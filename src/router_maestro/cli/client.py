@@ -21,8 +21,7 @@ class ServerNotRunningError(AdminClientError):
     def __init__(self, endpoint: str) -> None:
         self.endpoint = endpoint
         super().__init__(
-            f"Server is not running at {endpoint}. "
-            "Start it with: router-maestro server start"
+            f"Server is not running at {endpoint}. Start it with: router-maestro server start"
         )
 
 
@@ -197,9 +196,7 @@ class AdminClient:
             self._handle_connection_error(e)
             return {}
 
-    async def set_priorities(
-        self, priorities: list[str], fallback: dict | None = None
-    ) -> bool:
+    async def set_priorities(self, priorities: list[str], fallback: dict | None = None) -> bool:
         """Set priority configuration.
 
         Args:

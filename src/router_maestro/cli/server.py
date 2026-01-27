@@ -8,7 +8,7 @@ import uvicorn
 from rich.console import Console
 from rich.panel import Panel
 
-from router_maestro.config.server import get_or_create_api_key
+from router_maestro.config.server import get_current_context_api_key, get_or_create_api_key
 
 app = typer.Typer(no_args_is_help=True)
 console = Console()
@@ -34,7 +34,7 @@ def start(
         case_sensitive=False,
     ),
 ) -> None:
-    """Start the router-maestro API server."""
+    """Start router-maestro API server."""
     if is_port_in_use(port, host):
         console.print(f"[red]Error: Port {port} is already in use[/red]")
         raise typer.Exit(1)
@@ -51,7 +51,7 @@ def start(
     # Get or create API key
     key, was_generated = get_or_create_api_key(api_key)
 
-    # Set environment variables for the server process to read
+    # Set environment variables for server process to read
     os.environ["ROUTER_MAESTRO_API_KEY"] = key
     os.environ["ROUTER_MAESTRO_LOG_LEVEL"] = log_level
 
@@ -89,7 +89,7 @@ def status(
     port: int = typer.Option(8080, "--port", "-p", help="Port to check"),
     host: str = typer.Option("127.0.0.1", "--host", "-h", help="Host to check"),
 ) -> None:
-    """Show the current server status."""
+    """Show current server status."""
     if is_port_in_use(port, host):
         console.print(f"[green]Server is running on {host}:{port}[/green]")
 
@@ -110,10 +110,8 @@ def status(
 
 @app.command()
 def show_key() -> None:
-    """Show the current server API key."""
-    from router_maestro.config.server import get_local_api_key
-
-    api_key = get_local_api_key()
+    """Show current server API key."""
+    api_key = get_current_context_api_key()
     if api_key:
         console.print(f"[green]API Key:[/green] {api_key}")
     else:

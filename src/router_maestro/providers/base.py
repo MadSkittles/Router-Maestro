@@ -25,7 +25,8 @@ class ChatRequest:
     max_tokens: int | None = None
     stream: bool = False
     tools: list[dict] | None = None  # OpenAI format tool definitions
-    tool_choice: str | dict | None = None  # "auto", "none", "required", or {"type": "function", "function": {"name": "..."}}
+    # "auto", "none", "required", or {"type": "function", "function": {"name": "..."}}
+    tool_choice: str | dict | None = None
     extra: dict = field(default_factory=dict)
 
 

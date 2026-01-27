@@ -1,7 +1,7 @@
 """Server configuration management.
 
-API keys are stored in contexts.json under the 'local' context.
-This module provides utilities to manage the local server's API key.
+API keys are stored in contexts.json under context.
+This module provides utilities to manage API keys.
 """
 
 import secrets
@@ -16,7 +16,7 @@ def generate_api_key() -> str:
 
 
 def get_local_api_key() -> str | None:
-    """Get the API key for the local context.
+    """Get API key for local context.
 
     Returns:
         The API key if configured, None otherwise.
@@ -28,8 +28,22 @@ def get_local_api_key() -> str | None:
     return None
 
 
+def get_current_context_api_key() -> str | None:
+    """Get API key for current context.
+
+    Returns:
+        The API key if configured, None otherwise.
+    """
+    config = load_contexts_config()
+    ctx_name = config.current
+    ctx = config.contexts.get(ctx_name)
+    if ctx:
+        return ctx.api_key
+    return None
+
+
 def set_local_api_key(api_key: str) -> None:
-    """Set the API key for the local context.
+    """Set API key for local context.
 
     Args:
         api_key: The API key to set.
@@ -45,7 +59,7 @@ def set_local_api_key(api_key: str) -> None:
 
 
 def get_or_create_api_key(api_key: str | None = None) -> tuple[str, bool]:
-    """Get or create an API key for the local server.
+    """Get or create an API key for local server.
 
     Priority order:
     1. Provided api_key argument (from CLI --api-key)
@@ -69,6 +83,8 @@ def get_or_create_api_key(api_key: str | None = None) -> tuple[str, bool]:
     # Check environment variable
     env_key = os.environ.get("ROUTER_MAESTRO_API_KEY")
     if env_key:
+        # Save to local context for persistence
+        set_local_api_key(env_key)
         return env_key, False
 
     # Try to load from local context

@@ -12,8 +12,8 @@ from rich.panel import Panel
 from rich.prompt import Confirm, Prompt
 from rich.table import Table
 
-from router_maestro.config.server import load_server_config
-from router_maestro.routing import Router
+from router_maestro.cli.client import ServerNotRunningError, get_admin_client
+from router_maestro.config.server import get_current_context_api_key
 
 app = typer.Typer(no_args_is_help=True)
 console = Console()
@@ -50,9 +50,17 @@ def claude_code_config() -> None:
             shutil.copy(settings_path, backup_path)
             console.print(f"[green]Backed up to {backup_path}[/green]")
 
-    # Step 3 & 4: Select models
-    router = Router()
-    models = asyncio.run(router.list_models())
+    # Step 3 & 4: Select models from server
+    try:
+        client = get_admin_client()
+        models = asyncio.run(client.list_models())
+    except ServerNotRunningError as e:
+        console.print(f"[red]{e}[/red]")
+        console.print("[dim]Tip: Start router-maestro server first.[/dim]")
+        raise typer.Exit(1)
+    except Exception as e:
+        console.print(f"[red]Error: {e}[/red]")
+        raise typer.Exit(1)
 
     if not models:
         console.print("[red]No models available. Please authenticate first.[/red]")
@@ -65,7 +73,7 @@ def claude_code_config() -> None:
     table.add_column("Model Key", style="green")
     table.add_column("Name", style="white")
     for i, model in enumerate(models, 1):
-        table.add_row(str(i), f"{model.provider}/{model.id}", model.name)
+        table.add_row(str(i), f"{model['provider']}/{model['id']}", model["name"])
     console.print(table)
 
     # Select main model
@@ -76,7 +84,7 @@ def claude_code_config() -> None:
         idx = int(main_choice) - 1
         if 0 <= idx < len(models):
             m = models[idx]
-            main_model = f"{m.provider}/{m.id}"
+            main_model = f"{m['provider']}/{m['id']}"
 
     # Select fast model
     console.print("\n[bold]Step 4: Select small/fast model[/bold]")
@@ -86,15 +94,19 @@ def claude_code_config() -> None:
         idx = int(fast_choice) - 1
         if 0 <= idx < len(models):
             m = models[idx]
-            fast_model = f"{m.provider}/{m.id}"
+            fast_model = f"{m['provider']}/{m['id']}"
 
     # Step 5: Generate config
-    server_config = load_server_config()
-    auth_token = server_config.api_key or "router-maestro"
+    auth_token = get_current_context_api_key() or "router-maestro"
+    client = get_admin_client()
+    base_url = (
+        client.endpoint.rstrip("/") if hasattr(client, "endpoint") else "http://localhost:8080"
+    )
+    anthropic_url = f"{base_url}/api/anthropic"
 
     config = {
         "env": {
-            "ANTHROPIC_BASE_URL": "http://localhost:8080/api/anthropic",
+            "ANTHROPIC_BASE_URL": anthropic_url,
             "ANTHROPIC_AUTH_TOKEN": auth_token,
             "ANTHROPIC_MODEL": main_model,
             "ANTHROPIC_SMALL_FAST_MODEL": fast_model,
@@ -111,6 +123,7 @@ def claude_code_config() -> None:
             f"[green]Created {settings_path}[/green]\n\n"
             f"Main model: {main_model}\n"
             f"Fast model: {fast_model}\n\n"
+            f"Endpoint: {anthropic_url}\n\n"
             "[dim]Start router-maestro server before using Claude Code:[/dim]\n"
             "  router-maestro server start",
             title="Success",

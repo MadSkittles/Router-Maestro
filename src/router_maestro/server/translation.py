@@ -113,7 +113,8 @@ def _translate_tool_choice(tool_choice) -> str | dict | None:
     Anthropic format:
     - {"type": "auto"} -> "auto"
     - {"type": "any"} -> "required"
-    - {"type": "tool", "name": "tool_name"} -> {"type": "function", "function": {"name": "tool_name"}}
+    - {"type": "tool", "name": "tool_name"} ->
+      {"type": "function", "function": {"name": "tool_name"}}
 
     OpenAI format:
     - "auto" - model decides

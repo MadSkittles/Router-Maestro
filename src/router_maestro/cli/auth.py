@@ -99,9 +99,7 @@ async def _do_login(client: AdminClient, provider: str, provider_info: dict) -> 
                 # status == "pending" - continue polling
         else:
             # API key auth
-            api_key = Prompt.ask(
-                f"Enter API key for {provider_info['name']}", password=True
-            )
+            api_key = Prompt.ask(f"Enter API key for {provider_info['name']}", password=True)
             if not api_key:
                 console.print("[red]API key cannot be empty[/red]")
                 raise typer.Exit(1)

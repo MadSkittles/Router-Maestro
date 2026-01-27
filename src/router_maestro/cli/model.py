@@ -38,9 +38,7 @@ def list_models() -> None:
 
     if not models:
         console.print("[dim]No models available.[/dim]")
-        console.print(
-            "[dim]Make sure you have authenticated with at least one provider.[/dim]"
-        )
+        console.print("[dim]Make sure you have authenticated with at least one provider.[/dim]")
         return
 
     table = Table(title="Available Models")
@@ -88,8 +86,7 @@ def priority_list() -> None:
     if not priorities:
         console.print("[dim]No priorities configured.[/dim]")
         console.print(
-            "[dim]Use 'router-maestro model priority add <provider/model>' "
-            "to add priorities.[/dim]"
+            "[dim]Use 'router-maestro model priority add <provider/model>' to add priorities.[/dim]"
         )
         return
 
@@ -105,9 +102,7 @@ def priority_list() -> None:
 
 @priority_app.command(name="add")
 def priority_add(
-    model_key: Annotated[
-        str, typer.Argument(help="Model key in format 'provider/model'")
-    ],
+    model_key: Annotated[str, typer.Argument(help="Model key in format 'provider/model'")],
     position: Annotated[
         int | None,
         typer.Option("--position", "-p", help="Position in priority list (1-based)"),
@@ -151,9 +146,7 @@ def priority_add(
 
 @priority_app.command(name="remove")
 def priority_remove(
-    model_key: Annotated[
-        str, typer.Argument(help="Model key in format 'provider/model'")
-    ],
+    model_key: Annotated[str, typer.Argument(help="Model key in format 'provider/model'")],
 ) -> None:
     """Remove a model from the priority list."""
     if "/" not in model_key:

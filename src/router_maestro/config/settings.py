@@ -18,7 +18,7 @@ def load_config(path: Path, model: type[T], default_factory: callable) -> T:
     """Load configuration from JSON file.
 
     Args:
-        path: Path to the configuration file
+        path: Path to configuration file
         model: Pydantic model class to parse into
         default_factory: Function to create default configuration
 
@@ -29,7 +29,6 @@ def load_config(path: Path, model: type[T], default_factory: callable) -> T:
         config = default_factory()
         save_config(path, config)
         return config
-
     with open(path, encoding="utf-8") as f:
         data = json.load(f)
     return model.model_validate(data)
@@ -39,7 +38,7 @@ def save_config(path: Path, config: BaseModel) -> None:
     """Save configuration to JSON file.
 
     Args:
-        path: Path to the configuration file
+        path: Path to configuration file
         config: Configuration object to save
     """
     path.parent.mkdir(parents=True, exist_ok=True)

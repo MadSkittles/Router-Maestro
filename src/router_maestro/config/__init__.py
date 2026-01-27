@@ -22,6 +22,11 @@ from router_maestro.config.providers import (
     ModelConfig,
     ProvidersConfig,
 )
+from router_maestro.config.server import (
+    get_current_context_api_key,
+    get_or_create_api_key,
+    set_local_api_key,
+)
 from router_maestro.config.settings import (
     load_contexts_config,
     load_priorities_config,
@@ -60,4 +65,8 @@ __all__ = [
     "save_priorities_config",
     "load_contexts_config",
     "save_contexts_config",
+    # Server functions
+    "get_current_context_api_key",
+    "get_or_create_api_key",
+    "set_local_api_key",
 ]
