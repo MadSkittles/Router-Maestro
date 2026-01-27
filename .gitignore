@@ -68,6 +68,7 @@ venv.bak/
 .idea/
 .vscode/
 .claude/
+.serena/
 *.swp
 *.swo
 *.project
