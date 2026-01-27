@@ -1,0 +1,72 @@
+services:
+  traefik:
+    image: traefik:v3.2
+    container_name: traefik
+    restart: unless-stopped
+    command:
+      # API and Dashboard
+      - "--api.dashboard=true"
+      # Docker provider
+      - "--providers.docker=true"
+      - "--providers.docker.exposedbydefault=false"
+      # Entrypoints
+      - "--entrypoints.web.address=:80"
+      - "--entrypoints.websecure.address=:443"
+      # HTTP to HTTPS redirect
+      - "--entrypoints.web.http.redirections.entrypoint.to=websecure"
+      - "--entrypoints.web.http.redirections.entrypoint.scheme=https"
+      # Let's Encrypt with Cloudflare DNS challenge
+      - "--certificatesresolvers.letsencrypt.acme.dnschallenge=true"
+      - "--certificatesresolvers.letsencrypt.acme.dnschallenge.provider=cloudflare"
+      - "--certificatesresolvers.letsencrypt.acme.email=${ACME_EMAIL}"
+      - "--certificatesresolvers.letsencrypt.acme.storage=/letsencrypt/acme.json"
+      # Uncomment for staging/testing (avoid rate limits)
+      # - "--certificatesresolvers.letsencrypt.acme.caserver=https://acme-staging-v02.api.letsencrypt.org/directory"
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      - CF_DNS_API_TOKEN=${CF_DNS_API_TOKEN}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - traefik-certificates:/letsencrypt
+    networks:
+      - web
+    labels:
+      # Dashboard (optional, access via traefik.${DOMAIN})
+      - "traefik.enable=true"
+      - "traefik.http.routers.traefik.rule=Host(`traefik.${DOMAIN}`)"
+      - "traefik.http.routers.traefik.entrypoints=websecure"
+      - "traefik.http.routers.traefik.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.traefik.service=api@internal"
+      # Basic auth for dashboard (generate with: htpasswd -nB admin)
+      - "traefik.http.routers.traefik.middlewares=auth"
+      - "traefik.http.middlewares.auth.basicauth.users=${TRAEFIK_DASHBOARD_AUTH}"
+
+  router-maestro:
+    image: likanwen/router-maestro:latest
+    container_name: router-maestro
+    restart: unless-stopped
+    environment:
+      - ROUTER_MAESTRO_API_KEY=${ROUTER_MAESTRO_API_KEY}
+      - ROUTER_MAESTRO_LOG_LEVEL=${ROUTER_MAESTRO_LOG_LEVEL:-INFO}
+    volumes:
+      # Persist auth and config (bind mounts)
+      - ~/.local/share/router-maestro:/home/maestro/.local/share/router-maestro
+      - ~/.config/router-maestro:/home/maestro/.config/router-maestro
+    networks:
+      - web
+    labels:
+      - "traefik.enable=true"
+      # Main router for API
+      - "traefik.http.routers.router-maestro.rule=Host(`${DOMAIN}`)"
+      - "traefik.http.routers.router-maestro.entrypoints=websecure"
+      - "traefik.http.routers.router-maestro.tls.certresolver=letsencrypt"
+      - "traefik.http.services.router-maestro.loadbalancer.server.port=8080"
+
+volumes:
+  traefik-certificates:
+
+networks:
+  web:
+    driver: bridge

@@ -1,0 +1,119 @@
+"""Configuration management commands."""
+
+import asyncio
+import json
+import shutil
+from datetime import datetime
+from pathlib import Path
+
+import typer
+from rich.console import Console
+from rich.panel import Panel
+from rich.prompt import Confirm, Prompt
+from rich.table import Table
+
+from router_maestro.config.server import load_server_config
+from router_maestro.routing import Router
+
+app = typer.Typer(no_args_is_help=True)
+console = Console()
+
+
+def get_claude_code_paths() -> dict[str, Path]:
+    """Get Claude Code settings paths."""
+    return {
+        "user": Path.home() / ".claude" / "settings.json",
+        "project": Path.cwd() / ".claude" / "settings.json",
+    }
+
+
+@app.command(name="claude-code")
+def claude_code_config() -> None:
+    """Generate Claude Code CLI settings.json for router-maestro."""
+    # Step 1: Select level
+    console.print("\n[bold]Step 1: Select configuration level[/bold]")
+    console.print("  1. User-level (~/.claude/settings.json)")
+    console.print("  2. Project-level (./.claude/settings.json)")
+    choice = Prompt.ask("Select", choices=["1", "2"], default="1")
+
+    paths = get_claude_code_paths()
+    level = "user" if choice == "1" else "project"
+    settings_path = paths[level]
+
+    # Step 2: Backup if exists
+    if settings_path.exists():
+        console.print(f"\n[yellow]settings.json already exists at {settings_path}[/yellow]")
+        if Confirm.ask("Backup existing file?", default=True):
+            backup_path = settings_path.with_suffix(
+                f".json.backup.{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+            )
+            shutil.copy(settings_path, backup_path)
+            console.print(f"[green]Backed up to {backup_path}[/green]")
+
+    # Step 3 & 4: Select models
+    router = Router()
+    models = asyncio.run(router.list_models())
+
+    if not models:
+        console.print("[red]No models available. Please authenticate first.[/red]")
+        raise typer.Exit(1)
+
+    # Display models
+    console.print("\n[bold]Available models:[/bold]")
+    table = Table()
+    table.add_column("#", style="dim")
+    table.add_column("Model Key", style="green")
+    table.add_column("Name", style="white")
+    for i, model in enumerate(models, 1):
+        table.add_row(str(i), f"{model.provider}/{model.id}", model.name)
+    console.print(table)
+
+    # Select main model
+    console.print("\n[bold]Step 3: Select main model[/bold]")
+    main_choice = Prompt.ask("Enter number (or 0 for auto-routing)", default="0")
+    main_model = "router-maestro"
+    if main_choice != "0" and main_choice.isdigit():
+        idx = int(main_choice) - 1
+        if 0 <= idx < len(models):
+            m = models[idx]
+            main_model = f"{m.provider}/{m.id}"
+
+    # Select fast model
+    console.print("\n[bold]Step 4: Select small/fast model[/bold]")
+    fast_choice = Prompt.ask("Enter number", default="1")
+    fast_model = "router-maestro"
+    if fast_choice.isdigit():
+        idx = int(fast_choice) - 1
+        if 0 <= idx < len(models):
+            m = models[idx]
+            fast_model = f"{m.provider}/{m.id}"
+
+    # Step 5: Generate config
+    server_config = load_server_config()
+    auth_token = server_config.api_key or "router-maestro"
+
+    config = {
+        "env": {
+            "ANTHROPIC_BASE_URL": "http://localhost:8080/api/anthropic",
+            "ANTHROPIC_AUTH_TOKEN": auth_token,
+            "ANTHROPIC_MODEL": main_model,
+            "ANTHROPIC_SMALL_FAST_MODEL": fast_model,
+            "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
+        }
+    }
+
+    settings_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(settings_path, "w", encoding="utf-8") as f:
+        json.dump(config, f, indent=2)
+
+    console.print(
+        Panel(
+            f"[green]Created {settings_path}[/green]\n\n"
+            f"Main model: {main_model}\n"
+            f"Fast model: {fast_model}\n\n"
+            "[dim]Start router-maestro server before using Claude Code:[/dim]\n"
+            "  router-maestro server start",
+            title="Success",
+            border_style="green",
+        )
+    )
