@@ -8,10 +8,24 @@ Multi-model routing router with OpenAI-compatible and Anthropic-compatible APIs.
 - **Intelligent routing**: Priority-based model selection with automatic fallback on failure
 - **Dual API compatibility**: Both OpenAI (`/v1/...`) and Anthropic (`/v1/messages`) API formats
 - **Cross-provider translation**: Seamlessly route OpenAI requests to Anthropic providers and vice versa
+- **Configuration hot-reload**: Auto-reload config files every 5 minutes without server restart
 - **Usage tracking**: Token usage statistics with heatmap visualization
 - **CLI management**: Full command-line interface for configuration and server control
-- **Hot-reload cache**: 5-minute TTL model cache with admin refresh endpoint
 - **Docker ready**: Production-ready Docker images with Traefik integration
+
+## Table of Contents
+
+- [Installation](#installation)
+- [Quick Start](#quick-start)
+- [CLI Commands](#cli-commands)
+- [Model Identification & Routing](#model-identification--routing)
+- [Priority Configuration](#priority-configuration)
+- [Configuration Hot-Reload](#configuration-hot-reload)
+- [API Endpoints](#api-endpoints)
+- [Provider Configuration](#provider-configuration)
+- [Docker Deployment](#docker-deployment)
+- [Claude Code Integration](#claude-code-integration)
+- [License](#license)
 
 ## Installation
 
@@ -21,6 +35,8 @@ Multi-model routing router with OpenAI-compatible and Anthropic-compatible APIs.
 pip install router-maestro
 # or
 uv pip install router-maestro
+# or
+uv tool install router-maestro
 ```
 
 ### uvx (run without installing)
@@ -42,7 +58,6 @@ uv pip install -e ".[dev]"
 ### 1. Start the server
 
 ```bash
-# Start API server on port 8080
 router-maestro server start --port 8080
 ```
 
@@ -72,7 +87,6 @@ router-maestro model list
 ### 4. Make API requests
 
 ```bash
-# Using the OpenAI-compatible endpoint
 curl -X POST http://localhost:8080/v1/chat/completions \
   -H "Authorization: Bearer YOUR_API_KEY" \
   -H "Content-Type: application/json" \
@@ -87,174 +101,56 @@ curl -X POST http://localhost:8080/v1/chat/completions \
 ### Server Management
 
 ```bash
-# Start server
-router-maestro server start --port 8080
-
-# Stop server
-router-maestro server stop
-
-# Get server info
-router-maestro server info
+router-maestro server start --port 8080   # Start server
+router-maestro server stop                 # Stop server
+router-maestro server info                 # Get server info
 ```
 
 ### Authentication
 
 ```bash
-# Login (interactive)
-router-maestro auth login
-
-# Login to specific provider
-router-maestro auth login github-copilot
-router-maestro auth login openai
-router-maestro auth login anthropic
-
-# Logout
-router-maestro auth logout github-copilot
-
-# List authenticated providers
-router-maestro auth list
+router-maestro auth login                  # Interactive login
+router-maestro auth login github-copilot   # Login to specific provider
+router-maestro auth logout github-copilot  # Logout from provider
+router-maestro auth list                   # List authenticated providers
 ```
 
 ### Model Management
 
 ```bash
-# List all available models
-router-maestro model list
-
-# Set model priority (higher priority = tried first)
-router-maestro model priority github-copilot/gpt-4o --position 1
-router-maestro model priority openai/gpt-4-turbo --position 2
-
-# Remove from priority
-router-maestro model priority remove github-copilot/gpt-4o
-
-# Show current priorities
-router-maestro model priority list
+router-maestro model list                  # List all available models
+router-maestro model refresh               # Refresh models cache immediately
+router-maestro model priority list         # Show current priorities
+router-maestro model priority <model> --position <n>  # Set priority
+router-maestro model priority remove <model>          # Remove from priority
 ```
 
 ### Context Management
 
 ```bash
-# Set deployment API key
-router-maestro context set-key YOUR_API_KEY
-
-# Get current API key
-router-maestro context get-key
-
-# Show current context
-router-maestro context show
+router-maestro context show                # Show current context
+router-maestro context list                # List all contexts
+router-maestro context set <name>          # Switch context
+router-maestro context add <name> --endpoint <url> --api-key <key>  # Add context
+router-maestro context set-key <key>       # Set API key for current context
+router-maestro context get-key             # Get current API key
+router-maestro context test                # Test connection to current context
 ```
 
 ### Statistics
 
 ```bash
-# Show token usage for last 7 days
-router-maestro stats --days 7
-
-# Show heatmap visualization
-router-maestro stats --days 30 --heatmap
+router-maestro stats --days 7              # Show token usage for last 7 days
+router-maestro stats --days 30 --heatmap   # Show heatmap visualization
 ```
 
 ### Configuration
 
 ```bash
-# Generate Claude Code settings
-router-maestro config claude-code
+router-maestro config claude-code          # Generate Claude Code settings.json
 ```
 
-## API Endpoints
-
-### OpenAI-Compatible API
-
-#### Chat Completions
-
-```bash
-POST /v1/chat/completions
-```
-
-Request format (standard OpenAI):
-
-```json
-{
-  "model": "github-copilot/gpt-4o",
-  "messages": [
-    {"role": "system", "content": "You are a helpful assistant."},
-    {"role": "user", "content": "Explain quantum computing."}
-  ],
-  "temperature": 0.7,
-  "max_tokens": 1000,
-  "stream": false
-}
-```
-
-Streaming:
-
-```bash
-curl -X POST http://localhost:8080/v1/chat/completions \
-  -H "Authorization: Bearer YOUR_API_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{"model": "github-copilot/gpt-4o", "messages": [{"role": "user", "content": "Hello"}], "stream": true}'
-```
-
-#### List Models
-
-```bash
-GET /v1/models
-```
-
-### Anthropic-Compatible API
-
-#### Messages
-
-```bash
-POST /v1/messages
-POST /api/anthropic/v1/messages
-```
-
-Request format (Anthropic):
-
-```json
-{
-  "model": "github-copilot/claude-3-5-sonnet",
-  "max_tokens": 1024,
-  "system": "You are a helpful assistant.",
-  "messages": [
-    {
-      "role": "user",
-      "content": "Hello!"
-    }
-  ]
-}
-```
-
-Streaming with Anthropic format:
-
-```bash
-curl -X POST http://localhost:8080/v1/messages \
-  -H "Authorization: Bearer YOUR_API_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "github-copilot/claude-3-5-sonnet",
-    "messages": [{"role": "user", "content": "Hello"}],
-    "stream": true
-  }'
-```
-
-#### Count Tokens
-
-```bash
-POST /v1/messages/count_tokens
-POST /api/anthropic/v1/messages/count_tokens
-```
-
-### Admin API
-
-```bash
-# Refresh model cache
-POST /api/admin/models/refresh
-```
-
-## Model Identification
+## Model Identification & Routing
 
 Models are identified using the format: `{provider}/{model-id}`
 
@@ -279,15 +175,237 @@ curl -X POST http://localhost:8080/v1/chat/completions \
 ```
 
 The router will:
-1. Try providers in priority order
+1. Try models in priority order
 2. Use the first authenticated provider with available models
 3. Fall back to next provider on failure (if configured)
 
-## Configuration
+### Cross-Provider Translation
 
-### Provider Configuration
+Router-Maestro automatically translates requests between OpenAI and Anthropic formats:
 
-Edit `~/.config/router-maestro/providers.json` to add custom providers:
+```bash
+# Use Anthropic API format with OpenAI provider
+POST /v1/messages
+{"model": "openai/gpt-4o", "messages": [...]}
+
+# Use OpenAI API format with Anthropic provider
+POST /v1/chat/completions
+{"model": "anthropic/claude-3-5-sonnet", "messages": [...]}
+```
+
+## Priority Configuration
+
+Priority determines which model is tried first when using auto-routing (`model: "router-maestro"`).
+
+### Setting Priorities
+
+```bash
+# Set model as highest priority (position 1)
+router-maestro model priority github-copilot/claude-sonnet-4 --position 1
+
+# Set model as second priority
+router-maestro model priority openai/gpt-4o --position 2
+
+# View current priorities
+router-maestro model priority list
+```
+
+### How Priority Insertion Works
+
+When you set a model's priority, existing models shift to make room (they don't get replaced):
+
+**Example**: Starting with priorities `[A, B, C]` (positions 1, 2, 3)
+
+```bash
+# Insert D at position 2
+router-maestro model priority D --position 2
+# Result: [A, D, B, C] (positions 1, 2, 3, 4)
+# - A stays at position 1
+# - D is inserted at position 2
+# - B shifts from position 2 to 3
+# - C shifts from position 3 to 4
+```
+
+### Priority Configuration File
+
+Edit `~/.config/router-maestro/priorities.json` directly:
+
+```json
+{
+  "priorities": [
+    "github-copilot/claude-sonnet-4",
+    "github-copilot/gpt-4o",
+    "openai/gpt-4-turbo",
+    "anthropic/claude-3-5-sonnet"
+  ],
+  "fallback": {
+    "strategy": "priority",
+    "maxRetries": 2
+  }
+}
+```
+
+### Fallback Behavior
+
+Fallback only triggers when:
+1. The error is **retryable** (see Retryable Errors below)
+2. The fallback strategy is not `none`
+3. There are valid fallback candidates
+
+**Important**: Fallback behavior depends on how you specify the model:
+
+| Model Specification | Fallback Behavior |
+|---------------------|-------------------|
+| `router-maestro` (auto-routing) | Tries models in priority order; on failure, continues down the list |
+| `provider/model` in priorities list | On failure, tries models **after** it in the priorities list |
+| `provider/model` NOT in priorities list | **No fallback** - fails immediately even if retryable |
+
+### Fallback Strategies
+
+Configure in `priorities.json`:
+
+```json
+{
+  "fallback": {
+    "strategy": "priority",
+    "maxRetries": 2
+  }
+}
+```
+
+#### `priority` Strategy
+
+On failure, try the next model in the priorities list (in order).
+
+**Example**: priorities = `[A, B, C, D]`
+- Request with `model: "router-maestro"` → tries A, if fails tries B, then C...
+- Request with `model: "B"` → tries B, if fails tries C, then D (skips A)
+- Request with `model: "X"` (not in list) → tries X, if fails → **error** (no fallback)
+
+#### `same-model` Strategy
+
+On failure, try the **same model** on a different provider.
+
+**Example**: You have `gpt-4o` available on both `github-copilot` and `openai`
+- Request with `model: "github-copilot/gpt-4o"` fails
+- Router tries `openai/gpt-4o` as fallback
+
+This strategy is useful when:
+- Multiple providers offer the same model
+- You want provider redundancy without changing the model
+
+**Note**: If no other provider has the same model, no fallback occurs.
+
+#### `none` Strategy
+
+Never fallback. Any failure returns an error immediately.
+
+### Retryable Errors
+
+Fallback only occurs for these HTTP status codes:
+- `429` - Rate limited
+- `500`, `502`, `503`, `504` - Server errors
+- `529` - Anthropic overloaded
+
+Non-retryable errors (e.g., `400 Bad Request`, `401 Unauthorized`, `404 Not Found`) always fail immediately without fallback.
+
+## Configuration Hot-Reload
+
+Router-Maestro automatically reloads configuration files without requiring a server restart.
+
+### Auto-Reload Behavior
+
+| File | Auto-Reload | TTL |
+|------|-------------|-----|
+| `priorities.json` | Yes | 5 minutes |
+| `providers.json` | Yes | 5 minutes |
+| `auth.json` | No | Requires restart |
+
+### When Changes Take Effect
+
+1. **Within 5 minutes**: Configuration changes are automatically detected and applied
+2. **Immediately**: Use CLI commands to force immediate reload:
+   ```bash
+   # Refresh models cache (reloads providers.json and priorities.json)
+   router-maestro model refresh
+   ```
+
+### Manual Refresh via API
+
+```bash
+POST /api/admin/models/refresh
+```
+
+This endpoint:
+- Reloads `providers.json` and `priorities.json`
+- Clears the models cache
+- Re-fetches models from all providers
+
+## API Endpoints
+
+### OpenAI-Compatible API
+
+#### Chat Completions
+
+```bash
+POST /v1/chat/completions
+```
+
+```json
+{
+  "model": "github-copilot/gpt-4o",
+  "messages": [
+    {"role": "system", "content": "You are a helpful assistant."},
+    {"role": "user", "content": "Explain quantum computing."}
+  ],
+  "temperature": 0.7,
+  "max_tokens": 1000,
+  "stream": false
+}
+```
+
+#### List Models
+
+```bash
+GET /v1/models
+```
+
+### Anthropic-Compatible API
+
+#### Messages
+
+```bash
+POST /v1/messages
+POST /api/anthropic/v1/messages
+```
+
+```json
+{
+  "model": "github-copilot/claude-3-5-sonnet",
+  "max_tokens": 1024,
+  "system": "You are a helpful assistant.",
+  "messages": [{"role": "user", "content": "Hello!"}]
+}
+```
+
+#### Count Tokens
+
+```bash
+POST /v1/messages/count_tokens
+POST /api/anthropic/v1/messages/count_tokens
+```
+
+### Admin API
+
+```bash
+POST /api/admin/models/refresh   # Refresh model cache
+```
+
+## Provider Configuration
+
+### Custom Providers
+
+Edit `~/.config/router-maestro/providers.json` to add custom OpenAI-compatible providers:
 
 ```json
 {
@@ -302,53 +420,33 @@ Edit `~/.config/router-maestro/providers.json` to add custom providers:
     },
     "vllm": {
       "type": "openai-compatible",
-      "baseURL": "http://localhost:8000/v1ories": {}
+      "baseURL": "http://localhost:8000/v1",
+      "models": {}
     }
   }
 }
 ```
 
-Set API keys via environment variables (uppercase, underscore for hyphens):
+### API Keys for Custom Providers
+
+Set API keys via environment variables (uppercase, replace hyphens with underscores):
 
 ```bash
 export OLLAMA_API_KEY="sk-..."  # For ollama provider
 export VLLM_API_KEY="sk-..."    # For vllm provider
 ```
 
-### Priority Configuration
-
-Edit `~/.config/router-maestro/priorities.json`:
-
-```json
-{
-  "priorities": [
-    "github-copilot/gpt-4o",
-    "openai/gpt-4-turbo",
-    "anthropic/claude-3-5-sonnet"
-  ],
-  "fallback": {
-    "strategy": "priority",
-    "maxRetries": 2
-  }
-}
-```
-
-Fallback strategies:
-- `priority` - Try next model in priorities list
-- `same-model` - Try same model on different providers
-- `none` - No fallback, fail immediately
-
 ### Data Locations
 
 Following XDG Base Directory specification:
 
 | Type | Location |
-|-------|-----------|
-| Config | `~/.config/router-maestro/` |
+|------|----------|
+| **Config** | `~/.config/router-maestro/` |
 | - providers.json | Custom provider definitions |
 | - priorities.json | Model priorities and fallback config |
-| - contexts.json | Deployment context and API keys |
-| Data | `~/.local/share/router-maestro/` |
+| - contexts.json | Deployment contexts and API keys |
+| **Data** | `~/.local/share/router-maestro/` |
 | - auth.json | Stored OAuth tokens and API keys |
 | - server.json | Server state |
 | - stats.db | Token usage statistics |
@@ -602,11 +700,11 @@ exit
 
 The OAuth token is stored in `/home/maestro/.local/share/router-maestro/auth.json` inside the container (persisted via Docker volume).
 
-### Generating Claude Code settings.json
+## Claude Code Integration
 
 Router-Maestro can generate a `settings.json` file for Claude Code CLI to use your deployment.
 
-#### Interactive Generation
+### Interactive Generation
 
 ```bash
 # Make sure you're connected to the right context
@@ -622,7 +720,7 @@ The wizard will:
 3. Let you select main and fast models
 4. Generate the settings file
 
-#### Example Generated settings.json
+### Example Generated settings.json
 
 ```json
 {
@@ -636,7 +734,7 @@ The wizard will:
 }
 ```
 
-#### Manual Configuration
+### Manual Configuration
 
 If you prefer to create the file manually:
 
@@ -657,59 +755,6 @@ EOF
 ```
 
 Now Claude Code will route requests through your Router-Maestro deployment.
-
-### Using docker-compose (Reference)
-
-```bash
-# Copy .env.example to .env and configure
-cp .env.example .env
-
-# Start services
-docker-compose up -d
-
-# View logs
-docker-compose logs -f router-maestro
-```
-
-The docker-compose includes:
-- **Traefik**: Reverse proxy with automatic HTTPS via Let's Encrypt (Cloudflare DNS)
-- **Router-Maestro**: Application server with persistent volumes
-
-### Standalone container
-
-```bash
-docker run -d --name router-maestro -p 8080:8080 \
-  -e ROUTER_MAESTRO_API_KEY=your_secure_key \
-  -e ROUTER_MAESTRO_LOG_LEVEL=INFO \
-  -v ~/.local/share/router-maestro:/home/maestro/.local/share/router-maestro \
-  -v ~/.config/router-maestro:/home/maestro/.config/router-maestro \
-  likanwen/router-maestro:latest
-```
-
-## Cross-Provider Request Translation
-
-Router-Maestro automatically translates requests between OpenAI and Anthropic formats:
-
-- **OpenAI request → Anthropic provider**: Messages, roles, and parameters are translated
-- **Anthropic request → OpenAI provider**: Blocks, roles, and system prompts are translated
-
-This means you can use either API format with any provider:
-
-```bash
-# Use Anthropic API format with OpenAI provider
-POST /v1/messages
-{
-  "model": "openai/gpt-4o",  # OpenAI provider
-  "messages": [{"role": "user", "content": "Hello"}]
-}
-
-# Use OpenAI API format with Anthropic provider
-POST /v1/chat/completions
-{
-  "model": "anthropic/claude-3-5-sonnet",  # Anthropic provider
-  "messages": [{"role": "user", "content": "Hello"}]
-}
-```
 
 ## License
 

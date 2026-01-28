@@ -6,7 +6,7 @@ readme = "README.md"
 license = "MIT"
 requires-python = ">=3.11"
 authors = [
-    { name = "Router-Maestro Contributors" }
+    { name = "Kanwen Li", email = "likanwen@icloud.com" },
 ]
 keywords = ["llm", "api", "routing", "load-balancing", "copilot", "openai"]
 classifiers = [

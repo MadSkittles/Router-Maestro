@@ -178,6 +178,24 @@ class AdminClient:
             self._handle_connection_error(e)
             return []
 
+    async def refresh_models(self) -> bool:
+        """Refresh the models cache on the server.
+
+        Returns:
+            True if successful
+        """
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.post(
+                    f"{self.endpoint}/api/admin/models/refresh",
+                    headers=self._get_headers(),
+                )
+                response.raise_for_status()
+                return True
+        except httpx.HTTPError as e:
+            self._handle_connection_error(e)
+            return False
+
     async def get_priorities(self) -> dict:
         """Get priority configuration.
 

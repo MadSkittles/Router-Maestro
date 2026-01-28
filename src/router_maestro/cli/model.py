@@ -66,6 +66,24 @@ def list_models() -> None:
     console.print(table)
 
 
+@app.command(name="refresh")
+def refresh_models() -> None:
+    """Refresh the models cache from all providers."""
+    client = get_admin_client()
+
+    console.print("[dim]Refreshing models cache...[/dim]")
+
+    try:
+        success = asyncio.run(client.refresh_models())
+        if success:
+            console.print("[green]Models cache refreshed successfully[/green]")
+        else:
+            console.print("[red]Failed to refresh models cache[/red]")
+            raise typer.Exit(1)
+    except Exception as e:
+        _handle_server_error(e)
+
+
 # Priority subcommand group
 priority_app = typer.Typer(no_args_is_help=True, help="Manage model priorities")
 app.add_typer(priority_app, name="priority")

@@ -71,16 +71,25 @@ class Router:
         # Priorities config cache
         self._priorities_config: PrioritiesConfig | None = None
         self._priorities_config_timestamp: float = 0.0
-        self._load_config()
+        # Providers config cache
+        self._providers_config_timestamp: float = 0.0
+        self._load_providers()
 
-    def _load_config(self) -> None:
+    def _load_providers(self) -> None:
         """Load providers from configuration."""
         custom_providers_config = load_providers_config()
         auth_manager = AuthManager()
 
-        # Always add built-in GitHub Copilot provider
-        copilot = CopilotProvider()
-        self.providers["github-copilot"] = copilot
+        # Clear existing providers except keep copilot if already exists
+        old_copilot = self.providers.get("github-copilot")
+        self.providers.clear()
+
+        # Always add built-in GitHub Copilot provider (reuse existing instance if available)
+        if old_copilot is not None:
+            self.providers["github-copilot"] = old_copilot
+        else:
+            copilot = CopilotProvider()
+            self.providers["github-copilot"] = copilot
         logger.debug("Loaded built-in provider: github-copilot")
 
         # Load custom providers from providers.json
@@ -100,6 +109,7 @@ class Router:
                 self.providers[provider_name] = provider
                 logger.debug("Loaded custom provider: %s", provider_name)
 
+        self._providers_config_timestamp = time.time()
         logger.info("Loaded %d providers", len(self.providers))
 
     def _get_priorities_config(self) -> PrioritiesConfig:
@@ -115,6 +125,16 @@ class Router:
         self._priorities_config = load_priorities_config()
         self._priorities_config_timestamp = current_time
         return self._priorities_config
+
+    def _ensure_providers_fresh(self) -> None:
+        """Ensure providers config is fresh, reload if expired."""
+        current_time = time.time()
+        if current_time - self._providers_config_timestamp >= CACHE_TTL_SECONDS:
+            logger.debug("Providers config expired, reloading")
+            self._load_providers()
+            # Also invalidate models cache since providers may have changed
+            self._models_cache.clear()
+            self._cache_initialized = False
 
     def _parse_model_key(self, model_key: str) -> tuple[str, str]:
         """Parse a model key into provider and model.
@@ -132,6 +152,9 @@ class Router:
 
     async def _ensure_models_cache(self) -> None:
         """Ensure the models cache is populated and not expired."""
+        # First ensure providers config is fresh
+        self._ensure_providers_fresh()
+
         # Check if cache is still valid (initialized and not expired)
         if self._cache_initialized:
             age = time.time() - self._cache_timestamp
@@ -493,10 +516,11 @@ class Router:
         return models
 
     def invalidate_cache(self) -> None:
-        """Invalidate the models cache to force refresh."""
+        """Invalidate all caches to force refresh."""
         self._models_cache.clear()
         self._cache_initialized = False
         self._cache_timestamp = 0.0
         self._priorities_config = None
         self._priorities_config_timestamp = 0.0
-        logger.debug("Models cache invalidated")
+        self._providers_config_timestamp = 0.0
+        logger.debug("All caches invalidated")

@@ -1,4 +1,4 @@
-.PHONY: help install dev test lint format clean build push run stop logs shell docker-up docker-down docker-logs buildx-setup build-multiarch
+.PHONY: help install dev test lint format clean build push run stop logs shell docker-up docker-down docker-logs buildx-setup build-multiarch dist publish publish-test
 
 # Variables
 VERSION := $(shell grep '^version' pyproject.toml | head -1 | cut -d'"' -f2)
@@ -17,6 +17,10 @@ help:
 	@echo "  make lint        Run linter (ruff check)"
 	@echo "  make format      Format code (ruff format)"
 	@echo "  make clean       Clean build artifacts"
+	@echo ""
+	@echo "Build & Publish:"
+	@echo "  make dist        Build Python package (sdist + wheel)"
+	@echo "  make publish     Publish to PyPI (requires PYPI_TOKEN)"
 	@echo ""
 	@echo "Local Server:"
 	@echo "  make run         Start local server (port 8080)"
@@ -56,9 +60,30 @@ format:
 	uv run ruff check --fix src/ tests/
 
 clean:
-	rm -rf build/ dist/ *.egg-info .pytest_cache .ruff_cache
+	rm -rf build/ dist/ *.egg-info .pytest_cache .ruff_cache src/*.egg-info
 	find . -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
 	find . -type f -name "*.pyc" -delete 2>/dev/null || true
+
+# ============== Build & Publish ==============
+
+dist: clean
+	uv build
+
+publish: dist
+	@if [ -z "$$PYPI_TOKEN" ]; then \
+		echo "Error: PYPI_TOKEN environment variable is not set"; \
+		echo "Usage: PYPI_TOKEN=your_token make publish"; \
+		exit 1; \
+	fi
+	uv publish --token $$PYPI_TOKEN
+
+publish-test: dist
+	@if [ -z "$$PYPI_TEST_TOKEN" ]; then \
+		echo "Error: PYPI_TEST_TOKEN environment variable is not set"; \
+		echo "Usage: PYPI_TEST_TOKEN=your_token make publish-test"; \
+		exit 1; \
+	fi
+	uv publish --token $$PYPI_TEST_TOKEN --publish-url https://test.pypi.org/legacy/
 
 # ============== Local Server ==============
 
