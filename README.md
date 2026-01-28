@@ -355,7 +355,310 @@ Following XDG Base Directory specification:
 
 ## Docker Deployment
 
-### Using docker-compose
+### Quick Deploy to VPS
+
+This section covers deploying Router-Maestro to a VPS with HTTPS support via Traefik.
+
+#### 1. Prerequisites
+
+- A VPS with Docker and Docker Compose installed
+- A domain pointing to your VPS (e.g., `api.example.com`)
+- A Cloudflare account with your domain configured (for DNS challenge)
+
+#### 2. Clone and Configure
+
+```bash
+# On your VPS
+git clone https://github.com/likanwen/router-maestro.git
+cd router-maestro
+
+# Copy environment template
+cp .env.example .env
+```
+
+Edit `.env` with your values:
+
+```bash
+# Your domain (must point to this VPS)
+DOMAIN=api.example.com
+
+# Cloudflare API token (Zone:DNS:Edit permission)
+# Generate at: https://dash.cloudflare.com/profile/api-tokens
+CF_DNS_API_TOKEN=your_cloudflare_api_token
+
+# Email for Let's Encrypt notifications
+ACME_EMAIL=your-email@example.com
+
+# API key for Router-Maestro (generate a secure random string)
+ROUTER_MAESTRO_API_KEY=$(openssl rand -hex 32)
+
+# Traefik dashboard auth (optional, generate with: htpasswd -nB admin)
+# Note: Escape $ as $$ in .env file
+TRAEFIK_DASHBOARD_AUTH=admin:$$2y$$05$$your_bcrypt_hash_here
+```
+
+#### 3. Deploy
+
+```bash
+# Start services
+docker compose up -d
+
+# Check status
+docker compose ps
+
+# View logs
+docker compose logs -f router-maestro
+```
+
+Your Router-Maestro API will be available at `https://api.example.com`.
+
+### HTTPS with Traefik and Let's Encrypt
+
+The included `docker-compose.yml` uses [Traefik](https://traefik.io/) as a reverse proxy with automatic HTTPS certificate management via [Let's Encrypt](https://letsencrypt.org/).
+
+#### How It Works
+
+1. **Traefik** listens on ports 80 and 443
+2. **Let's Encrypt** issues free SSL certificates automatically
+3. **DNS Challenge** verifies domain ownership without opening additional ports
+4. **Auto-renewal** happens before certificates expire
+
+#### Default: Cloudflare DNS Challenge
+
+The default configuration uses Cloudflare for DNS challenge. This is the recommended approach because:
+- Works even if port 80 is blocked
+- Supports wildcard certificates
+- No downtime during certificate renewal
+
+Required Cloudflare API token permissions:
+- `Zone:DNS:Edit` - to create TXT records for verification
+
+#### Using Other DNS Providers
+
+Traefik supports 100+ DNS providers. To switch from Cloudflare:
+
+1. **Update `docker-compose.yml`** - change the DNS challenge provider:
+
+```yaml
+# In traefik service command section, replace:
+- "--certificatesresolvers.letsencrypt.acme.dnschallenge.provider=cloudflare"
+# With your provider, e.g.:
+- "--certificatesresolvers.letsencrypt.acme.dnschallenge.provider=route53"      # AWS
+- "--certificatesresolvers.letsencrypt.acme.dnschallenge.provider=digitalocean" # DigitalOcean
+- "--certificatesresolvers.letsencrypt.acme.dnschallenge.provider=godaddy"      # GoDaddy
+- "--certificatesresolvers.letsencrypt.acme.dnschallenge.provider=namecheap"    # Namecheap
+```
+
+2. **Update environment variables** - each provider requires different credentials:
+
+```yaml
+# In traefik service environment section, replace CF_DNS_API_TOKEN with:
+# AWS Route53
+- AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
+- AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
+
+# DigitalOcean
+- DO_AUTH_TOKEN=${DO_AUTH_TOKEN}
+
+# GoDaddy
+- GODADDY_API_KEY=${GODADDY_API_KEY}
+- GODADDY_API_SECRET=${GODADDY_API_SECRET}
+```
+
+3. **Update `.env`** with your provider's credentials
+
+See the [Traefik DNS Challenge documentation](https://doc.traefik.io/traefik/https/acme/#providers) for the full list of supported providers and their required environment variables.
+
+#### Using HTTP Challenge (Alternative)
+
+If you don't want to use DNS challenge, you can use HTTP challenge instead. This requires port 80 to be accessible:
+
+```yaml
+# Replace dnschallenge lines with:
+- "--certificatesresolvers.letsencrypt.acme.httpchallenge=true"
+- "--certificatesresolvers.letsencrypt.acme.httpchallenge.entrypoint=web"
+```
+
+#### 4. Authenticate with GitHub Copilot (on VPS)
+
+You need to authenticate with providers on the VPS. The easiest way is to run CLI commands inside the container:
+
+```bash
+# Enter the container
+docker compose exec router-maestro /bin/sh
+
+# Login to GitHub Copilot (follow the OAuth flow)
+router-maestro auth login github-copilot
+
+# Verify authentication
+router-maestro auth list
+
+# Exit container
+exit
+```
+
+### Managing Remote Deployments from Local Machine
+
+Once your VPS is deployed, you can manage it from your local machine using **contexts**.
+
+#### 1. Install Router-Maestro Locally
+
+```bash
+pip install router-maestro
+# or
+uvx --from router-maestro router-maestro --help
+```
+
+#### 2. Add Your VPS as a Context
+
+```bash
+# Add the remote deployment
+router-maestro context add my-vps \
+  --endpoint https://api.example.com \
+  --api-key your_router_maestro_api_key
+
+# Switch to the remote context
+router-maestro context set my-vps
+
+# Verify connection
+router-maestro context test
+```
+
+#### 3. Manage the Remote Server
+
+Now all CLI commands will target your VPS:
+
+```bash
+# List models available on the remote server
+router-maestro model list
+
+# Check authenticated providers
+router-maestro auth list
+
+# View statistics
+router-maestro stats --days 7
+
+# Set model priorities
+router-maestro model priority github-copilot/claude-sonnet-4 --position 1
+```
+
+#### 4. Switch Between Contexts
+
+```bash
+# List all contexts
+router-maestro context list
+
+# Switch back to local
+router-maestro context set local
+
+# Switch to VPS
+router-maestro context set my-vps
+
+# Show current context
+router-maestro context current
+```
+
+### GitHub Copilot OAuth Authentication
+
+Router-Maestro uses GitHub's OAuth Device Flow for Copilot authentication:
+
+#### On Local Server
+
+```bash
+# Start the server first
+router-maestro server start --port 8080
+
+# In another terminal, initiate OAuth
+router-maestro auth login github-copilot
+```
+
+You'll see:
+```
+Please visit the following URL and enter the code:
+  URL: https://github.com/login/device
+  Code: ABCD-1234
+
+Waiting for authorization...
+```
+
+1. Open the URL in your browser
+2. Enter the code
+3. Authorize "GitHub Copilot Chat"
+4. The CLI will confirm: "Successfully authenticated!"
+
+#### On Remote VPS
+
+```bash
+# Enter the container
+docker compose exec router-maestro /bin/sh
+
+# Run OAuth flow
+router-maestro auth login github-copilot
+# Follow the same steps as above
+
+# Exit container
+exit
+```
+
+The OAuth token is stored in `/home/maestro/.local/share/router-maestro/auth.json` inside the container (persisted via Docker volume).
+
+### Generating Claude Code settings.json
+
+Router-Maestro can generate a `settings.json` file for Claude Code CLI to use your deployment.
+
+#### Interactive Generation
+
+```bash
+# Make sure you're connected to the right context
+router-maestro context current
+
+# Generate settings.json
+router-maestro config claude-code
+```
+
+The wizard will:
+1. Ask for configuration level (user `~/.claude/` or project `./.claude/`)
+2. Show available models from your server
+3. Let you select main and fast models
+4. Generate the settings file
+
+#### Example Generated settings.json
+
+```json
+{
+  "env": {
+    "ANTHROPIC_BASE_URL": "https://api.example.com/api/anthropic",
+    "ANTHROPIC_AUTH_TOKEN": "your_router_maestro_api_key",
+    "ANTHROPIC_MODEL": "github-copilot/claude-sonnet-4",
+    "ANTHROPIC_SMALL_FAST_MODEL": "github-copilot/gpt-4o-mini",
+    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1"
+  }
+}
+```
+
+#### Manual Configuration
+
+If you prefer to create the file manually:
+
+```bash
+mkdir -p ~/.claude
+
+cat > ~/.claude/settings.json << 'EOF'
+{
+  "env": {
+    "ANTHROPIC_BASE_URL": "https://api.example.com/api/anthropic",
+    "ANTHROPIC_AUTH_TOKEN": "your_router_maestro_api_key",
+    "ANTHROPIC_MODEL": "github-copilot/claude-sonnet-4",
+    "ANTHROPIC_SMALL_FAST_MODEL": "github-copilot/gpt-4o-mini",
+    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1"
+  }
+}
+EOF
+```
+
+Now Claude Code will route requests through your Router-Maestro deployment.
+
+### Using docker-compose (Reference)
 
 ```bash
 # Copy .env.example to .env and configure
