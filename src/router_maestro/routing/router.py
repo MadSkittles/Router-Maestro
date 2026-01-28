@@ -6,6 +6,7 @@ from collections.abc import AsyncIterator
 from router_maestro.auth import ApiKeyCredential, AuthManager
 from router_maestro.config import (
     FallbackStrategy,
+    PrioritiesConfig,
     load_priorities_config,
     load_providers_config,
 )
@@ -67,6 +68,9 @@ class Router:
         self._models_cache: dict[str, tuple[str, ModelInfo]] = {}
         self._cache_initialized: bool = False
         self._cache_timestamp: float = 0.0
+        # Priorities config cache
+        self._priorities_config: PrioritiesConfig | None = None
+        self._priorities_config_timestamp: float = 0.0
         self._load_config()
 
     def _load_config(self) -> None:
@@ -97,6 +101,20 @@ class Router:
                 logger.debug("Loaded custom provider: %s", provider_name)
 
         logger.info("Loaded %d providers", len(self.providers))
+
+    def _get_priorities_config(self) -> PrioritiesConfig:
+        """Get priorities config with caching."""
+        # Simple time-based cache (same TTL as models cache)
+        current_time = time.time()
+        if (
+            self._priorities_config is not None
+            and current_time - self._priorities_config_timestamp < CACHE_TTL_SECONDS
+        ):
+            return self._priorities_config
+
+        self._priorities_config = load_priorities_config()
+        self._priorities_config_timestamp = current_time
+        return self._priorities_config
 
     def _parse_model_key(self, model_key: str) -> tuple[str, str]:
         """Parse a model key into provider and model.
@@ -145,6 +163,58 @@ class Router:
         self._cache_timestamp = time.time()
         logger.info("Models cache initialized with %d entries", len(self._models_cache))
 
+    async def _resolve_provider(self, model_id: str) -> tuple[str, str, BaseProvider]:
+        """Resolve model_id to provider.
+
+        Args:
+            model_id: Model ID (can be 'router-maestro', 'provider/model', or just 'model')
+
+        Returns:
+            Tuple of (provider_name, actual_model_id, provider)
+
+        Raises:
+            ProviderError: If model not found or no models available
+        """
+        # Check for auto-routing
+        if model_id == AUTO_ROUTE_MODEL:
+            result = await self._get_auto_route_model()
+            if not result:
+                logger.error("No models available for auto-routing")
+                raise ProviderError("No models available for auto-routing", status_code=503)
+            return result
+
+        # Explicit model specified - find in cache
+        result = await self._find_model_in_cache(model_id)
+        if not result:
+            logger.warning("Model not found: %s", model_id)
+            raise ProviderError(
+                f"Model '{model_id}' not found in any provider",
+                status_code=404,
+            )
+        return result
+
+    def _create_request_with_model(
+        self, original_request: ChatRequest, model_id: str
+    ) -> ChatRequest:
+        """Create a new ChatRequest with a different model ID.
+
+        Args:
+            original_request: The original request
+            model_id: The new model ID to use
+
+        Returns:
+            New ChatRequest with updated model
+        """
+        return ChatRequest(
+            model=model_id,
+            messages=original_request.messages,
+            temperature=original_request.temperature,
+            max_tokens=original_request.max_tokens,
+            stream=original_request.stream,
+            tools=original_request.tools,
+            tool_choice=original_request.tool_choice,
+        )
+
     async def _get_auto_route_model(self) -> tuple[str, str, BaseProvider] | None:
         """Get the highest priority available model for auto-routing.
 
@@ -152,7 +222,7 @@ class Router:
             Tuple of (provider_name, model_id, provider) or None if no model available
         """
         await self._ensure_models_cache()
-        priorities_config = load_priorities_config()
+        priorities_config = self._get_priorities_config()
 
         # Try each priority in order
         for priority_key in priorities_config.priorities:
@@ -230,7 +300,7 @@ class Router:
 
         if strategy == FallbackStrategy.PRIORITY:
             # Follow the priorities list order, starting after current
-            priorities_config = load_priorities_config()
+            priorities_config = self._get_priorities_config()
             found_current = False
 
             for priority_key in priorities_config.priorities:
@@ -259,6 +329,83 @@ class Router:
 
         return candidates
 
+    async def _execute_with_fallback(
+        self,
+        request: ChatRequest,
+        provider_name: str,
+        actual_model_id: str,
+        provider: BaseProvider,
+        fallback: bool,
+        is_stream: bool,
+    ) -> tuple[ChatResponse | AsyncIterator[ChatStreamChunk], str]:
+        """Execute request with fallback support.
+
+        Args:
+            request: Original chat request
+            provider_name: Name of the primary provider
+            actual_model_id: The actual model ID to use
+            provider: The primary provider instance
+            fallback: Whether to try fallback providers on error
+            is_stream: Whether this is a streaming request
+
+        Returns:
+            Tuple of (response or stream, provider_name)
+
+        Raises:
+            ProviderError: If all providers fail
+        """
+        actual_request = self._create_request_with_model(request, actual_model_id)
+
+        try:
+            await provider.ensure_token()
+            if is_stream:
+                stream = provider.chat_completion_stream(actual_request)
+                logger.info("Stream request routed to %s", provider_name)
+                return stream, provider_name
+            else:
+                response = await provider.chat_completion(actual_request)
+                logger.info("Request completed via %s", provider_name)
+                return response, provider_name
+        except ProviderError as e:
+            logger.warning("Provider %s failed: %s", provider_name, e)
+            if not fallback or not e.retryable:
+                raise
+
+            # Load fallback config
+            priorities_config = self._get_priorities_config()
+            fallback_config = priorities_config.fallback
+
+            if fallback_config.strategy == FallbackStrategy.NONE:
+                raise
+
+            # Get fallback candidates
+            candidates = self._get_fallback_candidates(
+                provider_name, actual_model_id, fallback_config.strategy
+            )
+
+            # Try fallback candidates up to maxRetries
+            for i, (other_name, other_model_id, other_provider) in enumerate(candidates):
+                if i >= fallback_config.maxRetries:
+                    break
+
+                logger.info("Trying fallback: %s/%s", other_name, other_model_id)
+                fallback_request = self._create_request_with_model(request, other_model_id)
+
+                try:
+                    await other_provider.ensure_token()
+                    if is_stream:
+                        stream = other_provider.chat_completion_stream(fallback_request)
+                        logger.info("Stream fallback succeeded via %s", other_name)
+                        return stream, other_name
+                    else:
+                        response = await other_provider.chat_completion(fallback_request)
+                        logger.info("Fallback succeeded via %s", other_name)
+                        return response, other_name
+                except ProviderError as fallback_error:
+                    logger.warning("Fallback %s failed: %s", other_name, fallback_error)
+                    continue
+            raise
+
     async def chat_completion(
         self,
         request: ChatRequest,
@@ -276,88 +423,13 @@ class Router:
         Raises:
             ProviderError: If model not found or all providers fail
         """
-        model_id = request.model
-
-        # Check for auto-routing
-        if model_id == AUTO_ROUTE_MODEL:
-            result = await self._get_auto_route_model()
-            if not result:
-                logger.error("No models available for auto-routing")
-                raise ProviderError("No models available for auto-routing", status_code=503)
-            provider_name, actual_model_id, provider = result
-        else:
-            # Explicit model specified - find in cache
-            result = await self._find_model_in_cache(model_id)
-            if not result:
-                logger.warning("Model not found: %s", model_id)
-                raise ProviderError(
-                    f"Model '{model_id}' not found in any provider",
-                    status_code=404,
-                )
-            provider_name, actual_model_id, provider = result
-
+        provider_name, actual_model_id, provider = await self._resolve_provider(request.model)
         logger.info("Routing request to %s/%s", provider_name, actual_model_id)
 
-        # Create request with actual model ID
-        actual_request = ChatRequest(
-            model=actual_model_id,
-            messages=request.messages,
-            temperature=request.temperature,
-            max_tokens=request.max_tokens,
-            stream=request.stream,
-            tools=request.tools,
-            tool_choice=request.tool_choice,
+        result, used_provider = await self._execute_with_fallback(
+            request, provider_name, actual_model_id, provider, fallback, is_stream=False
         )
-
-        try:
-            await provider.ensure_token()
-            response = await provider.chat_completion(actual_request)
-            logger.info("Request completed via %s", provider_name)
-            return response, provider_name
-        except ProviderError as e:
-            logger.warning("Provider %s failed: %s", provider_name, e)
-            if not fallback or not e.retryable:
-                raise
-
-            # Load fallback config
-            priorities_config = load_priorities_config()
-            fallback_config = priorities_config.fallback
-
-            if fallback_config.strategy == FallbackStrategy.NONE:
-                raise
-
-            # Get fallback candidates
-            candidates = self._get_fallback_candidates(
-                provider_name, actual_model_id, fallback_config.strategy
-            )
-
-            # Try fallback candidates up to maxRetries
-            for i, (other_name, other_model_id, other_provider) in enumerate(candidates):
-                if i >= fallback_config.maxRetries:
-                    break
-
-                logger.info("Trying fallback: %s/%s", other_name, other_model_id)
-
-                # Create request with the candidate's model
-                fallback_request = ChatRequest(
-                    model=other_model_id,
-                    messages=request.messages,
-                    temperature=request.temperature,
-                    max_tokens=request.max_tokens,
-                    stream=request.stream,
-                    tools=request.tools,
-                    tool_choice=request.tool_choice,
-                )
-
-                try:
-                    await other_provider.ensure_token()
-                    response = await other_provider.chat_completion(fallback_request)
-                    logger.info("Fallback succeeded via %s", other_name)
-                    return response, other_name
-                except ProviderError as fallback_error:
-                    logger.warning("Fallback %s failed: %s", other_name, fallback_error)
-                    continue
-            raise
+        return result, used_provider  # type: ignore
 
     async def chat_completion_stream(
         self,
@@ -376,87 +448,13 @@ class Router:
         Raises:
             ProviderError: If model not found or all providers fail
         """
-        model_id = request.model
-
-        # Check for auto-routing
-        if model_id == AUTO_ROUTE_MODEL:
-            result = await self._get_auto_route_model()
-            if not result:
-                logger.error("No models available for auto-routing")
-                raise ProviderError("No models available for auto-routing", status_code=503)
-            provider_name, actual_model_id, provider = result
-        else:
-            # Explicit model specified - find in cache
-            result = await self._find_model_in_cache(model_id)
-            if not result:
-                logger.warning("Model not found: %s", model_id)
-                raise ProviderError(
-                    f"Model '{model_id}' not found in any provider",
-                    status_code=404,
-                )
-            provider_name, actual_model_id, provider = result
-
+        provider_name, actual_model_id, provider = await self._resolve_provider(request.model)
         logger.info("Routing stream request to %s/%s", provider_name, actual_model_id)
 
-        # Create request with actual model ID
-        actual_request = ChatRequest(
-            model=actual_model_id,
-            messages=request.messages,
-            temperature=request.temperature,
-            max_tokens=request.max_tokens,
-            stream=request.stream,
-            tools=request.tools,
-            tool_choice=request.tool_choice,
+        result, used_provider = await self._execute_with_fallback(
+            request, provider_name, actual_model_id, provider, fallback, is_stream=True
         )
-
-        try:
-            await provider.ensure_token()
-            stream = provider.chat_completion_stream(actual_request)
-            return stream, provider_name
-        except ProviderError as e:
-            logger.warning("Provider %s failed: %s", provider_name, e)
-            if not fallback or not e.retryable:
-                raise
-
-            # Load fallback config
-            priorities_config = load_priorities_config()
-            fallback_config = priorities_config.fallback
-
-            if fallback_config.strategy == FallbackStrategy.NONE:
-                raise
-
-            # Get fallback candidates
-            candidates = self._get_fallback_candidates(
-                provider_name, actual_model_id, fallback_config.strategy
-            )
-
-            # Try fallback candidates up to maxRetries
-            for i, (other_name, other_model_id, other_provider) in enumerate(candidates):
-                if i >= fallback_config.maxRetries:
-                    break
-
-                logger.info("Trying stream fallback: %s/%s", other_name, other_model_id)
-
-                # Create request with the candidate's model
-                fallback_request = ChatRequest(
-                    model=other_model_id,
-                    messages=request.messages,
-                    temperature=request.temperature,
-                    max_tokens=request.max_tokens,
-                    stream=request.stream,
-                    tools=request.tools,
-                    tool_choice=request.tool_choice,
-                )
-
-                try:
-                    await other_provider.ensure_token()
-                    stream = other_provider.chat_completion_stream(fallback_request)
-                    logger.info("Stream fallback succeeded via %s", other_name)
-                    return stream, other_name
-                except ProviderError as fallback_error:
-                    logger.warning("Stream fallback %s failed: %s", other_name, fallback_error)
-                    continue
-            raise
+        return result, used_provider  # type: ignore
 
     async def list_models(self) -> list[ModelInfo]:
         """List all available models from all authenticated providers.
@@ -467,7 +465,7 @@ class Router:
             List of available models
         """
         await self._ensure_models_cache()
-        priorities_config = load_priorities_config()
+        priorities_config = self._get_priorities_config()
 
         models: list[ModelInfo] = []
         seen: set[str] = set()
@@ -499,4 +497,6 @@ class Router:
         self._models_cache.clear()
         self._cache_initialized = False
         self._cache_timestamp = 0.0
+        self._priorities_config = None
+        self._priorities_config_timestamp = 0.0
         logger.debug("Models cache invalidated")

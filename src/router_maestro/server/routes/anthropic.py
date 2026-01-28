@@ -21,7 +21,11 @@ from router_maestro.server.translation import (
     translate_anthropic_to_openai,
     translate_openai_chunk_to_anthropic_events,
 )
-from router_maestro.utils import get_logger
+from router_maestro.utils import (
+    estimate_tokens_from_char_count,
+    get_logger,
+    map_openai_stop_reason_to_anthropic,
+)
 
 logger = get_logger("server.routes.anthropic")
 
@@ -90,8 +94,6 @@ async def count_tokens(request: AnthropicCountTokensRequest):
     Since we're proxying to various providers, we can't get exact counts
     without making an actual request.
     """
-    # Estimate tokens based on character count (rough approximation)
-    # Average ~4 characters per token for English text
     total_chars = 0
 
     # Count system prompt
@@ -115,23 +117,12 @@ async def count_tokens(request: AnthropicCountTokensRequest):
                 elif hasattr(block, "text"):
                     total_chars += len(block.text)
 
-    # Rough estimate: 4 chars per token
-    estimated_tokens = total_chars // 4
-
-    return {"input_tokens": estimated_tokens}
+    return {"input_tokens": estimate_tokens_from_char_count(total_chars)}
 
 
 def _map_finish_reason(reason: str | None) -> str | None:
     """Map OpenAI finish reason to Anthropic stop reason."""
-    if reason is None:
-        return None
-    mapping = {
-        "stop": "end_turn",
-        "length": "max_tokens",
-        "tool_calls": "tool_use",
-        "content_filter": "end_turn",
-    }
-    return mapping.get(reason, "end_turn")
+    return map_openai_stop_reason_to_anthropic(reason)
 
 
 def _estimate_input_tokens(request: AnthropicMessagesRequest) -> int:
@@ -189,8 +180,7 @@ def _estimate_input_tokens(request: AnthropicMessagesRequest) -> int:
                 except Exception:
                     pass
 
-    # Rough estimate: 4 chars per token
-    return total_chars // 4
+    return estimate_tokens_from_char_count(total_chars)
 
 
 async def stream_response(

@@ -14,7 +14,7 @@ from router_maestro.server.schemas.anthropic import (
     AnthropicUsage,
     AnthropicUserMessage,
 )
-from router_maestro.utils import get_logger
+from router_maestro.utils import get_logger, map_openai_stop_reason_to_anthropic
 
 logger = get_logger("server.translation")
 
@@ -414,15 +414,7 @@ def _map_stop_reason(
     openai_reason: str | None,
 ) -> str | None:
     """Map OpenAI finish reason to Anthropic stop reason."""
-    if openai_reason is None:
-        return None
-    mapping = {
-        "stop": "end_turn",
-        "length": "max_tokens",
-        "tool_calls": "tool_use",
-        "content_filter": "end_turn",
-    }
-    return mapping.get(openai_reason, "end_turn")
+    return map_openai_stop_reason_to_anthropic(openai_reason)
 
 
 def translate_openai_chunk_to_anthropic_events(
