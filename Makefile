@@ -1,9 +1,10 @@
-.PHONY: help install dev test lint format clean build push run stop logs shell docker-up docker-down docker-logs
+.PHONY: help install dev test lint format clean build push run stop logs shell docker-up docker-down docker-logs buildx-setup build-multiarch
 
 # Variables
 VERSION := $(shell grep '^version' pyproject.toml | head -1 | cut -d'"' -f2)
 IMAGE_NAME := likanwen/router-maestro
 DOCKER_TAGS := -t $(IMAGE_NAME):$(VERSION) -t $(IMAGE_NAME):latest
+PLATFORMS := linux/amd64,linux/arm64
 
 # Default target
 help:
@@ -23,9 +24,11 @@ help:
 	@echo "  make stop        Stop local server"
 	@echo ""
 	@echo "Docker:"
-	@echo "  make build       Build Docker image ($(IMAGE_NAME):$(VERSION))"
-	@echo "  make push        Push image to Docker Hub"
-	@echo "  make shell       Open shell in container"
+	@echo "  make build            Build Docker image ($(IMAGE_NAME):$(VERSION))"
+	@echo "  make push             Push image to Docker Hub"
+	@echo "  make buildx-setup     Setup Docker buildx for multi-arch builds"
+	@echo "  make build-multiarch  Build and push multi-arch image (amd64, arm64)"
+	@echo "  make shell            Open shell in container"
 	@echo ""
 	@echo "Docker Compose (Production):"
 	@echo "  make docker-up   Start services (Traefik + Router-Maestro)"
@@ -76,6 +79,13 @@ build:
 push: build
 	docker push $(IMAGE_NAME):$(VERSION)
 	docker push $(IMAGE_NAME):latest
+
+buildx-setup:
+	@docker buildx inspect multiarch > /dev/null 2>&1 || docker buildx create --name multiarch --use
+	docker buildx inspect --bootstrap
+
+build-multiarch: buildx-setup
+	docker buildx build --platform $(PLATFORMS) $(DOCKER_TAGS) --push .
 
 shell:
 	docker run --rm -it $(IMAGE_NAME):latest /bin/sh
