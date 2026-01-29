@@ -43,7 +43,10 @@ Get up and running in 4 steps:
 **Option A: Docker (recommended)**
 
 ```bash
-docker run -d -p 8080:8080 -v router-maestro-data:/home/maestro/.local/share/router-maestro ghcr.io/madskittles/router-maestro:latest
+docker run -d -p 8080:8080 \
+  -v ~/.local/share/router-maestro:/home/maestro/.local/share/router-maestro \
+  -v ~/.config/router-maestro:/home/maestro/.config/router-maestro \
+  likanwen/router-maestro:latest
 ```
 
 **Option B: Install locally**
