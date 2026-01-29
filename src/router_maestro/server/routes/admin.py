@@ -1,9 +1,7 @@
 """Admin API routes for remote management."""
 
-from typing import Annotated
-
 import httpx
-from fastapi import APIRouter, BackgroundTasks, HTTPException, Query
+from fastapi import APIRouter, BackgroundTasks, HTTPException
 
 from router_maestro.auth import AuthManager, AuthType
 from router_maestro.auth.github_oauth import (
@@ -29,9 +27,7 @@ from router_maestro.server.schemas.admin import (
     OAuthStatusResponse,
     PrioritiesResponse,
     PrioritiesUpdateRequest,
-    StatsResponse,
 )
-from router_maestro.stats import StatsStorage
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
 
@@ -287,72 +283,4 @@ async def update_priorities(request: PrioritiesUpdateRequest) -> PrioritiesRespo
     return PrioritiesResponse(
         priorities=config.priorities,
         fallback=config.fallback.model_dump(),
-    )
-
-
-# ============================================================================
-# Stats endpoints
-# ============================================================================
-
-
-@router.get("/stats", response_model=StatsResponse)
-async def get_stats(
-    days: Annotated[int, Query(ge=1, le=365)] = 7,
-    provider: str | None = None,
-    model: str | None = None,
-) -> StatsResponse:
-    """Get usage statistics."""
-    storage = StatsStorage()
-
-    # Get total stats
-    total = storage.get_total_usage(days=days)
-
-    # Get stats by model (which includes provider info)
-    by_model_raw = storage.get_usage_by_model(days=days)
-
-    # Aggregate by provider
-    by_provider: dict[str, dict] = {}
-    by_model: dict[str, dict] = {}
-
-    for record in by_model_raw:
-        provider_name = record["provider"]
-        model_name = record["model"]
-        model_key = f"{provider_name}/{model_name}"
-
-        # Filter if requested
-        if provider and provider_name != provider:
-            continue
-        if model and model_name != model:
-            continue
-
-        # Aggregate by provider
-        if provider_name not in by_provider:
-            by_provider[provider_name] = {
-                "total_tokens": 0,
-                "prompt_tokens": 0,
-                "completion_tokens": 0,
-                "request_count": 0,
-            }
-
-        by_provider[provider_name]["total_tokens"] += record.get("total_tokens", 0) or 0
-        by_provider[provider_name]["prompt_tokens"] += record.get("prompt_tokens", 0) or 0
-        by_provider[provider_name]["completion_tokens"] += record.get("completion_tokens", 0) or 0
-        by_provider[provider_name]["request_count"] += record.get("request_count", 0) or 0
-
-        # Store by model
-        by_model[model_key] = {
-            "total_tokens": record.get("total_tokens", 0) or 0,
-            "prompt_tokens": record.get("prompt_tokens", 0) or 0,
-            "completion_tokens": record.get("completion_tokens", 0) or 0,
-            "request_count": record.get("request_count", 0) or 0,
-            "avg_latency_ms": record.get("avg_latency_ms", 0) or 0,
-        }
-
-    return StatsResponse(
-        total_requests=total.get("request_count", 0) or 0,
-        total_tokens=total.get("total_tokens", 0) or 0,
-        prompt_tokens=total.get("prompt_tokens", 0) or 0,
-        completion_tokens=total.get("completion_tokens", 0) or 0,
-        by_provider=by_provider,
-        by_model=by_model,
     )

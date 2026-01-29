@@ -241,38 +241,6 @@ class AdminClient:
             self._handle_connection_error(e)
             return False
 
-    async def get_stats(
-        self, days: int = 7, provider: str | None = None, model: str | None = None
-    ) -> dict:
-        """Get usage statistics.
-
-        Args:
-            days: Number of days to query
-            provider: Optional provider filter
-            model: Optional model filter
-
-        Returns:
-            Stats dict with total_requests, total_tokens, by_provider, by_model
-        """
-        try:
-            async with httpx.AsyncClient() as client:
-                params: dict = {"days": days}
-                if provider:
-                    params["provider"] = provider
-                if model:
-                    params["model"] = model
-
-                response = await client.get(
-                    f"{self.endpoint}/api/admin/stats",
-                    headers=self._get_headers(),
-                    params=params,
-                )
-                response.raise_for_status()
-                return response.json()
-        except httpx.HTTPError as e:
-            self._handle_connection_error(e)
-            return {}
-
     async def test_connection(self) -> dict:
         """Test connection to the server.
 

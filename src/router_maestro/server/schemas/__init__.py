@@ -10,8 +10,6 @@ from router_maestro.server.schemas.admin import (
     OAuthStatusResponse,
     PrioritiesResponse,
     PrioritiesUpdateRequest,
-    StatsQuery,
-    StatsResponse,
 )
 from router_maestro.server.schemas.openai import (
     ChatCompletionChoice,
@@ -39,8 +37,6 @@ __all__ = [
     "OAuthStatusResponse",
     "PrioritiesResponse",
     "PrioritiesUpdateRequest",
-    "StatsQuery",
-    "StatsResponse",
     # OpenAI schemas
     "ChatCompletionChoice",
     "ChatCompletionChunk",

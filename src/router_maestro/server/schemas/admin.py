@@ -66,22 +66,3 @@ class PrioritiesUpdateRequest(BaseModel):
 
     priorities: list[str] = Field(..., description="New priority list")
     fallback: dict | None = Field(default=None, description="Optional fallback config update")
-
-
-class StatsQuery(BaseModel):
-    """Query parameters for stats."""
-
-    days: int = Field(default=7, ge=1, le=365, description="Number of days to query")
-    provider: str | None = Field(default=None, description="Filter by provider")
-    model: str | None = Field(default=None, description="Filter by model")
-
-
-class StatsResponse(BaseModel):
-    """Response for usage statistics."""
-
-    total_requests: int = Field(default=0)
-    total_tokens: int = Field(default=0)
-    prompt_tokens: int = Field(default=0)
-    completion_tokens: int = Field(default=0)
-    by_provider: dict[str, dict] = Field(default_factory=dict)
-    by_model: dict[str, dict] = Field(default_factory=dict)

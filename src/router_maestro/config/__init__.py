@@ -8,7 +8,6 @@ from router_maestro.config.paths import (
     PRIORITIES_FILE,
     PROVIDERS_FILE,
     SERVER_CONFIG_FILE,
-    STATS_DB_FILE,
     get_config_dir,
     get_data_dir,
 )
@@ -45,7 +44,6 @@ __all__ = [
     "PROVIDERS_FILE",
     "PRIORITIES_FILE",
     "CONTEXTS_FILE",
-    "STATS_DB_FILE",
     "LOG_FILE",
     # Provider models
     "ModelConfig",

@@ -14,14 +14,13 @@ app = typer.Typer(
 console = Console()
 
 # Import and register sub-commands
-from router_maestro.cli import auth, config, context, model, server, stats  # noqa: E402
+from router_maestro.cli import auth, config, context, model, server  # noqa: E402
 
 app.add_typer(server.app, name="server", help="Manage the API server")
 app.add_typer(auth.app, name="auth", help="Manage authentication for providers")
 app.add_typer(model.app, name="model", help="Manage models and priorities")
 app.add_typer(context.app, name="context", help="Manage deployment contexts")
 app.add_typer(config.app, name="config", help="Manage configuration")
-app.command(name="stats")(stats.stats)
 
 
 @app.callback(invoke_without_command=True)

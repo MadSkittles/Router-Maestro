@@ -98,7 +98,7 @@ def status() -> None:
 
     try:
         data = asyncio.run(client.test_connection())
-        console.print(f"[green]Server is running[/green]")
+        console.print("[green]Server is running[/green]")
         console.print(f"  Version: {data.get('version', 'unknown')}")
         console.print(f"  Status: {data.get('status', 'unknown')}")
     except Exception as e:

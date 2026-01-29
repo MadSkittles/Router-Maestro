@@ -15,7 +15,6 @@ Router-Maestro acts as a proxy that gives you access to models from multiple pro
 - **Dual API compatibility**: Both OpenAI (`/v1/...`) and Anthropic (`/v1/messages`) API formats
 - **Cross-provider translation**: Seamlessly route OpenAI requests to Anthropic providers and vice versa
 - **Configuration hot-reload**: Auto-reload config files every 5 minutes without server restart
-- **Usage tracking**: Token usage statistics with heatmap visualization
 - **CLI management**: Full command-line interface for configuration and server control
 - **Docker ready**: Production-ready Docker images with Traefik integration
 
@@ -219,8 +218,6 @@ router-maestro model list
 | Command | Description |
 |---------|-------------|
 | `config claude-code` | Generate Claude Code settings |
-| `stats --days 7` | Show usage statistics |
-| `stats --days 30 --heatmap` | Show heatmap visualization |
 
 ## API Reference
 
@@ -276,7 +273,6 @@ Following XDG Base Directory specification:
 | **Data** | `~/.local/share/router-maestro/` | |
 | | `auth.json` | OAuth tokens |
 | | `server.json` | Server state |
-| | `stats.db` | Usage statistics |
 
 ### Custom Providers
 
@@ -365,7 +361,6 @@ router-maestro context set my-vps
 
 # Now all commands target the VPS
 router-maestro model list
-router-maestro stats --days 7
 ```
 
 ### HTTPS with Traefik
