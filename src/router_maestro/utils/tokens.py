@@ -1,7 +1,13 @@
 """Token estimation utilities."""
 
+from typing import Literal
+
 # Approximate characters per token for English text
 CHARS_PER_TOKEN = 4
+
+AnthropicStopReason = Literal[
+    "end_turn", "max_tokens", "stop_sequence", "tool_use", "pause_turn", "refusal"
+]
 
 
 def estimate_tokens(text: str) -> int:
@@ -31,7 +37,9 @@ def estimate_tokens_from_char_count(char_count: int) -> int:
     return char_count // CHARS_PER_TOKEN
 
 
-def map_openai_stop_reason_to_anthropic(openai_reason: str | None) -> str | None:
+def map_openai_stop_reason_to_anthropic(
+    openai_reason: str | None,
+) -> AnthropicStopReason | None:
     """Map OpenAI finish reason to Anthropic stop reason.
 
     Args:
@@ -42,7 +50,7 @@ def map_openai_stop_reason_to_anthropic(openai_reason: str | None) -> str | None
     """
     if openai_reason is None:
         return None
-    mapping = {
+    mapping: dict[str, AnthropicStopReason] = {
         "stop": "end_turn",
         "length": "max_tokens",
         "tool_calls": "tool_use",

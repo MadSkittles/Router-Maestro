@@ -26,6 +26,7 @@ from router_maestro.utils import (
     get_logger,
     map_openai_stop_reason_to_anthropic,
 )
+from router_maestro.utils.tokens import AnthropicStopReason
 
 logger = get_logger("server.routes.anthropic")
 
@@ -106,7 +107,7 @@ async def count_tokens(request: AnthropicCountTokensRequest):
 
     # Count messages
     for msg in request.messages:
-        content = msg.content if hasattr(msg, "content") else msg.get("content", "")
+        content = msg.content
         if isinstance(content, str):
             total_chars += len(content)
         elif isinstance(content, list):
@@ -115,12 +116,12 @@ async def count_tokens(request: AnthropicCountTokensRequest):
                     if block.get("type") == "text":
                         total_chars += len(block.get("text", ""))
                 elif hasattr(block, "text"):
-                    total_chars += len(block.text)
+                    total_chars += len(block.text)  # type: ignore[union-attr]
 
     return {"input_tokens": estimate_tokens_from_char_count(total_chars)}
 
 
-def _map_finish_reason(reason: str | None) -> str | None:
+def _map_finish_reason(reason: str | None) -> AnthropicStopReason | None:
     """Map OpenAI finish reason to Anthropic stop reason."""
     return map_openai_stop_reason_to_anthropic(reason)
 
@@ -144,7 +145,7 @@ def _estimate_input_tokens(request: AnthropicMessagesRequest) -> int:
 
     # Count messages
     for msg in request.messages:
-        content = msg.content if hasattr(msg, "content") else msg.get("content", "")
+        content = msg.content
         if isinstance(content, str):
             total_chars += len(content)
         elif isinstance(content, list):
@@ -161,7 +162,7 @@ def _estimate_input_tokens(request: AnthropicMessagesRequest) -> int:
                                 if isinstance(tc, dict) and tc.get("type") == "text":
                                     total_chars += len(tc.get("text", ""))
                 elif hasattr(block, "text"):
-                    total_chars += len(block.text)
+                    total_chars += len(block.text)  # type: ignore[union-attr]
 
     # Count tools definitions if present
     if request.tools:
