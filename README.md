@@ -23,6 +23,11 @@ Router-Maestro acts as a proxy that gives you access to models from multiple pro
 
 - [Quick Start](#quick-start)
 - [Core Concepts](#core-concepts)
+  - [Model Identification](#model-identification)
+  - [Auto-Routing](#auto-routing)
+  - [Priority & Fallback](#priority--fallback)
+  - [Cross-Provider Translation](#cross-provider-translation)
+  - [Contexts](#contexts)
 - [CLI Reference](#cli-reference)
 - [API Reference](#api-reference)
 - [Configuration](#configuration)
@@ -33,19 +38,32 @@ Router-Maestro acts as a proxy that gives you access to models from multiple pro
 
 Get up and running in 4 steps:
 
-### 1. Install
+### 1. Start the Server
+
+**Option A: Docker (recommended)**
+
+```bash
+docker run -d -p 8080:8080 -v router-maestro-data:/home/maestro/.local/share/router-maestro ghcr.io/madskittles/router-maestro:latest
+```
+
+**Option B: Install locally**
 
 ```bash
 pip install router-maestro
-# or
-uv pip install router-maestro
-```
-
-### 2. Start the Server
-
-```bash
 router-maestro server start --port 8080
 ```
+
+### 2. Set Context (for Docker or Remote)
+
+When running via Docker, set up a context to communicate with the containerized server:
+
+```bash
+pip install router-maestro  # Install CLI locally
+router-maestro context add docker --endpoint http://localhost:8080
+router-maestro context set docker
+```
+
+> **What's a context?** A context is a named connection profile (endpoint + API key) that lets you manage local or remote Router-Maestro servers. See [Contexts](#contexts) for details.
 
 ### 3. Authenticate with GitHub Copilot
 
@@ -68,7 +86,6 @@ router-maestro config claude-code
 **Done!** Now run `claude` and your requests will route through Router-Maestro.
 
 > **For production deployment**, see the [Deployment](#deployment) section.
-
 ## Core Concepts
 
 ### Model Identification
@@ -132,6 +149,27 @@ POST /v1/messages  {"model": "openai/gpt-4o", ...}
 
 # Use OpenAI API with Anthropic provider
 POST /v1/chat/completions  {"model": "anthropic/claude-3-5-sonnet", ...}
+```
+
+### Contexts
+
+A **context** is a named connection profile that stores an endpoint URL and API key. Contexts let you manage multiple Router-Maestro deployments from a single CLI.
+
+| Context | Use Case |
+|---------|----------|
+| `local` | Default context for `router-maestro server start` |
+| `docker` | Connect to a local Docker container |
+| `my-vps` | Connect to a remote VPS deployment |
+
+```bash
+# Add a context
+router-maestro context add my-vps --endpoint https://api.example.com --api-key xxx
+
+# Switch contexts
+router-maestro context set my-vps
+
+# All CLI commands now target the remote server
+router-maestro model list
 ```
 
 ## CLI Reference
