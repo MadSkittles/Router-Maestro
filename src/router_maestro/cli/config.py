@@ -139,19 +139,29 @@ def claude_code_config() -> None:
     )
     anthropic_url = f"{base_url}/api/anthropic"
 
-    config = {
-        "env": {
-            "ANTHROPIC_BASE_URL": anthropic_url,
-            "ANTHROPIC_AUTH_TOKEN": auth_token,
-            "ANTHROPIC_MODEL": main_model,
-            "ANTHROPIC_SMALL_FAST_MODEL": fast_model,
-            "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
-        }
+    env_config = {
+        "ANTHROPIC_BASE_URL": anthropic_url,
+        "ANTHROPIC_AUTH_TOKEN": auth_token,
+        "ANTHROPIC_MODEL": main_model,
+        "ANTHROPIC_SMALL_FAST_MODEL": fast_model,
+        "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
     }
+
+    # Load existing settings to preserve other sections (e.g., MCP servers)
+    existing_config: dict = {}
+    if settings_path.exists():
+        try:
+            with open(settings_path, encoding="utf-8") as f:
+                existing_config = json.load(f)
+        except (json.JSONDecodeError, OSError):
+            pass  # If file is corrupted, start fresh
+
+    # Merge: update env section while preserving other sections
+    existing_config["env"] = env_config
 
     settings_path.parent.mkdir(parents=True, exist_ok=True)
     with open(settings_path, "w", encoding="utf-8") as f:
-        json.dump(config, f, indent=2)
+        json.dump(existing_config, f, indent=2)
 
     console.print(
         Panel(
