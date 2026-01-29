@@ -2,6 +2,12 @@
 
 Multi-model routing router with OpenAI-compatible and Anthropic-compatible APIs. Route LLM requests across GitHub Copilot, OpenAI, Anthropic, and custom providers with intelligent fallback and priority-based selection.
 
+## TL;DR
+
+**Use GitHub Copilot's models (Claude, GPT-4o, o3-mini) with Claude Code or any OpenAI/Anthropic-compatible client.**
+
+Router-Maestro acts as a proxy that gives you access to models from multiple providers through a unified API. Authenticate once with GitHub Copilot, and use its models anywhere that supports OpenAI or Anthropic APIs.
+
 ## Features
 
 - **Multi-provider support**: GitHub Copilot (OAuth), OpenAI, Anthropic, and custom OpenAI-compatible endpoints
@@ -15,407 +21,224 @@ Multi-model routing router with OpenAI-compatible and Anthropic-compatible APIs.
 
 ## Table of Contents
 
-- [Installation](#installation)
 - [Quick Start](#quick-start)
-- [CLI Commands](#cli-commands)
-- [Model Identification & Routing](#model-identification--routing)
-- [Priority Configuration](#priority-configuration)
-- [Configuration Hot-Reload](#configuration-hot-reload)
-- [API Endpoints](#api-endpoints)
-- [Provider Configuration](#provider-configuration)
-- [Docker Deployment](#docker-deployment)
-- [Claude Code Integration](#claude-code-integration)
+- [Core Concepts](#core-concepts)
+- [CLI Reference](#cli-reference)
+- [API Reference](#api-reference)
+- [Configuration](#configuration)
+- [Deployment](#deployment)
 - [License](#license)
 
-## Installation
+## Quick Start
 
-### pip/uv
+Get up and running in 4 steps:
+
+### 1. Install
 
 ```bash
 pip install router-maestro
 # or
 uv pip install router-maestro
-# or
-uv tool install router-maestro
 ```
 
-### uvx (run without installing)
-
-```bash
-uvx --from router-maestro router-maestro --help
-```
-
-### Development
-
-```bash
-git clone https://github.com/likanwen/router-maestro.git
-cd router-maestro
-uv pip install -e ".[dev]"
-```
-
-## Quick Start
-
-### 1. Start the server
+### 2. Start the Server
 
 ```bash
 router-maestro server start --port 8080
 ```
 
-The server will:
-- Auto-generate an API key (displayed on startup)
-- Pre-warm model cache if providers are already authenticated
-- Listen on `http://localhost:8080`
-
-### 2. Authenticate with a provider
+### 3. Authenticate with GitHub Copilot
 
 ```bash
-# Interactive provider selection
-router-maestro auth login
-
-# Or specify provider directly
 router-maestro auth login github-copilot
-router-maestro auth login openai
-router-maestro auth login anthropic
+
+# Follow the prompts:
+#   1. Visit https://github.com/login/device
+#   2. Enter the displayed code
+#   3. Authorize "GitHub Copilot Chat"
 ```
 
-### 3. List available models
+### 4. Configure Claude Code
 
 ```bash
-router-maestro model list
+router-maestro config claude-code
+# Follow the wizard to select models
 ```
 
-### 4. Make API requests
+**Done!** Now run `claude` and your requests will route through Router-Maestro.
 
-```bash
-curl -X POST http://localhost:8080/v1/chat/completions \
-  -H "Authorization: Bearer YOUR_API_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "github-copilot/gpt-4o",
-    "messages": [{"role": "user", "content": "Hello!"}]
-  }'
-```
+> **For production deployment**, see the [Deployment](#deployment) section.
 
-## CLI Commands
+## Core Concepts
 
-### Server Management
+### Model Identification
 
-```bash
-router-maestro server start --port 8080   # Start server
-router-maestro server stop                 # Stop server
-router-maestro server info                 # Get server info
-```
+Models are identified using the format `{provider}/{model-id}`:
 
-### Authentication
-
-```bash
-router-maestro auth login                  # Interactive login
-router-maestro auth login github-copilot   # Login to specific provider
-router-maestro auth logout github-copilot  # Logout from provider
-router-maestro auth list                   # List authenticated providers
-```
-
-### Model Management
-
-```bash
-router-maestro model list                  # List all available models
-router-maestro model refresh               # Refresh models cache immediately
-router-maestro model priority list         # Show current priorities
-router-maestro model priority <model> --position <n>  # Set priority
-router-maestro model priority remove <model>          # Remove from priority
-router-maestro model fallback show         # Show fallback configuration
-router-maestro model fallback set --strategy <s> --max-retries <n>  # Set fallback
-```
-
-### Context Management
-
-```bash
-router-maestro context show                # Show current context
-router-maestro context list                # List all contexts
-router-maestro context set <name>          # Switch context
-router-maestro context add <name> --endpoint <url> --api-key <key>  # Add context
-router-maestro context set-key <key>       # Set API key for current context
-router-maestro context get-key             # Get current API key
-router-maestro context test                # Test connection to current context
-```
-
-### Statistics
-
-```bash
-router-maestro stats --days 7              # Show token usage for last 7 days
-router-maestro stats --days 30 --heatmap   # Show heatmap visualization
-```
-
-### Configuration
-
-```bash
-router-maestro config claude-code          # Generate Claude Code settings.json
-```
-
-## Model Identification & Routing
-
-Models are identified using the format: `{provider}/{model-id}`
-
-Examples:
-- `github-copilot/gpt-4o` - GPT-4o via GitHub Copilot
-- `openai/gpt-4-turbo` - GPT-4 Turbo via OpenAI
-- `anthropic/claude-3-5-sonnet` - Claude 3.5 Sonnet via Anthropic
-- `my-llm/llama-3` - Custom model via OpenAI-compatible provider
+| Example | Description |
+|---------|-------------|
+| `github-copilot/gpt-4o` | GPT-4o via GitHub Copilot |
+| `github-copilot/claude-sonnet-4` | Claude Sonnet 4 via GitHub Copilot |
+| `openai/gpt-4-turbo` | GPT-4 Turbo via OpenAI |
+| `anthropic/claude-3-5-sonnet` | Claude 3.5 Sonnet via Anthropic |
 
 ### Auto-Routing
 
 Use the special model name `router-maestro` for automatic provider selection:
 
-```bash
-curl -X POST http://localhost:8080/v1/chat/completions \
-  -H "Authorization: Bearer YOUR_API_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "router-maestro",
-    "messages": [{"role": "user", "content": "Hello"}]
-  }'
+```json
+{"model": "router-maestro", "messages": [...]}
 ```
 
-The router will:
-1. Try models in priority order (from `priorities.json`)
-2. If priorities list is empty, use the first available model from any authenticated provider
-3. Fall back to next model on failure (if configured)
+The router will try models in priority order and fall back to the next on failure.
 
-**Note**: The special model name `router-maestro` does not appear in `model list` or `/v1/models` API responses. It is only used in requests to trigger auto-routing.
+### Priority & Fallback
 
-### Cross-Provider Translation
-
-Router-Maestro automatically translates requests between OpenAI and Anthropic formats:
+**Priority** determines which model is tried first when using auto-routing.
 
 ```bash
-# Use Anthropic API format with OpenAI provider
-POST /v1/messages
-{"model": "openai/gpt-4o", "messages": [...]}
-
-# Use OpenAI API format with Anthropic provider
-POST /v1/chat/completions
-{"model": "anthropic/claude-3-5-sonnet", "messages": [...]}
-```
-
-## Priority Configuration
-
-Priority determines which model is tried first when using auto-routing (`model: "router-maestro"`).
-
-### Setting Priorities
-
-```bash
-# Set model as highest priority (position 1)
+# Set priorities
 router-maestro model priority github-copilot/claude-sonnet-4 --position 1
+router-maestro model priority github-copilot/gpt-4o --position 2
 
-# Set model as second priority
-router-maestro model priority openai/gpt-4o --position 2
-
-# View current priorities
+# View priorities
 router-maestro model priority list
 ```
 
-### How Priority Insertion Works
+**Fallback** triggers when a request fails with a retryable error (429, 5xx):
 
-When you set a model's priority, existing models shift to make room (they don't get replaced):
+| Strategy | Behavior |
+|----------|----------|
+| `priority` | Try next model in priorities list |
+| `same-model` | Try same model on different provider |
+| `none` | Fail immediately |
 
-**Example**: Starting with priorities `[A, B, C]` (positions 1, 2, 3)
-
-```bash
-# Insert D at position 2
-router-maestro model priority D --position 2
-# Result: [A, D, B, C] (positions 1, 2, 3, 4)
-# - A stays at position 1
-# - D is inserted at position 2
-# - B shifts from position 2 to 3
-# - C shifts from position 3 to 4
-```
-
-### Priority Configuration File
-
-Edit `~/.config/router-maestro/priorities.json` directly:
+Configure in `~/.config/router-maestro/priorities.json`:
 
 ```json
 {
-  "priorities": [
-    "github-copilot/claude-sonnet-4",
-    "github-copilot/gpt-4o",
-    "openai/gpt-4-turbo",
-    "anthropic/claude-3-5-sonnet"
-  ],
-  "fallback": {
-    "strategy": "priority",
-    "maxRetries": 2
-  }
+  "priorities": ["github-copilot/claude-sonnet-4", "github-copilot/gpt-4o"],
+  "fallback": {"strategy": "priority", "maxRetries": 2}
 }
 ```
 
-### Fallback Behavior
+### Cross-Provider Translation
 
-Fallback only triggers when:
-1. The error is **retryable** (see Retryable Errors below)
-2. The fallback strategy is not `none`
-3. There are valid fallback candidates
-
-**Important**: Fallback behavior depends on how you specify the model:
-
-| Model Specification | Fallback Behavior |
-|---------------------|-------------------|
-| `router-maestro` (auto-routing) | Tries models in priority order; on failure, continues down the list |
-| `provider/model` in priorities list | On failure, tries models **after** it in the priorities list |
-| `provider/model` NOT in priorities list | **No fallback** - fails immediately even if retryable |
-
-**When priorities list is empty**:
-- Auto-routing (`router-maestro`) will use the first available model from any authenticated provider
-- Since there's no priorities list to follow, **no fallback occurs** on failure (even with `priority` strategy)
-- To enable fallback, add models to your priorities list
-
-### Fallback Strategies
-
-Configure in `priorities.json`:
-
-```json
-{
-  "fallback": {
-    "strategy": "priority",
-    "maxRetries": 2
-  }
-}
-```
-
-#### `priority` Strategy
-
-On failure, try the next model in the priorities list (in order).
-
-**Example**: priorities = `[A, B, C, D]`
-- Request with `model: "router-maestro"` → tries A, if fails tries B, then C...
-- Request with `model: "B"` → tries B, if fails tries C, then D (skips A)
-- Request with `model: "X"` (not in list) → tries X, if fails → **error** (no fallback)
-- **priorities = `[]` (empty)** → auto-routing picks first available model, if fails → **error** (no fallback)
-
-#### `same-model` Strategy
-
-On failure, try the **same model** on a different provider.
-
-**Example**: You have `gpt-4o` available on both `github-copilot` and `openai`
-- Request with `model: "github-copilot/gpt-4o"` fails
-- Router tries `openai/gpt-4o` as fallback
-
-This strategy is useful when:
-- Multiple providers offer the same model
-- You want provider redundancy without changing the model
-
-**Note**: If no other provider has the same model, no fallback occurs.
-
-#### `none` Strategy
-
-Never fallback. Any failure returns an error immediately.
-
-### Retryable Errors
-
-Fallback only occurs for these HTTP status codes:
-- `429` - Rate limited
-- `500`, `502`, `503`, `504` - Server errors
-- `529` - Anthropic overloaded
-
-Non-retryable errors (e.g., `400 Bad Request`, `401 Unauthorized`, `404 Not Found`) always fail immediately without fallback.
-
-## Configuration Hot-Reload
-
-Router-Maestro automatically reloads configuration files without requiring a server restart.
-
-### Auto-Reload Behavior
-
-| File | Auto-Reload | TTL |
-|------|-------------|-----|
-| `priorities.json` | Yes | 5 minutes |
-| `providers.json` | Yes | 5 minutes |
-| `auth.json` | No | Requires restart |
-
-### When Changes Take Effect
-
-1. **Within 5 minutes**: Configuration changes are automatically detected and applied
-2. **Immediately**: Use CLI commands to force immediate reload:
-   ```bash
-   # Refresh models cache (reloads providers.json and priorities.json)
-   router-maestro model refresh
-   ```
-
-### Manual Refresh via API
+Router-Maestro automatically translates between OpenAI and Anthropic formats:
 
 ```bash
-POST /api/admin/models/refresh
+# Use Anthropic API with OpenAI provider
+POST /v1/messages  {"model": "openai/gpt-4o", ...}
+
+# Use OpenAI API with Anthropic provider
+POST /v1/chat/completions  {"model": "anthropic/claude-3-5-sonnet", ...}
 ```
 
-This endpoint:
-- Reloads `providers.json` and `priorities.json`
-- Clears the models cache
-- Re-fetches models from all providers
+## CLI Reference
 
-## API Endpoints
+### Server
 
-### OpenAI-Compatible API
+| Command | Description |
+|---------|-------------|
+| `server start --port 8080` | Start the server |
+| `server stop` | Stop the server |
+| `server info` | Show server status |
 
-#### Chat Completions
+### Authentication
+
+| Command | Description |
+|---------|-------------|
+| `auth login [provider]` | Authenticate with a provider |
+| `auth logout <provider>` | Remove authentication |
+| `auth list` | List authenticated providers |
+
+### Models
+
+| Command | Description |
+|---------|-------------|
+| `model list` | List available models |
+| `model refresh` | Refresh models cache |
+| `model priority list` | Show priorities |
+| `model priority <model> --position <n>` | Set priority |
+| `model fallback show` | Show fallback config |
+
+### Contexts (Remote Management)
+
+| Command | Description |
+|---------|-------------|
+| `context show` | Show current context |
+| `context list` | List all contexts |
+| `context set <name>` | Switch context |
+| `context add <name> --endpoint <url> --api-key <key>` | Add remote context |
+| `context test` | Test connection |
+
+### Other
+
+| Command | Description |
+|---------|-------------|
+| `config claude-code` | Generate Claude Code settings |
+| `stats --days 7` | Show usage statistics |
+| `stats --days 30 --heatmap` | Show heatmap visualization |
+
+## API Reference
+
+### OpenAI-Compatible
 
 ```bash
+# Chat completions
 POST /v1/chat/completions
-```
-
-```json
 {
   "model": "github-copilot/gpt-4o",
-  "messages": [
-    {"role": "system", "content": "You are a helpful assistant."},
-    {"role": "user", "content": "Explain quantum computing."}
-  ],
-  "temperature": 0.7,
-  "max_tokens": 1000,
+  "messages": [{"role": "user", "content": "Hello"}],
   "stream": false
 }
-```
 
-#### List Models
-
-```bash
+# List models
 GET /v1/models
 ```
 
-### Anthropic-Compatible API
-
-#### Messages
+### Anthropic-Compatible
 
 ```bash
+# Messages
 POST /v1/messages
 POST /api/anthropic/v1/messages
-```
-
-```json
 {
-  "model": "github-copilot/claude-3-5-sonnet",
+  "model": "github-copilot/claude-sonnet-4",
   "max_tokens": 1024,
-  "system": "You are a helpful assistant.",
-  "messages": [{"role": "user", "content": "Hello!"}]
+  "messages": [{"role": "user", "content": "Hello"}]
 }
-```
 
-#### Count Tokens
-
-```bash
+# Count tokens
 POST /v1/messages/count_tokens
-POST /api/anthropic/v1/messages/count_tokens
 ```
 
-### Admin API
+### Admin
 
 ```bash
 POST /api/admin/models/refresh   # Refresh model cache
 ```
 
-## Provider Configuration
+## Configuration
+
+### File Locations
+
+Following XDG Base Directory specification:
+
+| Type | Path | Contents |
+|------|------|----------|
+| **Config** | `~/.config/router-maestro/` | |
+| | `providers.json` | Custom provider definitions |
+| | `priorities.json` | Model priorities and fallback |
+| | `contexts.json` | Deployment contexts |
+| **Data** | `~/.local/share/router-maestro/` | |
+| | `auth.json` | OAuth tokens |
+| | `server.json` | Server state |
+| | `stats.db` | Usage statistics |
 
 ### Custom Providers
 
-Edit `~/.config/router-maestro/providers.json` to add custom OpenAI-compatible providers:
+Add OpenAI-compatible providers in `~/.config/router-maestro/providers.json`:
 
 ```json
 {
@@ -427,344 +250,92 @@ Edit `~/.config/router-maestro/providers.json` to add custom OpenAI-compatible p
         "llama3": {"name": "Llama 3"},
         "mistral": {"name": "Mistral 7B"}
       }
-    },
-    "vllm": {
-      "type": "openai-compatible",
-      "baseURL": "http://localhost:8000/v1",
-      "models": {}
     }
   }
 }
 ```
 
-### API Keys for Custom Providers
-
-Set API keys via environment variables (uppercase, replace hyphens with underscores):
+Set API keys via environment variables (uppercase, hyphens → underscores):
 
 ```bash
-export OLLAMA_API_KEY="sk-..."  # For ollama provider
-export VLLM_API_KEY="sk-..."    # For vllm provider
+export OLLAMA_API_KEY="sk-..."
 ```
 
-### Data Locations
+### Hot-Reload
 
-Following XDG Base Directory specification:
+Configuration files are automatically reloaded every 5 minutes:
 
-| Type | Location |
-|------|----------|
-| **Config** | `~/.config/router-maestro/` |
-| - providers.json | Custom provider definitions |
-| - priorities.json | Model priorities and fallback config |
-| - contexts.json | Deployment contexts and API keys |
-| **Data** | `~/.local/share/router-maestro/` |
-| - auth.json | Stored OAuth tokens and API keys |
-| - server.json | Server state |
-| - stats.db | Token usage statistics |
+| File | Auto-Reload |
+|------|-------------|
+| `priorities.json` | ✓ (5 min) |
+| `providers.json` | ✓ (5 min) |
+| `auth.json` | Requires restart |
 
-## Docker Deployment
+Force immediate reload:
 
-### Quick Deploy to VPS
+```bash
+router-maestro model refresh
+```
 
-This section covers deploying Router-Maestro to a VPS with HTTPS support via Traefik.
+## Deployment
 
-#### 1. Prerequisites
+### Docker Deployment
 
-- A VPS with Docker and Docker Compose installed
-- A domain pointing to your VPS (e.g., `api.example.com`)
-- A Cloudflare account with your domain configured (for DNS challenge)
-
-#### 2. Clone and Configure
+Deploy to a VPS with Docker Compose:
 
 ```bash
 # On your VPS
 git clone https://github.com/likanwen/router-maestro.git
 cd router-maestro
-
-# Copy environment template
-cp .env.example .env
-```
-
-Edit `.env` with your values:
-
-```bash
-# Your domain (must point to this VPS)
-DOMAIN=api.example.com
-
-# Cloudflare API token (Zone:DNS:Edit permission)
-# Generate at: https://dash.cloudflare.com/profile/api-tokens
-CF_DNS_API_TOKEN=your_cloudflare_api_token
-
-# Email for Let's Encrypt notifications
-ACME_EMAIL=your-email@example.com
-
-# API key for Router-Maestro (generate a secure random string)
-ROUTER_MAESTRO_API_KEY=$(openssl rand -hex 32)
-
-# Traefik dashboard auth (optional, generate with: htpasswd -nB admin)
-# Note: Escape $ as $$ in .env file
-TRAEFIK_DASHBOARD_AUTH=admin:$$2y$$05$$your_bcrypt_hash_here
-```
-
-#### 3. Deploy
-
-```bash
-# Start services
+cp .env.example .env  # Edit with your domain
 docker compose up -d
-
-# Check status
-docker compose ps
-
-# View logs
-docker compose logs -f router-maestro
 ```
 
-Your Router-Maestro API will be available at `https://api.example.com`.
-
-### HTTPS with Traefik and Let's Encrypt
-
-The included `docker-compose.yml` uses [Traefik](https://traefik.io/) as a reverse proxy with automatic HTTPS certificate management via [Let's Encrypt](https://letsencrypt.org/).
-
-#### How It Works
-
-1. **Traefik** listens on ports 80 and 443
-2. **Let's Encrypt** issues free SSL certificates automatically
-3. **DNS Challenge** verifies domain ownership without opening additional ports
-4. **Auto-renewal** happens before certificates expire
-
-#### Default: Cloudflare DNS Challenge
-
-The default configuration uses Cloudflare for DNS challenge. This is the recommended approach because:
-- Works even if port 80 is blocked
-- Supports wildcard certificates
-- No downtime during certificate renewal
-
-Required Cloudflare API token permissions:
-- `Zone:DNS:Edit` - to create TXT records for verification
-
-#### Using Other DNS Providers
-
-Traefik supports 100+ DNS providers. To switch from Cloudflare:
-
-1. **Update `docker-compose.yml`** - change the DNS challenge provider:
-
-```yaml
-# In traefik service command section, replace:
-- "--certificatesresolvers.letsencrypt.acme.dnschallenge.provider=cloudflare"
-# With your provider, e.g.:
-- "--certificatesresolvers.letsencrypt.acme.dnschallenge.provider=route53"      # AWS
-- "--certificatesresolvers.letsencrypt.acme.dnschallenge.provider=digitalocean" # DigitalOcean
-- "--certificatesresolvers.letsencrypt.acme.dnschallenge.provider=godaddy"      # GoDaddy
-- "--certificatesresolvers.letsencrypt.acme.dnschallenge.provider=namecheap"    # Namecheap
-```
-
-2. **Update environment variables** - each provider requires different credentials:
-
-```yaml
-# In traefik service environment section, replace CF_DNS_API_TOKEN with:
-# AWS Route53
-- AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
-- AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
-
-# DigitalOcean
-- DO_AUTH_TOKEN=${DO_AUTH_TOKEN}
-
-# GoDaddy
-- GODADDY_API_KEY=${GODADDY_API_KEY}
-- GODADDY_API_SECRET=${GODADDY_API_SECRET}
-```
-
-3. **Update `.env`** with your provider's credentials
-
-See the [Traefik DNS Challenge documentation](https://doc.traefik.io/traefik/https/acme/#providers) for the full list of supported providers and their required environment variables.
-
-#### Using HTTP Challenge (Alternative)
-
-If you don't want to use DNS challenge, you can use HTTP challenge instead. This requires port 80 to be accessible:
-
-```yaml
-# Replace dnschallenge lines with:
-- "--certificatesresolvers.letsencrypt.acme.httpchallenge=true"
-- "--certificatesresolvers.letsencrypt.acme.httpchallenge.entrypoint=web"
-```
-
-#### 4. Authenticate with GitHub Copilot (on VPS)
-
-You need to authenticate with providers on the VPS. The easiest way is to run CLI commands inside the container:
+Configure `.env`:
 
 ```bash
-# Enter the container
+DOMAIN=api.example.com
+CF_DNS_API_TOKEN=your_cloudflare_token  # For HTTPS
+ACME_EMAIL=your@email.com
+ROUTER_MAESTRO_API_KEY=$(openssl rand -hex 32)
+```
+
+Authenticate inside the container:
+
+```bash
 docker compose exec router-maestro /bin/sh
-
-# Login to GitHub Copilot (follow the OAuth flow)
 router-maestro auth login github-copilot
-
-# Verify authentication
-router-maestro auth list
-
-# Exit container
-exit
+# Follow OAuth flow, then exit
 ```
 
-### Managing Remote Deployments from Local Machine
+### Remote Management
 
-Once your VPS is deployed, you can manage it from your local machine using **contexts**.
-
-#### 1. Install Router-Maestro Locally
+Manage your VPS deployment from your local machine using contexts:
 
 ```bash
-pip install router-maestro
-# or
-uvx --from router-maestro router-maestro --help
-```
-
-#### 2. Add Your VPS as a Context
-
-```bash
-# Add the remote deployment
+# Add remote context
 router-maestro context add my-vps \
   --endpoint https://api.example.com \
-  --api-key your_router_maestro_api_key
+  --api-key your_api_key
 
-# Switch to the remote context
+# Switch to remote
 router-maestro context set my-vps
 
-# Verify connection
-router-maestro context test
-```
-
-#### 3. Manage the Remote Server
-
-Now all CLI commands will target your VPS:
-
-```bash
-# List models available on the remote server
+# Now all commands target the VPS
 router-maestro model list
-
-# Check authenticated providers
-router-maestro auth list
-
-# View statistics
 router-maestro stats --days 7
-
-# Set model priorities
-router-maestro model priority github-copilot/claude-sonnet-4 --position 1
 ```
 
-#### 4. Switch Between Contexts
+### HTTPS with Traefik
 
-```bash
-# List all contexts
-router-maestro context list
+The Docker Compose setup includes Traefik for automatic HTTPS via Let's Encrypt with DNS challenge.
 
-# Switch back to local
-router-maestro context set local
+For detailed configuration options including:
+- Other DNS providers (Route53, DigitalOcean, etc.)
+- HTTP challenge setup
+- Traefik dashboard configuration
 
-# Switch to VPS
-router-maestro context set my-vps
-
-# Show current context
-router-maestro context current
-```
-
-### GitHub Copilot OAuth Authentication
-
-Router-Maestro uses GitHub's OAuth Device Flow for Copilot authentication:
-
-#### On Local Server
-
-```bash
-# Start the server first
-router-maestro server start --port 8080
-
-# In another terminal, initiate OAuth
-router-maestro auth login github-copilot
-```
-
-You'll see:
-```
-Please visit the following URL and enter the code:
-  URL: https://github.com/login/device
-  Code: ABCD-1234
-
-Waiting for authorization...
-```
-
-1. Open the URL in your browser
-2. Enter the code
-3. Authorize "GitHub Copilot Chat"
-4. The CLI will confirm: "Successfully authenticated!"
-
-#### On Remote VPS
-
-```bash
-# Enter the container
-docker compose exec router-maestro /bin/sh
-
-# Run OAuth flow
-router-maestro auth login github-copilot
-# Follow the same steps as above
-
-# Exit container
-exit
-```
-
-The OAuth token is stored in `/home/maestro/.local/share/router-maestro/auth.json` inside the container (persisted via Docker volume).
-
-## Claude Code Integration
-
-Router-Maestro can generate a `settings.json` file for Claude Code CLI to use your deployment.
-
-### Interactive Generation
-
-```bash
-# Make sure you're connected to the right context
-router-maestro context current
-
-# Generate settings.json
-router-maestro config claude-code
-```
-
-The wizard will:
-1. Ask for configuration level (user `~/.claude/` or project `./.claude/`)
-2. Show available models from your server
-3. Let you select main and fast models
-4. Generate the settings file
-
-### Example Generated settings.json
-
-```json
-{
-  "env": {
-    "ANTHROPIC_BASE_URL": "https://api.example.com/api/anthropic",
-    "ANTHROPIC_AUTH_TOKEN": "your_router_maestro_api_key",
-    "ANTHROPIC_MODEL": "github-copilot/claude-sonnet-4",
-    "ANTHROPIC_SMALL_FAST_MODEL": "github-copilot/gpt-4o-mini",
-    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1"
-  }
-}
-```
-
-### Manual Configuration
-
-If you prefer to create the file manually:
-
-```bash
-mkdir -p ~/.claude
-
-cat > ~/.claude/settings.json << 'EOF'
-{
-  "env": {
-    "ANTHROPIC_BASE_URL": "https://api.example.com/api/anthropic",
-    "ANTHROPIC_AUTH_TOKEN": "your_router_maestro_api_key",
-    "ANTHROPIC_MODEL": "github-copilot/claude-sonnet-4",
-    "ANTHROPIC_SMALL_FAST_MODEL": "github-copilot/gpt-4o-mini",
-    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1"
-  }
-}
-EOF
-```
-
-Now Claude Code will route requests through your Router-Maestro deployment.
+See [docs/deployment.md](docs/deployment.md).
 
 ## License
 
