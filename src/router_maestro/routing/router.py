@@ -382,7 +382,7 @@ class Router:
         try:
             await provider.ensure_token()
             if is_stream:
-                stream = provider.chat_completion_stream(actual_request)
+                stream = await provider.chat_completion_stream(actual_request)
                 logger.info("Stream request routed to %s", provider_name)
                 return stream, provider_name
             else:
@@ -417,7 +417,7 @@ class Router:
                 try:
                     await other_provider.ensure_token()
                     if is_stream:
-                        stream = other_provider.chat_completion_stream(fallback_request)
+                        stream = await other_provider.chat_completion_stream(fallback_request)
                         logger.info("Stream fallback succeeded via %s", other_name)
                         return stream, other_name
                     else:

@@ -95,8 +95,8 @@ router-maestro config claude-code
 
 Models are identified using the format `{provider}/{model-id}`:
 
-| Example | Description |
-|---------|-------------|
+| Example                           | Description                         |
+| --------------------------------- | ----------------------------------- |
 | `github-copilot/gpt-4o` | GPT-4o via GitHub Copilot |
 | `github-copilot/claude-sonnet-4` | Claude Sonnet 4 via GitHub Copilot |
 | `openai/gpt-4-turbo` | GPT-4 Turbo via OpenAI |
@@ -127,8 +127,8 @@ router-maestro model priority list
 
 **Fallback** triggers when a request fails with a retryable error (429, 5xx):
 
-| Strategy | Behavior |
-|----------|----------|
+| Strategy     | Behavior                             |
+| ------------ | ------------------------------------ |
 | `priority` | Try next model in priorities list |
 | `same-model` | Try same model on different provider |
 | `none` | Fail immediately |
@@ -158,8 +158,8 @@ POST /v1/chat/completions  {"model": "anthropic/claude-3-5-sonnet", ...}
 
 A **context** is a named connection profile that stores an endpoint URL and API key. Contexts let you manage multiple Router-Maestro deployments from a single CLI.
 
-| Context | Use Case |
-|---------|----------|
+| Context  | Use Case                                   |
+| -------- | ------------------------------------------ |
 | `local` | Default context for `router-maestro server start` |
 | `docker` | Connect to a local Docker container |
 | `my-vps` | Connect to a remote VPS deployment |
@@ -179,25 +179,25 @@ router-maestro model list
 
 ### Server
 
-| Command | Description |
-|---------|-------------|
-| `server start --port 8080` | Start the server |
+| Command                    | Description        |
+| -------------------------- | ------------------ |
+| `server start --port 8080` | Start the server   |
 | `server stop` | Stop the server |
 | `server info` | Show server status |
 
 ### Authentication
 
-| Command | Description |
-|---------|-------------|
-| `auth login [provider]` | Authenticate with a provider |
+| Command                 | Description                    |
+| ----------------------- | ------------------------------ |
+| `auth login [provider]` | Authenticate with a provider   |
 | `auth logout <provider>` | Remove authentication |
 | `auth list` | List authenticated providers |
 
 ### Models
 
-| Command | Description |
-|---------|-------------|
-| `model list` | List available models |
+| Command                            | Description            |
+| ---------------------------------- | ---------------------- |
+| `model list`                       | List available models  |
 | `model refresh` | Refresh models cache |
 | `model priority list` | Show priorities |
 | `model priority <model> --position <n>` | Set priority |
@@ -205,9 +205,9 @@ router-maestro model list
 
 ### Contexts (Remote Management)
 
-| Command | Description |
-|---------|-------------|
-| `context show` | Show current context |
+| Command                                              | Description          |
+| ---------------------------------------------------- | -------------------- |
+| `context show`                                       | Show current context |
 | `context list` | List all contexts |
 | `context set <name>` | Switch context |
 | `context add <name> --endpoint <url> --api-key <key>` | Add remote context |
@@ -215,8 +215,8 @@ router-maestro model list
 
 ### Other
 
-| Command | Description |
-|---------|-------------|
+| Command              | Description                   |
+| -------------------- | ----------------------------- |
 | `config claude-code` | Generate Claude Code settings |
 
 ## API Reference
@@ -264,8 +264,8 @@ POST /api/admin/models/refresh   # Refresh model cache
 
 Following XDG Base Directory specification:
 
-| Type | Path | Contents |
-|------|------|----------|
+| Type       | Path                               | Contents                     |
+| ---------- | ---------------------------------- | ---------------------------- |
 | **Config** | `~/.config/router-maestro/` | |
 | | `providers.json` | Custom provider definitions |
 | | `priorities.json` | Model priorities and fallback |
@@ -303,8 +303,8 @@ export OLLAMA_API_KEY="sk-..."
 
 Configuration files are automatically reloaded every 5 minutes:
 
-| File | Auto-Reload |
-|------|-------------|
+| File               | Auto-Reload      |
+| ------------------ | ---------------- |
 | `priorities.json` | ✓ (5 min) |
 | `providers.json` | ✓ (5 min) |
 | `auth.json` | Requires restart |
@@ -368,6 +368,7 @@ router-maestro model list
 The Docker Compose setup includes Traefik for automatic HTTPS via Let's Encrypt with DNS challenge.
 
 For detailed configuration options including:
+
 - Other DNS providers (Route53, DigitalOcean, etc.)
 - HTTP challenge setup
 - Traefik dashboard configuration
