@@ -29,12 +29,20 @@ class AnthropicImageBlock(BaseModel):
     source: AnthropicImageSource
 
 
+class AnthropicToolResultContentBlock(BaseModel):
+    """Content block within tool result (text or image)."""
+
+    type: Literal["text", "image"]
+    text: str | None = None
+    source: AnthropicImageSource | None = None
+
+
 class AnthropicToolResultBlock(BaseModel):
     """Tool result content block."""
 
     type: Literal["tool_result"] = "tool_result"
     tool_use_id: str
-    content: str
+    content: str | list[AnthropicToolResultContentBlock]
     is_error: bool | None = None
 
 

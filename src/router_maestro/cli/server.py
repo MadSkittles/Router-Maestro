@@ -85,27 +85,24 @@ def start(
 
 
 @app.command()
-def status(
-    port: int = typer.Option(8080, "--port", "-p", help="Port to check"),
-    host: str = typer.Option("127.0.0.1", "--host", "-h", help="Host to check"),
-) -> None:
-    """Show current server status."""
-    if is_port_in_use(port, host):
-        console.print(f"[green]Server is running on {host}:{port}[/green]")
+def status() -> None:
+    """Show current server status (uses current context)."""
+    import asyncio
 
-        # Try to get server info
-        import httpx
+    from router_maestro.cli.client import get_admin_client, get_current_endpoint
 
-        try:
-            response = httpx.get(f"http://{host}:{port}/", timeout=5.0)
-            if response.status_code == 200:
-                data = response.json()
-                console.print(f"  Version: {data.get('version', 'unknown')}")
-                console.print(f"  Status: {data.get('status', 'unknown')}")
-        except Exception:
-            pass
-    else:
-        console.print(f"[yellow]No server running on {host}:{port}[/yellow]")
+    client = get_admin_client()
+    endpoint = get_current_endpoint()
+
+    console.print(f"[dim]Context endpoint: {endpoint}[/dim]")
+
+    try:
+        data = asyncio.run(client.test_connection())
+        console.print(f"[green]Server is running[/green]")
+        console.print(f"  Version: {data.get('version', 'unknown')}")
+        console.print(f"  Status: {data.get('status', 'unknown')}")
+    except Exception as e:
+        console.print(f"[yellow]Server not reachable: {e}[/yellow]")
 
 
 @app.command()

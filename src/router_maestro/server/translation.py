@@ -52,6 +52,7 @@ def _translate_model_name(model: str) -> str:
     # Handle Claude model version suffixes
     # e.g., claude-sonnet-4-20250514 -> claude-sonnet-4
     # e.g., claude-opus-4.5 -> claude-opus-4.5 (keep as-is, it's a valid model)
+    # e.g., claude-haiku-4-5-20251001 -> claude-haiku-4.5 (hyphenated version to dot)
     import re
 
     # Pattern: claude-{tier}-{major}[-{date_suffix}]
@@ -59,6 +60,15 @@ def _translate_model_name(model: str) -> str:
     match = re.match(r"^(claude-(?:sonnet|opus|haiku)-\d+(?:\.\d+)?)-\d{8}$", model)
     if match:
         return match.group(1)
+
+    # Handle hyphenated version numbers (e.g., claude-haiku-4-5-20251001 -> claude-haiku-4.5)
+    # Claude Code may send versions like "4-5" instead of "4.5"
+    match = re.match(r"^(claude-(?:sonnet|opus|haiku))-(\d+)-(\d+)-(\d{8})$", model)
+    if match:
+        tier = match.group(1)
+        major = match.group(2)
+        minor = match.group(3)
+        return f"{tier}-{major}.{minor}"
 
     return model
 
@@ -211,6 +221,17 @@ def _handle_user_message(message: AnthropicUserMessage | dict) -> list[Message]:
         else:
             tool_content = block.content
             tool_use_id = block.tool_use_id
+
+        # Handle content as array of content blocks
+        if isinstance(tool_content, list):
+            text_parts = []
+            for item in tool_content:
+                if isinstance(item, dict) and item.get("type") == "text":
+                    text_parts.append(item.get("text", ""))
+                elif hasattr(item, "type") and item.type == "text":
+                    text_parts.append(getattr(item, "text", ""))
+            tool_content = "\n".join(text_parts)
+
         result.append(
             Message(
                 role="tool",
