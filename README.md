@@ -58,7 +58,7 @@ router-maestro server start --port 8080
 
 ### 2. Set Context (for Docker or Remote)
 
-When running via Docker, set up a context to communicate with the containerized server:
+When running via Docker in remote VPS, set up a context to communicate with the containerized server:
 
 ```bash
 pip install router-maestro  # Install CLI locally
