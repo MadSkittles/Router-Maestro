@@ -40,7 +40,7 @@ Get up and running in 4 steps:
 
 ### 1. Start the Server
 
-**Option A: Docker (recommended)**
+#### Docker (recommended)
 
 ```bash
 docker run -d -p 8080:8080 \
@@ -49,7 +49,7 @@ docker run -d -p 8080:8080 \
   likanwen/router-maestro:latest
 ```
 
-**Option B: Install locally**
+#### Install locally
 
 ```bash
 pip install router-maestro
@@ -89,6 +89,7 @@ router-maestro config claude-code
 **Done!** Now run `claude` and your requests will route through Router-Maestro.
 
 > **For production deployment**, see the [Deployment](#deployment) section.
+
 ## Core Concepts
 
 ### Model Identification
