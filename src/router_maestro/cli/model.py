@@ -202,3 +202,87 @@ def priority_clear() -> None:
         console.print("[green]Cleared all priorities[/green]")
     except Exception as e:
         _handle_server_error(e)
+
+
+# Fallback subcommand group
+fallback_app = typer.Typer(no_args_is_help=True, help="Manage fallback configuration")
+app.add_typer(fallback_app, name="fallback")
+
+VALID_STRATEGIES = ["priority", "same-model", "none"]
+
+
+@fallback_app.command(name="show")
+def fallback_show() -> None:
+    """Show current fallback configuration."""
+    client = get_admin_client()
+
+    try:
+        data = asyncio.run(client.get_priorities())
+        fallback = data.get("fallback", {})
+    except Exception as e:
+        _handle_server_error(e)
+        return
+
+    strategy = fallback.get("strategy", "priority")
+    max_retries = fallback.get("maxRetries", 2)
+
+    console.print()
+    console.print("[bold]Fallback Configuration[/bold]")
+    console.print(f"  Strategy:    [cyan]{strategy}[/cyan]")
+    console.print(f"  Max Retries: [cyan]{max_retries}[/cyan]")
+    console.print()
+
+
+@fallback_app.command(name="set")
+def fallback_set(
+    strategy: Annotated[
+        str | None,
+        typer.Option("--strategy", "-s", help="Fallback strategy (priority, same-model, none)"),
+    ] = None,
+    max_retries: Annotated[
+        int | None,
+        typer.Option("--max-retries", "-r", help="Maximum number of fallback retries (0-10)"),
+    ] = None,
+) -> None:
+    """Set fallback configuration."""
+    # Validate that at least one option is provided
+    if strategy is None and max_retries is None:
+        console.print("[red]At least one of --strategy or --max-retries must be provided[/red]")
+        raise typer.Exit(1)
+
+    # Validate strategy
+    if strategy is not None and strategy not in VALID_STRATEGIES:
+        console.print(f"[red]Invalid strategy '{strategy}'[/red]")
+        console.print(f"[dim]Valid strategies: {', '.join(VALID_STRATEGIES)}[/dim]")
+        raise typer.Exit(1)
+
+    # Validate max_retries
+    if max_retries is not None and (max_retries < 0 or max_retries > 10):
+        console.print("[red]max-retries must be between 0 and 10[/red]")
+        raise typer.Exit(1)
+
+    client = get_admin_client()
+
+    try:
+        # Get current config
+        data = asyncio.run(client.get_priorities())
+        priorities = data.get("priorities", [])
+        fallback = data.get("fallback", {})
+
+        # Update fallback config
+        if strategy is not None:
+            fallback["strategy"] = strategy
+        if max_retries is not None:
+            fallback["maxRetries"] = max_retries
+
+        # Save
+        asyncio.run(client.set_priorities(priorities, fallback))
+
+        console.print("[green]Fallback configuration updated[/green]")
+
+        # Show updated config
+        console.print(f"  Strategy:    [cyan]{fallback.get('strategy', 'priority')}[/cyan]")
+        console.print(f"  Max Retries: [cyan]{fallback.get('maxRetries', 2)}[/cyan]")
+
+    except Exception as e:
+        _handle_server_error(e)

@@ -123,6 +123,8 @@ router-maestro model refresh               # Refresh models cache immediately
 router-maestro model priority list         # Show current priorities
 router-maestro model priority <model> --position <n>  # Set priority
 router-maestro model priority remove <model>          # Remove from priority
+router-maestro model fallback show         # Show fallback configuration
+router-maestro model fallback set --strategy <s> --max-retries <n>  # Set fallback
 ```
 
 ### Context Management
@@ -175,9 +177,11 @@ curl -X POST http://localhost:8080/v1/chat/completions \
 ```
 
 The router will:
-1. Try models in priority order
-2. Use the first authenticated provider with available models
-3. Fall back to next provider on failure (if configured)
+1. Try models in priority order (from `priorities.json`)
+2. If priorities list is empty, use the first available model from any authenticated provider
+3. Fall back to next model on failure (if configured)
+
+**Note**: The special model name `router-maestro` does not appear in `model list` or `/v1/models` API responses. It is only used in requests to trigger auto-routing.
 
 ### Cross-Provider Translation
 
@@ -260,6 +264,11 @@ Fallback only triggers when:
 | `provider/model` in priorities list | On failure, tries models **after** it in the priorities list |
 | `provider/model` NOT in priorities list | **No fallback** - fails immediately even if retryable |
 
+**When priorities list is empty**:
+- Auto-routing (`router-maestro`) will use the first available model from any authenticated provider
+- Since there's no priorities list to follow, **no fallback occurs** on failure (even with `priority` strategy)
+- To enable fallback, add models to your priorities list
+
 ### Fallback Strategies
 
 Configure in `priorities.json`:
@@ -281,6 +290,7 @@ On failure, try the next model in the priorities list (in order).
 - Request with `model: "router-maestro"` → tries A, if fails tries B, then C...
 - Request with `model: "B"` → tries B, if fails tries C, then D (skips A)
 - Request with `model: "X"` (not in list) → tries X, if fails → **error** (no fallback)
+- **priorities = `[]` (empty)** → auto-routing picks first available model, if fails → **error** (no fallback)
 
 #### `same-model` Strategy
 
