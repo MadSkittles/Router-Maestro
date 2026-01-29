@@ -57,7 +57,7 @@ Router-Maestro is a multi-model routing system that exposes both OpenAI-compatib
 - `schemas/` - Pydantic models for both API formats
 
 **CLI (`src/router_maestro/cli/`)**
-- Typer-based CLI with subcommands: `server`, `auth`, `model`, `context`, `config`, `stats`
+- Typer-based CLI with subcommands: `server`, `auth`, `model`, `context`, `config`
 - Each subcommand in its own module registered in `main.py`
 
 ### Data Flow
@@ -72,7 +72,7 @@ Router-Maestro is a multi-model routing system that exposes both OpenAI-compatib
 
 Configuration and data files follow XDG conventions:
 - **Config** (`~/.config/router-maestro/`): `providers.json`, `priorities.json`, `contexts.json`
-- **Data** (`~/.local/share/router-maestro/`): `auth.json`, `server.json`, `stats.db`
+- **Data** (`~/.local/share/router-maestro/`): `auth.json`, `server.json`
 
 ### Model Identification
 
