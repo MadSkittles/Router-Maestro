@@ -15,8 +15,16 @@ from rich.table import Table
 from router_maestro.cli.client import ServerNotRunningError, get_admin_client
 from router_maestro.config.server import get_current_context_api_key
 
-app = typer.Typer(no_args_is_help=True)
+app = typer.Typer(invoke_without_command=True)
 console = Console()
+
+# Available CLI tools for configuration
+CLI_TOOLS = {
+    "claude-code": {
+        "name": "Claude Code",
+        "description": "Generate settings.json for Claude Code CLI",
+    },
+}
 
 
 def get_claude_code_paths() -> dict[str, Path]:
@@ -25,6 +33,33 @@ def get_claude_code_paths() -> dict[str, Path]:
         "user": Path.home() / ".claude" / "settings.json",
         "project": Path.cwd() / ".claude" / "settings.json",
     }
+
+
+@app.callback(invoke_without_command=True)
+def config_callback(ctx: typer.Context) -> None:
+    """Generate configuration for CLI tools (interactive selection if not specified)."""
+    if ctx.invoked_subcommand is not None:
+        return
+
+    # Interactive selection
+    console.print("\n[bold]Available CLI tools:[/bold]")
+    tools = list(CLI_TOOLS.items())
+    for i, (key, info) in enumerate(tools, 1):
+        console.print(f"  {i}. {info['name']} - {info['description']}")
+
+    console.print()
+    choice = Prompt.ask(
+        "Select tool to configure",
+        choices=[str(i) for i in range(1, len(tools) + 1)],
+        default="1",
+    )
+
+    idx = int(choice) - 1
+    tool_key = tools[idx][0]
+
+    # Dispatch to the appropriate command
+    if tool_key == "claude-code":
+        claude_code_config()
 
 
 @app.command(name="claude-code")
