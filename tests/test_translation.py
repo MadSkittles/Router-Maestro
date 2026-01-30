@@ -1,7 +1,10 @@
 """Tests for the translation module."""
 
-import pytest
-
+from router_maestro.server.schemas.anthropic import (
+    AnthropicMessagesRequest,
+    AnthropicTextBlock,
+    AnthropicUserMessage,
+)
 from router_maestro.server.translation import (
     _extract_text_content,
     _map_stop_reason,
@@ -9,11 +12,6 @@ from router_maestro.server.translation import (
     _translate_tool_choice,
     _translate_tools,
     translate_anthropic_to_openai,
-)
-from router_maestro.server.schemas.anthropic import (
-    AnthropicMessagesRequest,
-    AnthropicTextBlock,
-    AnthropicUserMessage,
 )
 
 

@@ -19,9 +19,7 @@ class MockProvider(BaseProvider):
     ):
         self._name = name
         self._authenticated = authenticated
-        self._models = models or [
-            ModelInfo(id="test-model", name="Test Model", provider=name)
-        ]
+        self._models = models or [ModelInfo(id="test-model", name="Test Model", provider=name)]
         self._fail_on_request = fail_on_request
 
     @property

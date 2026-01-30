@@ -1,7 +1,5 @@
 """Tests for providers module."""
 
-import pytest
-
 from router_maestro.providers import (
     AnthropicProvider,
     ChatRequest,

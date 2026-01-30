@@ -1,7 +1,5 @@
 """Tests for utility functions."""
 
-import pytest
-
 from router_maestro.utils import (
     estimate_tokens,
     estimate_tokens_from_char_count,
