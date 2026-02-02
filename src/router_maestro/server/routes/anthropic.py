@@ -36,13 +36,16 @@ logger = get_logger("server.routes.anthropic")
 router = APIRouter()
 
 
+TEST_RESPONSE_TEXT = "This is a test response from Router-Maestro."
+
+
 def _create_test_response() -> AnthropicMessagesResponse:
     """Create a mock response for test model."""
     return AnthropicMessagesResponse(
         id=f"msg_{uuid.uuid4().hex[:24]}",
         type="message",
         role="assistant",
-        content=[AnthropicTextBlock(type="text", text="This is a test response from Router-Maestro.")],
+        content=[AnthropicTextBlock(type="text", text=TEST_RESPONSE_TEXT)],
         model="test",
         stop_reason="end_turn",
         stop_sequence=None,
@@ -55,22 +58,51 @@ async def _stream_test_response() -> AsyncGenerator[str, None]:
     response_id = f"msg_{uuid.uuid4().hex[:24]}"
 
     # message_start event
-    yield f'event: message_start\ndata: {json.dumps({"type": "message_start", "message": {"id": response_id, "type": "message", "role": "assistant", "content": [], "model": "test", "stop_reason": None, "stop_sequence": None, "usage": {"input_tokens": 10, "output_tokens": 0}}})}\n\n'
+    message_start = {
+        "type": "message_start",
+        "message": {
+            "id": response_id,
+            "type": "message",
+            "role": "assistant",
+            "content": [],
+            "model": "test",
+            "stop_reason": None,
+            "stop_sequence": None,
+            "usage": {"input_tokens": 10, "output_tokens": 0},
+        },
+    }
+    yield f"event: message_start\ndata: {json.dumps(message_start)}\n\n"
 
     # content_block_start event
-    yield f'event: content_block_start\ndata: {json.dumps({"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}})}\n\n'
+    block_start = {
+        "type": "content_block_start",
+        "index": 0,
+        "content_block": {"type": "text", "text": ""},
+    }
+    yield f"event: content_block_start\ndata: {json.dumps(block_start)}\n\n"
 
     # content_block_delta event
-    yield f'event: content_block_delta\ndata: {json.dumps({"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "This is a test response from Router-Maestro."}})}\n\n'
+    block_delta = {
+        "type": "content_block_delta",
+        "index": 0,
+        "delta": {"type": "text_delta", "text": TEST_RESPONSE_TEXT},
+    }
+    yield f"event: content_block_delta\ndata: {json.dumps(block_delta)}\n\n"
 
     # content_block_stop event
-    yield f'event: content_block_stop\ndata: {json.dumps({"type": "content_block_stop", "index": 0})}\n\n'
+    block_stop = {"type": "content_block_stop", "index": 0}
+    yield f"event: content_block_stop\ndata: {json.dumps(block_stop)}\n\n"
 
     # message_delta event
-    yield f'event: message_delta\ndata: {json.dumps({"type": "message_delta", "delta": {"stop_reason": "end_turn", "stop_sequence": None}, "usage": {"output_tokens": 10}})}\n\n'
+    message_delta = {
+        "type": "message_delta",
+        "delta": {"stop_reason": "end_turn", "stop_sequence": None},
+        "usage": {"output_tokens": 10},
+    }
+    yield f"event: message_delta\ndata: {json.dumps(message_delta)}\n\n"
 
     # message_stop event
-    yield f'event: message_stop\ndata: {json.dumps({"type": "message_stop"})}\n\n'
+    yield f"event: message_stop\ndata: {json.dumps({'type': 'message_stop'})}\n\n"
 
 
 @router.post("/v1/messages")
