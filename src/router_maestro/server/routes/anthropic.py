@@ -36,6 +36,43 @@ logger = get_logger("server.routes.anthropic")
 router = APIRouter()
 
 
+def _create_test_response() -> AnthropicMessagesResponse:
+    """Create a mock response for test model."""
+    return AnthropicMessagesResponse(
+        id=f"msg_{uuid.uuid4().hex[:24]}",
+        type="message",
+        role="assistant",
+        content=[AnthropicTextBlock(type="text", text="This is a test response from Router-Maestro.")],
+        model="test",
+        stop_reason="end_turn",
+        stop_sequence=None,
+        usage=AnthropicUsage(input_tokens=10, output_tokens=10),
+    )
+
+
+async def _stream_test_response() -> AsyncGenerator[str, None]:
+    """Stream a mock test response."""
+    response_id = f"msg_{uuid.uuid4().hex[:24]}"
+
+    # message_start event
+    yield f'event: message_start\ndata: {json.dumps({"type": "message_start", "message": {"id": response_id, "type": "message", "role": "assistant", "content": [], "model": "test", "stop_reason": None, "stop_sequence": None, "usage": {"input_tokens": 10, "output_tokens": 0}}})}\n\n'
+
+    # content_block_start event
+    yield f'event: content_block_start\ndata: {json.dumps({"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}})}\n\n'
+
+    # content_block_delta event
+    yield f'event: content_block_delta\ndata: {json.dumps({"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "This is a test response from Router-Maestro."}})}\n\n'
+
+    # content_block_stop event
+    yield f'event: content_block_stop\ndata: {json.dumps({"type": "content_block_stop", "index": 0})}\n\n'
+
+    # message_delta event
+    yield f'event: message_delta\ndata: {json.dumps({"type": "message_delta", "delta": {"stop_reason": "end_turn", "stop_sequence": None}, "usage": {"output_tokens": 10}})}\n\n'
+
+    # message_stop event
+    yield f'event: message_stop\ndata: {json.dumps({"type": "message_stop"})}\n\n'
+
+
 @router.post("/v1/messages")
 @router.post("/api/anthropic/v1/messages")
 async def messages(request: AnthropicMessagesRequest):
@@ -45,6 +82,16 @@ async def messages(request: AnthropicMessagesRequest):
         request.model,
         request.stream,
     )
+
+    # Handle test model
+    if request.model == "test":
+        if request.stream:
+            return StreamingResponse(
+                _stream_test_response(),
+                media_type="text/event-stream",
+            )
+        return _create_test_response()
+
     model_router = get_router()
 
     # Translate Anthropic request to OpenAI format
