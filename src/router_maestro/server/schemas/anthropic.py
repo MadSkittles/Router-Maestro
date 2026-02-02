@@ -244,3 +244,24 @@ class AnthropicStreamState(BaseModel):
     estimated_input_tokens: int = 0  # Estimated input tokens from request
     last_usage: dict | None = None  # Track the latest usage from stream chunks
     message_complete: bool = False  # Track if message_stop was sent
+
+
+# Models API types
+
+
+class AnthropicModelInfo(BaseModel):
+    """Anthropic model object."""
+
+    id: str
+    created_at: str  # ISO 8601 datetime
+    display_name: str
+    type: Literal["model"] = "model"
+
+
+class AnthropicModelList(BaseModel):
+    """Anthropic models list response with pagination."""
+
+    data: list[AnthropicModelInfo]
+    first_id: str | None = None
+    last_id: str | None = None
+    has_more: bool = False

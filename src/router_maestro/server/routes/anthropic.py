@@ -3,6 +3,7 @@
 import json
 import uuid
 from collections.abc import AsyncGenerator
+from datetime import UTC, datetime
 
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
@@ -13,6 +14,8 @@ from router_maestro.server.schemas.anthropic import (
     AnthropicCountTokensRequest,
     AnthropicMessagesRequest,
     AnthropicMessagesResponse,
+    AnthropicModelInfo,
+    AnthropicModelList,
     AnthropicStreamState,
     AnthropicTextBlock,
     AnthropicUsage,
@@ -227,3 +230,93 @@ async def stream_response(
             },
         }
         yield f"event: error\ndata: {json.dumps(error_event)}\n\n"
+
+
+def _generate_display_name(model_id: str) -> str:
+    """Generate a human-readable display name from model ID.
+
+    Transforms model IDs like 'github-copilot/claude-sonnet-4' into
+    'Claude Sonnet 4 (github-copilot)'.
+    """
+    if "/" in model_id:
+        provider, model_name = model_id.split("/", 1)
+    else:
+        provider = ""
+        model_name = model_id
+
+    # Capitalize words and handle common patterns
+    words = model_name.replace("-", " ").replace("_", " ").split()
+    display_words = []
+    for word in words:
+        # Keep version numbers as-is
+        if word.replace(".", "").isdigit():
+            display_words.append(word)
+        else:
+            display_words.append(word.capitalize())
+
+    display_name = " ".join(display_words)
+    if provider:
+        display_name = f"{display_name} ({provider})"
+
+    return display_name
+
+
+@router.get("/api/anthropic/v1/models")
+async def list_models(
+    limit: int = 20,
+    after_id: str | None = None,
+    before_id: str | None = None,
+) -> AnthropicModelList:
+    """List available models in Anthropic format.
+
+    Args:
+        limit: Maximum number of models to return (default 20)
+        after_id: Return models after this ID (for forward pagination)
+        before_id: Return models before this ID (for backward pagination)
+    """
+    model_router = get_router()
+    models = await model_router.list_models()
+
+    # Generate ISO 8601 timestamp for created_at
+    # Using current time since actual creation dates aren't tracked
+    created_at = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    # Convert to Anthropic format
+    anthropic_models = [
+        AnthropicModelInfo(
+            id=model.id,
+            created_at=created_at,
+            display_name=_generate_display_name(model.id),
+            type="model",
+        )
+        for model in models
+    ]
+
+    # Handle pagination
+    start_idx = 0
+    if after_id:
+        for i, model in enumerate(anthropic_models):
+            if model.id == after_id:
+                start_idx = i + 1
+                break
+
+    end_idx = len(anthropic_models)
+    if before_id:
+        for i, model in enumerate(anthropic_models):
+            if model.id == before_id:
+                end_idx = i
+                break
+
+    # Apply limit
+    paginated = anthropic_models[start_idx : min(start_idx + limit, end_idx)]
+
+    first_id = paginated[0].id if paginated else None
+    last_id = paginated[-1].id if paginated else None
+    has_more = (start_idx + limit) < end_idx
+
+    return AnthropicModelList(
+        data=paginated,
+        first_id=first_id,
+        last_id=last_id,
+        has_more=has_more,
+    )

@@ -1,6 +1,6 @@
 [project]
 name = "router-maestro"
-version = "0.1.5"
+version = "0.1.6"
 description = "Multi-model routing and load balancing system with OpenAI-compatible API"
 readme = "README.md"
 license = "MIT"
