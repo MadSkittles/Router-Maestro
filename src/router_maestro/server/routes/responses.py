@@ -1,6 +1,7 @@
 """Responses API route for Codex models."""
 
 import json
+import time
 import uuid
 from collections.abc import AsyncGenerator
 from typing import Any
@@ -163,6 +164,23 @@ def make_text_content(text: str) -> dict[str, Any]:
     return {"type": "output_text", "text": text, "annotations": []}
 
 
+def make_usage(raw_usage: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Create properly structured usage object matching OpenAI spec."""
+    if not raw_usage:
+        return None
+
+    input_tokens = raw_usage.get("input_tokens", 0)
+    output_tokens = raw_usage.get("output_tokens", 0)
+
+    return {
+        "input_tokens": input_tokens,
+        "input_tokens_details": {"cached_tokens": 0},
+        "output_tokens": output_tokens,
+        "output_tokens_details": {"reasoning_tokens": 0},
+        "total_tokens": input_tokens + output_tokens,
+    }
+
+
 def make_message_item(msg_id: str, text: str, status: str = "completed") -> dict[str, Any]:
     """Create message output item."""
     return {
@@ -191,12 +209,17 @@ def make_function_call_item(
 @router.post("/api/openai/v1/responses")
 async def create_response(request: ResponsesRequest):
     """Handle Responses API requests (for Codex models)."""
+    request_id = generate_id("req")
+    start_time = time.time()
+
     logger.info(
-        "Received responses request: model=%s, stream=%s, has_tools=%s",
+        "Received responses request: req_id=%s, model=%s, stream=%s, has_tools=%s",
+        request_id,
         request.model,
         request.stream,
         request.tools is not None,
     )
+
     model_router = get_router()
 
     input_value = convert_input_to_internal(request.input)
@@ -215,8 +238,13 @@ async def create_response(request: ResponsesRequest):
 
     if request.stream:
         return StreamingResponse(
-            stream_response(model_router, internal_request),
+            stream_response(model_router, internal_request, request_id, start_time),
             media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",
+            },
         )
 
     try:
@@ -250,17 +278,44 @@ async def create_response(request: ResponsesRequest):
             usage=usage,
         )
     except ProviderError as e:
-        logger.error("Responses request failed: %s", e)
+        elapsed_ms = (time.time() - start_time) * 1000
+        logger.error(
+            "Responses request failed: req_id=%s, elapsed=%.1fms, error=%s",
+            request_id,
+            elapsed_ms,
+            e,
+        )
         raise HTTPException(status_code=e.status_code, detail=str(e))
 
 
 async def stream_response(
-    model_router: Router, request: InternalResponsesRequest
+    model_router: Router,
+    request: InternalResponsesRequest,
+    request_id: str,
+    start_time: float,
 ) -> AsyncGenerator[str, None]:
     """Stream Responses API response."""
     try:
         stream, provider_name = await model_router.responses_completion_stream(request)
         response_id = generate_id("resp")
+        created_at = int(time.time())
+
+        logger.debug(
+            "Stream started: req_id=%s, resp_id=%s, provider=%s",
+            request_id,
+            response_id,
+            provider_name,
+        )
+
+        # Base response object with all required fields (matching OpenAI spec)
+        base_response = {
+            "id": response_id,
+            "object": "response",
+            "created_at": created_at,
+            "model": request.model,
+            "error": None,
+            "incomplete_details": None,
+        }
 
         output_items: list[dict[str, Any]] = []
         output_index = 0
@@ -278,8 +333,7 @@ async def stream_response(
             {
                 "type": "response.created",
                 "response": {
-                    "id": response_id,
-                    "object": "response",
+                    **base_response,
                     "status": "in_progress",
                     "output": [],
                 },
@@ -291,8 +345,7 @@ async def stream_response(
             {
                 "type": "response.in_progress",
                 "response": {
-                    "id": response_id,
-                    "object": "response",
+                    **base_response,
                     "status": "in_progress",
                     "output": [],
                 },
@@ -306,11 +359,18 @@ async def stream_response(
                     current_message_id = generate_id("msg")
                     message_started = True
 
+                    # Note: content starts as empty array, matching OpenAI spec
                     yield sse_event(
                         {
                             "type": "response.output_item.added",
                             "output_index": output_index,
-                            "item": make_message_item(current_message_id, "", "in_progress"),
+                            "item": {
+                                "type": "message",
+                                "id": current_message_id,
+                                "role": "assistant",
+                                "content": [],
+                                "status": "in_progress",
+                            },
                         }
                     )
 
@@ -440,12 +500,10 @@ async def stream_response(
                     {
                         "type": "response.completed",
                         "response": {
-                            "id": response_id,
-                            "object": "response",
+                            **base_response,
                             "status": "completed",
-                            "model": request.model,
                             "output": output_items,
-                            "usage": final_usage,
+                            "usage": make_usage(final_usage),
                         },
                     }
                 )
@@ -467,21 +525,52 @@ async def stream_response(
                 {
                     "type": "response.completed",
                     "response": {
-                        "id": response_id,
-                        "object": "response",
+                        **base_response,
                         "status": "completed",
-                        "model": request.model,
                         "output": output_items,
-                        "usage": final_usage,
+                        "usage": make_usage(final_usage),
                     },
                 }
             )
 
-        yield "data: [DONE]\n\n"
+        elapsed_ms = (time.time() - start_time) * 1000
+        logger.info(
+            "Stream completed: req_id=%s, elapsed=%.1fms, output_items=%d",
+            request_id,
+            elapsed_ms,
+            len(output_items),
+        )
+
+        # NOTE: Do NOT send "data: [DONE]\n\n" - agent-maestro doesn't send it
+        # for Responses API
 
     except ProviderError as e:
-        error_data = {"error": {"message": str(e), "type": "provider_error"}}
-        yield f"data: {json.dumps(error_data)}\n\n"
+        elapsed_ms = (time.time() - start_time) * 1000
+        logger.error(
+            "Stream failed: req_id=%s, elapsed=%.1fms, error=%s",
+            request_id,
+            elapsed_ms,
+            e,
+        )
+        # Send response.failed event matching OpenAI spec
+        yield sse_event(
+            {
+                "type": "response.failed",
+                "response": {
+                    "id": response_id,
+                    "object": "response",
+                    "status": "failed",
+                    "created_at": created_at,
+                    "model": request.model,
+                    "output": [],
+                    "error": {
+                        "code": "server_error",
+                        "message": str(e),
+                    },
+                    "incomplete_details": None,
+                },
+            }
+        )
 
 
 def _close_message_events(

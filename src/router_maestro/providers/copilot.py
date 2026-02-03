@@ -618,16 +618,18 @@ class CopilotProvider(BaseProvider):
                     elif event_type == "response.output_item.done":
                         item = data.get("item", {})
                         if item.get("type") == "function_call":
-                            # Emit complete tool call if not already done
-                            yield ResponsesStreamChunk(
-                                content="",
-                                tool_call=ResponsesToolCall(
-                                    call_id=item.get("call_id", ""),
-                                    name=item.get("name", ""),
-                                    arguments=item.get("arguments", "{}"),
-                                ),
-                            )
-                            current_fc = None
+                            # Only emit if not already done via function_call_arguments.done
+                            # (current_fc would be None if already emitted)
+                            if current_fc is not None:
+                                yield ResponsesStreamChunk(
+                                    content="",
+                                    tool_call=ResponsesToolCall(
+                                        call_id=item.get("call_id", ""),
+                                        name=item.get("name", ""),
+                                        arguments=item.get("arguments", "{}"),
+                                    ),
+                                )
+                                current_fc = None
 
                     # Handle done event to get final usage
                     elif event_type == "response.done":
