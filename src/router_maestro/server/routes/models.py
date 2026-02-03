@@ -15,8 +15,7 @@ def get_router() -> Router:
     return Router()
 
 
-@router.get("/models")
-@router.get("/v1/models")
+@router.get("/api/openai/v1/models")
 async def list_models() -> ModelList:
     """List available models."""
     model_router = get_router()

@@ -9,6 +9,10 @@ from router_maestro.providers.base import (
     Message,
     ModelInfo,
     ProviderError,
+    ResponsesRequest,
+    ResponsesResponse,
+    ResponsesStreamChunk,
+    ResponsesToolCall,
 )
 from router_maestro.providers.copilot import CopilotProvider
 from router_maestro.providers.openai import OpenAIProvider
@@ -23,6 +27,10 @@ __all__ = [
     "ChatResponse",
     "ChatStreamChunk",
     "ModelInfo",
+    "ResponsesRequest",
+    "ResponsesResponse",
+    "ResponsesStreamChunk",
+    "ResponsesToolCall",
     # Providers
     "CopilotProvider",
     "OpenAIProvider",

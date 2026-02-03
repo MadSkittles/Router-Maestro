@@ -25,6 +25,23 @@ from router_maestro.server.schemas.openai import (
     ModelList,
     ModelObject,
 )
+from router_maestro.server.schemas.responses import (
+    ResponsesDeltaEvent,
+    ResponsesDoneEvent,
+    ResponsesFunctionCallInput,
+    ResponsesFunctionCallOutput,
+    ResponsesFunctionTool,
+    ResponsesInputMessage,
+    ResponsesInputTextContent,
+    ResponsesMessageOutput,
+    ResponsesOutputText,
+    ResponsesReasoningOutput,
+    ResponsesRequest,
+    ResponsesResponse,
+    ResponsesStreamEvent,
+    ResponsesToolChoiceFunction,
+    ResponsesUsage,
+)
 
 __all__ = [
     # Admin schemas
@@ -50,4 +67,20 @@ __all__ = [
     "ErrorResponse",
     "ModelList",
     "ModelObject",
+    # Responses API schemas
+    "ResponsesDeltaEvent",
+    "ResponsesDoneEvent",
+    "ResponsesFunctionCallInput",
+    "ResponsesFunctionCallOutput",
+    "ResponsesFunctionTool",
+    "ResponsesInputMessage",
+    "ResponsesInputTextContent",
+    "ResponsesMessageOutput",
+    "ResponsesOutputText",
+    "ResponsesReasoningOutput",
+    "ResponsesRequest",
+    "ResponsesResponse",
+    "ResponsesStreamEvent",
+    "ResponsesToolChoiceFunction",
+    "ResponsesUsage",
 ]

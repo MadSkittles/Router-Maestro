@@ -19,6 +19,9 @@ from router_maestro.providers import (
     ModelInfo,
     OpenAICompatibleProvider,
     ProviderError,
+    ResponsesRequest,
+    ResponsesResponse,
+    ResponsesStreamChunk,
 )
 from router_maestro.utils import get_logger
 
@@ -475,6 +478,159 @@ class Router:
         logger.info("Routing stream request to %s/%s", provider_name, actual_model_id)
 
         result, used_provider = await self._execute_with_fallback(
+            request, provider_name, actual_model_id, provider, fallback, is_stream=True
+        )
+        return result, used_provider  # type: ignore
+
+    def _create_responses_request_with_model(
+        self, original_request: ResponsesRequest, model_id: str
+    ) -> ResponsesRequest:
+        """Create a new ResponsesRequest with a different model ID.
+
+        Args:
+            original_request: The original request
+            model_id: The new model ID to use
+
+        Returns:
+            New ResponsesRequest with updated model
+        """
+        return ResponsesRequest(
+            model=model_id,
+            input=original_request.input,
+            stream=original_request.stream,
+            instructions=original_request.instructions,
+            temperature=original_request.temperature,
+            max_output_tokens=original_request.max_output_tokens,
+            tools=original_request.tools,
+            tool_choice=original_request.tool_choice,
+            parallel_tool_calls=original_request.parallel_tool_calls,
+        )
+
+    async def _execute_responses_with_fallback(
+        self,
+        request: ResponsesRequest,
+        provider_name: str,
+        actual_model_id: str,
+        provider: BaseProvider,
+        fallback: bool,
+        is_stream: bool,
+    ) -> tuple[ResponsesResponse | AsyncIterator[ResponsesStreamChunk], str]:
+        """Execute Responses API request with fallback support.
+
+        Args:
+            request: Original responses request
+            provider_name: Name of the primary provider
+            actual_model_id: The actual model ID to use
+            provider: The primary provider instance
+            fallback: Whether to try fallback providers on error
+            is_stream: Whether this is a streaming request
+
+        Returns:
+            Tuple of (response or stream, provider_name)
+
+        Raises:
+            ProviderError: If all providers fail
+        """
+        actual_request = self._create_responses_request_with_model(request, actual_model_id)
+
+        try:
+            await provider.ensure_token()
+            if is_stream:
+                stream = provider.responses_completion_stream(actual_request)
+                logger.info("Responses stream request routed to %s", provider_name)
+                return stream, provider_name
+            else:
+                response = await provider.responses_completion(actual_request)
+                logger.info("Responses request completed via %s", provider_name)
+                return response, provider_name
+        except ProviderError as e:
+            logger.warning("Provider %s failed for responses: %s", provider_name, e)
+            if not fallback or not e.retryable:
+                raise
+
+            # Load fallback config
+            priorities_config = self._get_priorities_config()
+            fallback_config = priorities_config.fallback
+
+            if fallback_config.strategy == FallbackStrategy.NONE:
+                raise
+
+            # Get fallback candidates
+            candidates = self._get_fallback_candidates(
+                provider_name, actual_model_id, fallback_config.strategy
+            )
+
+            # Try fallback candidates up to maxRetries
+            for i, (other_name, other_model_id, other_provider) in enumerate(candidates):
+                if i >= fallback_config.maxRetries:
+                    break
+
+                logger.info("Trying responses fallback: %s/%s", other_name, other_model_id)
+                fallback_request = self._create_responses_request_with_model(
+                    request, other_model_id
+                )
+
+                try:
+                    await other_provider.ensure_token()
+                    if is_stream:
+                        stream = other_provider.responses_completion_stream(fallback_request)
+                        logger.info("Responses stream fallback succeeded via %s", other_name)
+                        return stream, other_name
+                    else:
+                        response = await other_provider.responses_completion(fallback_request)
+                        logger.info("Responses fallback succeeded via %s", other_name)
+                        return response, other_name
+                except ProviderError as fallback_error:
+                    logger.warning("Responses fallback %s failed: %s", other_name, fallback_error)
+                    continue
+            raise
+
+    async def responses_completion(
+        self,
+        request: ResponsesRequest,
+        fallback: bool = True,
+    ) -> tuple[ResponsesResponse, str]:
+        """Route a Responses API completion request.
+
+        Args:
+            request: Responses completion request
+            fallback: Whether to try fallback providers on error
+
+        Returns:
+            Tuple of (response, provider_name)
+
+        Raises:
+            ProviderError: If model not found or all providers fail
+        """
+        provider_name, actual_model_id, provider = await self._resolve_provider(request.model)
+        logger.info("Routing responses request to %s/%s", provider_name, actual_model_id)
+
+        result, used_provider = await self._execute_responses_with_fallback(
+            request, provider_name, actual_model_id, provider, fallback, is_stream=False
+        )
+        return result, used_provider  # type: ignore
+
+    async def responses_completion_stream(
+        self,
+        request: ResponsesRequest,
+        fallback: bool = True,
+    ) -> tuple[AsyncIterator[ResponsesStreamChunk], str]:
+        """Route a streaming Responses API completion request.
+
+        Args:
+            request: Responses completion request
+            fallback: Whether to try fallback providers on error
+
+        Returns:
+            Tuple of (stream iterator, provider_name)
+
+        Raises:
+            ProviderError: If model not found or all providers fail
+        """
+        provider_name, actual_model_id, provider = await self._resolve_provider(request.model)
+        logger.info("Routing responses stream request to %s/%s", provider_name, actual_model_id)
+
+        result, used_provider = await self._execute_responses_with_fallback(
             request, provider_name, actual_model_id, provider, fallback, is_stream=True
         )
         return result, used_provider  # type: ignore

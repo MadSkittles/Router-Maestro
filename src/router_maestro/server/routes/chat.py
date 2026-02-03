@@ -27,8 +27,7 @@ logger = get_logger("server.routes.chat")
 router = APIRouter()
 
 
-@router.post("/chat/completions")
-@router.post("/v1/chat/completions")
+@router.post("/api/openai/v1/chat/completions")
 async def chat_completions(request: ChatCompletionRequest):
     """Handle chat completion requests."""
     logger.info(

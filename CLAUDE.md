@@ -51,8 +51,8 @@ Router-Maestro is a multi-model routing system that exposes both OpenAI-compatib
 
 **Server (`src/router_maestro/server/`)**
 - FastAPI application with two API flavors:
-  - OpenAI-compatible: `/v1/chat/completions`, `/v1/models`
-  - Anthropic-compatible: `/v1/messages`, `/api/anthropic/v1/messages`
+  - OpenAI-compatible: `/api/openai/v1/chat/completions`, `/api/openai/v1/models`
+  - Anthropic-compatible: `/api/anthropic/v1/messages`
 - `translation.py` - Converts between Anthropic and OpenAI request/response formats
 - `schemas/` - Pydantic models for both API formats
 

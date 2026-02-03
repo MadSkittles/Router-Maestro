@@ -59,6 +59,53 @@ class ModelInfo:
     provider: str
 
 
+@dataclass
+class ResponsesToolCall:
+    """A tool/function call from the Responses API."""
+
+    call_id: str
+    name: str
+    arguments: str
+
+
+@dataclass
+class ResponsesRequest:
+    """Request for the Responses API (used by Codex models)."""
+
+    model: str
+    input: str | list  # Can be string or list of message dicts
+    stream: bool = False
+    instructions: str | None = None
+    temperature: float = 1.0
+    max_output_tokens: int | None = None
+    # Tool support
+    tools: list[dict] | None = None
+    tool_choice: str | dict | None = None
+    parallel_tool_calls: bool | None = None
+
+
+@dataclass
+class ResponsesResponse:
+    """Response from the Responses API."""
+
+    content: str
+    model: str
+    usage: dict | None = None
+    tool_calls: list[ResponsesToolCall] | None = None
+
+
+@dataclass
+class ResponsesStreamChunk:
+    """A chunk from streaming Responses API completion."""
+
+    content: str
+    finish_reason: str | None = None
+    usage: dict | None = None
+    # Tool call support
+    tool_call: ResponsesToolCall | None = None  # A complete tool call
+    tool_call_delta: dict | None = None  # Partial tool call for streaming
+
+
 class ProviderError(Exception):
     """Error from a provider."""
 
@@ -121,3 +168,36 @@ class BaseProvider(ABC):
         Override this for providers that need token refresh.
         """
         pass
+
+    async def responses_completion(self, request: ResponsesRequest) -> ResponsesResponse:
+        """Generate a Responses API completion (for Codex models).
+
+        Args:
+            request: Responses completion request
+
+        Returns:
+            Responses completion response
+
+        Raises:
+            NotImplementedError: If provider does not support Responses API
+        """
+        raise NotImplementedError("Provider does not support Responses API")
+
+    async def responses_completion_stream(
+        self, request: ResponsesRequest
+    ) -> AsyncIterator[ResponsesStreamChunk]:
+        """Generate a streaming Responses API completion (for Codex models).
+
+        Args:
+            request: Responses completion request
+
+        Yields:
+            Responses completion chunks
+
+        Raises:
+            NotImplementedError: If provider does not support Responses API
+        """
+        raise NotImplementedError("Provider does not support Responses API")
+        # Make this a generator (required for type checking)
+        if False:
+            yield ResponsesStreamChunk(content="")

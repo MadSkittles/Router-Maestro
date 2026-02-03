@@ -9,7 +9,13 @@ from fastapi.middleware.cors import CORSMiddleware
 from router_maestro import __version__
 from router_maestro.routing import get_router
 from router_maestro.server.middleware import verify_api_key
-from router_maestro.server.routes import admin_router, anthropic_router, chat_router, models_router
+from router_maestro.server.routes import (
+    admin_router,
+    anthropic_router,
+    chat_router,
+    models_router,
+    responses_router,
+)
 from router_maestro.utils import get_logger, setup_logging
 
 logger = get_logger("server")
@@ -64,6 +70,7 @@ def create_app() -> FastAPI:
     # Include routers with API key verification
     app.include_router(chat_router, dependencies=[Depends(verify_api_key)])
     app.include_router(models_router, dependencies=[Depends(verify_api_key)])
+    app.include_router(responses_router, dependencies=[Depends(verify_api_key)])
     app.include_router(anthropic_router, dependencies=[Depends(verify_api_key)])
     app.include_router(admin_router, dependencies=[Depends(verify_api_key)])
 

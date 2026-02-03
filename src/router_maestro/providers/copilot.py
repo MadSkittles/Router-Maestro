@@ -14,6 +14,10 @@ from router_maestro.providers.base import (
     ChatStreamChunk,
     ModelInfo,
     ProviderError,
+    ResponsesRequest,
+    ResponsesResponse,
+    ResponsesStreamChunk,
+    ResponsesToolCall,
 )
 from router_maestro.utils import get_logger
 
@@ -22,6 +26,7 @@ logger = get_logger("providers.copilot")
 COPILOT_BASE_URL = "https://api.githubcopilot.com"
 COPILOT_CHAT_URL = f"{COPILOT_BASE_URL}/chat/completions"
 COPILOT_MODELS_URL = f"{COPILOT_BASE_URL}/models"
+COPILOT_RESPONSES_URL = f"{COPILOT_BASE_URL}/responses"
 
 # Model cache TTL in seconds (5 minutes)
 MODELS_CACHE_TTL = 300
@@ -344,3 +349,318 @@ class CopilotProvider(BaseProvider):
                 return self._models_cache
             logger.error("Failed to list Copilot models: %s", e)
             raise ProviderError(f"Failed to list models: {e}", retryable=True)
+
+    # Tools that are not supported by Copilot Responses API
+    UNSUPPORTED_TOOL_TYPES = {"web_search", "web_search_preview", "code_interpreter"}
+
+    def _filter_unsupported_tools(self, tools: list[dict] | None) -> list[dict] | None:
+        """Filter out tools that are not supported by Copilot API.
+
+        Args:
+            tools: List of tool definitions
+
+        Returns:
+            Filtered list of tools, or None if empty
+        """
+        if not tools:
+            return None
+
+        filtered = []
+        for tool in tools:
+            tool_type = tool.get("type", "function")
+            # Only include function tools, filter out unsupported built-in tools
+            if tool_type == "function":
+                filtered.append(tool)
+            elif tool_type not in self.UNSUPPORTED_TOOL_TYPES:
+                filtered.append(tool)
+            else:
+                logger.debug("Filtering out unsupported tool type: %s", tool_type)
+
+        return filtered if filtered else None
+
+    def _build_responses_payload(self, request: ResponsesRequest) -> dict:
+        """Build payload for Responses API request.
+
+        Args:
+            request: The responses request
+
+        Returns:
+            Payload dictionary for the API
+        """
+        payload: dict = {
+            "model": request.model,
+            "input": request.input,
+            "stream": request.stream,
+        }
+        if request.instructions:
+            payload["instructions"] = request.instructions
+        if request.temperature != 1.0:
+            payload["temperature"] = request.temperature
+        if request.max_output_tokens:
+            payload["max_output_tokens"] = request.max_output_tokens
+        # Tool support - filter out unsupported tools
+        filtered_tools = self._filter_unsupported_tools(request.tools)
+        if filtered_tools:
+            payload["tools"] = filtered_tools
+        if request.tool_choice:
+            payload["tool_choice"] = request.tool_choice
+        if request.parallel_tool_calls is not None:
+            payload["parallel_tool_calls"] = request.parallel_tool_calls
+        return payload
+
+    def _extract_response_content(self, data: dict) -> str:
+        """Extract text content from Responses API response.
+
+        Args:
+            data: The response JSON data
+
+        Returns:
+            The extracted text content
+        """
+        content = ""
+        for output in data.get("output", []):
+            if output.get("type") == "message":
+                for content_item in output.get("content", []):
+                    if content_item.get("type") == "output_text":
+                        content += content_item.get("text", "")
+        return content
+
+    def _extract_tool_calls(self, data: dict) -> list[ResponsesToolCall]:
+        """Extract tool calls from Responses API response.
+
+        Args:
+            data: The response JSON data
+
+        Returns:
+            List of tool calls
+        """
+        tool_calls = []
+        for output in data.get("output", []):
+            if output.get("type") == "function_call":
+                tool_calls.append(
+                    ResponsesToolCall(
+                        call_id=output.get("call_id", ""),
+                        name=output.get("name", ""),
+                        arguments=output.get("arguments", "{}"),
+                    )
+                )
+        return tool_calls
+
+    async def responses_completion(self, request: ResponsesRequest) -> ResponsesResponse:
+        """Generate a Responses API completion via Copilot (for Codex models)."""
+        await self.ensure_token()
+
+        payload = self._build_responses_payload(request)
+
+        logger.debug("Copilot responses completion: model=%s", request.model)
+        client = self._get_client()
+        try:
+            response = await client.post(
+                COPILOT_RESPONSES_URL,
+                json=payload,
+                headers=self._get_headers(),
+            )
+            response.raise_for_status()
+            data = response.json()
+
+            content = self._extract_response_content(data)
+            tool_calls = self._extract_tool_calls(data)
+
+            usage = None
+            if "usage" in data:
+                usage = data["usage"]
+
+            logger.debug("Copilot responses completion successful")
+            return ResponsesResponse(
+                content=content,
+                model=data.get("model", request.model),
+                usage=usage,
+                tool_calls=tool_calls if tool_calls else None,
+            )
+        except httpx.HTTPStatusError as e:
+            retryable = e.response.status_code in (429, 500, 502, 503, 504)
+            try:
+                error_body = e.response.text
+            except Exception:
+                error_body = ""
+            logger.error(
+                "Copilot responses API error: %d - %s",
+                e.response.status_code,
+                error_body[:200],
+            )
+            raise ProviderError(
+                f"Copilot API error: {e.response.status_code} - {error_body}",
+                status_code=e.response.status_code,
+                retryable=retryable,
+            )
+        except httpx.HTTPError as e:
+            logger.error("Copilot responses HTTP error: %s", e)
+            raise ProviderError(f"HTTP error: {e}", retryable=True)
+
+    async def responses_completion_stream(
+        self, request: ResponsesRequest
+    ) -> AsyncIterator[ResponsesStreamChunk]:
+        """Generate a streaming Responses API completion via Copilot (for Codex models)."""
+        await self.ensure_token()
+
+        payload = self._build_responses_payload(request)
+        payload["stream"] = True
+
+        logger.debug("Copilot streaming responses: model=%s", request.model)
+        logger.debug("Copilot responses payload: %s", payload)
+        client = self._get_client()
+        try:
+            async with client.stream(
+                "POST",
+                COPILOT_RESPONSES_URL,
+                json=payload,
+                headers=self._get_headers(),
+            ) as response:
+                # Check for errors before processing stream
+                if response.status_code >= 400:
+                    # Read the error body before the context closes
+                    error_body = await response.aread()
+                    error_text = error_body.decode("utf-8", errors="replace")
+                    logger.error(
+                        "Copilot responses stream API error: %d - %s",
+                        response.status_code,
+                        error_text,
+                    )
+                    retryable = response.status_code in (429, 500, 502, 503, 504)
+                    raise ProviderError(
+                        f"Copilot API error: {response.status_code} - {error_text}",
+                        status_code=response.status_code,
+                        retryable=retryable,
+                    )
+
+                stream_finished = False
+                final_usage = None
+                # Track current function call being streamed
+                current_fc: dict | None = None
+
+                async for line in response.aiter_lines():
+                    if stream_finished:
+                        break
+
+                    if not line or not line.startswith("data: "):
+                        continue
+
+                    data_str = line[6:]  # Remove "data: " prefix
+                    if data_str == "[DONE]":
+                        # Stream ended, emit final chunk if we haven't already
+                        if not stream_finished:
+                            yield ResponsesStreamChunk(
+                                content="",
+                                finish_reason="stop",
+                                usage=final_usage,
+                            )
+                            stream_finished = True
+                        break
+
+                    import json
+
+                    data = json.loads(data_str)
+                    event_type = data.get("type", "")
+
+                    # Handle text delta events
+                    if event_type == "response.output_text.delta":
+                        delta_text = data.get("delta", "")
+                        if delta_text:
+                            yield ResponsesStreamChunk(content=delta_text)
+
+                    # Handle function call output_item.added - start of a new function call
+                    elif event_type == "response.output_item.added":
+                        item = data.get("item", {})
+                        if item.get("type") == "function_call":
+                            current_fc = {
+                                "id": item.get("id", ""),
+                                "call_id": item.get("call_id", ""),
+                                "name": item.get("name", ""),
+                                "arguments": "",
+                                "output_index": data.get("output_index", 0),
+                            }
+
+                    # Handle function call arguments delta
+                    elif event_type == "response.function_call_arguments.delta":
+                        delta = data.get("delta", "")
+                        if current_fc and delta:
+                            current_fc["arguments"] += delta
+                            # Emit delta event for streaming
+                            yield ResponsesStreamChunk(
+                                content="",
+                                tool_call_delta={
+                                    "type": "function_call_arguments_delta",
+                                    "item_id": current_fc["id"],
+                                    "call_id": current_fc["call_id"],
+                                    "name": current_fc["name"],
+                                    "output_index": current_fc["output_index"],
+                                    "delta": delta,
+                                },
+                            )
+
+                    # Handle function call arguments done
+                    elif event_type == "response.function_call_arguments.done":
+                        if current_fc:
+                            current_fc["arguments"] = data.get("arguments", current_fc["arguments"])
+                            # Emit complete tool call
+                            yield ResponsesStreamChunk(
+                                content="",
+                                tool_call=ResponsesToolCall(
+                                    call_id=current_fc["call_id"],
+                                    name=current_fc["name"],
+                                    arguments=current_fc["arguments"],
+                                ),
+                            )
+                            current_fc = None
+
+                    # Handle output_item.done for function calls
+                    elif event_type == "response.output_item.done":
+                        item = data.get("item", {})
+                        if item.get("type") == "function_call":
+                            # Emit complete tool call if not already done
+                            yield ResponsesStreamChunk(
+                                content="",
+                                tool_call=ResponsesToolCall(
+                                    call_id=item.get("call_id", ""),
+                                    name=item.get("name", ""),
+                                    arguments=item.get("arguments", "{}"),
+                                ),
+                            )
+                            current_fc = None
+
+                    # Handle done event to get final usage
+                    elif event_type == "response.done":
+                        resp = data.get("response", {})
+                        final_usage = resp.get("usage")
+                        yield ResponsesStreamChunk(
+                            content="",
+                            finish_reason="stop",
+                            usage=final_usage,
+                        )
+                        stream_finished = True
+
+                    # Handle completed events
+                    elif event_type == "response.completed":
+                        # Final response received - emit finish chunk
+                        resp = data.get("response", {})
+                        if not final_usage:
+                            final_usage = resp.get("usage")
+                        yield ResponsesStreamChunk(
+                            content="",
+                            finish_reason="stop",
+                            usage=final_usage,
+                        )
+                        stream_finished = True
+
+                # If stream ended without explicit completion event, emit final chunk
+                if not stream_finished:
+                    logger.debug("Stream ended without completion event, emitting final chunk")
+                    yield ResponsesStreamChunk(
+                        content="",
+                        finish_reason="stop",
+                        usage=final_usage,
+                    )
+
+        except httpx.HTTPError as e:
+            logger.error("Copilot responses stream HTTP error: %s", e)
+            raise ProviderError(f"HTTP error: {e}", retryable=True)
