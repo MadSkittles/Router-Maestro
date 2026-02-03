@@ -1,5 +1,8 @@
 """Translation between Anthropic and OpenAI API formats."""
 
+import json
+import re
+
 from router_maestro.providers import ChatRequest, Message
 from router_maestro.server.schemas.anthropic import (
     AnthropicAssistantContentBlock,
@@ -53,7 +56,6 @@ def _translate_model_name(model: str) -> str:
     # e.g., claude-sonnet-4-20250514 -> claude-sonnet-4
     # e.g., claude-opus-4.5 -> claude-opus-4.5 (keep as-is, it's a valid model)
     # e.g., claude-haiku-4-5-20251001 -> claude-haiku-4.5 (hyphenated version to dot)
-    import re
 
     # Pattern: claude-{tier}-{major}[-{date_suffix}]
     # We want to strip date suffixes like -20250514 but keep version numbers like .5
@@ -146,8 +148,6 @@ def _translate_tool_choice(tool_choice) -> str | dict | None:
 
 def _sanitize_system_prompt(system: str) -> str:
     """Remove reserved keywords from system prompt that Copilot rejects."""
-    import re
-
     # Remove x-anthropic-billing-header line (Claude Code adds this)
     # Pattern matches the header line and any following newlines
     system = re.sub(r"x-anthropic-billing-header:[^\n]*\n*", "", system)
@@ -282,15 +282,11 @@ def _extract_tool_calls(blocks: list) -> list[dict] | None:
                 }
                 # Convert input to JSON string if it's a dict
                 if isinstance(tool_call["function"]["arguments"], dict):
-                    import json
-
                     tool_call["function"]["arguments"] = json.dumps(
                         tool_call["function"]["arguments"]
                     )
                 tool_calls.append(tool_call)
         elif isinstance(block, AnthropicToolUseBlock):
-            import json
-
             tool_call = {
                 "id": block.id,
                 "type": "function",

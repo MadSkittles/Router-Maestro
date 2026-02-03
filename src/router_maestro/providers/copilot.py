@@ -1,5 +1,6 @@
 """GitHub Copilot provider implementation."""
 
+import json
 import time
 from collections.abc import AsyncIterator
 
@@ -74,9 +75,13 @@ class CopilotProvider(BaseProvider):
             self._cached_token = copilot_token.token
             self._token_expires = copilot_token.expires_at
 
-            # Update stored credential with new access token
-            cred.access = copilot_token.token
-            cred.expires = copilot_token.expires_at
+            # Update stored credential with new access token (immutable pattern)
+            updated_cred = OAuthCredential(
+                refresh=cred.refresh,
+                access=copilot_token.token,
+                expires=copilot_token.expires_at,
+            )
+            self.auth_manager.storage.set("github-copilot", updated_cred)
             self.auth_manager.save()
             logger.debug("Copilot token refreshed, expires at %d", copilot_token.expires_at)
         except httpx.HTTPError as e:
@@ -168,8 +173,6 @@ class CopilotProvider(BaseProvider):
 
             choices = data.get("choices", [])
             if not choices:
-                import json
-
                 logger.error("Copilot API returned empty choices: %s", json.dumps(data)[:500])
                 raise ProviderError(
                     f"Copilot API returned empty choices: {json.dumps(data)[:500]}",
@@ -241,8 +244,6 @@ class CopilotProvider(BaseProvider):
                     data_str = line[6:]  # Remove "data: " prefix
                     if data_str == "[DONE]":
                         break
-
-                    import json
 
                     data = json.loads(data_str)
 
@@ -557,8 +558,6 @@ class CopilotProvider(BaseProvider):
                             )
                             stream_finished = True
                         break
-
-                    import json
 
                     data = json.loads(data_str)
                     event_type = data.get("type", "")

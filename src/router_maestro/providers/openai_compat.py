@@ -1,5 +1,6 @@
 """OpenAI-compatible provider for custom endpoints."""
 
+import json
 from collections.abc import AsyncIterator
 
 import httpx
@@ -121,8 +122,6 @@ class OpenAICompatibleProvider(BaseProvider):
                         data_str = line[6:]
                         if data_str == "[DONE]":
                             break
-
-                        import json
 
                         data = json.loads(data_str)
 

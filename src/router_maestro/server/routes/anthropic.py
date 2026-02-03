@@ -255,8 +255,6 @@ def _estimate_input_tokens(request: AnthropicMessagesRequest) -> int:
                 total_chars += len(tool.description)
             if hasattr(tool, "input_schema"):
                 # Rough estimate for schema
-                import json
-
                 try:
                     schema_str = json.dumps(tool.input_schema)
                     total_chars += len(schema_str)

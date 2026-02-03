@@ -1,5 +1,6 @@
 """Anthropic provider implementation."""
 
+import json
 from collections.abc import AsyncIterator
 
 import httpx
@@ -159,8 +160,6 @@ class AnthropicProvider(BaseProvider):
                         data_str = line[6:]
                         if not data_str:
                             continue
-
-                        import json
 
                         data = json.loads(data_str)
                         event_type = data.get("type")

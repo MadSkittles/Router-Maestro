@@ -1,5 +1,6 @@
 """OpenAI provider implementation."""
 
+import json
 from collections.abc import AsyncIterator
 
 import httpx
@@ -122,8 +123,6 @@ class OpenAIProvider(BaseProvider):
                         data_str = line[6:]
                         if data_str == "[DONE]":
                             break
-
-                        import json
 
                         data = json.loads(data_str)
 
