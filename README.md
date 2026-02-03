@@ -81,14 +81,33 @@ router-maestro auth login github-copilot
 #   3. Authorize "GitHub Copilot Chat"
 ```
 
-### 4. Configure Claude Code
+### 4. Configure Your CLI Tool
+
+#### Claude Code
 
 ```bash
 router-maestro config claude-code
 # Follow the wizard to select models
 ```
 
-**Done!** Now run `claude` and your requests will route through Router-Maestro.
+#### OpenAI Codex (CLI, Extension, App)
+
+```bash
+router-maestro config codex
+# Follow the wizard to select models
+```
+
+After configuration, set the API key environment variable:
+
+```bash
+# Get your API key
+router-maestro server show-key
+
+# Set the environment variable (add to your shell profile)
+export ROUTER_MAESTRO_API_KEY="your-api-key-here"
+```
+
+**Done!** Now run `claude` or `codex` and your requests will route through Router-Maestro.
 
 > **For production deployment**, see the [Deployment](#deployment) section.
 
@@ -221,6 +240,7 @@ router-maestro model list
 | Command              | Description                   |
 | -------------------- | ----------------------------- |
 | `config claude-code` | Generate Claude Code settings |
+| `config codex`       | Generate Codex config (CLI/Extension/App) |
 
 ## API Reference
 
