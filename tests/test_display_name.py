@@ -1,7 +1,5 @@
 """Tests for Anthropic model display name generation."""
 
-import pytest
-
 from router_maestro.server.routes.anthropic import _generate_display_name
 
 

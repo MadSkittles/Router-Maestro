@@ -1,13 +1,9 @@
 """Advanced tests for translation module."""
 
-import pytest
-
-from router_maestro.providers import Message
 from router_maestro.server.schemas.anthropic import (
     AnthropicAssistantMessage,
     AnthropicImageBlock,
     AnthropicImageSource,
-    AnthropicMessagesRequest,
     AnthropicStreamState,
     AnthropicTextBlock,
     AnthropicThinkingBlock,
@@ -26,7 +22,6 @@ from router_maestro.server.translation import (
     _translate_model_name,
     _translate_tool_choice,
     _translate_tools,
-    translate_anthropic_to_openai,
     translate_openai_chunk_to_anthropic_events,
     translate_openai_to_anthropic,
 )
@@ -249,9 +244,7 @@ class TestHandleUserMessage:
         """Test handling tool result content."""
         msg = {
             "role": "user",
-            "content": [
-                {"type": "tool_result", "tool_use_id": "tc-1", "content": "Result data"}
-            ],
+            "content": [{"type": "tool_result", "tool_use_id": "tc-1", "content": "Result data"}],
         }
         result = _handle_user_message(msg)
         assert len(result) == 1
@@ -267,7 +260,10 @@ class TestHandleUserMessage:
                 {
                     "type": "tool_result",
                     "tool_use_id": "tc-2",
-                    "content": [{"type": "text", "text": "Line 1"}, {"type": "text", "text": "Line 2"}],
+                    "content": [
+                        {"type": "text", "text": "Line 1"},
+                        {"type": "text", "text": "Line 2"},
+                    ],
                 }
             ],
         }
@@ -375,7 +371,10 @@ class TestTranslateOpenAIChunkToAnthropicEvents:
         state = AnthropicStreamState()
         state.message_start_sent = True
 
-        chunk = {"id": "chunk-1", "choices": [{"delta": {"content": "Hello"}, "finish_reason": None}]}
+        chunk = {
+            "id": "chunk-1",
+            "choices": [{"delta": {"content": "Hello"}, "finish_reason": None}],
+        }
 
         events = translate_openai_chunk_to_anthropic_events(chunk, state, "claude-3")
 
@@ -410,7 +409,11 @@ class TestTranslateOpenAIChunkToAnthropicEvents:
                 {
                     "delta": {
                         "tool_calls": [
-                            {"index": 0, "id": "tc-1", "function": {"name": "test", "arguments": ""}}
+                            {
+                                "index": 0,
+                                "id": "tc-1",
+                                "function": {"name": "test", "arguments": ""},
+                            }
                         ]
                     },
                     "finish_reason": None,
@@ -430,7 +433,10 @@ class TestTranslateOpenAIChunkToAnthropicEvents:
         state = AnthropicStreamState()
         state.message_complete = True
 
-        chunk = {"id": "chunk-1", "choices": [{"delta": {"content": "More"}, "finish_reason": None}]}
+        chunk = {
+            "id": "chunk-1",
+            "choices": [{"delta": {"content": "More"}, "finish_reason": None}],
+        }
 
         events = translate_openai_chunk_to_anthropic_events(chunk, state, "claude-3")
         assert len(events) == 0

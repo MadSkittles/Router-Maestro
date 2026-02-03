@@ -1,11 +1,5 @@
 """Tests for configuration modules."""
 
-import json
-import tempfile
-from pathlib import Path
-
-import pytest
-
 from router_maestro.config import (
     FallbackConfig,
     FallbackStrategy,

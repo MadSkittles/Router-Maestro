@@ -393,7 +393,9 @@ class TestRouterFallback:
     def test_get_fallback_candidates_priority(self, router_with_fallback):
         """Test getting fallback candidates with priority strategy."""
         router, _, _ = router_with_fallback
-        candidates = router._get_fallback_candidates("primary", "model-1", FallbackStrategy.PRIORITY)
+        candidates = router._get_fallback_candidates(
+            "primary", "model-1", FallbackStrategy.PRIORITY
+        )
 
         assert len(candidates) == 1
         assert candidates[0][0] == "secondary"

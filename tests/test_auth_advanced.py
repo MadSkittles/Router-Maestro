@@ -1,10 +1,7 @@
 """Tests for auth storage module."""
 
-import json
 import tempfile
 from pathlib import Path
-
-import pytest
 
 from router_maestro.auth.storage import (
     ApiKeyCredential,
@@ -117,11 +114,14 @@ class TestAuthStorage:
             # Create and save storage
             storage = AuthStorage()
             storage.set("openai", ApiKeyCredential(key="test-key"))
-            storage.set("github-copilot", OAuthCredential(
-                refresh="refresh",
-                access="access",
-                expires=12345,
-            ))
+            storage.set(
+                "github-copilot",
+                OAuthCredential(
+                    refresh="refresh",
+                    access="access",
+                    expires=12345,
+                ),
+            )
             storage.save(path)
 
             # Load and verify
