@@ -77,3 +77,12 @@ Configuration and data files follow XDG conventions:
 ### Model Identification
 
 Models are identified by `provider/model-id` format (e.g., `github-copilot/gpt-4o`). The special model name `router-maestro` triggers auto-routing based on priority configuration.
+
+### Version Updates
+
+When releasing a new version, update these files:
+
+1. `pyproject.toml` - `version = "x.x.x"`
+2. `src/router_maestro/__init__.py` - `__version__ = "x.x.x"`
+3. Run `uv lock` to update `uv.lock`
+4. Create git tag: `git tag vx.x.x`
