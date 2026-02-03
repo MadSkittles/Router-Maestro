@@ -7,6 +7,7 @@ import httpx
 
 from router_maestro.auth import AuthManager, AuthType
 from router_maestro.auth.github_oauth import get_copilot_token
+from router_maestro.auth.storage import OAuthCredential
 from router_maestro.providers.base import (
     BaseProvider,
     ChatRequest,
@@ -55,7 +56,7 @@ class CopilotProvider(BaseProvider):
     async def ensure_token(self) -> None:
         """Ensure we have a valid Copilot token, refreshing if needed."""
         cred = self.auth_manager.get_credential("github-copilot")
-        if not cred or cred.type != AuthType.OAUTH:
+        if not cred or not isinstance(cred, OAuthCredential):
             logger.error("Not authenticated with GitHub Copilot")
             raise ProviderError("Not authenticated with GitHub Copilot", status_code=401)
 
