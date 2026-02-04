@@ -177,3 +177,84 @@ class TestAnthropicToOpenAITranslation:
         assert result.messages[0].role == "system"
         assert result.messages[0].content == "You are a helpful assistant."
         assert result.messages[1].role == "user"
+
+
+class TestToolResultWithToolReference:
+    """Tests for tool_result handling with tool_reference blocks."""
+
+    def test_tool_reference_blocks_are_filtered_out(self):
+        """Test that tool_reference blocks are silently skipped."""
+        request = AnthropicMessagesRequest(
+            model="claude-sonnet-4",
+            max_tokens=1000,
+            messages=[
+                {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "tool_use", "id": "toolu_123", "name": "test_tool", "input": {}}
+                    ],
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": "toolu_123",
+                            "content": [
+                                {"type": "tool_reference", "tool_name": "mcp__github__create_pr"},
+                                {
+                                    "type": "tool_reference",
+                                    "tool_name": "mcp__github__list_issues",
+                                },
+                                {"type": "text", "text": "Tool result content"},
+                            ],
+                        }
+                    ],
+                },
+            ],
+        )
+
+        result = translate_anthropic_to_openai(request)
+
+        # Find the tool message
+        tool_messages = [m for m in result.messages if m.role == "tool"]
+        assert len(tool_messages) == 1
+        assert tool_messages[0].content == "Tool result content"
+        assert "tool_reference" not in tool_messages[0].content
+        assert "mcp__github" not in tool_messages[0].content
+
+    def test_tool_result_with_only_tool_references(self):
+        """Test tool_result containing only tool_reference blocks."""
+        request = AnthropicMessagesRequest(
+            model="claude-sonnet-4",
+            max_tokens=1000,
+            messages=[
+                {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "tool_use", "id": "toolu_456", "name": "list_tools", "input": {}}
+                    ],
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": "toolu_456",
+                            "content": [
+                                {"type": "tool_reference", "tool_name": "mcp__slack__send"},
+                                {"type": "tool_reference", "tool_name": "mcp__slack__read"},
+                            ],
+                        }
+                    ],
+                },
+            ],
+        )
+
+        result = translate_anthropic_to_openai(request)
+
+        # Find the tool message - should have empty content
+        tool_messages = [m for m in result.messages if m.role == "tool"]
+        assert len(tool_messages) == 1
+        assert tool_messages[0].content == ""
+        assert tool_messages[0].tool_call_id == "toolu_456"

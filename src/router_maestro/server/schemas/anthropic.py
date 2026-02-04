@@ -30,11 +30,12 @@ class AnthropicImageBlock(BaseModel):
 
 
 class AnthropicToolResultContentBlock(BaseModel):
-    """Content block within tool result (text or image)."""
+    """Content block within tool result (text, image, or tool_reference)."""
 
-    type: Literal["text", "image"]
+    type: Literal["text", "image", "tool_reference"]
     text: str | None = None
     source: AnthropicImageSource | None = None
+    tool_name: str | None = None  # For tool_reference type (Claude Code MCP metadata)
 
 
 class AnthropicToolResultBlock(BaseModel):
