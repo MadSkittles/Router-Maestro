@@ -6,7 +6,6 @@ from router_maestro.providers.base import ChatRequest, ModelInfo
 from router_maestro.providers.openai_base import OpenAIChatProvider
 from router_maestro.utils import get_logger
 
-
 logger = get_logger("providers.openai_compat")
 
 
