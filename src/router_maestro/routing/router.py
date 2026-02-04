@@ -1,7 +1,8 @@
 """Model router with priority-based selection and fallback."""
 
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
+from typing import TypeVar
 
 from router_maestro.auth import ApiKeyCredential, AuthManager
 from router_maestro.config import (
@@ -17,6 +18,8 @@ from router_maestro.providers import (
     ChatStreamChunk,
     CopilotProvider,
     ModelInfo,
+    OpenAIProvider,
+    AnthropicProvider,
     OpenAICompatibleProvider,
     ProviderError,
     ResponsesRequest,
@@ -35,6 +38,10 @@ CACHE_TTL_SECONDS = 300
 
 # Global singleton instance
 _router_instance: "Router | None" = None
+
+RequestT = TypeVar("RequestT")
+ResponseT = TypeVar("ResponseT")
+ChunkT = TypeVar("ChunkT")
 
 
 def get_router() -> "Router":
@@ -83,37 +90,64 @@ class Router:
         custom_providers_config = load_providers_config()
         auth_manager = AuthManager()
 
-        # Clear existing providers except keep copilot if already exists
-        old_copilot = self.providers.get("github-copilot")
-        self.providers.clear()
+        old_providers = self.providers
+        self.providers = {}
 
-        # Always add built-in GitHub Copilot provider (reuse existing instance if available)
-        if old_copilot is not None:
-            self.providers["github-copilot"] = old_copilot
-        else:
-            copilot = CopilotProvider()
-            self.providers["github-copilot"] = copilot
-        logger.debug("Loaded built-in provider: github-copilot")
+        self._add_builtin_provider("github-copilot", CopilotProvider, old_providers)
+        self._add_builtin_provider("openai", OpenAIProvider, old_providers)
+        self._add_builtin_provider("anthropic", AnthropicProvider, old_providers)
 
         # Load custom providers from providers.json
         for provider_name, provider_config in custom_providers_config.providers.items():
-            # Get API key from auth storage
-            cred = auth_manager.get_credential(provider_name)
-            if isinstance(cred, ApiKeyCredential):
-                provider = OpenAICompatibleProvider(
-                    name=provider_name,
-                    base_url=provider_config.baseURL,
-                    api_key=cred.key,
-                    models={
-                        model_id: model_config.name
-                        for model_id, model_config in provider_config.models.items()
-                    },
-                )
+            provider = self._create_custom_provider(provider_name, provider_config, auth_manager)
+            if provider is not None:
                 self.providers[provider_name] = provider
-                logger.debug("Loaded custom provider: %s", provider_name)
 
         self._providers_config_timestamp = time.time()
         logger.info("Loaded %d providers", len(self.providers))
+
+    def _add_builtin_provider(
+        self,
+        name: str,
+        provider_cls: type[BaseProvider],
+        old_providers: dict[str, BaseProvider],
+    ) -> None:
+        existing = old_providers.get(name)
+        if isinstance(existing, provider_cls):
+            self.providers[name] = existing
+        else:
+            self.providers[name] = provider_cls()
+        logger.debug("Loaded built-in provider: %s", name)
+
+    def _create_custom_provider(
+        self,
+        provider_name: str,
+        provider_config,
+        auth_manager: AuthManager,
+    ) -> BaseProvider | None:
+        provider_type = provider_config.type
+        if provider_type != "openai-compatible":
+            logger.warning(
+                "Unknown provider type '%s' for %s; skipping", provider_type, provider_name
+            )
+            return None
+
+        cred = auth_manager.get_credential(provider_name)
+        if not isinstance(cred, ApiKeyCredential):
+            logger.debug("Skipping custom provider %s (no API key)", provider_name)
+            return None
+
+        provider = OpenAICompatibleProvider(
+            name=provider_name,
+            base_url=provider_config.baseURL,
+            api_key=cred.key,
+            models={
+                model_id: model_config.name
+                for model_id, model_config in provider_config.models.items()
+            },
+        )
+        logger.debug("Loaded custom provider: %s", provider_name)
+        return provider
 
     def _get_priorities_config(self) -> PrioritiesConfig:
         """Get priorities config with caching."""
@@ -239,6 +273,7 @@ class Router:
             stream=original_request.stream,
             tools=original_request.tools,
             tool_choice=original_request.tool_choice,
+            extra=original_request.extra,
         )
 
     async def _get_auto_route_model(self) -> tuple[str, str, BaseProvider] | None:
@@ -364,73 +399,19 @@ class Router:
         fallback: bool,
         is_stream: bool,
     ) -> tuple[ChatResponse | AsyncIterator[ChatStreamChunk], str]:
-        """Execute request with fallback support.
-
-        Args:
-            request: Original chat request
-            provider_name: Name of the primary provider
-            actual_model_id: The actual model ID to use
-            provider: The primary provider instance
-            fallback: Whether to try fallback providers on error
-            is_stream: Whether this is a streaming request
-
-        Returns:
-            Tuple of (response or stream, provider_name)
-
-        Raises:
-            ProviderError: If all providers fail
-        """
-        actual_request = self._create_request_with_model(request, actual_model_id)
-
-        try:
-            await provider.ensure_token()
-            if is_stream:
-                stream = provider.chat_completion_stream(actual_request)
-                logger.info("Stream request routed to %s", provider_name)
-                return stream, provider_name
-            else:
-                response = await provider.chat_completion(actual_request)
-                logger.info("Request completed via %s", provider_name)
-                return response, provider_name
-        except ProviderError as e:
-            logger.warning("Provider %s failed: %s", provider_name, e)
-            if not fallback or not e.retryable:
-                raise
-
-            # Load fallback config
-            priorities_config = self._get_priorities_config()
-            fallback_config = priorities_config.fallback
-
-            if fallback_config.strategy == FallbackStrategy.NONE:
-                raise
-
-            # Get fallback candidates
-            candidates = self._get_fallback_candidates(
-                provider_name, actual_model_id, fallback_config.strategy
-            )
-
-            # Try fallback candidates up to maxRetries
-            for i, (other_name, other_model_id, other_provider) in enumerate(candidates):
-                if i >= fallback_config.maxRetries:
-                    break
-
-                logger.info("Trying fallback: %s/%s", other_name, other_model_id)
-                fallback_request = self._create_request_with_model(request, other_model_id)
-
-                try:
-                    await other_provider.ensure_token()
-                    if is_stream:
-                        stream = other_provider.chat_completion_stream(fallback_request)
-                        logger.info("Stream fallback succeeded via %s", other_name)
-                        return stream, other_name
-                    else:
-                        response = await other_provider.chat_completion(fallback_request)
-                        logger.info("Fallback succeeded via %s", other_name)
-                        return response, other_name
-                except ProviderError as fallback_error:
-                    logger.warning("Fallback %s failed: %s", other_name, fallback_error)
-                    continue
-            raise
+        """Execute request with fallback support."""
+        return await self._execute_with_fallback_common(
+            request=request,
+            provider_name=provider_name,
+            actual_model_id=actual_model_id,
+            provider=provider,
+            fallback=fallback,
+            is_stream=is_stream,
+            build_request=self._create_request_with_model,
+            call_nonstream=lambda prov, req: prov.chat_completion(req),
+            call_stream=lambda prov, req: prov.chat_completion_stream(req),
+            log_prefix="",
+        )
 
     async def chat_completion(
         self,
@@ -515,73 +496,86 @@ class Router:
         fallback: bool,
         is_stream: bool,
     ) -> tuple[ResponsesResponse | AsyncIterator[ResponsesStreamChunk], str]:
-        """Execute Responses API request with fallback support.
+        """Execute Responses API request with fallback support."""
+        return await self._execute_with_fallback_common(
+            request=request,
+            provider_name=provider_name,
+            actual_model_id=actual_model_id,
+            provider=provider,
+            fallback=fallback,
+            is_stream=is_stream,
+            build_request=self._create_responses_request_with_model,
+            call_nonstream=lambda prov, req: prov.responses_completion(req),
+            call_stream=lambda prov, req: prov.responses_completion_stream(req),
+            log_prefix="Responses",
+        )
 
-        Args:
-            request: Original responses request
-            provider_name: Name of the primary provider
-            actual_model_id: The actual model ID to use
-            provider: The primary provider instance
-            fallback: Whether to try fallback providers on error
-            is_stream: Whether this is a streaming request
+    async def _execute_with_fallback_common(
+        self,
+        request: RequestT,
+        provider_name: str,
+        actual_model_id: str,
+        provider: BaseProvider,
+        fallback: bool,
+        is_stream: bool,
+        build_request: Callable[[RequestT, str], RequestT],
+        call_nonstream: Callable[[BaseProvider, RequestT], Awaitable[ResponseT]],
+        call_stream: Callable[[BaseProvider, RequestT], AsyncIterator[ChunkT]],
+        log_prefix: str,
+    ) -> tuple[ResponseT | AsyncIterator[ChunkT], str]:
+        """Execute request with fallback support."""
 
-        Returns:
-            Tuple of (response or stream, provider_name)
+        def _with_prefix(message: str) -> str:
+            return f"{log_prefix} {message}".strip()
 
-        Raises:
-            ProviderError: If all providers fail
-        """
-        actual_request = self._create_responses_request_with_model(request, actual_model_id)
+        actual_request = build_request(request, actual_model_id)
 
         try:
             await provider.ensure_token()
             if is_stream:
-                stream = provider.responses_completion_stream(actual_request)
-                logger.info("Responses stream request routed to %s", provider_name)
+                stream = call_stream(provider, actual_request)
+                logger.info(_with_prefix("stream request routed to %s"), provider_name)
                 return stream, provider_name
-            else:
-                response = await provider.responses_completion(actual_request)
-                logger.info("Responses request completed via %s", provider_name)
-                return response, provider_name
+            response = await call_nonstream(provider, actual_request)
+            logger.info(_with_prefix("request completed via %s"), provider_name)
+            return response, provider_name
         except ProviderError as e:
-            logger.warning("Provider %s failed for responses: %s", provider_name, e)
+            logger.warning(_with_prefix("provider %s failed: %s"), provider_name, e)
             if not fallback or not e.retryable:
                 raise
 
-            # Load fallback config
             priorities_config = self._get_priorities_config()
             fallback_config = priorities_config.fallback
 
             if fallback_config.strategy == FallbackStrategy.NONE:
                 raise
 
-            # Get fallback candidates
             candidates = self._get_fallback_candidates(
                 provider_name, actual_model_id, fallback_config.strategy
             )
 
-            # Try fallback candidates up to maxRetries
             for i, (other_name, other_model_id, other_provider) in enumerate(candidates):
                 if i >= fallback_config.maxRetries:
                     break
 
-                logger.info("Trying responses fallback: %s/%s", other_name, other_model_id)
-                fallback_request = self._create_responses_request_with_model(
-                    request, other_model_id
-                )
+                logger.info(_with_prefix("trying fallback: %s/%s"), other_name, other_model_id)
+                fallback_request = build_request(request, other_model_id)
 
                 try:
                     await other_provider.ensure_token()
                     if is_stream:
-                        stream = other_provider.responses_completion_stream(fallback_request)
-                        logger.info("Responses stream fallback succeeded via %s", other_name)
+                        stream = call_stream(other_provider, fallback_request)
+                        logger.info(
+                            _with_prefix("stream fallback succeeded via %s"), other_name
+                        )
                         return stream, other_name
-                    else:
-                        response = await other_provider.responses_completion(fallback_request)
-                        logger.info("Responses fallback succeeded via %s", other_name)
-                        return response, other_name
+                    response = await call_nonstream(other_provider, fallback_request)
+                    logger.info(_with_prefix("fallback succeeded via %s"), other_name)
+                    return response, other_name
                 except ProviderError as fallback_error:
-                    logger.warning("Responses fallback %s failed: %s", other_name, fallback_error)
+                    logger.warning(
+                        _with_prefix("fallback %s failed: %s"), other_name, fallback_error
+                    )
                     continue
             raise
 

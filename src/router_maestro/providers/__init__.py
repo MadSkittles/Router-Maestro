@@ -16,6 +16,7 @@ from router_maestro.providers.base import (
 )
 from router_maestro.providers.copilot import CopilotProvider
 from router_maestro.providers.openai import OpenAIProvider
+from router_maestro.providers.openai_base import OpenAIChatProvider
 from router_maestro.providers.openai_compat import OpenAICompatibleProvider
 
 __all__ = [
@@ -31,6 +32,7 @@ __all__ = [
     "ResponsesResponse",
     "ResponsesStreamChunk",
     "ResponsesToolCall",
+    "OpenAIChatProvider",
     # Providers
     "CopilotProvider",
     "OpenAIProvider",
