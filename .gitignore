@@ -112,3 +112,6 @@ dmypy.json
 .worktrees/
 .security-key
 logs/security/
+
+# MCP configuration (contains secrets)
+.mcp.json
