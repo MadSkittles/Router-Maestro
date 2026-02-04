@@ -172,8 +172,11 @@ def claude_code_config() -> None:
         except (json.JSONDecodeError, OSError):
             pass  # If file is corrupted, start fresh
 
-    # Merge: update env section while preserving other sections
-    existing_config["env"] = env_config
+    # Merge: update env variables while preserving existing ones
+    existing_env = existing_config.get("env", {})
+    if not isinstance(existing_env, dict):
+        existing_env = {}
+    existing_config["env"] = {**existing_env, **env_config}
 
     settings_path.parent.mkdir(parents=True, exist_ok=True)
     with open(settings_path, "w", encoding="utf-8") as f:
