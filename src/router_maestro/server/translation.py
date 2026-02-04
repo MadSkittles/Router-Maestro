@@ -226,10 +226,29 @@ def _handle_user_message(message: AnthropicUserMessage | dict) -> list[Message]:
         if isinstance(tool_content, list):
             text_parts = []
             for item in tool_content:
-                if isinstance(item, dict) and item.get("type") == "text":
-                    text_parts.append(item.get("text", ""))
-                elif hasattr(item, "type") and item.type == "text":
-                    text_parts.append(getattr(item, "text", ""))
+                if isinstance(item, dict):
+                    item_type = item.get("type")
+                    if item_type == "text":
+                        text_parts.append(item.get("text", ""))
+                    elif item_type == "tool_reference":
+                        # Silently skip tool references - they're metadata
+                        logger.debug("Skipping tool_reference block: %s", item.get("tool_name"))
+                    elif item_type == "image":
+                        # Images in tool results not supported in OpenAI format
+                        logger.debug("Skipping image in tool result")
+                    else:
+                        logger.warning("Unknown content block type in tool_result: %s", item_type)
+                elif hasattr(item, "type"):
+                    if item.type == "text":
+                        text_parts.append(getattr(item, "text", ""))
+                    elif item.type == "tool_reference":
+                        logger.debug(
+                            "Skipping tool_reference block: %s", getattr(item, "tool_name", "")
+                        )
+                    elif item.type == "image":
+                        logger.debug("Skipping image in tool result")
+                    else:
+                        logger.warning("Unknown content block type in tool_result: %s", item.type)
             tool_content = "\n".join(text_parts)
 
         result.append(

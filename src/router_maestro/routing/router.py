@@ -12,15 +12,15 @@ from router_maestro.config import (
     load_providers_config,
 )
 from router_maestro.providers import (
+    AnthropicProvider,
     BaseProvider,
     ChatRequest,
     ChatResponse,
     ChatStreamChunk,
     CopilotProvider,
     ModelInfo,
-    OpenAIProvider,
-    AnthropicProvider,
     OpenAICompatibleProvider,
+    OpenAIProvider,
     ProviderError,
     ResponsesRequest,
     ResponsesResponse,
@@ -565,9 +565,7 @@ class Router:
                     await other_provider.ensure_token()
                     if is_stream:
                         stream = call_stream(other_provider, fallback_request)
-                        logger.info(
-                            _with_prefix("stream fallback succeeded via %s"), other_name
-                        )
+                        logger.info(_with_prefix("stream fallback succeeded via %s"), other_name)
                         return stream, other_name
                     response = await call_nonstream(other_provider, fallback_request)
                     logger.info(_with_prefix("fallback succeeded via %s"), other_name)
