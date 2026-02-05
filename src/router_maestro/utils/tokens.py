@@ -124,7 +124,7 @@ def _extract_system_text(system: str | list[AnthropicTextBlock] | None) -> str:
     return "\n".join(block.text for block in system)
 
 
-def _extract_message_text(message: AnthropicMessage) -> str:
+def _extract_message_text(message: AnthropicMessage | dict) -> str:
     """Extract text from a single message.
 
     Handles text blocks, thinking blocks, tool_use blocks, and tool_result blocks.
@@ -135,39 +135,80 @@ def _extract_message_text(message: AnthropicMessage) -> str:
     Returns:
         Combined text content
     """
-    content = message.content
+    if isinstance(message, dict):
+        content = message.get("content")
+    else:
+        content = message.content
     if isinstance(content, str):
         return content
+    if content is None:
+        return ""
 
     parts = []
     for block in content:
+        if isinstance(block, dict):
+            block_text = block.get("text")
+            if block_text:
+                parts.append(block_text)
+            block_thinking = block.get("thinking")
+            if block_thinking:
+                parts.append(block_thinking)
+            block_name = block.get("name")
+            if block_name:
+                parts.append(block_name)
+            block_input = block.get("input")
+            if block_input:
+                try:
+                    parts.append(json.dumps(block_input))
+                except Exception:
+                    pass
+            if "tool_use_id" in block:
+                tool_content = block.get("content")
+                if isinstance(tool_content, str):
+                    parts.append(tool_content)
+                elif isinstance(tool_content, list):
+                    for tool_block in tool_content:
+                        if isinstance(tool_block, dict):
+                            tool_text = tool_block.get("text")
+                            if tool_text:
+                                parts.append(tool_text)
+                        elif hasattr(tool_block, "text"):
+                            tool_block_text = getattr(tool_block, "text", None)
+                            if tool_block_text:
+                                parts.append(tool_block_text)
+            continue
         # Text blocks
-        if hasattr(block, "text") and block.text:
-            parts.append(block.text)
+        block_text = getattr(block, "text", None)
+        if block_text:
+            parts.append(block_text)
         # Thinking blocks
-        if hasattr(block, "thinking") and block.thinking:
-            parts.append(block.thinking)
+        block_thinking = getattr(block, "thinking", None)
+        if block_thinking:
+            parts.append(block_thinking)
         # Tool use blocks
-        if hasattr(block, "name") and block.name:
-            parts.append(block.name)
-        if hasattr(block, "input") and block.input:
+        block_name = getattr(block, "name", None)
+        if block_name:
+            parts.append(block_name)
+        block_input = getattr(block, "input", None)
+        if block_input:
             try:
-                parts.append(json.dumps(block.input))
+                parts.append(json.dumps(block_input))
             except Exception:
                 pass
         # Tool result blocks - handle content field
-        if hasattr(block, "content") and hasattr(block, "tool_use_id"):
-            tool_content = block.content
+        if hasattr(block, "tool_use_id"):
+            tool_content = getattr(block, "content", None)
             if isinstance(tool_content, str):
                 parts.append(tool_content)
             elif isinstance(tool_content, list):
                 for tc in tool_content:
-                    if hasattr(tc, "text") and tc.text:
-                        parts.append(tc.text)
+                    tc_text = getattr(tc, "text", None)
+                    if tc_text:
+                        parts.append(tc_text)
     return "\n".join(parts)
 
 
-def _extract_tools_text(tools: list[AnthropicTool] | None) -> str:
+def _extract_tools_text(tools: list[AnthropicTool | dict] | None) -> str:
     """Extract text from tool definitions.
 
     Args:
@@ -180,13 +221,24 @@ def _extract_tools_text(tools: list[AnthropicTool] | None) -> str:
         return ""
     parts = []
     for tool in tools:
-        parts.append(tool.name)
-        if tool.description:
-            parts.append(tool.description)
-        try:
-            parts.append(json.dumps(tool.input_schema))
-        except Exception:
-            pass
+        if isinstance(tool, dict):
+            tool_name = tool.get("name")
+            if tool_name:
+                parts.append(tool_name)
+            tool_description = tool.get("description")
+            if tool_description:
+                parts.append(tool_description)
+            tool_input_schema = tool.get("input_schema")
+        else:
+            parts.append(tool.name)
+            if tool.description:
+                parts.append(tool.description)
+            tool_input_schema = tool.input_schema
+        if tool_input_schema:
+            try:
+                parts.append(json.dumps(tool_input_schema))
+            except Exception:
+                pass
     return "\n".join(parts)
 
 

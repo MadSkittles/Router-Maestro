@@ -161,6 +161,23 @@ class TestCountAnthropicRequestTokens:
         # Should include tool definition tokens
         assert result > 0
 
+    def test_with_tools_dict(self):
+        """Test counting with tool definitions as dicts."""
+        messages = [AnthropicUserMessage(content="Use a tool")]
+        tools = [
+            {
+                "name": "get_weather",
+                "description": "Get weather for a location",
+                "input_schema": {"type": "object", "properties": {"location": {"type": "string"}}},
+            }
+        ]
+        result = count_anthropic_request_tokens(
+            system=None,
+            messages=messages,
+            tools=tools,
+        )
+        assert result > 0
+
     def test_with_tool_no_description(self):
         """Test counting with tool that has no description."""
         messages = [AnthropicUserMessage(content="Hi")]
@@ -208,6 +225,29 @@ class TestCountAnthropicRequestTokens:
         )
         assert result > 0
 
+    def test_with_tool_use_block_dict(self):
+        """Test counting with tool_use content block dicts."""
+        messages = [
+            {"role": "user", "content": "Get weather"},
+            {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": "tool_123",
+                        "name": "get_weather",
+                        "input": {"location": "San Francisco"},
+                    }
+                ],
+            },
+        ]
+        result = count_anthropic_request_tokens(
+            system=None,
+            messages=messages,
+            tools=None,
+        )
+        assert result > 0
+
     def test_with_tool_result_block_string(self):
         """Test counting with tool_result block containing string content."""
         messages = [
@@ -219,6 +259,27 @@ class TestCountAnthropicRequestTokens:
                     )
                 ]
             ),
+        ]
+        result = count_anthropic_request_tokens(
+            system=None,
+            messages=messages,
+            tools=None,
+        )
+        assert result > 0
+
+    def test_with_tool_result_block_string_dict(self):
+        """Test counting with tool_result block dict containing string content."""
+        messages = [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "tool_123",
+                        "content": "The weather is sunny.",
+                    }
+                ],
+            },
         ]
         result = count_anthropic_request_tokens(
             system=None,
@@ -241,6 +302,30 @@ class TestCountAnthropicRequestTokens:
                     )
                 ]
             ),
+        ]
+        result = count_anthropic_request_tokens(
+            system=None,
+            messages=messages,
+            tools=None,
+        )
+        assert result > 0
+
+    def test_with_tool_result_block_list_dict(self):
+        """Test counting with tool_result block dict containing list content."""
+        messages = [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "tool_123",
+                        "content": [
+                            {"type": "text", "text": "Result part 1"},
+                            {"type": "text", "text": "Result part 2"},
+                        ],
+                    }
+                ],
+            },
         ]
         result = count_anthropic_request_tokens(
             system=None,
