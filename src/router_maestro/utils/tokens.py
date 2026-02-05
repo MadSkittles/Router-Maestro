@@ -89,8 +89,9 @@ def estimate_tokens(text: str) -> int:
 def estimate_tokens_from_char_count(char_count: int) -> int:
     """Estimate token count from character count.
 
-    This is a legacy function kept for backward compatibility.
-    Prefer using count_tokens() with actual text when possible.
+    .. deprecated::
+        This function uses inaccurate character-based estimation.
+        Use count_tokens() with actual text for accurate results.
 
     Args:
         char_count: Number of characters
