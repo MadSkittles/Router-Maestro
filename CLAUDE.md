@@ -86,3 +86,17 @@ When releasing a new version, update these files:
 2. `src/router_maestro/__init__.py` - `__version__ = "x.x.x"`
 3. Run `uv lock` to update `uv.lock`
 4. Create git tag: `git tag vx.x.x`
+
+### GitHub Operations
+
+Use the GitHub MCP tools instead of `gh` CLI for GitHub operations like creating PRs, issues, and reviews. The MCP tools work better with Enterprise Managed Users and provide structured responses.
+
+Available GitHub MCP tools:
+- `mcp__github__create_pull_request` - Create pull requests
+- `mcp__github__get_pull_request` - Get PR details
+- `mcp__github__create_pull_request_review` - Review PRs
+- `mcp__github__merge_pull_request` - Merge PRs
+- `mcp__github__get_pull_request_files` - Get files changed in a PR
+- `mcp__github__create_issue` - Create issues
+- `mcp__github__list_issues` - List issues
+- `mcp__github__search_code` - Search code in repositories

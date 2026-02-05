@@ -27,6 +27,7 @@ from router_maestro.server.translation import (
     translate_openai_chunk_to_anthropic_events,
 )
 from router_maestro.utils import (
+    estimate_anthropic_request_tokens,
     estimate_tokens_from_char_count,
     get_logger,
     map_openai_stop_reason_to_anthropic,
@@ -260,57 +261,14 @@ def _map_finish_reason(reason: str | None) -> AnthropicStopReason | None:
 def _estimate_input_tokens(request: AnthropicMessagesRequest) -> int:
     """Estimate input tokens from request content.
 
-    Uses a rough approximation of ~4 characters per token for English text.
-    This provides an estimate for context display before actual usage is known.
+    Uses the centralized token estimation function that accounts for
+    message overhead and structure overhead for more accurate estimates.
     """
-    total_chars = 0
-
-    # Count system prompt
-    if request.system:
-        if isinstance(request.system, str):
-            total_chars += len(request.system)
-        else:
-            for block in request.system:
-                if hasattr(block, "text"):
-                    total_chars += len(block.text)
-
-    # Count messages
-    for msg in request.messages:
-        content = msg.content
-        if isinstance(content, str):
-            total_chars += len(content)
-        elif isinstance(content, list):
-            for block in content:
-                if isinstance(block, dict):
-                    if block.get("type") == "text":
-                        total_chars += len(block.get("text", ""))
-                    elif block.get("type") == "tool_result":
-                        tool_content = block.get("content", "")
-                        if isinstance(tool_content, str):
-                            total_chars += len(tool_content)
-                        elif isinstance(tool_content, list):
-                            for tc in tool_content:
-                                if isinstance(tc, dict) and tc.get("type") == "text":
-                                    total_chars += len(tc.get("text", ""))
-                elif hasattr(block, "text"):
-                    total_chars += len(block.text)  # type: ignore[union-attr]
-
-    # Count tools definitions if present
-    if request.tools:
-        for tool in request.tools:
-            if hasattr(tool, "name"):
-                total_chars += len(tool.name)
-            if hasattr(tool, "description") and tool.description:
-                total_chars += len(tool.description)
-            if hasattr(tool, "input_schema"):
-                # Rough estimate for schema
-                try:
-                    schema_str = json.dumps(tool.input_schema)
-                    total_chars += len(schema_str)
-                except Exception:
-                    pass
-
-    return estimate_tokens_from_char_count(total_chars)
+    return estimate_anthropic_request_tokens(
+        system=request.system,
+        messages=request.messages,
+        tools=request.tools,
+    )
 
 
 async def stream_response(

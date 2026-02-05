@@ -16,21 +16,21 @@ class TestTokenEstimation:
 
     def test_estimate_tokens_short_text(self):
         """Test estimating tokens for short text."""
-        # 12 characters / 4 = 3 tokens
-        assert estimate_tokens("Hello world!") == 3
+        # 12 characters / 3 = 4 tokens (CHARS_PER_TOKEN = 3)
+        assert estimate_tokens("Hello world!") == 4
 
     def test_estimate_tokens_longer_text(self):
         """Test estimating tokens for longer text."""
-        # 100 characters / 4 = 25 tokens
+        # 100 characters / 3 = 33 tokens (CHARS_PER_TOKEN = 3)
         text = "a" * 100
-        assert estimate_tokens(text) == 25
+        assert estimate_tokens(text) == 33
 
     def test_estimate_tokens_from_char_count(self):
         """Test estimating tokens from character count."""
         assert estimate_tokens_from_char_count(0) == 0
-        assert estimate_tokens_from_char_count(4) == 1
-        assert estimate_tokens_from_char_count(100) == 25
-        assert estimate_tokens_from_char_count(1000) == 250
+        assert estimate_tokens_from_char_count(3) == 1  # 3 / 3 = 1
+        assert estimate_tokens_from_char_count(100) == 33  # 100 / 3 = 33
+        assert estimate_tokens_from_char_count(1000) == 333  # 1000 / 3 = 333
 
 
 class TestStopReasonMapping:
