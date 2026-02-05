@@ -78,6 +78,10 @@ Configuration and data files follow XDG conventions:
 
 Models are identified by `provider/model-id` format (e.g., `github-copilot/gpt-4o`). The special model name `router-maestro` triggers auto-routing based on priority configuration.
 
+### Pre-Commit Workflow
+
+Run `/lint` and let Codex review the code before committing.
+
 ### Version Updates
 
 When releasing a new version, update these files:

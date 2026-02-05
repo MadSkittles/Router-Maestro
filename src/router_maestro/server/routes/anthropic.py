@@ -18,8 +18,6 @@ from router_maestro.server.schemas.anthropic import (
     AnthropicModelList,
     AnthropicStreamState,
     AnthropicTextBlock,
-    AnthropicToolResultBlock,
-    AnthropicToolUseBlock,
     AnthropicUsage,
 )
 from router_maestro.server.translation import (
@@ -27,8 +25,8 @@ from router_maestro.server.translation import (
     translate_openai_chunk_to_anthropic_events,
 )
 from router_maestro.utils import (
+    count_anthropic_request_tokens,
     estimate_anthropic_request_tokens,
-    estimate_tokens_from_char_count,
     get_logger,
     map_openai_stop_reason_to_anthropic,
 )
@@ -174,83 +172,18 @@ async def messages(request: AnthropicMessagesRequest):
 @router.post("/v1/messages/count_tokens")
 @router.post("/api/anthropic/v1/messages/count_tokens")
 async def count_tokens(request: AnthropicCountTokensRequest):
-    """Count tokens for a messages request.
+    """Count tokens for a messages request using tiktoken.
 
-    This is a simplified implementation that estimates tokens.
-    Since we're proxying to various providers, we can't get exact counts
-    without making an actual request.
+    Uses the centralized token counting function that provides accurate
+    token counting via tiktoken (cl100k_base encoding).
     """
-    total_chars = 0
-
-    # Count system prompt
-    if request.system:
-        if isinstance(request.system, str):
-            total_chars += len(request.system)
-        else:
-            for block in request.system:
-                total_chars += len(block.text)
-
-    # Count messages
-    for msg in request.messages:
-        content = msg.content
-        if isinstance(content, str):
-            total_chars += len(content)
-        elif isinstance(content, list):
-            for block in content:
-                if isinstance(block, dict):
-                    if block.get("type") == "text":
-                        total_chars += len(block.get("text", ""))
-                    elif block.get("type") == "tool_use":
-                        total_chars += len(block.get("name", ""))
-                        total_chars += len(json.dumps(block.get("input", {})))
-                    elif block.get("type") == "tool_result":
-                        tool_content = block.get("content", "")
-                        if isinstance(tool_content, str):
-                            total_chars += len(tool_content)
-                        elif isinstance(tool_content, list):
-                            for item in tool_content:
-                                if isinstance(item, dict):
-                                    total_chars += len(item.get("text", ""))
-                                else:
-                                    logger.warning(
-                                        f"Unhandled tool_result item type: {type(item)}, "
-                                        f"item: {item}"
-                                    )
-                        else:
-                            logger.warning(
-                                f"Unhandled tool_result content type: {type(tool_content)}, "
-                                f"content: {tool_content}"
-                            )
-                    else:
-                        logger.warning(
-                            f"Unhandled dict block type: {block.get('type')}, block: {block}"
-                        )
-                elif isinstance(block, AnthropicToolUseBlock):
-                    total_chars += len(block.name)
-                    total_chars += len(json.dumps(block.input))
-                elif isinstance(block, AnthropicToolResultBlock):
-                    if isinstance(block.content, str):
-                        total_chars += len(block.content)
-                    elif isinstance(block.content, list):
-                        for item in block.content:
-                            if hasattr(item, "text") and item.text:
-                                total_chars += len(item.text)
-                            else:
-                                logger.warning(
-                                    f"Unhandled AnthropicToolResultBlock item: {type(item)}, "
-                                    f"item: {item}"
-                                )
-                    else:
-                        logger.warning(
-                            f"Unhandled AnthropicToolResultBlock content type: "
-                            f"{type(block.content)}, content: {block.content}"
-                        )
-                elif hasattr(block, "text"):
-                    total_chars += len(block.text)  # type: ignore[union-attr]
-                else:
-                    logger.warning(f"Unhandled block type: {type(block)}, block: {block}")
-
-    return {"input_tokens": estimate_tokens_from_char_count(total_chars)}
+    input_tokens = count_anthropic_request_tokens(
+        system=request.system,
+        messages=request.messages,
+        tools=request.tools,
+        model=request.model,
+    )
+    return {"input_tokens": input_tokens}
 
 
 def _map_finish_reason(reason: str | None) -> AnthropicStopReason | None:
