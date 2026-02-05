@@ -3,6 +3,8 @@
 from router_maestro.utils.logging import get_logger, setup_logging
 from router_maestro.utils.tokens import (
     calibrate_tokens,
+    count_anthropic_request_tokens,
+    count_tokens,
     estimate_anthropic_request_tokens,
     estimate_tokens,
     estimate_tokens_from_char_count,
@@ -13,6 +15,8 @@ __all__ = [
     "get_logger",
     "setup_logging",
     "calibrate_tokens",
+    "count_anthropic_request_tokens",
+    "count_tokens",
     "estimate_anthropic_request_tokens",
     "estimate_tokens",
     "estimate_tokens_from_char_count",

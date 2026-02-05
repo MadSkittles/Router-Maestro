@@ -16,14 +16,18 @@ class TestTokenEstimation:
 
     def test_estimate_tokens_short_text(self):
         """Test estimating tokens for short text."""
-        # 12 characters / 3 = 4 tokens (CHARS_PER_TOKEN = 3)
-        assert estimate_tokens("Hello world!") == 4
+        # Now uses tiktoken for accurate counting
+        result = estimate_tokens("Hello world!")
+        assert result > 0
+        assert result < 10  # Should be small
 
     def test_estimate_tokens_longer_text(self):
         """Test estimating tokens for longer text."""
-        # 100 characters / 3 = 33 tokens (CHARS_PER_TOKEN = 3)
+        # Now uses tiktoken for accurate counting
         text = "a" * 100
-        assert estimate_tokens(text) == 33
+        result = estimate_tokens(text)
+        assert result > 0
+        assert result < 50  # Tiktoken is more efficient than char-based
 
     def test_estimate_tokens_from_char_count(self):
         """Test estimating tokens from character count."""

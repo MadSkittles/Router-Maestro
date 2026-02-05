@@ -1,10 +1,12 @@
-"""Token estimation utilities."""
+"""Token counting utilities using tiktoken."""
 
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from functools import lru_cache
 from typing import TYPE_CHECKING, Literal
+
+import tiktoken
 
 if TYPE_CHECKING:
     from router_maestro.server.schemas.anthropic import (
@@ -13,15 +15,11 @@ if TYPE_CHECKING:
         AnthropicTool,
     )
 
-# Approximate characters per token for English text
-# Using 3 instead of 4 for more conservative estimation
-CHARS_PER_TOKEN = 3
+# Default encoding for Claude models (cl100k_base is compatible)
+DEFAULT_ENCODING = "cl100k_base"
 
 # Per-message overhead for role markers, separators, and special tokens
 MESSAGE_OVERHEAD_TOKENS = 4
-
-# Structure overhead multiplier for JSON framing, special tokens, etc.
-STRUCTURE_OVERHEAD_MULTIPLIER = 1.25
 
 AnthropicStopReason = Literal[
     "end_turn", "max_tokens", "stop_sequence", "tool_use", "pause_turn", "refusal"
@@ -29,172 +27,70 @@ AnthropicStopReason = Literal[
 
 
 # =============================================================================
-# Token Calibration (ported from agent-maestro)
-# =============================================================================
-#
-# Linear regression model: calibrated = slope * base_tokens + base_offset
-#
-# These coefficients were derived from actual API usage data to correct
-# the estimation to match real token counts from the Anthropic API.
+# Tiktoken Encoder (cached for performance)
 # =============================================================================
 
 
-@dataclass
-class CalibrationCoefficients:
-    """Linear regression coefficients for token calibration."""
-
-    slope: float
-    base_offset: int  # Integer baseline adjustment for token count accuracy
-
-
-@dataclass
-class TokenRangeCalibration:
-    """Calibration parameters for different token size ranges."""
-
-    small: CalibrationCoefficients  # < 10K tokens
-    medium: CalibrationCoefficients  # 10K - 50K tokens
-    large: CalibrationCoefficients  # 50K - 100K tokens
-    xlarge: CalibrationCoefficients  # >= 100K tokens
-
-
-@dataclass
-class TokenCalibrationConfig:
-    """Calibration config for input and output tokens."""
-
-    input: TokenRangeCalibration
-    output: TokenRangeCalibration
-
-
-# Calibration parameters optimized for different token size ranges
-# These are based on linear regression from actual API usage data
-CALIBRATION_CONFIG: dict[str, TokenCalibrationConfig] = {
-    "default": TokenCalibrationConfig(
-        input=TokenRangeCalibration(
-            small=CalibrationCoefficients(slope=1.065, base_offset=-120),
-            medium=CalibrationCoefficients(slope=1.082, base_offset=1300),
-            large=CalibrationCoefficients(slope=1.05, base_offset=2000),
-            xlarge=CalibrationCoefficients(slope=1.05, base_offset=1500),
-        ),
-        output=TokenRangeCalibration(
-            # Use same parameters for all output token ranges due to high variability
-            small=CalibrationCoefficients(slope=0.67, base_offset=170),
-            medium=CalibrationCoefficients(slope=0.67, base_offset=170),
-            large=CalibrationCoefficients(slope=0.67, base_offset=170),
-            xlarge=CalibrationCoefficients(slope=0.67, base_offset=170),
-        ),
-    ),
-    "opus": TokenCalibrationConfig(
-        input=TokenRangeCalibration(
-            small=CalibrationCoefficients(slope=1.1, base_offset=0),
-            medium=CalibrationCoefficients(slope=1.1, base_offset=1500),
-            large=CalibrationCoefficients(slope=1.12, base_offset=1500),
-            xlarge=CalibrationCoefficients(slope=1.14, base_offset=1500),
-        ),
-        output=TokenRangeCalibration(
-            small=CalibrationCoefficients(slope=1.0, base_offset=150),
-            medium=CalibrationCoefficients(slope=1.0, base_offset=150),
-            large=CalibrationCoefficients(slope=1.0, base_offset=150),
-            xlarge=CalibrationCoefficients(slope=1.0, base_offset=150),
-        ),
-    ),
-}
-
-
-def _get_calibration_config(model: str | None) -> TokenCalibrationConfig:
-    """Get calibration config based on model name.
+@lru_cache(maxsize=4)
+def get_encoding(encoding_name: str = DEFAULT_ENCODING) -> tiktoken.Encoding:
+    """Get a tiktoken encoding, cached for performance.
 
     Args:
-        model: Model name/ID
+        encoding_name: Name of the encoding (default: cl100k_base)
 
     Returns:
-        Calibration config for the model
+        Tiktoken encoding object
     """
-    if model and "opus" in model.lower():
-        return CALIBRATION_CONFIG["opus"]
-    return CALIBRATION_CONFIG["default"]
+    return tiktoken.get_encoding(encoding_name)
 
 
-def _get_calibration_coefficients(
-    tokens: int,
-    is_input: bool,
-    config: TokenCalibrationConfig,
-) -> CalibrationCoefficients:
-    """Select calibration coefficients based on token count and type.
+def count_tokens(text: str, encoding_name: str = DEFAULT_ENCODING) -> int:
+    """Count tokens in text using tiktoken.
 
     Args:
-        tokens: Base token count
-        is_input: True for input tokens, False for output tokens
-        config: Calibration config to use
+        text: Text to count tokens for
+        encoding_name: Tiktoken encoding name
 
     Returns:
-        Calibration coefficients for the token range
+        Exact token count
     """
-    range_config = config.input if is_input else config.output
-
-    # Thresholds (9K, 45K, 90K) approximate actual API thresholds (10K, 50K, 100K)
-    if tokens < 9000:
-        return range_config.small
-    elif tokens < 45000:
-        return range_config.medium
-    elif tokens < 90000:
-        return range_config.large
-    else:
-        return range_config.xlarge
-
-
-def calibrate_tokens(
-    base_tokens: int,
-    is_input: bool = True,
-    model: str | None = None,
-) -> int:
-    """Calibrate token count to fit actual API usage.
-
-    Uses linear regression coefficients optimized from actual API usage data
-    to correct the base estimation to match real token counts.
-
-    Args:
-        base_tokens: Base token count from estimation
-        is_input: True for input tokens, False for output tokens
-        model: Model name/ID to select appropriate calibration
-
-    Returns:
-        Calibrated token count matching actual API usage
-    """
-    if base_tokens <= 0:
+    if not text:
         return 0
-
-    config = _get_calibration_config(model)
-    coefficients = _get_calibration_coefficients(base_tokens, is_input, config)
-
-    # Apply calibration: calibrated = slope × base + base_offset
-    calibrated = coefficients.slope * base_tokens + coefficients.base_offset
-
-    # Ensure we return at least 1 for non-zero input
-    return max(1, round(calibrated))
+    encoding = get_encoding(encoding_name)
+    return len(encoding.encode(text))
 
 
 # =============================================================================
-# Base Token Estimation Functions
+# Legacy estimation functions (kept for backward compatibility)
 # =============================================================================
+
+# Approximate characters per token (legacy, kept for backward compatibility)
+CHARS_PER_TOKEN = 3
+
+# Structure overhead multiplier (legacy, no longer used with tiktoken)
+STRUCTURE_OVERHEAD_MULTIPLIER = 1.25
 
 
 def estimate_tokens(text: str) -> int:
-    """Estimate token count from text.
+    """Count tokens in text using tiktoken.
 
-    Uses a rough approximation of ~3 characters per token for English text.
-    This provides an estimate for context display before actual usage is known.
+    This function now uses tiktoken for accurate counting instead of
+    character-based estimation.
 
     Args:
-        text: The text to estimate tokens for
+        text: The text to count tokens for
 
     Returns:
-        Estimated token count
+        Token count
     """
-    return len(text) // CHARS_PER_TOKEN
+    return count_tokens(text)
 
 
 def estimate_tokens_from_char_count(char_count: int) -> int:
     """Estimate token count from character count.
+
+    This is a legacy function kept for backward compatibility.
+    Prefer using count_tokens() with actual text when possible.
 
     Args:
         char_count: Number of characters
@@ -205,25 +101,30 @@ def estimate_tokens_from_char_count(char_count: int) -> int:
     return char_count // CHARS_PER_TOKEN
 
 
-def _count_system_chars(system: str | list[AnthropicTextBlock] | None) -> int:
-    """Count characters in system prompt.
+# =============================================================================
+# Content extraction helpers
+# =============================================================================
+
+
+def _extract_system_text(system: str | list[AnthropicTextBlock] | None) -> str:
+    """Extract text from system prompt.
 
     Args:
         system: System prompt as string or list of text blocks
 
     Returns:
-        Total character count
+        Combined text content
     """
     if system is None:
-        return 0
+        return ""
     if isinstance(system, str):
-        return len(system)
+        return system
     # List of AnthropicTextBlock
-    return sum(len(block.text) for block in system)
+    return "\n".join(block.text for block in system)
 
 
-def _count_message_chars(message: AnthropicMessage) -> int:
-    """Count characters in a single message.
+def _extract_message_text(message: AnthropicMessage) -> str:
+    """Extract text from a single message.
 
     Handles text blocks, thinking blocks, tool_use blocks, and tool_result blocks.
 
@@ -231,112 +132,169 @@ def _count_message_chars(message: AnthropicMessage) -> int:
         message: An Anthropic user or assistant message
 
     Returns:
-        Total character count
+        Combined text content
     """
     content = message.content
     if isinstance(content, str):
-        return len(content)
+        return content
 
-    total = 0
+    parts = []
     for block in content:
         # Text blocks
         if hasattr(block, "text") and block.text:
-            total += len(block.text)
+            parts.append(block.text)
         # Thinking blocks
         if hasattr(block, "thinking") and block.thinking:
-            total += len(block.thinking)
+            parts.append(block.thinking)
         # Tool use blocks
         if hasattr(block, "name") and block.name:
-            total += len(block.name)
+            parts.append(block.name)
         if hasattr(block, "input") and block.input:
             try:
-                total += len(json.dumps(block.input))
+                parts.append(json.dumps(block.input))
             except Exception:
                 pass
         # Tool result blocks - handle content field
         if hasattr(block, "content") and hasattr(block, "tool_use_id"):
             tool_content = block.content
             if isinstance(tool_content, str):
-                total += len(tool_content)
+                parts.append(tool_content)
             elif isinstance(tool_content, list):
                 for tc in tool_content:
                     if hasattr(tc, "text") and tc.text:
-                        total += len(tc.text)
-    return total
+                        parts.append(tc.text)
+    return "\n".join(parts)
 
 
-def _count_tools_chars(tools: list[AnthropicTool] | None) -> int:
-    """Count characters in tool definitions.
+def _extract_tools_text(tools: list[AnthropicTool] | None) -> str:
+    """Extract text from tool definitions.
 
     Args:
         tools: List of tool definitions
 
     Returns:
-        Total character count
+        Combined text content
     """
     if not tools:
-        return 0
-    total = 0
+        return ""
+    parts = []
     for tool in tools:
-        total += len(tool.name)
+        parts.append(tool.name)
         if tool.description:
-            total += len(tool.description)
+            parts.append(tool.description)
         try:
-            total += len(json.dumps(tool.input_schema))
+            parts.append(json.dumps(tool.input_schema))
         except Exception:
             pass
-    return total
+    return "\n".join(parts)
 
 
+# =============================================================================
+# Main token counting function
+# =============================================================================
+
+
+def count_anthropic_request_tokens(
+    system: str | list | None,
+    messages: list,
+    tools: list | None = None,
+    model: str | None = None,
+) -> int:
+    """Count tokens for an Anthropic-style request using tiktoken.
+
+    This function provides accurate token counting by using tiktoken
+    (cl100k_base encoding) which is compatible with Claude models.
+
+    Args:
+        system: System prompt (string or list of text blocks)
+        messages: List of AnthropicMessage objects
+        tools: List of AnthropicTool objects
+        model: Model name/ID (currently unused, reserved for future use)
+
+    Returns:
+        Token count for the request
+    """
+    total_tokens = 0
+
+    # Count system prompt tokens
+    system_text = _extract_system_text(system)
+    if system_text:
+        total_tokens += count_tokens(system_text)
+
+    # Count message tokens
+    for msg in messages:
+        message_text = _extract_message_text(msg)
+        if message_text:
+            total_tokens += count_tokens(message_text)
+        # Add per-message overhead for role markers and separators
+        total_tokens += MESSAGE_OVERHEAD_TOKENS
+
+    # Count tool definition tokens
+    tools_text = _extract_tools_text(tools)
+    if tools_text:
+        total_tokens += count_tokens(tools_text)
+
+    return total_tokens
+
+
+# Alias for backward compatibility
 def estimate_anthropic_request_tokens(
     system: str | list | None,
     messages: list,
     tools: list | None = None,
     model: str | None = None,
 ) -> int:
-    """Estimate total tokens for an Anthropic-style request.
+    """Count tokens for an Anthropic-style request.
 
-    This is the centralized estimation function that accounts for:
-    - System prompt content
-    - Message content (text, tool_use, tool_result, thinking blocks)
-    - Per-message overhead (role markers, separators)
-    - Tool definitions
-    - Structure overhead (JSON framing, special tokens)
-    - Model-specific calibration (Opus vs other models)
+    This is an alias for count_anthropic_request_tokens() for backward
+    compatibility. The function now uses tiktoken for accurate counting.
 
     Args:
         system: System prompt (string or list of text blocks)
         messages: List of AnthropicMessage objects
         tools: List of AnthropicTool objects
-        model: Model name/ID for calibration selection
+        model: Model name/ID (currently unused, reserved for future use)
 
     Returns:
-        Calibrated token count matching actual API usage
+        Token count for the request
     """
-    total_chars = 0
+    return count_anthropic_request_tokens(system, messages, tools, model)
 
-    # Count system prompt
-    total_chars += _count_system_chars(system)
 
-    # Count messages
-    message_count = len(messages)
-    for msg in messages:
-        total_chars += _count_message_chars(msg)
+# =============================================================================
+# Legacy calibration (no longer needed with tiktoken, kept for reference)
+# =============================================================================
 
-    # Count tools
-    total_chars += _count_tools_chars(tools)
+# Note: The calibration logic has been removed since tiktoken provides
+# accurate token counts. The calibration was only needed to correct
+# the character-based estimation which had significant errors.
 
-    # Calculate base tokens
-    base_tokens = total_chars // CHARS_PER_TOKEN
 
-    # Add per-message overhead
-    base_tokens += message_count * MESSAGE_OVERHEAD_TOKENS
+def calibrate_tokens(
+    base_tokens: int,
+    is_input: bool = True,
+    model: str | None = None,
+) -> int:
+    """Legacy calibration function (now a no-op).
 
-    # Apply structure overhead multiplier
-    base_tokens = int(base_tokens * STRUCTURE_OVERHEAD_MULTIPLIER)
+    With tiktoken providing accurate token counts, calibration is no longer
+    needed. This function is kept for backward compatibility and simply
+    returns the input value.
 
-    # Apply model-specific calibration
-    return calibrate_tokens(base_tokens, is_input=True, model=model)
+    Args:
+        base_tokens: Token count
+        is_input: Ignored (was for input vs output calibration)
+        model: Ignored (was for model-specific calibration)
+
+    Returns:
+        Same token count (no calibration applied)
+    """
+    return base_tokens
+
+
+# =============================================================================
+# Stop reason mapping
+# =============================================================================
 
 
 def map_openai_stop_reason_to_anthropic(
