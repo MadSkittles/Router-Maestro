@@ -45,10 +45,10 @@ class TestCountTokens:
 
     def test_count_tokens_code(self):
         """Test code snippet."""
-        code = '''
+        code = """
 def hello_world():
     print("Hello, World!")
-'''
+"""
         result = count_tokens(code)
         assert result > 0
 
