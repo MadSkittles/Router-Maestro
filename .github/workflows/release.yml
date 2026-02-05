@@ -26,9 +26,31 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  check-branch:
+    name: Check Branch
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Verify tag is on master branch
+        if: ${{ github.event_name == 'push' && github.ref_type == 'tag' }}
+        run: |
+          # Check if the tag points to a commit on the master branch
+          TAG_COMMIT=$(git rev-list -n 1 ${{ github.ref_name }})
+          if git branch -r --contains "$TAG_COMMIT" | grep -q 'origin/master'; then
+            echo "✅ Tag ${{ github.ref_name }} is on master branch"
+          else
+            echo "❌ Tag ${{ github.ref_name }} is NOT on master branch"
+            echo "Release tags must be created on the master branch only."
+            exit 1
+          fi
+
   test:
     name: Test
     runs-on: ubuntu-latest
+    needs: check-branch
     steps:
       - uses: actions/checkout@v4
 
