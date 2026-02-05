@@ -25,9 +25,9 @@ class TestTokenEstimationAdvanced:
 
     def test_estimate_from_char_count_large(self):
         """Test estimation from large character count."""
-        # 4000 chars should be about 1000 tokens
+        # 4000 chars / 3 = 1333 tokens (CHARS_PER_TOKEN = 3)
         result = estimate_tokens_from_char_count(4000)
-        assert result == 1000
+        assert result == 1333
 
     def test_estimate_from_char_count_small(self):
         """Test estimation from small character count."""

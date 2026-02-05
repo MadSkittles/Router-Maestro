@@ -614,10 +614,10 @@ def translate_openai_chunk_to_anthropic_events(
         prompt_tokens = usage.get("prompt_tokens", 0)
         completion_tokens = usage.get("completion_tokens", 0)
 
-        # Use estimated_input_tokens for context display since Copilot may truncate input
-        # This gives Claude Code accurate context percentage based on actual conversation size
+        # Prefer actual tokens from API when available
+        # This gives Claude Code accurate context percentage based on actual API usage
         input_tokens_for_display = (
-            state.estimated_input_tokens if state.estimated_input_tokens > 0 else prompt_tokens
+            prompt_tokens if prompt_tokens > 0 else state.estimated_input_tokens
         )
 
         events.append(
