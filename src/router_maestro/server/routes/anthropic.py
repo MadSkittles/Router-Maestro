@@ -262,12 +262,14 @@ def _estimate_input_tokens(request: AnthropicMessagesRequest) -> int:
     """Estimate input tokens from request content.
 
     Uses the centralized token estimation function that accounts for
-    message overhead and structure overhead for more accurate estimates.
+    message overhead, structure overhead, and model-specific calibration
+    for more accurate estimates.
     """
     return estimate_anthropic_request_tokens(
         system=request.system,
         messages=request.messages,
         tools=request.tools,
+        model=request.model,
     )
 
 

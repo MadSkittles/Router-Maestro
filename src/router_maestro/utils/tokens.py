@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal
 
 if TYPE_CHECKING:
@@ -25,6 +26,156 @@ STRUCTURE_OVERHEAD_MULTIPLIER = 1.25
 AnthropicStopReason = Literal[
     "end_turn", "max_tokens", "stop_sequence", "tool_use", "pause_turn", "refusal"
 ]
+
+
+# =============================================================================
+# Token Calibration (ported from agent-maestro)
+# =============================================================================
+#
+# Linear regression model: calibrated = slope * base_tokens + base_offset
+#
+# These coefficients were derived from actual API usage data to correct
+# the estimation to match real token counts from the Anthropic API.
+# =============================================================================
+
+
+@dataclass
+class CalibrationCoefficients:
+    """Linear regression coefficients for token calibration."""
+
+    slope: float
+    base_offset: int  # Integer baseline adjustment for token count accuracy
+
+
+@dataclass
+class TokenRangeCalibration:
+    """Calibration parameters for different token size ranges."""
+
+    small: CalibrationCoefficients  # < 10K tokens
+    medium: CalibrationCoefficients  # 10K - 50K tokens
+    large: CalibrationCoefficients  # 50K - 100K tokens
+    xlarge: CalibrationCoefficients  # >= 100K tokens
+
+
+@dataclass
+class TokenCalibrationConfig:
+    """Calibration config for input and output tokens."""
+
+    input: TokenRangeCalibration
+    output: TokenRangeCalibration
+
+
+# Calibration parameters optimized for different token size ranges
+# These are based on linear regression from actual API usage data
+CALIBRATION_CONFIG: dict[str, TokenCalibrationConfig] = {
+    "default": TokenCalibrationConfig(
+        input=TokenRangeCalibration(
+            small=CalibrationCoefficients(slope=1.065, base_offset=-120),
+            medium=CalibrationCoefficients(slope=1.082, base_offset=1300),
+            large=CalibrationCoefficients(slope=1.05, base_offset=2000),
+            xlarge=CalibrationCoefficients(slope=1.05, base_offset=1500),
+        ),
+        output=TokenRangeCalibration(
+            # Use same parameters for all output token ranges due to high variability
+            small=CalibrationCoefficients(slope=0.67, base_offset=170),
+            medium=CalibrationCoefficients(slope=0.67, base_offset=170),
+            large=CalibrationCoefficients(slope=0.67, base_offset=170),
+            xlarge=CalibrationCoefficients(slope=0.67, base_offset=170),
+        ),
+    ),
+    "opus": TokenCalibrationConfig(
+        input=TokenRangeCalibration(
+            small=CalibrationCoefficients(slope=1.1, base_offset=0),
+            medium=CalibrationCoefficients(slope=1.1, base_offset=1500),
+            large=CalibrationCoefficients(slope=1.12, base_offset=1500),
+            xlarge=CalibrationCoefficients(slope=1.14, base_offset=1500),
+        ),
+        output=TokenRangeCalibration(
+            small=CalibrationCoefficients(slope=1.0, base_offset=150),
+            medium=CalibrationCoefficients(slope=1.0, base_offset=150),
+            large=CalibrationCoefficients(slope=1.0, base_offset=150),
+            xlarge=CalibrationCoefficients(slope=1.0, base_offset=150),
+        ),
+    ),
+}
+
+
+def _get_calibration_config(model: str | None) -> TokenCalibrationConfig:
+    """Get calibration config based on model name.
+
+    Args:
+        model: Model name/ID
+
+    Returns:
+        Calibration config for the model
+    """
+    if model and "opus" in model.lower():
+        return CALIBRATION_CONFIG["opus"]
+    return CALIBRATION_CONFIG["default"]
+
+
+def _get_calibration_coefficients(
+    tokens: int,
+    is_input: bool,
+    config: TokenCalibrationConfig,
+) -> CalibrationCoefficients:
+    """Select calibration coefficients based on token count and type.
+
+    Args:
+        tokens: Base token count
+        is_input: True for input tokens, False for output tokens
+        config: Calibration config to use
+
+    Returns:
+        Calibration coefficients for the token range
+    """
+    range_config = config.input if is_input else config.output
+
+    # Thresholds (9K, 45K, 90K) approximate actual API thresholds (10K, 50K, 100K)
+    if tokens < 9000:
+        return range_config.small
+    elif tokens < 45000:
+        return range_config.medium
+    elif tokens < 90000:
+        return range_config.large
+    else:
+        return range_config.xlarge
+
+
+def calibrate_tokens(
+    base_tokens: int,
+    is_input: bool = True,
+    model: str | None = None,
+) -> int:
+    """Calibrate token count to fit actual API usage.
+
+    Uses linear regression coefficients optimized from actual API usage data
+    to correct the base estimation to match real token counts.
+
+    Args:
+        base_tokens: Base token count from estimation
+        is_input: True for input tokens, False for output tokens
+        model: Model name/ID to select appropriate calibration
+
+    Returns:
+        Calibrated token count matching actual API usage
+    """
+    if base_tokens <= 0:
+        return 0
+
+    config = _get_calibration_config(model)
+    coefficients = _get_calibration_coefficients(base_tokens, is_input, config)
+
+    # Apply calibration: calibrated = slope × base + base_offset
+    calibrated = coefficients.slope * base_tokens + coefficients.base_offset
+
+    # Ensure we return at least 1 for non-zero input
+    return max(1, round(calibrated))
+
+
+# =============================================================================
+# Base Token Estimation Functions
+# =============================================================================
 
 
 def estimate_tokens(text: str) -> int:
@@ -141,6 +292,7 @@ def estimate_anthropic_request_tokens(
     system: str | list | None,
     messages: list,
     tools: list | None = None,
+    model: str | None = None,
 ) -> int:
     """Estimate total tokens for an Anthropic-style request.
 
@@ -150,14 +302,16 @@ def estimate_anthropic_request_tokens(
     - Per-message overhead (role markers, separators)
     - Tool definitions
     - Structure overhead (JSON framing, special tokens)
+    - Model-specific calibration (Opus vs other models)
 
     Args:
         system: System prompt (string or list of text blocks)
         messages: List of AnthropicMessage objects
         tools: List of AnthropicTool objects
+        model: Model name/ID for calibration selection
 
     Returns:
-        Estimated token count with overhead applied
+        Calibrated token count matching actual API usage
     """
     total_chars = 0
 
@@ -179,7 +333,10 @@ def estimate_anthropic_request_tokens(
     base_tokens += message_count * MESSAGE_OVERHEAD_TOKENS
 
     # Apply structure overhead multiplier
-    return int(base_tokens * STRUCTURE_OVERHEAD_MULTIPLIER)
+    base_tokens = int(base_tokens * STRUCTURE_OVERHEAD_MULTIPLIER)
+
+    # Apply model-specific calibration
+    return calibrate_tokens(base_tokens, is_input=True, model=model)
 
 
 def map_openai_stop_reason_to_anthropic(
