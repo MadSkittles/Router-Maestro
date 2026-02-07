@@ -81,9 +81,7 @@ def parse_model_id(model_id: str) -> ParsedModelId:
 _NATURAL_SORT_RE = re.compile(r"(\d+(?:\.\d+)*)")
 
 
-def _natural_sort_key(
-    s: str, descending: bool = False
-) -> list[tuple[int, tuple[int, ...], str]]:
+def _natural_sort_key(s: str, descending: bool = False) -> list[tuple[int, tuple[int, ...], str]]:
     """Split a string into segments for natural (human) sort order.
 
     Each segment becomes a tuple of (type_flag, version_tuple, text_value):
