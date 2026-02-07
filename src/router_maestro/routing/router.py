@@ -27,6 +27,7 @@ from router_maestro.providers import (
     ResponsesStreamChunk,
 )
 from router_maestro.utils import get_logger
+from router_maestro.utils.model_sort import sort_models
 
 logger = get_logger("routing")
 
@@ -654,11 +655,9 @@ class Router:
                 models.append(all_models[priority_key])
                 seen.add(priority_key)
 
-        # Add remaining models
-        for key, model in all_models.items():
-            if key not in seen:
-                models.append(model)
-                seen.add(key)
+        # Add remaining models (sorted by provider, family, version, variant)
+        remaining = [model for key, model in all_models.items() if key not in seen]
+        models.extend(sort_models(remaining))
 
         logger.debug("Listed %d models", len(models))
         return models
