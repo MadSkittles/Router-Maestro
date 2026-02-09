@@ -2,6 +2,8 @@
 
 import math
 
+import pytest
+
 from router_maestro.server.schemas.anthropic import (
     AnthropicAssistantMessage,
     AnthropicTextBlock,
@@ -11,6 +13,12 @@ from router_maestro.server.schemas.anthropic import (
     AnthropicToolResultContentBlock,
     AnthropicToolUseBlock,
     AnthropicUserMessage,
+)
+from router_maestro.utils.token_config import (
+    ANTHROPIC_CONFIG,
+    COPILOT_CONFIG,
+    OPENAI_CONFIG,
+    TokenCountingConfig,
 )
 from router_maestro.utils.tokens import (
     BASE_TOOL_TOKENS,
@@ -625,3 +633,152 @@ class TestEstimateAnthropicRequestTokens:
             system=None, messages=messages, tools=None
         )
         assert count_result == estimate_result
+
+
+class TestCountAnthropicRequestTokensWithConfig:
+    """Parameterized tests for count_anthropic_request_tokens with different configs."""
+
+    ALL_CONFIGS = [
+        pytest.param(COPILOT_CONFIG, id="copilot"),
+        pytest.param(ANTHROPIC_CONFIG, id="anthropic"),
+        pytest.param(OPENAI_CONFIG, id="openai"),
+    ]
+
+    @pytest.mark.parametrize("config", ALL_CONFIGS)
+    def test_simple_message_positive(self, config: TokenCountingConfig):
+        messages = [AnthropicUserMessage(content="Hello, how are you?")]
+        result = count_anthropic_request_tokens(system=None, messages=messages, config=config)
+        assert result > 0
+
+    @pytest.mark.parametrize("config", ALL_CONFIGS)
+    def test_empty_messages_zero(self, config: TokenCountingConfig):
+        result = count_anthropic_request_tokens(system=None, messages=[], config=config)
+        assert result == 0
+
+    @pytest.mark.parametrize("config", ALL_CONFIGS)
+    def test_with_system_prompt(self, config: TokenCountingConfig):
+        messages = [AnthropicUserMessage(content="Hi")]
+        result = count_anthropic_request_tokens(
+            system="You are a helpful assistant.",
+            messages=messages,
+            config=config,
+        )
+        assert result > 0
+
+    @pytest.mark.parametrize("config", ALL_CONFIGS)
+    def test_with_tools(self, config: TokenCountingConfig):
+        messages = [AnthropicUserMessage(content="Use a tool")]
+        tools = [
+            AnthropicTool(
+                name="get_weather",
+                description="Get weather for a location",
+                input_schema={
+                    "type": "object",
+                    "properties": {"location": {"type": "string"}},
+                },
+            )
+        ]
+        with_tools = count_anthropic_request_tokens(
+            system=None, messages=messages, tools=tools, config=config
+        )
+        without_tools = count_anthropic_request_tokens(
+            system=None, messages=messages, config=config
+        )
+        assert with_tools > without_tools
+
+    @pytest.mark.parametrize("config", ALL_CONFIGS)
+    def test_with_tool_use_block(self, config: TokenCountingConfig):
+        messages = [
+            AnthropicAssistantMessage(
+                content=[
+                    AnthropicToolUseBlock(
+                        id="tool_123",
+                        name="get_weather",
+                        input={"location": "San Francisco"},
+                    )
+                ]
+            ),
+        ]
+        result = count_anthropic_request_tokens(system=None, messages=messages, config=config)
+        assert result > 0
+
+    def test_copilot_vs_anthropic_tool_definitions(self):
+        """Copilot config inflates tool definitions (1.1x, 16 base), Anthropic does not."""
+        messages = [AnthropicUserMessage(content="Use tools")]
+        tools = [
+            AnthropicTool(
+                name="tool_a",
+                description="A longer tool description for meaningful difference",
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string", "description": "Search query"},
+                        "limit": {"type": "integer", "description": "Max results"},
+                    },
+                },
+            ),
+            AnthropicTool(
+                name="tool_b",
+                description="Another tool with some description text",
+                input_schema={
+                    "type": "object",
+                    "properties": {"id": {"type": "string"}},
+                },
+            ),
+        ]
+        copilot = count_anthropic_request_tokens(
+            system=None, messages=messages, tools=tools, config=COPILOT_CONFIG
+        )
+        anthropic = count_anthropic_request_tokens(
+            system=None, messages=messages, tools=tools, config=ANTHROPIC_CONFIG
+        )
+        openai = count_anthropic_request_tokens(
+            system=None, messages=messages, tools=tools, config=OPENAI_CONFIG
+        )
+        # Copilot has highest inflation (1.1x multiplier + 16 base)
+        assert copilot > anthropic
+        assert copilot > openai
+        # OpenAI has 8 base tool tokens, Anthropic has 0 -> OpenAI slightly higher
+        assert openai > anthropic
+
+    def test_copilot_vs_anthropic_tool_calls(self):
+        """Copilot config inflates tool calls (1.5x), Anthropic does not (1.0x)."""
+        messages = [
+            {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": "tool_1",
+                        "name": "get_weather",
+                        "input": {"location": "San Francisco", "units": "celsius"},
+                    }
+                ],
+            },
+        ]
+        copilot = count_anthropic_request_tokens(
+            system=None, messages=messages, config=COPILOT_CONFIG
+        )
+        anthropic = count_anthropic_request_tokens(
+            system=None, messages=messages, config=ANTHROPIC_CONFIG
+        )
+        assert copilot > anthropic
+
+    def test_estimate_alias_forwards_config(self):
+        """estimate_anthropic_request_tokens forwards config parameter."""
+        messages = [AnthropicUserMessage(content="Hello")]
+        tools = [
+            AnthropicTool(
+                name="test",
+                description="A test tool",
+                input_schema={"type": "object"},
+            )
+        ]
+        for config in [COPILOT_CONFIG, ANTHROPIC_CONFIG, OPENAI_CONFIG]:
+            count_result = count_anthropic_request_tokens(
+                system=None, messages=messages, tools=tools, config=config
+            )
+            estimate_result = estimate_anthropic_request_tokens(
+                system=None, messages=messages, tools=tools, config=config
+            )
+            assert count_result == estimate_result

@@ -8,7 +8,7 @@ from datetime import UTC, datetime
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 
-from router_maestro.providers import ChatRequest, ProviderError
+from router_maestro.providers import AnthropicProvider, ChatRequest, ProviderError
 from router_maestro.routing import Router, get_router
 from router_maestro.server.schemas.anthropic import (
     AnthropicCountTokensRequest,
@@ -30,6 +30,10 @@ from router_maestro.utils import (
     get_logger,
     map_openai_stop_reason_to_anthropic,
 )
+from router_maestro.utils.token_config import (
+    count_tokens_via_anthropic_api,
+    get_config_for_provider,
+)
 from router_maestro.utils.tokens import AnthropicStopReason
 
 logger = get_logger("server.routes.anthropic")
@@ -38,6 +42,20 @@ router = APIRouter()
 
 
 TEST_RESPONSE_TEXT = "This is a test response from Router-Maestro."
+
+
+async def _resolve_provider_name(model: str) -> str | None:
+    """Resolve which provider will handle a model.
+
+    Returns the provider name (e.g. ``"github-copilot"``, ``"anthropic"``)
+    or ``None`` if the model cannot be resolved.
+    """
+    model_router = get_router()
+    try:
+        provider_name, _actual_model, _provider = await model_router._resolve_provider(model)
+        return provider_name
+    except ProviderError:
+        return None
 
 
 def _create_test_response() -> AnthropicMessagesResponse:
@@ -131,8 +149,9 @@ async def messages(request: AnthropicMessagesRequest):
     chat_request = translate_anthropic_to_openai(request)
 
     if request.stream:
-        # Estimate input tokens for context display
-        estimated_tokens = _estimate_input_tokens(request)
+        # Resolve provider for accurate token estimation
+        provider_name = await _resolve_provider_name(request.model)
+        estimated_tokens = _estimate_input_tokens(request, provider_name)
         return StreamingResponse(
             stream_response(model_router, chat_request, request.model, estimated_tokens),
             media_type="text/event-stream",
@@ -172,16 +191,64 @@ async def messages(request: AnthropicMessagesRequest):
 @router.post("/v1/messages/count_tokens")
 @router.post("/api/anthropic/v1/messages/count_tokens")
 async def count_tokens(request: AnthropicCountTokensRequest):
-    """Count tokens for a messages request using tiktoken.
+    """Count tokens for a messages request.
 
-    Uses the centralized token counting function that provides accurate
-    token counting via tiktoken (cl100k_base encoding).
+    Resolves which provider will handle the model and selects the appropriate
+    token-counting configuration. For native Anthropic, attempts an upstream
+    API call for an exact count before falling back to local estimation.
     """
+    provider_name = await _resolve_provider_name(request.model)
+    config = get_config_for_provider(provider_name)
+
+    # For native Anthropic, try the upstream count_tokens API first
+    if provider_name == "anthropic":
+        model_router = get_router()
+        provider = model_router.providers.get("anthropic")
+        if isinstance(provider, AnthropicProvider) and provider.is_authenticated():
+            try:
+                # Serialise messages/tools to plain dicts for the API call
+                msgs = [
+                    m if isinstance(m, dict) else m.model_dump(exclude_none=True)
+                    for m in request.messages
+                ]
+                system = request.system
+                if system is not None and not isinstance(system, str):
+                    system = [
+                        b if isinstance(b, dict) else b.model_dump(exclude_none=True)
+                        for b in system
+                    ]
+                tools_dicts = None
+                if request.tools:
+                    tools_dicts = [
+                        t if isinstance(t, dict) else t.model_dump(exclude_none=True)
+                        for t in request.tools
+                    ]
+                # Strip provider prefix from model name for upstream API
+                model_name = request.model
+                if "/" in model_name:
+                    model_name = model_name.split("/", 1)[1]
+
+                exact_tokens = await count_tokens_via_anthropic_api(
+                    base_url=provider.base_url,
+                    api_key=provider._get_api_key(),
+                    model=model_name,
+                    messages=msgs,
+                    system=system,
+                    tools=tools_dicts,
+                )
+                return {"input_tokens": exact_tokens}
+            except Exception:
+                logger.warning(
+                    "Anthropic upstream count_tokens failed, falling back to local estimation",
+                    exc_info=True,
+                )
+
     input_tokens = count_anthropic_request_tokens(
         system=request.system,
         messages=request.messages,
         tools=request.tools,
         model=request.model,
+        config=config,
     )
     return {"input_tokens": input_tokens}
 
@@ -191,18 +258,22 @@ def _map_finish_reason(reason: str | None) -> AnthropicStopReason | None:
     return map_openai_stop_reason_to_anthropic(reason)
 
 
-def _estimate_input_tokens(request: AnthropicMessagesRequest) -> int:
+def _estimate_input_tokens(
+    request: AnthropicMessagesRequest,
+    provider_name: str | None = None,
+) -> int:
     """Estimate input tokens from request content.
 
-    Uses the centralized token estimation function that accounts for
-    message overhead, structure overhead, and model-specific calibration
-    for more accurate estimates.
+    Uses the centralized token estimation function with provider-aware
+    configuration for accurate estimates.
     """
+    config = get_config_for_provider(provider_name)
     return estimate_anthropic_request_tokens(
         system=request.system,
         messages=request.messages,
         tools=request.tools,
         model=request.model,
+        config=config,
     )
 
 

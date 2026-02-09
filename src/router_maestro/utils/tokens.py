@@ -13,6 +13,8 @@ from typing import TYPE_CHECKING, Any, Literal
 
 import tiktoken
 
+from router_maestro.utils.token_config import DEFAULT_CONFIG, TokenCountingConfig
+
 if TYPE_CHECKING:
     from router_maestro.server.schemas.anthropic import AnthropicTextBlock
 
@@ -181,16 +183,22 @@ def _count_object_tokens(obj: Any, encoding_name: str) -> int:
     return count_tokens(str(obj), encoding_name)
 
 
-def _count_message_object_tokens(obj: Any, encoding_name: str) -> int:
+def _count_message_object_tokens(
+    obj: Any,
+    encoding_name: str,
+    config: TokenCountingConfig | None = None,
+) -> int:
     """Recursively count tokens for a message object's values.
 
     Unlike _count_object_tokens, this does NOT tokenize the keys themselves
     (matching VS Code Copilot Chat's countMessageObjectTokens behavior).
     Special handling:
-    - 'name' key adds TOKENS_PER_NAME extra token
-    - 'tool_calls' key values are multiplied by TOOL_CALLS_MULTIPLIER
+    - 'name' key adds config.tokens_per_name extra token
+    - 'tool_calls' key values are multiplied by config.tool_calls_multiplier
     - image_url content is calculated based on image dimensions
     """
+    cfg = config if config is not None else DEFAULT_CONFIG
+
     if obj is None:
         return 0
 
@@ -206,7 +214,7 @@ def _count_message_object_tokens(obj: Any, encoding_name: str) -> int:
     if isinstance(obj, list):
         total = 0
         for item in obj:
-            total += _count_message_object_tokens(item, encoding_name)
+            total += _count_message_object_tokens(item, encoding_name, cfg)
         return total
 
     if isinstance(obj, dict):
@@ -227,17 +235,17 @@ def _count_message_object_tokens(obj: Any, encoding_name: str) -> int:
                     total += 765  # ~4 tiles (2x2) * 170 + 85
                 continue
 
-            new_tokens = _count_message_object_tokens(value, encoding_name)
+            new_tokens = _count_message_object_tokens(value, encoding_name, cfg)
 
-            # tool_calls get a 1.5x safety multiplier
+            # tool_calls get a safety multiplier
             if key == "tool_calls":
-                new_tokens = int(new_tokens * TOOL_CALLS_MULTIPLIER)
+                new_tokens = int(new_tokens * cfg.tool_calls_multiplier)
 
             total += new_tokens
 
             # name fields cost an extra token
             if key == "name" and value is not None:
-                total += TOKENS_PER_NAME
+                total += cfg.tokens_per_name
 
         return total
 
@@ -246,6 +254,7 @@ def _count_message_object_tokens(obj: Any, encoding_name: str) -> int:
         return _count_message_object_tokens(
             {k: v for k, v in obj.__dict__.items() if not k.startswith("_")},
             encoding_name,
+            cfg,
         )
 
     return count_tokens(str(obj), encoding_name)
@@ -337,12 +346,17 @@ def _tool_to_dict(tool: Any) -> dict:
 # =============================================================================
 
 
-def _count_message_tokens(msg_dict: dict, encoding_name: str) -> int:
+def _count_message_tokens(
+    msg_dict: dict,
+    encoding_name: str,
+    config: TokenCountingConfig | None = None,
+) -> int:
     """Count tokens for a single message dict.
 
-    Applies the TOOL_CALLS_MULTIPLIER to tool_use blocks in Anthropic format
+    Applies the config.tool_calls_multiplier to tool_use blocks in Anthropic format
     (where they appear as content blocks) and to tool_calls in OpenAI format.
     """
+    cfg = config if config is not None else DEFAULT_CONFIG
     total = 0
 
     for key, value in msg_dict.items():
@@ -351,26 +365,26 @@ def _count_message_tokens(msg_dict: dict, encoding_name: str) -> int:
 
         # OpenAI-format tool_calls at the message level
         if key == "tool_calls":
-            tc_tokens = _count_message_object_tokens(value, encoding_name)
-            total += int(tc_tokens * TOOL_CALLS_MULTIPLIER)
+            tc_tokens = _count_message_object_tokens(value, encoding_name, cfg)
+            total += int(tc_tokens * cfg.tool_calls_multiplier)
             continue
 
         # Anthropic-format: content is a list that may contain tool_use blocks
         if key == "content" and isinstance(value, list):
             for block in value:
                 if isinstance(block, dict) and block.get("type") == "tool_use":
-                    # Apply 1.5x multiplier to tool_use blocks
-                    block_tokens = _count_message_object_tokens(block, encoding_name)
-                    total += int(block_tokens * TOOL_CALLS_MULTIPLIER)
+                    # Apply multiplier to tool_use blocks
+                    block_tokens = _count_message_object_tokens(block, encoding_name, cfg)
+                    total += int(block_tokens * cfg.tool_calls_multiplier)
                 else:
-                    total += _count_message_object_tokens(block, encoding_name)
+                    total += _count_message_object_tokens(block, encoding_name, cfg)
             continue
 
-        new_tokens = _count_message_object_tokens(value, encoding_name)
+        new_tokens = _count_message_object_tokens(value, encoding_name, cfg)
         total += new_tokens
 
         if key == "name" and value is not None:
-            total += TOKENS_PER_NAME
+            total += cfg.tokens_per_name
 
     return total
 
@@ -385,24 +399,30 @@ def count_anthropic_request_tokens(
     messages: list,
     tools: list | None = None,
     model: str | None = None,
+    config: TokenCountingConfig | None = None,
 ) -> int:
     """Count tokens for an Anthropic-style request using tiktoken.
 
     Implements recursive key-value token counting aligned with VS Code
     Copilot Chat's BPETokenizer approach, including:
-    - Per-message overhead (TOKENS_PER_MESSAGE = 3)
-    - Name field overhead (TOKENS_PER_NAME = 1)
-    - Completion priming overhead (TOKENS_PER_COMPLETION = 3)
-    - Tool calls multiplier (1.5x)
-    - Tool definition overhead (16 base + 8/tool + 1.1x)
+    - Per-message overhead (config.tokens_per_message, default 3)
+    - Name field overhead (config.tokens_per_name, default 1)
+    - Completion priming overhead (config.tokens_per_completion, default 3)
+    - Tool calls multiplier (config.tool_calls_multiplier, default 1.5x)
+    - Tool definition overhead (config.base_tool_tokens + config.tokens_per_tool
+      per tool, scaled by config.tool_definition_multiplier)
     - Model-specific encoding selection (o200k_base for O-series)
+
+    When *config* is ``None``, uses ``DEFAULT_CONFIG`` (Copilot-aligned) for
+    full backward compatibility.
     """
+    cfg = config if config is not None else DEFAULT_CONFIG
     encoding_name = _select_encoding(model)
     total_tokens = 0
 
-    # Outer base: one TOKENS_PER_MESSAGE for the overall message sequence
+    # Outer base: one tokens_per_message for the overall message sequence
     if messages:
-        total_tokens += TOKENS_PER_MESSAGE
+        total_tokens += cfg.tokens_per_message
 
     # Count system prompt tokens
     system_text = _extract_system_text(system)
@@ -412,19 +432,19 @@ def count_anthropic_request_tokens(
     # Count message tokens
     for msg in messages:
         msg_dict = _message_to_dict(msg)
-        total_tokens += TOKENS_PER_MESSAGE
-        total_tokens += _count_message_tokens(msg_dict, encoding_name)
+        total_tokens += cfg.tokens_per_message
+        total_tokens += _count_message_tokens(msg_dict, encoding_name, cfg)
 
     # Completion priming overhead
     if messages:
-        total_tokens += TOKENS_PER_COMPLETION
+        total_tokens += cfg.tokens_per_completion
 
     # Count tool definition tokens
     if tools:
-        tool_tokens = BASE_TOOL_TOKENS
+        tool_tokens = cfg.base_tool_tokens
         for tool in tools:
             tool_dict = _tool_to_dict(tool)
-            tool_tokens += TOKENS_PER_TOOL
+            tool_tokens += cfg.tokens_per_tool
             tool_tokens += _count_object_tokens(
                 {
                     "name": tool_dict.get("name"),
@@ -433,7 +453,7 @@ def count_anthropic_request_tokens(
                 },
                 encoding_name,
             )
-        total_tokens += int(tool_tokens * TOOL_DEFINITION_MULTIPLIER)
+        total_tokens += int(tool_tokens * cfg.tool_definition_multiplier)
 
     return total_tokens
 
@@ -444,9 +464,10 @@ def estimate_anthropic_request_tokens(
     messages: list,
     tools: list | None = None,
     model: str | None = None,
+    config: TokenCountingConfig | None = None,
 ) -> int:
     """Count tokens for an Anthropic-style request (backward compat alias)."""
-    return count_anthropic_request_tokens(system, messages, tools, model)
+    return count_anthropic_request_tokens(system, messages, tools, model, config)
 
 
 # =============================================================================
