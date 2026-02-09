@@ -2,6 +2,15 @@
 
 from router_maestro.utils.logging import get_logger, setup_logging
 from router_maestro.utils.model_sort import ParsedModelId, parse_model_id, sort_models
+from router_maestro.utils.token_config import (
+    ANTHROPIC_CONFIG,
+    COPILOT_CONFIG,
+    DEFAULT_CONFIG,
+    OPENAI_CONFIG,
+    TokenCountingConfig,
+    count_tokens_via_anthropic_api,
+    get_config_for_provider,
+)
 from router_maestro.utils.tokens import (
     BASE_TOOL_TOKENS,
     TOKENS_PER_COMPLETION,
@@ -21,7 +30,11 @@ from router_maestro.utils.tokens import (
 )
 
 __all__ = [
+    "ANTHROPIC_CONFIG",
     "BASE_TOOL_TOKENS",
+    "COPILOT_CONFIG",
+    "DEFAULT_CONFIG",
+    "OPENAI_CONFIG",
     "ParsedModelId",
     "TOKENS_PER_COMPLETION",
     "TOKENS_PER_MESSAGE",
@@ -29,13 +42,16 @@ __all__ = [
     "TOKENS_PER_TOOL",
     "TOOL_CALLS_MULTIPLIER",
     "TOOL_DEFINITION_MULTIPLIER",
+    "TokenCountingConfig",
     "calculate_image_token_cost",
     "calibrate_tokens",
     "count_anthropic_request_tokens",
     "count_tokens",
+    "count_tokens_via_anthropic_api",
     "estimate_anthropic_request_tokens",
     "estimate_tokens",
     "estimate_tokens_from_char_count",
+    "get_config_for_provider",
     "get_logger",
     "map_openai_stop_reason_to_anthropic",
     "parse_model_id",
