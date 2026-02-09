@@ -40,6 +40,8 @@ Router-Maestro acts as a proxy that gives you access to models from multiple pro
 
 Get up and running in 4 steps:
 
+https://github.com/user-attachments/assets/e4a680f0-7a63-4812-b124-b045152d6253
+
 ### 1. Start the Server
 
 #### Docker (recommended)
