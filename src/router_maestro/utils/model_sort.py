@@ -26,6 +26,20 @@ class ParsedModelId:
     raw_id: str
 
 
+def strip_date_suffix(model_id: str) -> str:
+    """Strip date suffix (YYYYMMDD or YYYY-MM-DD) from a model ID.
+
+    Args:
+        model_id: Raw model ID string (e.g. "claude-opus-4-6-20250617")
+
+    Returns:
+        Model ID without date suffix (e.g. "claude-opus-4-6")
+    """
+    result = _DATE_SUFFIX_DASHED.sub("", model_id)
+    result = _DATE_SUFFIX_PLAIN.sub("", result)
+    return result
+
+
 def parse_model_id(model_id: str) -> ParsedModelId:
     """Parse a model ID into its components.
 

@@ -52,6 +52,9 @@ dependencies = [
 
     # TOML writing (for Codex config generation)
     "tomlkit>=0.12.0",
+
+    # Fuzzy matching
+    "rapidfuzz>=3.0.0",
 ]
 
 [project.optional-dependencies]

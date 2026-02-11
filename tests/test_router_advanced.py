@@ -201,6 +201,7 @@ class TestRouterModelResolutionAsync:
         router._priorities_config = None
         router._priorities_config_timestamp = 0.0
         router._providers_config_timestamp = float("inf")
+        router._fuzzy_cache = {}
         return router
 
     @pytest.mark.asyncio
