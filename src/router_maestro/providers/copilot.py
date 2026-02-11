@@ -113,7 +113,7 @@ class CopilotProvider(BaseProvider):
     def _get_client(self) -> httpx.AsyncClient:
         """Get or create a reusable HTTP client."""
         if self._client is None or self._client.is_closed:
-            self._client = httpx.AsyncClient(timeout=120.0)
+            self._client = httpx.AsyncClient(timeout=600.0)
         return self._client
 
     def _build_messages_payload(self, request: ChatRequest) -> tuple[list[dict], bool]:
@@ -291,8 +291,18 @@ class CopilotProvider(BaseProvider):
                 retryable=retryable,
             )
         except httpx.HTTPError as e:
-            logger.error("Copilot stream HTTP error: %s", e)
-            raise ProviderError(f"HTTP error: {e}", retryable=True)
+            resp = getattr(e, 'response', None)
+            resp_text = resp.text if resp is not None else 'No response'
+            logger.error(
+                "Copilot stream HTTP error: type=%s error=%r\nRequest payload: %s\nRequest URL: %s\nRequest headers: %s\nResponse: %s",
+                type(e).__name__,
+                e,
+                json.dumps(payload, default=str)[:2000],
+                COPILOT_CHAT_URL,
+                {k: v for k, v in self._get_headers(vision_request=has_images).items() if k != "Authorization"},
+                resp_text,
+            )
+            raise ProviderError(f"HTTP error: {type(e).__name__}: {e}", retryable=True)
 
     async def list_models(self, force_refresh: bool = False) -> list[ModelInfo]:
         """List available Copilot models from API with caching.
