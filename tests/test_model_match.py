@@ -8,7 +8,6 @@ from router_maestro.providers.base import ModelInfo
 from router_maestro.utils.model_match import fuzzy_match_model, normalize_model_id
 from router_maestro.utils.model_sort import strip_date_suffix
 
-
 # ── strip_date_suffix ──────────────────────────────────────────────────
 
 
@@ -76,20 +75,22 @@ def _make_cache(
 @pytest.fixture()
 def sample_cache() -> dict[str, tuple[str, ModelInfo]]:
     """A realistic model cache with multiple providers and versions."""
-    return _make_cache([
-        # Anthropic models via github-copilot
-        ("claude-opus-4-6-20250617", "github-copilot", "Claude Opus 4.6"),
-        ("claude-sonnet-4-5-20250514", "github-copilot", "Claude Sonnet 4.5"),
-        ("claude-sonnet-4-5-20250929", "github-copilot", "Claude Sonnet 4.5"),
-        # Anthropic models via anthropic provider
-        ("claude-opus-4-6-20250617", "anthropic", "Claude Opus 4.6"),
-        ("claude-sonnet-4-5-20250514", "anthropic", "Claude Sonnet 4.5"),
-        # OpenAI models
-        ("gpt-4o", "github-copilot", "GPT-4o"),
-        ("gpt-4o-mini", "github-copilot", "GPT-4o Mini"),
-        ("gpt-4o-mini-2024-07-18", "github-copilot", "GPT-4o Mini"),
-        ("o3-mini", "github-copilot", "o3-mini"),
-    ])
+    return _make_cache(
+        [
+            # Anthropic models via github-copilot
+            ("claude-opus-4-6-20250617", "github-copilot", "Claude Opus 4.6"),
+            ("claude-sonnet-4-5-20250514", "github-copilot", "Claude Sonnet 4.5"),
+            ("claude-sonnet-4-5-20250929", "github-copilot", "Claude Sonnet 4.5"),
+            # Anthropic models via anthropic provider
+            ("claude-opus-4-6-20250617", "anthropic", "Claude Opus 4.6"),
+            ("claude-sonnet-4-5-20250514", "anthropic", "Claude Sonnet 4.5"),
+            # OpenAI models
+            ("gpt-4o", "github-copilot", "GPT-4o"),
+            ("gpt-4o-mini", "github-copilot", "GPT-4o Mini"),
+            ("gpt-4o-mini-2024-07-18", "github-copilot", "GPT-4o Mini"),
+            ("o3-mini", "github-copilot", "o3-mini"),
+        ]
+    )
 
 
 class TestFuzzyMatchModel:
@@ -140,29 +141,35 @@ class TestFuzzyMatchModel:
 
     def test_multiple_versions_picks_newest(self):
         """When multiple date versions match, pick newest."""
-        cache = _make_cache([
-            ("claude-opus-4-6-20250101", "anthropic", "Claude Opus 4.6"),
-            ("claude-opus-4-6-20250617", "anthropic", "Claude Opus 4.6"),
-            ("claude-opus-4-6-20250301", "anthropic", "Claude Opus 4.6"),
-        ])
+        cache = _make_cache(
+            [
+                ("claude-opus-4-6-20250101", "anthropic", "Claude Opus 4.6"),
+                ("claude-opus-4-6-20250617", "anthropic", "Claude Opus 4.6"),
+                ("claude-opus-4-6-20250301", "anthropic", "Claude Opus 4.6"),
+            ]
+        )
         result = fuzzy_match_model("opus-4-6", cache)
         assert result == "claude-opus-4-6-20250617"
 
     def test_dated_wins_over_undated(self):
         """A dated model should win over an undated one in the same family."""
-        cache = _make_cache([
-            ("claude-opus-4-6", "anthropic", "Claude Opus 4.6"),
-            ("claude-opus-4-6-20250617", "anthropic", "Claude Opus 4.6"),
-        ])
+        cache = _make_cache(
+            [
+                ("claude-opus-4-6", "anthropic", "Claude Opus 4.6"),
+                ("claude-opus-4-6-20250617", "anthropic", "Claude Opus 4.6"),
+            ]
+        )
         result = fuzzy_match_model("opus-4-6", cache)
         assert result == "claude-opus-4-6-20250617"
 
     def test_cross_provider_first_registered_wins(self):
         """When same model in two providers, first-registered wins (consistent with router)."""
-        cache = _make_cache([
-            ("claude-opus-4-6-20250617", "github-copilot", "Claude Opus 4.6"),
-            ("claude-opus-4-6-20250617", "anthropic", "Claude Opus 4.6"),
-        ])
+        cache = _make_cache(
+            [
+                ("claude-opus-4-6-20250617", "github-copilot", "Claude Opus 4.6"),
+                ("claude-opus-4-6-20250617", "anthropic", "Claude Opus 4.6"),
+            ]
+        )
         result = fuzzy_match_model("opus-4-6", cache)
         # First registered is github-copilot, which gets the bare key
         assert result == "claude-opus-4-6-20250617"
