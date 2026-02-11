@@ -113,7 +113,14 @@ class CopilotProvider(BaseProvider):
     def _get_client(self) -> httpx.AsyncClient:
         """Get or create a reusable HTTP client."""
         if self._client is None or self._client.is_closed:
-            self._client = httpx.AsyncClient(timeout=600.0)
+            self._client = httpx.AsyncClient(
+                timeout=httpx.Timeout(
+                    connect=30.0,
+                    read=600.0,
+                    write=30.0,
+                    pool=30.0,
+                )
+            )
         return self._client
 
     def _build_messages_payload(self, request: ChatRequest) -> tuple[list[dict], bool]:
