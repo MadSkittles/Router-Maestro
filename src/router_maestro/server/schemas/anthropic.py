@@ -102,7 +102,7 @@ class AnthropicToolChoice(BaseModel):
 class AnthropicThinkingConfig(BaseModel):
     """Thinking configuration."""
 
-    type: Literal["enabled"] = "enabled"
+    type: Literal["enabled", "adaptive", "disabled"] = "enabled"
     budget_tokens: int | None = None
 
 
