@@ -291,15 +291,22 @@ class CopilotProvider(BaseProvider):
                 retryable=retryable,
             )
         except httpx.HTTPError as e:
-            resp = getattr(e, 'response', None)
-            resp_text = resp.text if resp is not None else 'No response'
+            resp = getattr(e, "response", None)
+            resp_text = resp.text if resp is not None else "No response"
+            headers = {
+                k: v
+                for k, v in self._get_headers(vision_request=has_images).items()
+                if k != "Authorization"
+            }
             logger.error(
-                "Copilot stream HTTP error: type=%s error=%r\nRequest payload: %s\nRequest URL: %s\nRequest headers: %s\nResponse: %s",
+                "Copilot stream HTTP error: type=%s error=%r\n"
+                "Request payload: %s\nRequest URL: %s\n"
+                "Request headers: %s\nResponse: %s",
                 type(e).__name__,
                 e,
                 json.dumps(payload, default=str)[:2000],
                 COPILOT_CHAT_URL,
-                {k: v for k, v in self._get_headers(vision_request=has_images).items() if k != "Authorization"},
+                headers,
                 resp_text,
             )
             raise ProviderError(f"HTTP error: {type(e).__name__}: {e}", retryable=True)
