@@ -40,7 +40,7 @@ Router-Maestro acts as a proxy that gives you access to models from multiple pro
 
 Get up and running in 4 steps:
 
-https://github.com/user-attachments/assets/8f60ec7a-4fbe-4342-9408-084073a4d48d
+<https://github.com/user-attachments/assets/8f60ec7a-4fbe-4342-9408-084073a4d48d>
 
 ### 1. Start the Server
 
@@ -125,6 +125,17 @@ Models are identified using the format `{provider}/{model-id}`:
 | `github-copilot/claude-sonnet-4` | Claude Sonnet 4 via GitHub Copilot |
 | `openai/gpt-4-turbo` | GPT-4 Turbo via OpenAI |
 | `anthropic/claude-3-5-sonnet` | Claude 3.5 Sonnet via Anthropic |
+
+**Fuzzy matching**: You don't need to type exact model IDs. Router-Maestro will fuzzy-match common variations:
+
+| You type              | Resolves to                      |
+| --------------------- | -------------------------------- |
+| `Opus 4.6`            | `claude-opus-4-6-20250617`       |
+| `opus-4-6`            | `claude-opus-4-6-20250617`       |
+| `claude-sonnet-4.5`   | `claude-sonnet-4-5-20250929`     |
+| `anthropic/sonnet-4-5`| Sonnet 4.5 via Anthropic only    |
+
+When multiple versions match, the newest (by date suffix) is selected automatically.
 
 ### Auto-Routing
 

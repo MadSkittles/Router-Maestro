@@ -127,6 +127,7 @@ class TestRouterCacheInvalidation:
         router._cache_timestamp = 100.0
         router._priorities_config = object()  # Mock config
         router._priorities_config_timestamp = 100.0
+        router._fuzzy_cache = {}
         return router
 
     def test_invalidate_cache_clears_models(self, router):

@@ -27,6 +27,7 @@ from router_maestro.providers import (
     ResponsesStreamChunk,
 )
 from router_maestro.utils import get_logger
+from router_maestro.utils.model_match import fuzzy_match_model
 from router_maestro.utils.model_sort import sort_models
 
 logger = get_logger("routing")
@@ -82,6 +83,8 @@ class Router:
         # Priorities config cache
         self._priorities_config: PrioritiesConfig | None = None
         self._priorities_config_timestamp: float = 0.0
+        # Fuzzy match result cache: raw_query -> resolved_cache_key (or None)
+        self._fuzzy_cache: dict[str, str | None] = {}
         # Providers config cache
         self._providers_config_timestamp: float = 0.0
         self._load_providers()
@@ -172,6 +175,7 @@ class Router:
             self._load_providers()
             # Also invalidate models cache since providers may have changed
             self._models_cache.clear()
+            self._fuzzy_cache.clear()
             self._cache_initialized = False
 
     def _parse_model_key(self, model_key: str) -> tuple[str, str]:
@@ -200,6 +204,7 @@ class Router:
                 return
             logger.debug("Cache expired (age=%.1fs), refreshing", age)
             self._models_cache.clear()
+            self._fuzzy_cache.clear()
 
         logger.debug("Initializing models cache")
         for provider_name, provider in self.providers.items():
@@ -310,6 +315,8 @@ class Router:
     async def _find_model_in_cache(self, model_id: str) -> tuple[str, str, BaseProvider] | None:
         """Find a model in the cache.
 
+        Tries exact match first, then falls back to fuzzy matching.
+
         Args:
             model_id: Model ID (can be 'provider/model' or just 'model')
 
@@ -327,7 +334,7 @@ class Router:
                     # Check if the model exists for this provider
                     if model_id in self._models_cache:
                         return provider_name, actual_model_id, provider
-            return None
+            # Fall through to fuzzy (don't return None yet)
 
         # Simple model_id (e.g., "gpt-4o") - look up in cache
         if model_id in self._models_cache:
@@ -335,6 +342,33 @@ class Router:
             provider = self.providers.get(provider_name)
             if provider and provider.is_authenticated():
                 return provider_name, model_id, provider
+
+        # Check fuzzy cache first
+        if model_id in self._fuzzy_cache:
+            matched_key = self._fuzzy_cache[model_id]
+            if matched_key is None:
+                return None  # Negative cache hit
+            if matched_key in self._models_cache:
+                provider_name, _ = self._models_cache[matched_key]
+                provider = self.providers.get(provider_name)
+                if provider and provider.is_authenticated():
+                    logger.debug("Fuzzy cache hit: '%s' -> '%s'", model_id, matched_key)
+                    return provider_name, matched_key, provider
+
+        # Fuzzy matching fallback
+        matched_key = fuzzy_match_model(model_id, self._models_cache)
+        self._fuzzy_cache[model_id] = matched_key  # Cache result (including None)
+        if matched_key is not None:
+            provider_name, _ = self._models_cache[matched_key]
+            provider = self.providers.get(provider_name)
+            if provider and provider.is_authenticated():
+                logger.info(
+                    "Fuzzy matched '%s' -> '%s' (provider: %s)",
+                    model_id,
+                    matched_key,
+                    provider_name,
+                )
+                return provider_name, matched_key, provider
 
         return None
 
@@ -665,6 +699,7 @@ class Router:
     def invalidate_cache(self) -> None:
         """Invalidate all caches to force refresh."""
         self._models_cache.clear()
+        self._fuzzy_cache.clear()
         self._cache_initialized = False
         self._cache_timestamp = 0.0
         self._priorities_config = None

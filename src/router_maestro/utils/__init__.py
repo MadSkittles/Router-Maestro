@@ -1,7 +1,13 @@
 """Utils module for router-maestro."""
 
 from router_maestro.utils.logging import get_logger, setup_logging
-from router_maestro.utils.model_sort import ParsedModelId, parse_model_id, sort_models
+from router_maestro.utils.model_match import fuzzy_match_model, normalize_model_id
+from router_maestro.utils.model_sort import (
+    ParsedModelId,
+    parse_model_id,
+    sort_models,
+    strip_date_suffix,
+)
 from router_maestro.utils.token_config import (
     ANTHROPIC_CONFIG,
     COPILOT_CONFIG,
@@ -51,10 +57,13 @@ __all__ = [
     "estimate_anthropic_request_tokens",
     "estimate_tokens",
     "estimate_tokens_from_char_count",
+    "fuzzy_match_model",
     "get_config_for_provider",
     "get_logger",
     "map_openai_stop_reason_to_anthropic",
+    "normalize_model_id",
     "parse_model_id",
     "setup_logging",
     "sort_models",
+    "strip_date_suffix",
 ]
