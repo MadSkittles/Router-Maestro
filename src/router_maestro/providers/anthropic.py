@@ -149,7 +149,7 @@ class AnthropicProvider(BaseProvider):
                     f"{self.base_url}/messages",
                     json=payload,
                     headers=self._get_headers(),
-                    timeout=120.0,
+                    timeout=httpx.Timeout(connect=30.0, read=600.0, write=30.0, pool=30.0),
                 ) as response:
                     response.raise_for_status()
 
