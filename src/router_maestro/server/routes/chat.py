@@ -1,12 +1,12 @@
 """Chat completions route."""
 
+import asyncio
 import json
 import time
 import uuid
 from collections.abc import AsyncGenerator
 
 from fastapi import APIRouter, HTTPException
-from fastapi.responses import StreamingResponse
 
 from router_maestro.providers import ChatRequest, Message, ProviderError
 from router_maestro.routing import Router, get_router
@@ -20,6 +20,7 @@ from router_maestro.server.schemas import (
     ChatCompletionUsage,
     ChatMessage,
 )
+from router_maestro.server.streaming import sse_streaming_response
 from router_maestro.utils import get_logger
 
 logger = get_logger("server.routes.chat")
@@ -47,10 +48,7 @@ async def chat_completions(request: ChatCompletionRequest):
     )
 
     if request.stream:
-        return StreamingResponse(
-            stream_response(model_router, chat_request),
-            media_type="text/event-stream",
-        )
+        return sse_streaming_response(stream_response(model_router, chat_request))
 
     try:
         response, provider_name = await model_router.chat_completion(chat_request)
@@ -138,4 +136,11 @@ async def stream_response(model_router: Router, request: ChatRequest) -> AsyncGe
 
     except ProviderError as e:
         error_data = {"error": {"message": str(e), "type": "provider_error"}}
+        yield f"data: {json.dumps(error_data)}\n\n"
+    except asyncio.CancelledError:
+        logger.info("Chat stream cancelled by client")
+        raise
+    except Exception:
+        logger.error("Unexpected error in chat stream", exc_info=True)
+        error_data = {"error": {"message": "Internal server error", "type": "server_error"}}
         yield f"data: {json.dumps(error_data)}\n\n"

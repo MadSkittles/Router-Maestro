@@ -1,5 +1,6 @@
 """Responses API route for Codex models."""
 
+import asyncio
 import json
 import time
 import uuid
@@ -7,7 +8,6 @@ from collections.abc import AsyncGenerator
 from typing import Any
 
 from fastapi import APIRouter, HTTPException
-from fastapi.responses import StreamingResponse
 
 from router_maestro.providers import ProviderError
 from router_maestro.providers import ResponsesRequest as InternalResponsesRequest
@@ -17,6 +17,7 @@ from router_maestro.server.schemas import (
     ResponsesResponse,
     ResponsesUsage,
 )
+from router_maestro.server.streaming import sse_streaming_response
 from router_maestro.utils import get_logger
 
 logger = get_logger("server.routes.responses")
@@ -237,14 +238,8 @@ async def create_response(request: ResponsesRequest):
     )
 
     if request.stream:
-        return StreamingResponse(
+        return sse_streaming_response(
             stream_response(model_router, internal_request, request_id, start_time),
-            media_type="text/event-stream",
-            headers={
-                "Cache-Control": "no-cache",
-                "Connection": "keep-alive",
-                "X-Accel-Buffering": "no",
-            },
         )
 
     try:
@@ -566,6 +561,36 @@ async def stream_response(
                     "error": {
                         "code": "server_error",
                         "message": str(e),
+                    },
+                    "incomplete_details": None,
+                },
+            }
+        )
+    except asyncio.CancelledError:
+        logger.info("Responses stream cancelled by client: req_id=%s", request_id)
+        raise
+    except Exception:
+        elapsed_ms = (time.time() - start_time) * 1000
+        logger.error(
+            "Unexpected error in responses stream: req_id=%s, elapsed=%.1fms",
+            request_id,
+            elapsed_ms,
+            exc_info=True,
+        )
+        fallback_id = generate_id("resp")
+        yield sse_event(
+            {
+                "type": "response.failed",
+                "response": {
+                    "id": fallback_id,
+                    "object": "response",
+                    "status": "failed",
+                    "created_at": int(time.time()),
+                    "model": request.model,
+                    "output": [],
+                    "error": {
+                        "code": "server_error",
+                        "message": "Internal server error",
                     },
                     "incomplete_details": None,
                 },
