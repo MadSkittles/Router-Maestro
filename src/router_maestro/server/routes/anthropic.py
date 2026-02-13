@@ -379,6 +379,11 @@ async def list_models(
             created_at=created_at,
             display_name=_generate_display_name(model.id),
             type="model",
+            max_prompt_tokens=model.max_prompt_tokens,
+            max_output_tokens=model.max_output_tokens,
+            max_context_window_tokens=model.max_context_window_tokens,
+            supports_thinking=model.supports_thinking or None,
+            supports_vision=model.supports_vision or None,
         )
         for model in models
     ]

@@ -31,6 +31,8 @@ class ChatRequest:
     tools: list[dict] | None = None  # OpenAI format tool definitions
     # "auto", "none", "required", or {"type": "function", "function": {"name": "..."}}
     tool_choice: str | dict | None = None
+    thinking_budget: int | None = None
+    thinking_type: str | None = None  # "enabled", "adaptive", "disabled"
     extra: dict = field(default_factory=dict)
 
 
@@ -61,6 +63,11 @@ class ModelInfo:
     id: str
     name: str
     provider: str
+    max_prompt_tokens: int | None = None
+    max_output_tokens: int | None = None
+    max_context_window_tokens: int | None = None
+    supports_thinking: bool = False
+    supports_vision: bool = False
 
 
 @dataclass
