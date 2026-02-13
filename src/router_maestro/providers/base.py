@@ -38,6 +38,26 @@ class ChatRequest:
     thinking_type: str | None = None  # "enabled", "adaptive", "disabled"
     extra: dict = field(default_factory=dict)
 
+    def with_thinking(
+        self,
+        *,
+        thinking_budget: int | None,
+        thinking_type: str | None,
+    ) -> "ChatRequest":
+        """Return new ChatRequest with updated thinking parameters (immutable)."""
+        return ChatRequest(
+            model=self.model,
+            messages=self.messages,
+            temperature=self.temperature,
+            max_tokens=self.max_tokens,
+            stream=self.stream,
+            tools=self.tools,
+            tool_choice=self.tool_choice,
+            thinking_budget=thinking_budget,
+            thinking_type=thinking_type,
+            extra=self.extra,
+        )
+
 
 @dataclass
 class ChatResponse:
@@ -71,6 +91,33 @@ class ModelInfo:
     max_context_window_tokens: int | None = None
     supports_thinking: bool = False
     supports_vision: bool = False
+
+    def with_overrides(
+        self,
+        *,
+        max_prompt_tokens: int | None = None,
+        max_output_tokens: int | None = None,
+        max_context_window_tokens: int | None = None,
+    ) -> "ModelInfo":
+        """Return new ModelInfo with specified limits overridden (immutable)."""
+        return ModelInfo(
+            id=self.id,
+            name=self.name,
+            provider=self.provider,
+            max_prompt_tokens=(
+                max_prompt_tokens if max_prompt_tokens is not None else self.max_prompt_tokens
+            ),
+            max_output_tokens=(
+                max_output_tokens if max_output_tokens is not None else self.max_output_tokens
+            ),
+            max_context_window_tokens=(
+                max_context_window_tokens
+                if max_context_window_tokens is not None
+                else self.max_context_window_tokens
+            ),
+            supports_thinking=self.supports_thinking,
+            supports_vision=self.supports_vision,
+        )
 
 
 @dataclass

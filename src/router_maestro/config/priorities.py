@@ -28,6 +28,28 @@ class FallbackConfig(BaseModel):
     )
 
 
+class ModelOverride(BaseModel):
+    """Per-model token limit overrides."""
+
+    max_prompt_tokens: int | None = None
+    max_output_tokens: int | None = None
+    max_context_window_tokens: int | None = None
+
+
+class ThinkingBudgetConfig(BaseModel):
+    """Server-side thinking budget defaults."""
+
+    default_budget: int = Field(default=16000, ge=1024, le=128000)
+    auto_enable: bool = Field(
+        default=False,
+        description="Auto-enable thinking for capable models when client doesn't request it",
+    )
+    model_budgets: dict[str, int] = Field(
+        default_factory=dict,
+        description="Per-model budget overrides keyed by model name",
+    )
+
+
 class PrioritiesConfig(BaseModel):
     """Configuration for model priorities and fallback."""
 
@@ -36,6 +58,11 @@ class PrioritiesConfig(BaseModel):
         description="Model priorities in format 'provider/model', highest to lowest",
     )
     fallback: FallbackConfig = Field(default_factory=FallbackConfig)
+    model_overrides: dict[str, ModelOverride] = Field(
+        default_factory=dict,
+        description="Per-model token limit overrides keyed by 'provider/model' or 'model'",
+    )
+    thinking: ThinkingBudgetConfig = Field(default_factory=ThinkingBudgetConfig)
 
     @classmethod
     def get_default(cls) -> "PrioritiesConfig":
