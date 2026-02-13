@@ -50,8 +50,6 @@ _O_SERIES_PATTERN = re.compile(r"\bo[1-9]\b|\bo[1-9]-|\bo[1-9][0-9]*-")
 
 # Legacy constants (kept for backward compatibility)
 CHARS_PER_TOKEN = 3
-MESSAGE_OVERHEAD_TOKENS = TOKENS_PER_MESSAGE
-STRUCTURE_OVERHEAD_MULTIPLIER = 1.25
 
 AnthropicStopReason = Literal[
     "end_turn", "max_tokens", "stop_sequence", "tool_use", "pause_turn", "refusal"
@@ -456,32 +454,6 @@ def count_anthropic_request_tokens(
         total_tokens += int(tool_tokens * cfg.tool_definition_multiplier)
 
     return total_tokens
-
-
-# Alias for backward compatibility
-def estimate_anthropic_request_tokens(
-    system: str | list | None,
-    messages: list,
-    tools: list | None = None,
-    model: str | None = None,
-    config: TokenCountingConfig | None = None,
-) -> int:
-    """Count tokens for an Anthropic-style request (backward compat alias)."""
-    return count_anthropic_request_tokens(system, messages, tools, model, config)
-
-
-# =============================================================================
-# Legacy calibration (no longer needed with tiktoken, kept for reference)
-# =============================================================================
-
-
-def calibrate_tokens(
-    base_tokens: int,
-    is_input: bool = True,
-    model: str | None = None,
-) -> int:
-    """Legacy calibration function (now a no-op)."""
-    return base_tokens
 
 
 # =============================================================================

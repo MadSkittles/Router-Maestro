@@ -1,6 +1,5 @@
 """Model router with priority-based selection and fallback."""
 
-import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import TypeVar
 
@@ -27,6 +26,7 @@ from router_maestro.providers import (
     ResponsesStreamChunk,
 )
 from router_maestro.utils import get_logger
+from router_maestro.utils.cache import TTLCache
 from router_maestro.utils.model_match import fuzzy_match_model
 from router_maestro.utils.model_sort import sort_models
 
@@ -78,15 +78,13 @@ class Router:
         self.providers: dict[str, BaseProvider] = {}
         # Model cache: maps model_id -> (provider_name, ModelInfo)
         self._models_cache: dict[str, tuple[str, ModelInfo]] = {}
-        self._cache_initialized: bool = False
-        self._cache_timestamp: float = 0.0
+        self._models_cache_ttl: TTLCache[bool] = TTLCache(CACHE_TTL_SECONDS)
         # Priorities config cache
-        self._priorities_config: PrioritiesConfig | None = None
-        self._priorities_config_timestamp: float = 0.0
+        self._priorities_cache: TTLCache[PrioritiesConfig] = TTLCache(CACHE_TTL_SECONDS)
         # Fuzzy match result cache: raw_query -> resolved_cache_key (or None)
         self._fuzzy_cache: dict[str, str | None] = {}
         # Providers config cache
-        self._providers_config_timestamp: float = 0.0
+        self._providers_ttl: TTLCache[bool] = TTLCache(CACHE_TTL_SECONDS)
         self._load_providers()
 
     def _load_providers(self) -> None:
@@ -107,7 +105,7 @@ class Router:
             if provider is not None:
                 self.providers[provider_name] = provider
 
-        self._providers_config_timestamp = time.time()
+        self._providers_ttl.set(True)
         logger.info("Loaded %d providers", len(self.providers))
 
     def _add_builtin_provider(
@@ -155,28 +153,23 @@ class Router:
 
     def _get_priorities_config(self) -> PrioritiesConfig:
         """Get priorities config with caching."""
-        # Simple time-based cache (same TTL as models cache)
-        current_time = time.time()
-        if (
-            self._priorities_config is not None
-            and current_time - self._priorities_config_timestamp < CACHE_TTL_SECONDS
-        ):
-            return self._priorities_config
+        cached = self._priorities_cache.get()
+        if cached is not None:
+            return cached
 
-        self._priorities_config = load_priorities_config()
-        self._priorities_config_timestamp = current_time
-        return self._priorities_config
+        config = load_priorities_config()
+        self._priorities_cache.set(config)
+        return config
 
     def _ensure_providers_fresh(self) -> None:
         """Ensure providers config is fresh, reload if expired."""
-        current_time = time.time()
-        if current_time - self._providers_config_timestamp >= CACHE_TTL_SECONDS:
+        if not self._providers_ttl.is_valid:
             logger.debug("Providers config expired, reloading")
             self._load_providers()
             # Also invalidate models cache since providers may have changed
             self._models_cache.clear()
             self._fuzzy_cache.clear()
-            self._cache_initialized = False
+            self._models_cache_ttl.clear()
 
     def _parse_model_key(self, model_key: str) -> tuple[str, str]:
         """Parse a model key into provider and model.
@@ -197,12 +190,12 @@ class Router:
         # First ensure providers config is fresh
         self._ensure_providers_fresh()
 
-        # Check if cache is still valid (initialized and not expired)
-        if self._cache_initialized:
-            age = time.time() - self._cache_timestamp
-            if age < CACHE_TTL_SECONDS:
-                return
-            logger.debug("Cache expired (age=%.1fs), refreshing", age)
+        # Check if cache is still valid
+        if self._models_cache_ttl.is_valid:
+            return
+
+        if self._models_cache:
+            logger.debug("Cache expired, refreshing")
             self._models_cache.clear()
             self._fuzzy_cache.clear()
 
@@ -225,8 +218,7 @@ class Router:
                     logger.warning("Failed to load models from %s: %s", provider_name, e)
                     continue
 
-        self._cache_initialized = True
-        self._cache_timestamp = time.time()
+        self._models_cache_ttl.set(True)
         logger.info("Models cache initialized with %d entries", len(self._models_cache))
 
     async def _resolve_provider(self, model_id: str) -> tuple[str, str, BaseProvider]:
@@ -700,9 +692,7 @@ class Router:
         """Invalidate all caches to force refresh."""
         self._models_cache.clear()
         self._fuzzy_cache.clear()
-        self._cache_initialized = False
-        self._cache_timestamp = 0.0
-        self._priorities_config = None
-        self._priorities_config_timestamp = 0.0
-        self._providers_config_timestamp = 0.0
+        self._models_cache_ttl.clear()
+        self._priorities_cache.clear()
+        self._providers_ttl.clear()
         logger.debug("All caches invalidated")

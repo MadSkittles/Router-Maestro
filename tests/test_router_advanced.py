@@ -20,6 +20,7 @@ from router_maestro.routing.router import (
     get_router,
     reset_router,
 )
+from router_maestro.utils.cache import TTLCache
 
 
 class MockProvider(BaseProvider):
@@ -101,6 +102,30 @@ class MockProvider(BaseProvider):
         yield ResponsesStreamChunk(content="world", finish_reason="stop")
 
 
+def _init_router_empty(router: Router) -> None:
+    """Initialize a Router (created via __new__) with empty caches."""
+    router._models_cache = {}
+    router._models_cache_ttl = TTLCache(CACHE_TTL_SECONDS)
+    router._priorities_cache = TTLCache(CACHE_TTL_SECONDS)
+    router._fuzzy_cache = {}
+    router._providers_ttl = TTLCache(CACHE_TTL_SECONDS)
+
+
+def _mark_providers_fresh(router: Router) -> None:
+    """Mark providers as freshly loaded so _ensure_providers_fresh is a no-op."""
+    router._providers_ttl.set(True)
+
+
+def _set_priorities(router: Router, config: PrioritiesConfig) -> None:
+    """Populate the priorities cache so _get_priorities_config returns the config."""
+    router._priorities_cache.set(config)
+
+
+def _mark_models_cached(router: Router) -> None:
+    """Mark the models cache as valid so _ensure_models_cache is a no-op."""
+    router._models_cache_ttl.set(True)
+
+
 class TestRouterSingleton:
     """Tests for Router singleton pattern."""
 
@@ -128,12 +153,7 @@ class TestRouterCacheManagement:
         """Create a router with mock providers."""
         router = Router.__new__(Router)
         router.providers = {}
-        router._models_cache = {}
-        router._cache_initialized = False
-        router._cache_timestamp = 0.0
-        router._priorities_config = None
-        router._priorities_config_timestamp = 0.0
-        router._providers_config_timestamp = 0.0
+        _init_router_empty(router)
         return router
 
     def test_cache_ttl_constant(self):
@@ -155,11 +175,11 @@ class TestRouterCacheManagement:
             ],
         )
         router_with_mock.providers = {"test-provider": mock_provider}
-        router_with_mock._providers_config_timestamp = float("inf")
+        _mark_providers_fresh(router_with_mock)
 
         await router_with_mock._ensure_models_cache()
 
-        assert router_with_mock._cache_initialized is True
+        assert router_with_mock._models_cache_ttl.is_valid
         assert "model-1" in router_with_mock._models_cache
         assert "model-2" in router_with_mock._models_cache
         assert "test-provider/model-1" in router_with_mock._models_cache
@@ -170,11 +190,11 @@ class TestRouterCacheManagement:
         """Test that cache skips unauthenticated providers."""
         unauth_provider = MockProvider(name="unauth", authenticated=False)
         router_with_mock.providers = {"unauth": unauth_provider}
-        router_with_mock._providers_config_timestamp = float("inf")
+        _mark_providers_fresh(router_with_mock)
 
         await router_with_mock._ensure_models_cache()
 
-        assert router_with_mock._cache_initialized is True
+        assert router_with_mock._models_cache_ttl.is_valid
         assert len(router_with_mock._models_cache) == 0
 
 
@@ -195,13 +215,8 @@ class TestRouterModelResolutionAsync:
                 models=[ModelInfo(id="claude-3", name="Claude 3", provider="secondary")],
             ),
         }
-        router._models_cache = {}
-        router._cache_initialized = False
-        router._cache_timestamp = 0.0
-        router._priorities_config = None
-        router._priorities_config_timestamp = 0.0
-        router._providers_config_timestamp = float("inf")
-        router._fuzzy_cache = {}
+        _init_router_empty(router)
+        _mark_providers_fresh(router)
         return router
 
     @pytest.mark.asyncio
@@ -231,11 +246,10 @@ class TestRouterModelResolutionAsync:
     @pytest.mark.asyncio
     async def test_resolve_auto_route_model(self, router_with_providers):
         """Test resolving auto-route model."""
-        # Set up priorities config
-        router_with_providers._priorities_config = PrioritiesConfig(
-            priorities=["primary/gpt-4o", "secondary/claude-3"],
+        _set_priorities(
+            router_with_providers,
+            PrioritiesConfig(priorities=["primary/gpt-4o", "secondary/claude-3"]),
         )
-        router_with_providers._priorities_config_timestamp = float("inf")
 
         result = await router_with_providers._get_auto_route_model()
         assert result is not None
@@ -256,15 +270,14 @@ class TestRouterChatCompletion:
             models=[ModelInfo(id="test-model", name="Test", provider="test")],
         )
         router.providers = {"test": mock}
+        _init_router_empty(router)
         router._models_cache = {
             "test-model": ("test", ModelInfo(id="test-model", name="Test", provider="test")),
             "test/test-model": ("test", ModelInfo(id="test-model", name="Test", provider="test")),
         }
-        router._cache_initialized = True
-        router._cache_timestamp = float("inf")
-        router._priorities_config = PrioritiesConfig(priorities=[])
-        router._priorities_config_timestamp = float("inf")
-        router._providers_config_timestamp = float("inf")
+        _mark_models_cached(router)
+        _mark_providers_fresh(router)
+        _set_priorities(router, PrioritiesConfig(priorities=[]))
         return router, mock
 
     @pytest.mark.asyncio
@@ -311,15 +324,14 @@ class TestRouterResponsesAPI:
             models=[ModelInfo(id="test-model", name="Test", provider="test")],
         )
         router.providers = {"test": mock}
+        _init_router_empty(router)
         router._models_cache = {
             "test-model": ("test", ModelInfo(id="test-model", name="Test", provider="test")),
             "test/test-model": ("test", ModelInfo(id="test-model", name="Test", provider="test")),
         }
-        router._cache_initialized = True
-        router._cache_timestamp = float("inf")
-        router._priorities_config = PrioritiesConfig(priorities=[])
-        router._priorities_config_timestamp = float("inf")
-        router._providers_config_timestamp = float("inf")
+        _mark_models_cached(router)
+        _mark_providers_fresh(router)
+        _set_priorities(router, PrioritiesConfig(priorities=[]))
         return router, mock
 
     @pytest.mark.asyncio
@@ -370,6 +382,7 @@ class TestRouterFallback:
             fail_on_request=False,
         )
         router.providers = {"primary": primary, "secondary": secondary}
+        _init_router_empty(router)
         router._models_cache = {
             "model-1": ("primary", ModelInfo(id="model-1", name="Model 1", provider="primary")),
             "primary/model-1": (
@@ -381,14 +394,15 @@ class TestRouterFallback:
                 ModelInfo(id="model-1", name="Model 1", provider="secondary"),
             ),
         }
-        router._cache_initialized = True
-        router._cache_timestamp = float("inf")
-        router._priorities_config = PrioritiesConfig(
-            priorities=["primary/model-1", "secondary/model-1"],
-            fallback={"strategy": "priority", "maxRetries": 3},
+        _mark_models_cached(router)
+        _mark_providers_fresh(router)
+        _set_priorities(
+            router,
+            PrioritiesConfig(
+                priorities=["primary/model-1", "secondary/model-1"],
+                fallback={"strategy": "priority", "maxRetries": 3},
+            ),
         )
-        router._priorities_config_timestamp = float("inf")
-        router._providers_config_timestamp = float("inf")
         return router, primary, secondary
 
     def test_get_fallback_candidates_priority(self, router_with_fallback):
@@ -436,6 +450,7 @@ class TestRouterListModels:
                 ],
             ),
         }
+        _init_router_empty(router)
         router._models_cache = {
             "model-a": (
                 "provider1",
@@ -454,13 +469,12 @@ class TestRouterListModels:
                 ModelInfo(id="model-b", name="Model B", provider="provider1"),
             ),
         }
-        router._cache_initialized = True
-        router._cache_timestamp = float("inf")
-        router._priorities_config = PrioritiesConfig(
-            priorities=["provider1/model-b", "provider1/model-a"]
+        _mark_models_cached(router)
+        _mark_providers_fresh(router)
+        _set_priorities(
+            router,
+            PrioritiesConfig(priorities=["provider1/model-b", "provider1/model-a"]),
         )
-        router._priorities_config_timestamp = float("inf")
-        router._providers_config_timestamp = float("inf")
         return router
 
     @pytest.mark.asyncio

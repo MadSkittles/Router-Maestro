@@ -22,6 +22,7 @@ from router_maestro.providers.base import (
     ResponsesToolCall,
 )
 from router_maestro.utils import get_logger
+from router_maestro.utils.cache import TTLCache
 
 logger = get_logger("providers.copilot")
 
@@ -44,8 +45,7 @@ class CopilotProvider(BaseProvider):
         self._cached_token: str | None = None
         self._token_expires: int = 0
         # Model cache
-        self._models_cache: list[ModelInfo] | None = None
-        self._models_cache_expires: float = 0
+        self._models_ttl_cache: TTLCache[list[ModelInfo]] = TTLCache(MODELS_CACHE_TTL)
         # Reusable HTTP client
         self._client: httpx.AsyncClient | None = None
 
@@ -201,20 +201,9 @@ class CopilotProvider(BaseProvider):
                 usage=data.get("usage"),
             )
         except httpx.HTTPStatusError as e:
-            retryable = e.response.status_code in (429, 500, 502, 503, 504)
-            try:
-                error_body = e.response.text
-            except Exception:
-                error_body = ""
-            logger.error("Copilot API error: %d - %s", e.response.status_code, error_body[:200])
-            raise ProviderError(
-                f"Copilot API error: {e.response.status_code} - {error_body}",
-                status_code=e.response.status_code,
-                retryable=retryable,
-            )
+            self._raise_http_status_error("Copilot", e, logger, include_body=True)
         except httpx.HTTPError as e:
-            logger.error("Copilot HTTP error: %s", e)
-            raise ProviderError(f"HTTP error: {e}", retryable=True)
+            self._raise_http_error("Copilot", e, logger)
 
     async def chat_completion_stream(self, request: ChatRequest) -> AsyncIterator[ChatStreamChunk]:
         """Generate a streaming chat completion via Copilot."""
@@ -288,22 +277,9 @@ class CopilotProvider(BaseProvider):
                             usage=usage,
                         )
         except httpx.HTTPStatusError as e:
-            retryable = e.response.status_code in (429, 500, 502, 503, 504)
-            try:
-                error_body = e.response.text
-            except Exception:
-                error_body = ""
-            logger.error(
-                "Copilot stream API error: %d - %s",
-                e.response.status_code,
-                error_body[:200],
-            )
-            raise ProviderError(
-                f"Copilot API error: {e.response.status_code} - {error_body}",
-                status_code=e.response.status_code,
-                retryable=retryable,
-            )
+            self._raise_http_status_error("Copilot", e, logger, stream=True, include_body=True)
         except httpx.HTTPError as e:
+            # Verbose diagnostics for stream connection issues (PR #17/#18)
             resp = getattr(e, "response", None)
             resp_text = resp.text if resp is not None else "No response"
             headers = {
@@ -333,16 +309,12 @@ class CopilotProvider(BaseProvider):
         Returns:
             List of available models
         """
-        current_time = time.time()
-
         # Return cached models if valid
-        if (
-            not force_refresh
-            and self._models_cache is not None
-            and current_time < self._models_cache_expires
-        ):
-            logger.debug("Using cached Copilot models (%d models)", len(self._models_cache))
-            return self._models_cache
+        if not force_refresh:
+            cached = self._models_ttl_cache.get()
+            if cached is not None:
+                logger.debug("Using cached Copilot models (%d models)", len(cached))
+                return cached
 
         await self.ensure_token()
 
@@ -369,16 +341,16 @@ class CopilotProvider(BaseProvider):
                     )
 
             # Update cache
-            self._models_cache = models
-            self._models_cache_expires = current_time + MODELS_CACHE_TTL
+            self._models_ttl_cache.set(models)
 
             logger.info("Fetched %d Copilot models", len(models))
             return models
         except httpx.HTTPError as e:
             # If cache exists, return stale cache on error
-            if self._models_cache is not None:
+            stale = self._models_ttl_cache._value
+            if stale is not None:
                 logger.warning("Failed to refresh Copilot models, using stale cache: %s", e)
-                return self._models_cache
+                return stale
             logger.error("Failed to list Copilot models: %s", e)
             raise ProviderError(f"Failed to list models: {e}", retryable=True)
 
@@ -510,24 +482,9 @@ class CopilotProvider(BaseProvider):
                 tool_calls=tool_calls if tool_calls else None,
             )
         except httpx.HTTPStatusError as e:
-            retryable = e.response.status_code in (429, 500, 502, 503, 504)
-            try:
-                error_body = e.response.text
-            except Exception:
-                error_body = ""
-            logger.error(
-                "Copilot responses API error: %d - %s",
-                e.response.status_code,
-                error_body[:200],
-            )
-            raise ProviderError(
-                f"Copilot API error: {e.response.status_code} - {error_body}",
-                status_code=e.response.status_code,
-                retryable=retryable,
-            )
+            self._raise_http_status_error("Copilot", e, logger, include_body=True)
         except httpx.HTTPError as e:
-            logger.error("Copilot responses HTTP error: %s", e)
-            raise ProviderError(f"HTTP error: {e}", retryable=True)
+            self._raise_http_error("Copilot", e, logger)
 
     async def responses_completion_stream(
         self, request: ResponsesRequest
@@ -694,5 +651,4 @@ class CopilotProvider(BaseProvider):
                     )
 
         except httpx.HTTPError as e:
-            logger.error("Copilot responses stream HTTP error: %s", e)
-            raise ProviderError(f"HTTP error: {e}", retryable=True)
+            self._raise_http_error("Copilot", e, logger, stream=True)

@@ -49,6 +49,66 @@ def get_codex_paths() -> dict[str, Path]:
     }
 
 
+def _backup_if_exists(path: Path) -> None:
+    """Prompt to backup an existing config file before overwriting."""
+    if not path.exists():
+        return
+    console.print(f"\n[yellow]{path.name} already exists at {path}[/yellow]")
+    if Confirm.ask("Backup existing file?", default=True):
+        backup_path = path.with_suffix(
+            f"{path.suffix}.backup.{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        )
+        shutil.copy(path, backup_path)
+        console.print(f"[green]Backed up to {backup_path}[/green]")
+
+
+def _fetch_and_display_models() -> list[dict]:
+    """Fetch models from the server and display them in a table.
+
+    Exits the CLI if the server is unreachable or no models are available.
+    """
+    try:
+        client = get_admin_client()
+        models = asyncio.run(client.list_models())
+    except ServerNotRunningError as e:
+        console.print(f"[red]{e}[/red]")
+        console.print("[dim]Tip: Start router-maestro server first.[/dim]")
+        raise typer.Exit(1)
+    except Exception as e:
+        console.print(f"[red]Error: {e}[/red]")
+        raise typer.Exit(1)
+
+    if not models:
+        console.print("[red]No models available. Please authenticate first.[/red]")
+        raise typer.Exit(1)
+
+    console.print("\n[bold]Available models:[/bold]")
+    table = Table()
+    table.add_column("#", style="dim")
+    table.add_column("Model Key", style="green")
+    table.add_column("Name", style="white")
+    for i, model in enumerate(models, 1):
+        table.add_row(str(i), f"{model['provider']}/{model['id']}", model["name"])
+    console.print(table)
+
+    return models
+
+
+def _select_model(models: list[dict], prompt: str, default: str = "0") -> str:
+    """Prompt the user to select a model from the list.
+
+    Returns the ``provider/id`` model key, or ``"router-maestro"`` for
+    auto-routing (choice ``0``).
+    """
+    choice = Prompt.ask(prompt, default=default)
+    if choice != "0" and choice.isdigit():
+        idx = int(choice) - 1
+        if 0 <= idx < len(models):
+            m = models[idx]
+            return f"{m['provider']}/{m['id']}"
+    return "router-maestro"
+
+
 @app.callback(invoke_without_command=True)
 def config_callback(ctx: typer.Context) -> None:
     """Generate configuration for CLI tools (interactive selection if not specified)."""
@@ -92,60 +152,16 @@ def claude_code_config() -> None:
     settings_path = paths[level]
 
     # Step 2: Backup if exists
-    if settings_path.exists():
-        console.print(f"\n[yellow]settings.json already exists at {settings_path}[/yellow]")
-        if Confirm.ask("Backup existing file?", default=True):
-            backup_path = settings_path.with_suffix(
-                f".json.backup.{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-            )
-            shutil.copy(settings_path, backup_path)
-            console.print(f"[green]Backed up to {backup_path}[/green]")
+    _backup_if_exists(settings_path)
 
     # Step 3 & 4: Select models from server
-    try:
-        client = get_admin_client()
-        models = asyncio.run(client.list_models())
-    except ServerNotRunningError as e:
-        console.print(f"[red]{e}[/red]")
-        console.print("[dim]Tip: Start router-maestro server first.[/dim]")
-        raise typer.Exit(1)
-    except Exception as e:
-        console.print(f"[red]Error: {e}[/red]")
-        raise typer.Exit(1)
+    models = _fetch_and_display_models()
 
-    if not models:
-        console.print("[red]No models available. Please authenticate first.[/red]")
-        raise typer.Exit(1)
-
-    # Display models
-    console.print("\n[bold]Available models:[/bold]")
-    table = Table()
-    table.add_column("#", style="dim")
-    table.add_column("Model Key", style="green")
-    table.add_column("Name", style="white")
-    for i, model in enumerate(models, 1):
-        table.add_row(str(i), f"{model['provider']}/{model['id']}", model["name"])
-    console.print(table)
-
-    # Select main model
     console.print("\n[bold]Step 3: Select main model[/bold]")
-    main_choice = Prompt.ask("Enter number (or 0 for auto-routing)", default="0")
-    main_model = "router-maestro"
-    if main_choice != "0" and main_choice.isdigit():
-        idx = int(main_choice) - 1
-        if 0 <= idx < len(models):
-            m = models[idx]
-            main_model = f"{m['provider']}/{m['id']}"
+    main_model = _select_model(models, "Enter number (or 0 for auto-routing)")
 
-    # Select fast model
     console.print("\n[bold]Step 4: Select small/fast model[/bold]")
-    fast_choice = Prompt.ask("Enter number", default="1")
-    fast_model = "router-maestro"
-    if fast_choice.isdigit():
-        idx = int(fast_choice) - 1
-        if 0 <= idx < len(models):
-            m = models[idx]
-            fast_model = f"{m['provider']}/{m['id']}"
+    fast_model = _select_model(models, "Enter number", default="1")
 
     # Step 5: Generate config
     auth_token = get_current_context_api_key() or "router-maestro"
@@ -210,50 +226,14 @@ def codex_config() -> None:
     config_path = paths[level]
 
     # Step 2: Backup if exists
-    if config_path.exists():
-        console.print(f"\n[yellow]config.toml already exists at {config_path}[/yellow]")
-        if Confirm.ask("Backup existing file?", default=True):
-            backup_path = config_path.with_suffix(
-                f".toml.backup.{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-            )
-            shutil.copy(config_path, backup_path)
-            console.print(f"[green]Backed up to {backup_path}[/green]")
+    _backup_if_exists(config_path)
 
     # Step 3: Get models from server
-    try:
-        client = get_admin_client()
-        models = asyncio.run(client.list_models())
-    except ServerNotRunningError as e:
-        console.print(f"[red]{e}[/red]")
-        console.print("[dim]Tip: Start router-maestro server first.[/dim]")
-        raise typer.Exit(1)
-    except Exception as e:
-        console.print(f"[red]Error: {e}[/red]")
-        raise typer.Exit(1)
-
-    if not models:
-        console.print("[red]No models available. Please authenticate first.[/red]")
-        raise typer.Exit(1)
-
-    # Display models
-    console.print("\n[bold]Available models:[/bold]")
-    table = Table()
-    table.add_column("#", style="dim")
-    table.add_column("Model Key", style="green")
-    table.add_column("Name", style="white")
-    for i, model in enumerate(models, 1):
-        table.add_row(str(i), f"{model['provider']}/{model['id']}", model["name"])
-    console.print(table)
+    models = _fetch_and_display_models()
 
     # Select model
     console.print("\n[bold]Step 2: Select model[/bold]")
-    model_choice = Prompt.ask("Enter number (or 0 for auto-routing)", default="0")
-    selected_model = "router-maestro"
-    if model_choice != "0" and model_choice.isdigit():
-        idx = int(model_choice) - 1
-        if 0 <= idx < len(models):
-            m = models[idx]
-            selected_model = f"{m['provider']}/{m['id']}"
+    selected_model = _select_model(models, "Enter number (or 0 for auto-routing)")
 
     # Step 4: Generate config
     client = get_admin_client()

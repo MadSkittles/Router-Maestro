@@ -4,7 +4,6 @@ import json
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator
 from logging import Logger
-from typing import NoReturn
 
 import httpx
 
@@ -13,7 +12,6 @@ from router_maestro.providers.base import (
     ChatRequest,
     ChatResponse,
     ChatStreamChunk,
-    ProviderError,
 )
 
 
@@ -71,9 +69,9 @@ class OpenAIChatProvider(BaseProvider, ABC):
                     usage=data.get("usage"),
                 )
             except httpx.HTTPStatusError as e:
-                self._raise_http_status_error(label, e)
+                self._raise_http_status_error(label, e, self._logger)
             except httpx.HTTPError as e:
-                self._raise_http_error(label, e)
+                self._raise_http_error(label, e, self._logger)
 
     async def chat_completion_stream(self, request: ChatRequest) -> AsyncIterator[ChatStreamChunk]:
         payload = self._build_payload(request, stream=True)
@@ -113,31 +111,6 @@ class OpenAIChatProvider(BaseProvider, ABC):
                                     usage=usage,
                                 )
             except httpx.HTTPStatusError as e:
-                self._raise_http_status_error(label, e, stream=True)
+                self._raise_http_status_error(label, e, self._logger, stream=True)
             except httpx.HTTPError as e:
-                self._raise_http_error(label, e, stream=True)
-
-    def _raise_http_status_error(
-        self,
-        label: str,
-        error: httpx.HTTPStatusError,
-        stream: bool = False,
-    ) -> NoReturn:
-        retryable = error.response.status_code in (429, 500, 502, 503, 504)
-        suffix = " stream" if stream else ""
-        self._logger.error("%s%s API error: %d", label, suffix, error.response.status_code)
-        raise ProviderError(
-            f"{label} API error: {error.response.status_code}",
-            status_code=error.response.status_code,
-            retryable=retryable,
-        )
-
-    def _raise_http_error(
-        self,
-        label: str,
-        error: httpx.HTTPError,
-        stream: bool = False,
-    ) -> NoReturn:
-        suffix = " stream" if stream else ""
-        self._logger.error("%s%s HTTP error: %s", label, suffix, error)
-        raise ProviderError(f"HTTP error: {error}", retryable=True)
+                self._raise_http_error(label, e, self._logger, stream=True)

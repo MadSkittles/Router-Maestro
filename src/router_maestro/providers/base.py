@@ -3,6 +3,10 @@
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
+from logging import Logger
+from typing import NoReturn
+
+import httpx
 
 
 @dataclass
@@ -168,6 +172,70 @@ class BaseProvider(ABC):
         Override this for providers that need token refresh.
         """
         pass
+
+    @staticmethod
+    def _raise_http_status_error(
+        label: str,
+        error: httpx.HTTPStatusError,
+        logger: Logger,
+        *,
+        stream: bool = False,
+        include_body: bool = False,
+    ) -> NoReturn:
+        """Raise a ProviderError from an HTTP status error.
+
+        Args:
+            label: Provider label for log messages
+            error: The httpx status error
+            logger: Logger instance for error logging
+            stream: Whether this is a streaming request
+            include_body: Whether to include the response body in the error message
+        """
+        retryable = error.response.status_code in (429, 500, 502, 503, 504)
+        suffix = " stream" if stream else ""
+        if include_body:
+            try:
+                error_body = error.response.text
+            except Exception:
+                error_body = ""
+            logger.error(
+                "%s%s API error: %d - %s",
+                label,
+                suffix,
+                error.response.status_code,
+                error_body[:200],
+            )
+            raise ProviderError(
+                f"{label} API error: {error.response.status_code} - {error_body}",
+                status_code=error.response.status_code,
+                retryable=retryable,
+            )
+        logger.error("%s%s API error: %d", label, suffix, error.response.status_code)
+        raise ProviderError(
+            f"{label} API error: {error.response.status_code}",
+            status_code=error.response.status_code,
+            retryable=retryable,
+        )
+
+    @staticmethod
+    def _raise_http_error(
+        label: str,
+        error: httpx.HTTPError,
+        logger: Logger,
+        *,
+        stream: bool = False,
+    ) -> NoReturn:
+        """Raise a ProviderError from a generic HTTP error.
+
+        Args:
+            label: Provider label for log messages
+            error: The httpx error
+            logger: Logger instance for error logging
+            stream: Whether this is a streaming request
+        """
+        suffix = " stream" if stream else ""
+        logger.error("%s%s HTTP error: %s", label, suffix, error)
+        raise ProviderError(f"HTTP error: {error}", retryable=True)
 
     async def responses_completion(self, request: ResponsesRequest) -> ResponsesResponse:
         """Generate a Responses API completion (for Codex models).
