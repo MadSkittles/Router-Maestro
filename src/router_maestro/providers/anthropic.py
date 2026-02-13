@@ -7,6 +7,8 @@ import httpx
 
 from router_maestro.auth import AuthManager, AuthType
 from router_maestro.providers.base import (
+    TIMEOUT_NON_STREAMING,
+    TIMEOUT_STREAMING,
     BaseProvider,
     ChatRequest,
     ChatResponse,
@@ -89,7 +91,7 @@ class AnthropicProvider(BaseProvider):
                     f"{self.base_url}/messages",
                     json=payload,
                     headers=self._get_headers(),
-                    timeout=120.0,
+                    timeout=TIMEOUT_NON_STREAMING,
                 )
                 response.raise_for_status()
                 data = response.json()
@@ -122,6 +124,8 @@ class AnthropicProvider(BaseProvider):
                     status_code=e.response.status_code,
                     retryable=retryable,
                 )
+            except httpx.TimeoutException as e:
+                self._raise_timeout_error("Anthropic", e, logger)
             except httpx.HTTPError as e:
                 logger.error("Anthropic HTTP error: %s", e)
                 raise ProviderError(f"HTTP error: {e}", retryable=True)
@@ -149,7 +153,7 @@ class AnthropicProvider(BaseProvider):
                     f"{self.base_url}/messages",
                     json=payload,
                     headers=self._get_headers(),
-                    timeout=httpx.Timeout(connect=30.0, read=600.0, write=30.0, pool=30.0),
+                    timeout=TIMEOUT_STREAMING,
                 ) as response:
                     response.raise_for_status()
 
@@ -184,6 +188,8 @@ class AnthropicProvider(BaseProvider):
                     status_code=e.response.status_code,
                     retryable=retryable,
                 )
+            except httpx.TimeoutException as e:
+                self._raise_timeout_error("Anthropic", e, logger, stream=True)
             except httpx.HTTPError as e:
                 logger.error("Anthropic stream HTTP error: %s", e)
                 raise ProviderError(f"HTTP error: {e}", retryable=True)

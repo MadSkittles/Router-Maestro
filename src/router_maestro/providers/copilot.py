@@ -10,6 +10,7 @@ from router_maestro.auth import AuthManager, AuthType
 from router_maestro.auth.github_oauth import get_copilot_token
 from router_maestro.auth.storage import OAuthCredential
 from router_maestro.providers.base import (
+    TIMEOUT_NON_STREAMING,
     BaseProvider,
     ChatRequest,
     ChatResponse,
@@ -180,6 +181,7 @@ class CopilotProvider(BaseProvider):
                 COPILOT_CHAT_URL,
                 json=payload,
                 headers=self._get_headers(vision_request=has_images),
+                timeout=TIMEOUT_NON_STREAMING,
             )
             response.raise_for_status()
             data = response.json()
@@ -202,6 +204,8 @@ class CopilotProvider(BaseProvider):
             )
         except httpx.HTTPStatusError as e:
             self._raise_http_status_error("Copilot", e, logger, include_body=True)
+        except httpx.TimeoutException as e:
+            self._raise_timeout_error("Copilot", e, logger)
         except httpx.HTTPError as e:
             self._raise_http_error("Copilot", e, logger)
 
@@ -278,6 +282,8 @@ class CopilotProvider(BaseProvider):
                         )
         except httpx.HTTPStatusError as e:
             self._raise_http_status_error("Copilot", e, logger, stream=True, include_body=True)
+        except httpx.TimeoutException as e:
+            self._raise_timeout_error("Copilot", e, logger, stream=True)
         except httpx.HTTPError as e:
             # Verbose diagnostics for stream connection issues (PR #17/#18)
             resp = getattr(e, "response", None)
@@ -463,6 +469,7 @@ class CopilotProvider(BaseProvider):
                 COPILOT_RESPONSES_URL,
                 json=payload,
                 headers=self._get_headers(),
+                timeout=TIMEOUT_NON_STREAMING,
             )
             response.raise_for_status()
             data = response.json()
@@ -483,6 +490,8 @@ class CopilotProvider(BaseProvider):
             )
         except httpx.HTTPStatusError as e:
             self._raise_http_status_error("Copilot", e, logger, include_body=True)
+        except httpx.TimeoutException as e:
+            self._raise_timeout_error("Copilot", e, logger)
         except httpx.HTTPError as e:
             self._raise_http_error("Copilot", e, logger)
 
@@ -650,5 +659,7 @@ class CopilotProvider(BaseProvider):
                         usage=final_usage,
                     )
 
+        except httpx.TimeoutException as e:
+            self._raise_timeout_error("Copilot", e, logger, stream=True)
         except httpx.HTTPError as e:
             self._raise_http_error("Copilot", e, logger, stream=True)

@@ -8,6 +8,9 @@ from typing import NoReturn
 
 import httpx
 
+TIMEOUT_NON_STREAMING = httpx.Timeout(connect=30.0, read=120.0, write=30.0, pool=30.0)
+TIMEOUT_STREAMING = httpx.Timeout(connect=30.0, read=600.0, write=30.0, pool=30.0)
+
 
 @dataclass
 class Message:
@@ -215,6 +218,31 @@ class BaseProvider(ABC):
             f"{label} API error: {error.response.status_code}",
             status_code=error.response.status_code,
             retryable=retryable,
+        )
+
+    @staticmethod
+    def _raise_timeout_error(
+        label: str,
+        error: httpx.TimeoutException,
+        logger: Logger,
+        *,
+        stream: bool = False,
+    ) -> NoReturn:
+        """Raise a ProviderError from an httpx timeout.
+
+        Args:
+            label: Provider label for log messages
+            error: The httpx timeout exception
+            logger: Logger instance for error logging
+            stream: Whether this is a streaming request
+        """
+        timeout_type = type(error).__name__
+        suffix = " stream" if stream else ""
+        logger.error("%s%s timed out (%s): %s", label, suffix, timeout_type, error)
+        raise ProviderError(
+            f"{label} timed out ({timeout_type}): {error}",
+            status_code=504,
+            retryable=True,
         )
 
     @staticmethod
