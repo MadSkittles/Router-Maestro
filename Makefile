@@ -1,4 +1,4 @@
-.PHONY: help install dev test lint format clean build push run stop logs shell docker-up docker-down docker-logs buildx-setup build-multiarch dist publish publish-test
+.PHONY: help install dev test lint format clean build push run stop logs shell docker-up docker-down docker-logs buildx-setup build-multiarch dist publish publish-test dev-up dev-down dev-logs dev-build
 
 # Variables
 VERSION := $(shell grep '^version' pyproject.toml | head -1 | cut -d'"' -f2)
@@ -38,6 +38,12 @@ help:
 	@echo "  make docker-up   Start services (Traefik + Router-Maestro)"
 	@echo "  make docker-down Stop services"
 	@echo "  make docker-logs View logs"
+	@echo ""
+	@echo "Docker Compose (Dev - local build):"
+	@echo "  make dev-up      Build from source and start"
+	@echo "  make dev-down    Stop dev services"
+	@echo "  make dev-logs    View dev logs"
+	@echo "  make dev-build   Rebuild dev image (no cache)"
 	@echo ""
 	@echo "Current version: $(VERSION)"
 
@@ -131,6 +137,20 @@ docker-restart:
 
 docker-pull:
 	docker compose pull
+
+# ============== Docker Compose (Dev) ==============
+
+dev-up:
+	docker compose -f docker-compose.dev.yml up --build -d
+
+dev-down:
+	docker compose -f docker-compose.dev.yml down
+
+dev-logs:
+	docker compose -f docker-compose.dev.yml logs -f
+
+dev-build:
+	docker compose -f docker-compose.dev.yml build --no-cache
 
 # ============== Release ==============
 
