@@ -94,13 +94,13 @@ def _fetch_and_display_models() -> list[dict]:
     return models
 
 
-def _select_model(models: list[dict], prompt: str) -> str:
+def _select_model(models: list[dict], prompt: str, default: str = "0") -> str:
     """Prompt the user to select a model from the list.
 
     Returns the ``provider/id`` model key, or ``"router-maestro"`` for
     auto-routing (choice ``0``).
     """
-    choice = Prompt.ask(prompt, default="0")
+    choice = Prompt.ask(prompt, default=default)
     if choice != "0" and choice.isdigit():
         idx = int(choice) - 1
         if 0 <= idx < len(models):
@@ -161,7 +161,7 @@ def claude_code_config() -> None:
     main_model = _select_model(models, "Enter number (or 0 for auto-routing)")
 
     console.print("\n[bold]Step 4: Select small/fast model[/bold]")
-    fast_model = _select_model(models, "Enter number")
+    fast_model = _select_model(models, "Enter number", default="1")
 
     # Step 5: Generate config
     auth_token = get_current_context_api_key() or "router-maestro"

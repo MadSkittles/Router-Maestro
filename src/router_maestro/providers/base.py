@@ -180,6 +180,7 @@ class BaseProvider(ABC):
         logger: Logger,
         *,
         stream: bool = False,
+        include_body: bool = False,
     ) -> NoReturn:
         """Raise a ProviderError from an HTTP status error.
 
@@ -188,22 +189,30 @@ class BaseProvider(ABC):
             error: The httpx status error
             logger: Logger instance for error logging
             stream: Whether this is a streaming request
+            include_body: Whether to include the response body in the error message
         """
         retryable = error.response.status_code in (429, 500, 502, 503, 504)
-        try:
-            error_body = error.response.text
-        except Exception:
-            error_body = ""
         suffix = " stream" if stream else ""
-        logger.error(
-            "%s%s API error: %d - %s",
-            label,
-            suffix,
-            error.response.status_code,
-            error_body[:200],
-        )
+        if include_body:
+            try:
+                error_body = error.response.text
+            except Exception:
+                error_body = ""
+            logger.error(
+                "%s%s API error: %d - %s",
+                label,
+                suffix,
+                error.response.status_code,
+                error_body[:200],
+            )
+            raise ProviderError(
+                f"{label} API error: {error.response.status_code} - {error_body}",
+                status_code=error.response.status_code,
+                retryable=retryable,
+            )
+        logger.error("%s%s API error: %d", label, suffix, error.response.status_code)
         raise ProviderError(
-            f"{label} API error: {error.response.status_code} - {error_body}",
+            f"{label} API error: {error.response.status_code}",
             status_code=error.response.status_code,
             retryable=retryable,
         )

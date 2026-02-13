@@ -201,7 +201,7 @@ class CopilotProvider(BaseProvider):
                 usage=data.get("usage"),
             )
         except httpx.HTTPStatusError as e:
-            self._raise_http_status_error("Copilot", e, logger)
+            self._raise_http_status_error("Copilot", e, logger, include_body=True)
         except httpx.HTTPError as e:
             self._raise_http_error("Copilot", e, logger)
 
@@ -277,9 +277,28 @@ class CopilotProvider(BaseProvider):
                             usage=usage,
                         )
         except httpx.HTTPStatusError as e:
-            self._raise_http_status_error("Copilot", e, logger, stream=True)
+            self._raise_http_status_error("Copilot", e, logger, stream=True, include_body=True)
         except httpx.HTTPError as e:
-            self._raise_http_error("Copilot", e, logger, stream=True)
+            # Verbose diagnostics for stream connection issues (PR #17/#18)
+            resp = getattr(e, "response", None)
+            resp_text = resp.text if resp is not None else "No response"
+            headers = {
+                k: v
+                for k, v in self._get_headers(vision_request=has_images).items()
+                if k != "Authorization"
+            }
+            logger.error(
+                "Copilot stream HTTP error: type=%s error=%r\n"
+                "Request payload: %s\nRequest URL: %s\n"
+                "Request headers: %s\nResponse: %s",
+                type(e).__name__,
+                e,
+                json.dumps(payload, default=str)[:2000],
+                COPILOT_CHAT_URL,
+                headers,
+                resp_text,
+            )
+            raise ProviderError(f"HTTP error: {type(e).__name__}: {e}", retryable=True)
 
     async def list_models(self, force_refresh: bool = False) -> list[ModelInfo]:
         """List available Copilot models from API with caching.
@@ -463,7 +482,7 @@ class CopilotProvider(BaseProvider):
                 tool_calls=tool_calls if tool_calls else None,
             )
         except httpx.HTTPStatusError as e:
-            self._raise_http_status_error("Copilot", e, logger)
+            self._raise_http_status_error("Copilot", e, logger, include_body=True)
         except httpx.HTTPError as e:
             self._raise_http_error("Copilot", e, logger)
 
