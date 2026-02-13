@@ -7,12 +7,10 @@ from router_maestro.providers import ChatRequest, Message
 from router_maestro.server.schemas.anthropic import (
     AnthropicAssistantContentBlock,
     AnthropicAssistantMessage,
-    AnthropicImageBlock,
     AnthropicMessagesRequest,
     AnthropicMessagesResponse,
     AnthropicStreamState,
     AnthropicTextBlock,
-    AnthropicThinkingBlock,
     AnthropicToolUseBlock,
     AnthropicUsage,
     AnthropicUserMessage,
@@ -20,6 +18,18 @@ from router_maestro.server.schemas.anthropic import (
 from router_maestro.utils import get_logger, map_openai_stop_reason_to_anthropic
 
 logger = get_logger("server.translation")
+
+
+def _get_block_field(block, field: str, default=None):
+    """Get a field from a content block (dict or Pydantic object)."""
+    if isinstance(block, dict):
+        return block.get(field, default)
+    return getattr(block, field, default)
+
+
+def _get_block_type(block) -> str | None:
+    """Get the 'type' field from a content block."""
+    return _get_block_field(block, "type")
 
 
 def translate_anthropic_to_openai(request: AnthropicMessagesRequest) -> ChatRequest:
@@ -97,14 +107,9 @@ def _translate_tools(tools: list) -> list[dict]:
     """
     result = []
     for tool in tools:
-        if isinstance(tool, dict):
-            name = tool.get("name", "")
-            description = tool.get("description", "")
-            input_schema = tool.get("input_schema", {})
-        else:
-            name = getattr(tool, "name", "")
-            description = getattr(tool, "description", "")
-            input_schema = getattr(tool, "input_schema", {})
+        name = _get_block_field(tool, "name", "")
+        description = _get_block_field(tool, "description", "")
+        input_schema = _get_block_field(tool, "input_schema", {})
 
         result.append(
             {
@@ -201,10 +206,7 @@ def _handle_user_message(message: AnthropicUserMessage | dict) -> list[Message]:
     other_blocks = []
 
     for block in content:
-        if isinstance(block, dict):
-            block_type = block.get("type")
-        else:
-            block_type = getattr(block, "type", None)
+        block_type = _get_block_type(block)
 
         if block_type == "tool_result":
             tool_results.append(block)
@@ -215,12 +217,8 @@ def _handle_user_message(message: AnthropicUserMessage | dict) -> list[Message]:
 
     # Tool results become tool role messages in OpenAI format
     for block in tool_results:
-        if isinstance(block, dict):
-            tool_content = block.get("content", "")
-            tool_use_id = block.get("tool_use_id", "")
-        else:
-            tool_content = block.content
-            tool_use_id = block.tool_use_id
+        tool_content = _get_block_field(block, "content", "")
+        tool_use_id = _get_block_field(block, "tool_use_id", "")
 
         # Handle content as array of content blocks
         if isinstance(tool_content, list):
@@ -289,34 +287,25 @@ def _extract_tool_calls(blocks: list) -> list[dict] | None:
     """Extract tool_use blocks and convert to OpenAI tool_calls format."""
     tool_calls = []
     for block in blocks:
-        if isinstance(block, dict):
-            if block.get("type") == "tool_use":
-                tool_call = {
-                    "id": block.get("id", ""),
-                    "type": "function",
-                    "function": {
-                        "name": block.get("name", ""),
-                        "arguments": block.get("input", {}),
-                    },
-                }
-                # Convert input to JSON string if it's a dict
-                if isinstance(tool_call["function"]["arguments"], dict):
-                    tool_call["function"]["arguments"] = json.dumps(
-                        tool_call["function"]["arguments"]
-                    )
-                tool_calls.append(tool_call)
-        elif isinstance(block, AnthropicToolUseBlock):
-            tool_call = {
-                "id": block.id,
+        if _get_block_type(block) != "tool_use":
+            continue
+
+        block_id = _get_block_field(block, "id", "")
+        block_name = _get_block_field(block, "name", "")
+        block_input = _get_block_field(block, "input", {})
+
+        arguments = json.dumps(block_input) if isinstance(block_input, dict) else str(block_input)
+
+        tool_calls.append(
+            {
+                "id": block_id,
                 "type": "function",
                 "function": {
-                    "name": block.name,
-                    "arguments": json.dumps(block.input)
-                    if isinstance(block.input, dict)
-                    else str(block.input),
+                    "name": block_name,
+                    "arguments": arguments,
                 },
             }
-            tool_calls.append(tool_call)
+        )
     return tool_calls if tool_calls else None
 
 
@@ -324,16 +313,11 @@ def _extract_text_content(blocks: list) -> str:
     """Extract text content from content blocks."""
     texts = []
     for block in blocks:
-        if isinstance(block, dict):
-            block_type = block.get("type")
-            if block_type == "text":
-                texts.append(block.get("text", ""))
-            elif block_type == "thinking":
-                texts.append(block.get("thinking", ""))
-        elif isinstance(block, AnthropicTextBlock):
-            texts.append(block.text)
-        elif isinstance(block, AnthropicThinkingBlock):
-            texts.append(block.thinking)
+        block_type = _get_block_type(block)
+        if block_type == "text":
+            texts.append(_get_block_field(block, "text", ""))
+        elif block_type == "thinking":
+            texts.append(_get_block_field(block, "thinking", ""))
     return "\n\n".join(texts)
 
 
@@ -347,35 +331,24 @@ def _extract_multimodal_content(blocks: list) -> str | list:
     image_parts = []
 
     for block in blocks:
-        if isinstance(block, dict):
-            block_type = block.get("type")
-            if block_type == "text":
-                text_parts.append(block.get("text", ""))
-            elif block_type == "thinking":
-                text_parts.append(block.get("thinking", ""))
-            elif block_type == "image":
-                # Convert Anthropic image format to OpenAI format
-                source = block.get("source", {})
-                if source.get("type") == "base64":
-                    media_type = source.get("media_type", "image/png")
-                    data = source.get("data", "")
-                    image_parts.append(
-                        {
-                            "type": "image_url",
-                            "image_url": {"url": f"data:{media_type};base64,{data}"},
-                        }
-                    )
-        elif isinstance(block, AnthropicTextBlock):
-            text_parts.append(block.text)
-        elif isinstance(block, AnthropicThinkingBlock):
-            text_parts.append(block.thinking)
-        elif isinstance(block, AnthropicImageBlock):
-            # Convert Anthropic image to OpenAI format
-            media_type = block.source.media_type
-            data = block.source.data
-            image_parts.append(
-                {"type": "image_url", "image_url": {"url": f"data:{media_type};base64,{data}"}}
-            )
+        block_type = _get_block_type(block)
+        if block_type == "text":
+            text_parts.append(_get_block_field(block, "text", ""))
+        elif block_type == "thinking":
+            text_parts.append(_get_block_field(block, "thinking", ""))
+        elif block_type == "image":
+            source = _get_block_field(block, "source", {})
+            # Handle both dict and object sources
+            source_type = _get_block_field(source, "type") if source else None
+            if source_type == "base64":
+                media_type = _get_block_field(source, "media_type", "image/png")
+                data = _get_block_field(source, "data", "")
+                image_parts.append(
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": f"data:{media_type};base64,{data}"},
+                    }
+                )
 
     # If no images, return simple text string
     if not image_parts:
@@ -425,7 +398,7 @@ def translate_openai_to_anthropic(
     finish_reason = None
     if openai_response.get("choices"):
         openai_reason = openai_response["choices"][0].get("finish_reason")
-        finish_reason = _map_stop_reason(openai_reason)
+        finish_reason = map_openai_stop_reason_to_anthropic(openai_reason)
 
     # Extract usage
     openai_usage = openai_response.get("usage", {})
@@ -444,13 +417,6 @@ def translate_openai_to_anthropic(
         stop_sequence=None,
         usage=usage,
     )
-
-
-def _map_stop_reason(
-    openai_reason: str | None,
-) -> str | None:
-    """Map OpenAI finish reason to Anthropic stop reason."""
-    return map_openai_stop_reason_to_anthropic(openai_reason)
 
 
 def translate_openai_chunk_to_anthropic_events(
@@ -624,7 +590,7 @@ def translate_openai_chunk_to_anthropic_events(
             {
                 "type": "message_delta",
                 "delta": {
-                    "stop_reason": _map_stop_reason(finish_reason),
+                    "stop_reason": map_openai_stop_reason_to_anthropic(finish_reason),
                     "stop_sequence": None,
                 },
                 "usage": {

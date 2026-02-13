@@ -7,12 +7,12 @@ from router_maestro.server.schemas.anthropic import (
 )
 from router_maestro.server.translation import (
     _extract_text_content,
-    _map_stop_reason,
     _translate_model_name,
     _translate_tool_choice,
     _translate_tools,
     translate_anthropic_to_openai,
 )
+from router_maestro.utils.tokens import map_openai_stop_reason_to_anthropic
 
 
 class TestModelNameTranslation:
@@ -92,23 +92,23 @@ class TestStopReasonMapping:
 
     def test_map_stop_to_end_turn(self):
         """Test mapping 'stop' to 'end_turn'."""
-        assert _map_stop_reason("stop") == "end_turn"
+        assert map_openai_stop_reason_to_anthropic("stop") == "end_turn"
 
     def test_map_length_to_max_tokens(self):
         """Test mapping 'length' to 'max_tokens'."""
-        assert _map_stop_reason("length") == "max_tokens"
+        assert map_openai_stop_reason_to_anthropic("length") == "max_tokens"
 
     def test_map_tool_calls_to_tool_use(self):
         """Test mapping 'tool_calls' to 'tool_use'."""
-        assert _map_stop_reason("tool_calls") == "tool_use"
+        assert map_openai_stop_reason_to_anthropic("tool_calls") == "tool_use"
 
     def test_map_none(self):
         """Test mapping None returns None."""
-        assert _map_stop_reason(None) is None
+        assert map_openai_stop_reason_to_anthropic(None) is None
 
     def test_map_unknown_to_end_turn(self):
         """Test mapping unknown reason defaults to 'end_turn'."""
-        assert _map_stop_reason("unknown_reason") == "end_turn"
+        assert map_openai_stop_reason_to_anthropic("unknown_reason") == "end_turn"
 
 
 class TestTextContentExtraction:
