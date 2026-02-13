@@ -4,7 +4,8 @@ import pytest
 
 from router_maestro.providers import ChatRequest, ChatResponse, Message, ModelInfo, ProviderError
 from router_maestro.providers.base import BaseProvider
-from router_maestro.routing.router import Router
+from router_maestro.routing.router import CACHE_TTL_SECONDS, Router
+from router_maestro.utils.cache import TTLCache
 
 
 class MockProvider(BaseProvider):
@@ -54,6 +55,15 @@ class MockProvider(BaseProvider):
         return self._models
 
 
+def _init_router_caches(router: Router) -> None:
+    """Initialize TTLCache attributes on a Router created via __new__."""
+    router._models_cache = {}
+    router._models_cache_ttl = TTLCache(CACHE_TTL_SECONDS)
+    router._priorities_cache = TTLCache(CACHE_TTL_SECONDS)
+    router._fuzzy_cache = {}
+    router._providers_ttl = TTLCache(CACHE_TTL_SECONDS)
+
+
 class TestRouterModelResolution:
     """Tests for Router model resolution logic."""
 
@@ -62,11 +72,7 @@ class TestRouterModelResolution:
         """Create a router with mock providers."""
         router = Router.__new__(Router)
         router.providers = {}
-        router._models_cache = {}
-        router._cache_initialized = False
-        router._cache_timestamp = 0.0
-        router._priorities_config = None
-        router._priorities_config_timestamp = 0.0
+        _init_router_caches(router)
         return router
 
     def test_parse_model_key_with_provider(self, router_with_mock):
@@ -122,12 +128,10 @@ class TestRouterCacheInvalidation:
     def router(self):
         """Create a minimal router for testing cache."""
         router = Router.__new__(Router)
+        _init_router_caches(router)
         router._models_cache = {"test": ("provider", None)}
-        router._cache_initialized = True
-        router._cache_timestamp = 100.0
-        router._priorities_config = object()  # Mock config
-        router._priorities_config_timestamp = 100.0
-        router._fuzzy_cache = {}
+        router._models_cache_ttl.set(True)
+        router._priorities_cache.set(object())
         return router
 
     def test_invalidate_cache_clears_models(self, router):
@@ -135,12 +139,11 @@ class TestRouterCacheInvalidation:
         router.invalidate_cache()
 
         assert router._models_cache == {}
-        assert router._cache_initialized is False
-        assert router._cache_timestamp == 0.0
+        assert not router._models_cache_ttl.is_valid
 
     def test_invalidate_cache_clears_priorities(self, router):
         """Test that invalidate_cache clears priorities config cache."""
         router.invalidate_cache()
 
-        assert router._priorities_config is None
-        assert router._priorities_config_timestamp == 0.0
+        assert router._priorities_cache.get() is None
+        assert not router._priorities_cache.is_valid

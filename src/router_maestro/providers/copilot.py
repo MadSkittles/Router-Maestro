@@ -22,6 +22,7 @@ from router_maestro.providers.base import (
     ResponsesToolCall,
 )
 from router_maestro.utils import get_logger
+from router_maestro.utils.cache import TTLCache
 
 logger = get_logger("providers.copilot")
 
@@ -44,8 +45,7 @@ class CopilotProvider(BaseProvider):
         self._cached_token: str | None = None
         self._token_expires: int = 0
         # Model cache
-        self._models_cache: list[ModelInfo] | None = None
-        self._models_cache_expires: float = 0
+        self._models_ttl_cache: TTLCache[list[ModelInfo]] = TTLCache(MODELS_CACHE_TTL)
         # Reusable HTTP client
         self._client: httpx.AsyncClient | None = None
 
@@ -333,16 +333,12 @@ class CopilotProvider(BaseProvider):
         Returns:
             List of available models
         """
-        current_time = time.time()
-
         # Return cached models if valid
-        if (
-            not force_refresh
-            and self._models_cache is not None
-            and current_time < self._models_cache_expires
-        ):
-            logger.debug("Using cached Copilot models (%d models)", len(self._models_cache))
-            return self._models_cache
+        if not force_refresh:
+            cached = self._models_ttl_cache.get()
+            if cached is not None:
+                logger.debug("Using cached Copilot models (%d models)", len(cached))
+                return cached
 
         await self.ensure_token()
 
@@ -369,16 +365,16 @@ class CopilotProvider(BaseProvider):
                     )
 
             # Update cache
-            self._models_cache = models
-            self._models_cache_expires = current_time + MODELS_CACHE_TTL
+            self._models_ttl_cache.set(models)
 
             logger.info("Fetched %d Copilot models", len(models))
             return models
         except httpx.HTTPError as e:
             # If cache exists, return stale cache on error
-            if self._models_cache is not None:
+            stale = self._models_ttl_cache._value
+            if stale is not None:
                 logger.warning("Failed to refresh Copilot models, using stale cache: %s", e)
-                return self._models_cache
+                return stale
             logger.error("Failed to list Copilot models: %s", e)
             raise ProviderError(f"Failed to list models: {e}", retryable=True)
 
