@@ -201,20 +201,9 @@ class CopilotProvider(BaseProvider):
                 usage=data.get("usage"),
             )
         except httpx.HTTPStatusError as e:
-            retryable = e.response.status_code in (429, 500, 502, 503, 504)
-            try:
-                error_body = e.response.text
-            except Exception:
-                error_body = ""
-            logger.error("Copilot API error: %d - %s", e.response.status_code, error_body[:200])
-            raise ProviderError(
-                f"Copilot API error: {e.response.status_code} - {error_body}",
-                status_code=e.response.status_code,
-                retryable=retryable,
-            )
+            self._raise_http_status_error("Copilot", e, logger)
         except httpx.HTTPError as e:
-            logger.error("Copilot HTTP error: %s", e)
-            raise ProviderError(f"HTTP error: {e}", retryable=True)
+            self._raise_http_error("Copilot", e, logger)
 
     async def chat_completion_stream(self, request: ChatRequest) -> AsyncIterator[ChatStreamChunk]:
         """Generate a streaming chat completion via Copilot."""
@@ -288,41 +277,9 @@ class CopilotProvider(BaseProvider):
                             usage=usage,
                         )
         except httpx.HTTPStatusError as e:
-            retryable = e.response.status_code in (429, 500, 502, 503, 504)
-            try:
-                error_body = e.response.text
-            except Exception:
-                error_body = ""
-            logger.error(
-                "Copilot stream API error: %d - %s",
-                e.response.status_code,
-                error_body[:200],
-            )
-            raise ProviderError(
-                f"Copilot API error: {e.response.status_code} - {error_body}",
-                status_code=e.response.status_code,
-                retryable=retryable,
-            )
+            self._raise_http_status_error("Copilot", e, logger, stream=True)
         except httpx.HTTPError as e:
-            resp = getattr(e, "response", None)
-            resp_text = resp.text if resp is not None else "No response"
-            headers = {
-                k: v
-                for k, v in self._get_headers(vision_request=has_images).items()
-                if k != "Authorization"
-            }
-            logger.error(
-                "Copilot stream HTTP error: type=%s error=%r\n"
-                "Request payload: %s\nRequest URL: %s\n"
-                "Request headers: %s\nResponse: %s",
-                type(e).__name__,
-                e,
-                json.dumps(payload, default=str)[:2000],
-                COPILOT_CHAT_URL,
-                headers,
-                resp_text,
-            )
-            raise ProviderError(f"HTTP error: {type(e).__name__}: {e}", retryable=True)
+            self._raise_http_error("Copilot", e, logger, stream=True)
 
     async def list_models(self, force_refresh: bool = False) -> list[ModelInfo]:
         """List available Copilot models from API with caching.
@@ -506,24 +463,9 @@ class CopilotProvider(BaseProvider):
                 tool_calls=tool_calls if tool_calls else None,
             )
         except httpx.HTTPStatusError as e:
-            retryable = e.response.status_code in (429, 500, 502, 503, 504)
-            try:
-                error_body = e.response.text
-            except Exception:
-                error_body = ""
-            logger.error(
-                "Copilot responses API error: %d - %s",
-                e.response.status_code,
-                error_body[:200],
-            )
-            raise ProviderError(
-                f"Copilot API error: {e.response.status_code} - {error_body}",
-                status_code=e.response.status_code,
-                retryable=retryable,
-            )
+            self._raise_http_status_error("Copilot", e, logger)
         except httpx.HTTPError as e:
-            logger.error("Copilot responses HTTP error: %s", e)
-            raise ProviderError(f"HTTP error: {e}", retryable=True)
+            self._raise_http_error("Copilot", e, logger)
 
     async def responses_completion_stream(
         self, request: ResponsesRequest
@@ -690,5 +632,4 @@ class CopilotProvider(BaseProvider):
                     )
 
         except httpx.HTTPError as e:
-            logger.error("Copilot responses stream HTTP error: %s", e)
-            raise ProviderError(f"HTTP error: {e}", retryable=True)
+            self._raise_http_error("Copilot", e, logger, stream=True)
