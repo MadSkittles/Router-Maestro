@@ -19,13 +19,6 @@ async def _async_gen_from_list(items: list[str]) -> AsyncGenerator[str, None]:
         yield item
 
 
-async def _slow_gen(delay: float, items: list[str]) -> AsyncGenerator[str, None]:
-    """Helper: yield items with a delay between each."""
-    for item in items:
-        await asyncio.sleep(delay)
-        yield item
-
-
 async def _failing_gen(
     error: Exception, items_before: list[str] | None = None
 ) -> AsyncGenerator[str, None]:
@@ -37,10 +30,7 @@ async def _failing_gen(
 
 async def _collect(gen: AsyncGenerator[str, None]) -> list[str]:
     """Collect all items from an async generator."""
-    result = []
-    async for item in gen:
-        result.append(item)
-    return result
+    return [item async for item in gen]
 
 
 @pytest.mark.asyncio
@@ -59,9 +49,8 @@ async def test_resilient_generator_yields_keepalive_on_timeout():
     """A keepalive comment should be emitted when no data arrives within the interval."""
     # Use a very short keepalive for testing
     with patch("router_maestro.server.streaming.SSE_KEEPALIVE_INTERVAL", 0.05):
-        # Reimport to pick up the patched constant — but since we use
-        # asyncio.wait(timeout=SSE_KEEPALIVE_INTERVAL) and the constant is
-        # read at call time, patching the module-level constant works.
+        # Patching the module-level constant works because asyncio.wait
+        # reads SSE_KEEPALIVE_INTERVAL at call time.
 
         async def slow_single_item() -> AsyncGenerator[str, None]:
             await asyncio.sleep(0.15)  # 3x the keepalive interval

@@ -138,9 +138,7 @@ async def messages(request: AnthropicMessagesRequest):
     # Handle test model
     if request.model == "test":
         if request.stream:
-            return sse_streaming_response(
-                _stream_test_response(),
-            )
+            return sse_streaming_response(_stream_test_response())
         return _create_test_response()
 
     model_router = get_router()
@@ -311,27 +309,25 @@ async def stream_response(
                 yield f"event: {event['type']}\ndata: {json.dumps(event)}\n\n"
 
     except ProviderError as e:
-        error_event = {
-            "type": "error",
-            "error": {
-                "type": "api_error",
-                "message": str(e),
-            },
-        }
-        yield f"event: error\ndata: {json.dumps(error_event)}\n\n"
+        yield _sse_error_event(str(e))
     except asyncio.CancelledError:
         logger.info("Anthropic stream cancelled by client")
         raise
     except Exception:
         logger.error("Unexpected error in Anthropic stream", exc_info=True)
-        error_event = {
-            "type": "error",
-            "error": {
-                "type": "api_error",
-                "message": "Internal server error",
-            },
-        }
-        yield f"event: error\ndata: {json.dumps(error_event)}\n\n"
+        yield _sse_error_event("Internal server error")
+
+
+def _sse_error_event(message: str) -> str:
+    """Format an Anthropic SSE error event."""
+    error_event = {
+        "type": "error",
+        "error": {
+            "type": "api_error",
+            "message": message,
+        },
+    }
+    return f"event: error\ndata: {json.dumps(error_event)}\n\n"
 
 
 def _generate_display_name(model_id: str) -> str:

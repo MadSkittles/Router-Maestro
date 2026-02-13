@@ -34,7 +34,7 @@ async def resilient_sse_generator(
     - ``ConnectionResetError`` — logged as warning
     - Any other ``Exception`` — logged with traceback
     """
-    # We use asyncio.wait with FIRST_COMPLETED so that we never cancel the
+    # We use asyncio.wait with a timeout so that we never cancel the
     # in-flight ``__anext__`` call.  Cancelling an async-generator's
     # ``__anext__`` can leave the generator in a broken state.
     next_task: asyncio.Task[str] | None = None
@@ -71,7 +71,7 @@ async def resilient_sse_generator(
             next_task.cancel()
             try:
                 await next_task
-            except (asyncio.CancelledError, StopAsyncIteration, Exception):
+            except BaseException:
                 pass
         await inner.aclose()
 

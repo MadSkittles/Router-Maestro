@@ -48,9 +48,7 @@ async def chat_completions(request: ChatCompletionRequest):
     )
 
     if request.stream:
-        return sse_streaming_response(
-            stream_response(model_router, chat_request),
-        )
+        return sse_streaming_response(stream_response(model_router, chat_request))
 
     try:
         response, provider_name = await model_router.chat_completion(chat_request)
