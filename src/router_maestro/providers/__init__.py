@@ -2,6 +2,8 @@
 
 from router_maestro.providers.anthropic import AnthropicProvider
 from router_maestro.providers.base import (
+    TIMEOUT_NON_STREAMING,
+    TIMEOUT_STREAMING,
     BaseProvider,
     ChatRequest,
     ChatResponse,
@@ -20,6 +22,9 @@ from router_maestro.providers.openai_base import OpenAIChatProvider
 from router_maestro.providers.openai_compat import OpenAICompatibleProvider
 
 __all__ = [
+    # Constants
+    "TIMEOUT_NON_STREAMING",
+    "TIMEOUT_STREAMING",
     # Base classes
     "BaseProvider",
     "ProviderError",

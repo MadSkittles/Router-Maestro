@@ -8,6 +8,8 @@ from logging import Logger
 import httpx
 
 from router_maestro.providers.base import (
+    TIMEOUT_NON_STREAMING,
+    TIMEOUT_STREAMING,
     BaseProvider,
     ChatRequest,
     ChatResponse,
@@ -57,7 +59,7 @@ class OpenAIChatProvider(BaseProvider, ABC):
                     f"{self.base_url}/chat/completions",
                     json=payload,
                     headers=self._get_headers(),
-                    timeout=120.0,
+                    timeout=TIMEOUT_NON_STREAMING,
                 )
                 response.raise_for_status()
                 data = response.json()
@@ -70,6 +72,8 @@ class OpenAIChatProvider(BaseProvider, ABC):
                 )
             except httpx.HTTPStatusError as e:
                 self._raise_http_status_error(label, e, self._logger)
+            except httpx.TimeoutException as e:
+                self._raise_timeout_error(label, e, self._logger)
             except httpx.HTTPError as e:
                 self._raise_http_error(label, e, self._logger)
 
@@ -84,7 +88,7 @@ class OpenAIChatProvider(BaseProvider, ABC):
                     f"{self.base_url}/chat/completions",
                     json=payload,
                     headers=self._get_headers(),
-                    timeout=httpx.Timeout(connect=30.0, read=600.0, write=30.0, pool=30.0),
+                    timeout=TIMEOUT_STREAMING,
                 ) as response:
                     response.raise_for_status()
 
@@ -112,5 +116,7 @@ class OpenAIChatProvider(BaseProvider, ABC):
                                 )
             except httpx.HTTPStatusError as e:
                 self._raise_http_status_error(label, e, self._logger, stream=True)
+            except httpx.TimeoutException as e:
+                self._raise_timeout_error(label, e, self._logger, stream=True)
             except httpx.HTTPError as e:
                 self._raise_http_error(label, e, self._logger, stream=True)
