@@ -257,6 +257,11 @@ class AnthropicModelInfo(BaseModel):
     created_at: str  # ISO 8601 datetime
     display_name: str
     type: Literal["model"] = "model"
+    max_prompt_tokens: int | None = None
+    max_output_tokens: int | None = None
+    max_context_window_tokens: int | None = None
+    supports_thinking: bool | None = None
+    supports_vision: bool | None = None
 
 
 class AnthropicModelList(BaseModel):

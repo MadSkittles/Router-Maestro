@@ -83,6 +83,11 @@ class AnthropicProvider(BaseProvider):
             payload["system"] = system_prompt
         if request.temperature != 1.0:
             payload["temperature"] = request.temperature
+        if request.thinking_type and request.thinking_type != "disabled":
+            thinking_config: dict = {"type": request.thinking_type}
+            if request.thinking_budget:
+                thinking_config["budget_tokens"] = request.thinking_budget
+            payload["thinking"] = thinking_config
 
         logger.debug("Anthropic chat completion: model=%s", request.model)
         async with httpx.AsyncClient() as client:
@@ -144,6 +149,11 @@ class AnthropicProvider(BaseProvider):
             payload["system"] = system_prompt
         if request.temperature != 1.0:
             payload["temperature"] = request.temperature
+        if request.thinking_type and request.thinking_type != "disabled":
+            thinking_config: dict = {"type": request.thinking_type}
+            if request.thinking_budget:
+                thinking_config["budget_tokens"] = request.thinking_budget
+            payload["thinking"] = thinking_config
 
         logger.debug("Anthropic streaming chat: model=%s", request.model)
         async with httpx.AsyncClient() as client:
@@ -199,10 +209,33 @@ class AnthropicProvider(BaseProvider):
         # Anthropic doesn't have a models endpoint, return known models
         logger.debug("Returning known Anthropic models")
         return [
-            ModelInfo(id="claude-sonnet-4-20250514", name="Claude Sonnet 4", provider=self.name),
             ModelInfo(
-                id="claude-3-5-sonnet-20241022", name="Claude 3.5 Sonnet", provider=self.name
+                id="claude-sonnet-4-20250514",
+                name="Claude Sonnet 4",
+                provider=self.name,
+                max_context_window_tokens=200000,
+                max_output_tokens=16384,
+                supports_thinking=True,
             ),
-            ModelInfo(id="claude-3-5-haiku-20241022", name="Claude 3.5 Haiku", provider=self.name),
-            ModelInfo(id="claude-3-opus-20240229", name="Claude 3 Opus", provider=self.name),
+            ModelInfo(
+                id="claude-3-5-sonnet-20241022",
+                name="Claude 3.5 Sonnet",
+                provider=self.name,
+                max_context_window_tokens=200000,
+                max_output_tokens=8192,
+            ),
+            ModelInfo(
+                id="claude-3-5-haiku-20241022",
+                name="Claude 3.5 Haiku",
+                provider=self.name,
+                max_context_window_tokens=200000,
+                max_output_tokens=8192,
+            ),
+            ModelInfo(
+                id="claude-3-opus-20240229",
+                name="Claude 3 Opus",
+                provider=self.name,
+                max_context_window_tokens=200000,
+                max_output_tokens=4096,
+            ),
         ]

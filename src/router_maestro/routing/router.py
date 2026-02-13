@@ -271,6 +271,8 @@ class Router:
             stream=original_request.stream,
             tools=original_request.tools,
             tool_choice=original_request.tool_choice,
+            thinking_budget=original_request.thinking_budget,
+            thinking_type=original_request.thinking_type,
             extra=original_request.extra,
         )
 

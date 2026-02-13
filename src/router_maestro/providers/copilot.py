@@ -173,6 +173,12 @@ class CopilotProvider(BaseProvider):
         }
         if request.max_tokens:
             payload["max_tokens"] = request.max_tokens
+        if request.tools:
+            payload["tools"] = request.tools
+        if request.tool_choice:
+            payload["tool_choice"] = request.tool_choice
+        if request.thinking_budget is not None:
+            payload["thinking_budget"] = request.thinking_budget
 
         logger.debug("Copilot chat completion: model=%s", request.model)
         client = self._get_client()
@@ -227,6 +233,8 @@ class CopilotProvider(BaseProvider):
             payload["tools"] = request.tools
         if request.tool_choice:
             payload["tool_choice"] = request.tool_choice
+        if request.thinking_budget is not None:
+            payload["thinking_budget"] = request.thinking_budget
 
         logger.debug("Copilot streaming chat: model=%s", request.model)
         client = self._get_client()
@@ -338,11 +346,19 @@ class CopilotProvider(BaseProvider):
             for model in data.get("data", []):
                 # Only include models that are enabled in model picker
                 if model.get("model_picker_enabled", True):
+                    caps = model.get("capabilities", {})
+                    limits = caps.get("limits", {})
+                    supports = caps.get("supports", {})
                     models.append(
                         ModelInfo(
                             id=model["id"],
                             name=model.get("name", model["id"]),
                             provider=self.name,
+                            max_prompt_tokens=limits.get("max_prompt_tokens"),
+                            max_output_tokens=limits.get("max_output_tokens"),
+                            max_context_window_tokens=limits.get("max_context_window_tokens"),
+                            supports_thinking=bool(supports.get("thinking")),
+                            supports_vision=bool(supports.get("vision")),
                         )
                     )
 

@@ -38,6 +38,13 @@ def translate_anthropic_to_openai(request: AnthropicMessagesRequest) -> ChatRequ
     tools = _translate_tools(request.tools) if request.tools else None
     tool_choice = _translate_tool_choice(request.tool_choice) if request.tool_choice else None
 
+    # Extract thinking configuration
+    thinking_budget = None
+    thinking_type = None
+    if request.thinking:
+        thinking_type = request.thinking.type
+        thinking_budget = request.thinking.budget_tokens
+
     logger.debug(
         "Translating Anthropic request: model=%s -> %s, messages=%d",
         request.model,
@@ -53,6 +60,8 @@ def translate_anthropic_to_openai(request: AnthropicMessagesRequest) -> ChatRequ
         stream=request.stream,
         tools=tools,
         tool_choice=tool_choice,
+        thinking_budget=thinking_budget,
+        thinking_type=thinking_type,
     )
 
 
