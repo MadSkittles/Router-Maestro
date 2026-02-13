@@ -34,10 +34,8 @@ from router_maestro.utils.tokens import (
     _count_object_tokens,
     _select_encoding,
     calculate_image_token_cost,
-    calibrate_tokens,
     count_anthropic_request_tokens,
     count_tokens,
-    estimate_anthropic_request_tokens,
     estimate_tokens,
     estimate_tokens_from_char_count,
 )
@@ -120,19 +118,6 @@ class TestEstimateTokensFromCharCount:
 
     def test_estimate_tokens_from_char_count_zero(self):
         assert estimate_tokens_from_char_count(0) == 0
-
-
-class TestCalibrateTokens:
-    """Tests for calibrate_tokens (now a no-op)."""
-
-    def test_calibrate_is_noop(self):
-        assert calibrate_tokens(100) == 100
-        assert calibrate_tokens(50000) == 50000
-        assert calibrate_tokens(0) == 0
-
-    def test_calibrate_ignores_parameters(self):
-        assert calibrate_tokens(100, is_input=True, model="opus") == 100
-        assert calibrate_tokens(100, is_input=False, model="sonnet") == 100
 
 
 class TestConstants:
@@ -623,18 +608,6 @@ class TestCountAnthropicRequestTokens:
         assert result_two > result_one
 
 
-class TestEstimateAnthropicRequestTokens:
-    """Tests for estimate_anthropic_request_tokens (backward compat alias)."""
-
-    def test_is_alias_for_count(self):
-        messages = [AnthropicUserMessage(content="Hello")]
-        count_result = count_anthropic_request_tokens(system=None, messages=messages, tools=None)
-        estimate_result = estimate_anthropic_request_tokens(
-            system=None, messages=messages, tools=None
-        )
-        assert count_result == estimate_result
-
-
 class TestCountAnthropicRequestTokensWithConfig:
     """Parameterized tests for count_anthropic_request_tokens with different configs."""
 
@@ -763,22 +736,3 @@ class TestCountAnthropicRequestTokensWithConfig:
             system=None, messages=messages, config=ANTHROPIC_CONFIG
         )
         assert copilot > anthropic
-
-    def test_estimate_alias_forwards_config(self):
-        """estimate_anthropic_request_tokens forwards config parameter."""
-        messages = [AnthropicUserMessage(content="Hello")]
-        tools = [
-            AnthropicTool(
-                name="test",
-                description="A test tool",
-                input_schema={"type": "object"},
-            )
-        ]
-        for config in [COPILOT_CONFIG, ANTHROPIC_CONFIG, OPENAI_CONFIG]:
-            count_result = count_anthropic_request_tokens(
-                system=None, messages=messages, tools=tools, config=config
-            )
-            estimate_result = estimate_anthropic_request_tokens(
-                system=None, messages=messages, tools=tools, config=config
-            )
-            assert count_result == estimate_result

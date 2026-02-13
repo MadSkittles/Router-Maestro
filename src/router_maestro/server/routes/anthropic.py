@@ -27,7 +27,6 @@ from router_maestro.server.translation import (
 )
 from router_maestro.utils import (
     count_anthropic_request_tokens,
-    estimate_anthropic_request_tokens,
     get_logger,
     map_openai_stop_reason_to_anthropic,
 )
@@ -35,7 +34,6 @@ from router_maestro.utils.token_config import (
     count_tokens_via_anthropic_api,
     get_config_for_provider,
 )
-from router_maestro.utils.tokens import AnthropicStopReason
 
 logger = get_logger("server.routes.anthropic")
 
@@ -168,7 +166,7 @@ async def messages(request: AnthropicMessagesRequest):
         )
 
         # Map finish reason
-        stop_reason = _map_finish_reason(response.finish_reason)
+        stop_reason = map_openai_stop_reason_to_anthropic(response.finish_reason)
 
         return AnthropicMessagesResponse(
             id=f"msg_{uuid.uuid4().hex[:24]}",
@@ -250,11 +248,6 @@ async def count_tokens(request: AnthropicCountTokensRequest):
     return {"input_tokens": input_tokens}
 
 
-def _map_finish_reason(reason: str | None) -> AnthropicStopReason | None:
-    """Map OpenAI finish reason to Anthropic stop reason."""
-    return map_openai_stop_reason_to_anthropic(reason)
-
-
 def _estimate_input_tokens(
     request: AnthropicMessagesRequest,
     provider_name: str | None = None,
@@ -265,7 +258,7 @@ def _estimate_input_tokens(
     configuration for accurate estimates.
     """
     config = get_config_for_provider(provider_name)
-    return estimate_anthropic_request_tokens(
+    return count_anthropic_request_tokens(
         system=request.system,
         messages=request.messages,
         tools=request.tools,
