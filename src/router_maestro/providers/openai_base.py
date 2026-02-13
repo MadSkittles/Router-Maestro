@@ -64,10 +64,42 @@ class OpenAIChatProvider(BaseProvider, ABC):
                 response.raise_for_status()
                 data = response.json()
 
+                choices = data.get("choices", [])
+                if not choices:
+                    usage = data.get("usage", {})
+                    completion_tokens = usage.get("completion_tokens", 0)
+                    model_name = data.get("model", request.model)
+
+                    if completion_tokens > 0:
+                        self._logger.warning(
+                            "%s returned empty choices with completion_tokens=%d "
+                            "for model=%s (possible content filtering)",
+                            label,
+                            completion_tokens,
+                            model_name,
+                        )
+                        return ChatResponse(
+                            content="",
+                            model=model_name,
+                            finish_reason="content_filter",
+                            usage=usage,
+                        )
+
+                    self._logger.error(
+                        "%s API returned empty choices with no completion tokens for model=%s",
+                        label,
+                        model_name,
+                    )
+                    raise ProviderError(
+                        f"{label} API returned empty choices for model={model_name}",
+                        status_code=502,
+                        retryable=True,
+                    )
+
                 return ChatResponse(
-                    content=data["choices"][0]["message"]["content"],
+                    content=choices[0]["message"]["content"],
                     model=data.get("model", request.model),
-                    finish_reason=data["choices"][0].get("finish_reason", "stop"),
+                    finish_reason=choices[0].get("finish_reason", "stop"),
                     usage=data.get("usage"),
                 )
             except httpx.HTTPStatusError as e:

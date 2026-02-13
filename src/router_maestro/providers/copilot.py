@@ -186,10 +186,35 @@ class CopilotProvider(BaseProvider):
 
             choices = data.get("choices", [])
             if not choices:
-                logger.error("Copilot API returned empty choices: %s", json.dumps(data)[:500])
+                usage = data.get("usage", {})
+                completion_tokens = usage.get("completion_tokens", 0)
+                model_name = data.get("model", request.model)
+
+                if completion_tokens > 0:
+                    logger.warning(
+                        "Copilot returned empty choices with completion_tokens=%d "
+                        "for model=%s (possible content filtering). Response: %s",
+                        completion_tokens,
+                        model_name,
+                        json.dumps(data)[:500],
+                    )
+                    return ChatResponse(
+                        content="",
+                        model=model_name,
+                        finish_reason="content_filter",
+                        usage=usage,
+                    )
+
+                logger.error(
+                    "Copilot API returned empty choices with no completion tokens "
+                    "for model=%s. Response: %s",
+                    model_name,
+                    json.dumps(data)[:500],
+                )
                 raise ProviderError(
-                    f"Copilot API returned empty choices: {json.dumps(data)[:500]}",
-                    status_code=500,
+                    f"Copilot API returned empty choices for model={model_name}: "
+                    f"{json.dumps(data)[:500]}",
+                    status_code=502,
                     retryable=True,
                 )
 

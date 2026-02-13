@@ -308,3 +308,205 @@ class TestBaseProviderAbstract:
         # Test default responses methods raise NotImplementedError
         with pytest.raises(NotImplementedError):
             await provider.responses_completion(ResponsesRequest(model="test", input="hi"))
+
+
+class TestEmptyChoicesHandling:
+    """Tests for empty choices handling in providers."""
+
+    @pytest.mark.asyncio
+    async def test_copilot_empty_choices_with_completion_tokens_returns_content_filter(self):
+        """Empty choices with completion_tokens > 0 returns content_filter response."""
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        from router_maestro.providers.copilot import CopilotProvider
+
+        provider = CopilotProvider()
+        provider._cached_token = "test-token"
+        provider._token_expires = 9999999999
+
+        mock_response = MagicMock()
+        mock_response.raise_for_status = MagicMock()
+        mock_response.json.return_value = {
+            "choices": [],
+            "created": 1770966457,
+            "id": "msg_test",
+            "usage": {
+                "completion_tokens": 8,
+                "prompt_tokens": 85058,
+                "total_tokens": 85066,
+            },
+            "model": "claude-opus-4.6-1m",
+        }
+
+        mock_client = AsyncMock()
+        mock_client.post = AsyncMock(return_value=mock_response)
+        provider._get_client = MagicMock(return_value=mock_client)
+
+        request = ChatRequest(
+            model="claude-opus-4.6-1m",
+            messages=[Message(role="user", content="Hello")],
+        )
+
+        result = await provider.chat_completion(request)
+
+        assert result.content == ""
+        assert result.finish_reason == "content_filter"
+        assert result.model == "claude-opus-4.6-1m"
+        assert result.usage["completion_tokens"] == 8
+
+    @pytest.mark.asyncio
+    async def test_copilot_empty_choices_no_tokens_raises_provider_error(self):
+        """Empty choices with completion_tokens=0 raises retryable ProviderError."""
+        from unittest.mock import AsyncMock, MagicMock
+
+        from router_maestro.providers.copilot import CopilotProvider
+
+        provider = CopilotProvider()
+        provider._cached_token = "test-token"
+        provider._token_expires = 9999999999
+
+        mock_response = MagicMock()
+        mock_response.raise_for_status = MagicMock()
+        mock_response.json.return_value = {
+            "choices": [],
+            "created": 1770966457,
+            "id": "msg_test",
+            "usage": {
+                "completion_tokens": 0,
+                "prompt_tokens": 100,
+                "total_tokens": 100,
+            },
+            "model": "gpt-4o",
+        }
+
+        mock_client = AsyncMock()
+        mock_client.post = AsyncMock(return_value=mock_response)
+        provider._get_client = MagicMock(return_value=mock_client)
+
+        request = ChatRequest(
+            model="gpt-4o",
+            messages=[Message(role="user", content="Hello")],
+        )
+
+        with pytest.raises(ProviderError) as exc_info:
+            await provider.chat_completion(request)
+
+        assert exc_info.value.status_code == 502
+        assert exc_info.value.retryable is True
+        assert "empty choices" in str(exc_info.value).lower()
+
+    @pytest.mark.asyncio
+    async def test_openai_base_empty_choices_with_completion_tokens(self):
+        """OpenAI base provider: empty choices with completion_tokens > 0 returns content_filter."""
+        from logging import Logger
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        from router_maestro.providers.openai_base import OpenAIChatProvider
+
+        class TestProvider(OpenAIChatProvider):
+            name = "test-openai"
+
+            def __init__(self):
+                super().__init__(base_url="https://api.test.com", logger=Logger("test"))
+                self._logger = Logger("test")
+
+            def _get_headers(self):
+                return {"Authorization": "Bearer test"}
+
+            def _error_label(self):
+                return "Test"
+
+            def is_authenticated(self):
+                return True
+
+            async def list_models(self):
+                return []
+
+        provider = TestProvider()
+
+        mock_response = MagicMock()
+        mock_response.raise_for_status = MagicMock()
+        mock_response.json.return_value = {
+            "choices": [],
+            "usage": {
+                "completion_tokens": 5,
+                "prompt_tokens": 100,
+                "total_tokens": 105,
+            },
+            "model": "gpt-4o",
+        }
+
+        mock_client_instance = AsyncMock()
+        mock_client_instance.post = AsyncMock(return_value=mock_response)
+        mock_client_instance.__aenter__ = AsyncMock(return_value=mock_client_instance)
+        mock_client_instance.__aexit__ = AsyncMock(return_value=False)
+
+        with patch("httpx.AsyncClient", return_value=mock_client_instance):
+            result = await provider.chat_completion(
+                ChatRequest(
+                    model="gpt-4o",
+                    messages=[Message(role="user", content="Hello")],
+                )
+            )
+
+        assert result.content == ""
+        assert result.finish_reason == "content_filter"
+        assert result.usage["completion_tokens"] == 5
+
+    @pytest.mark.asyncio
+    async def test_openai_base_empty_choices_no_tokens_raises_error(self):
+        """OpenAI base provider: empty choices with no tokens raises ProviderError."""
+        from logging import Logger
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        from router_maestro.providers.openai_base import OpenAIChatProvider
+
+        class TestProvider(OpenAIChatProvider):
+            name = "test-openai"
+
+            def __init__(self):
+                super().__init__(base_url="https://api.test.com", logger=Logger("test"))
+                self._logger = Logger("test")
+
+            def _get_headers(self):
+                return {"Authorization": "Bearer test"}
+
+            def _error_label(self):
+                return "Test"
+
+            def is_authenticated(self):
+                return True
+
+            async def list_models(self):
+                return []
+
+        provider = TestProvider()
+
+        mock_response = MagicMock()
+        mock_response.raise_for_status = MagicMock()
+        mock_response.json.return_value = {
+            "choices": [],
+            "usage": {
+                "completion_tokens": 0,
+                "prompt_tokens": 100,
+                "total_tokens": 100,
+            },
+            "model": "gpt-4o",
+        }
+
+        mock_client_instance = AsyncMock()
+        mock_client_instance.post = AsyncMock(return_value=mock_response)
+        mock_client_instance.__aenter__ = AsyncMock(return_value=mock_client_instance)
+        mock_client_instance.__aexit__ = AsyncMock(return_value=False)
+
+        with patch("httpx.AsyncClient", return_value=mock_client_instance):
+            with pytest.raises(ProviderError) as exc_info:
+                await provider.chat_completion(
+                    ChatRequest(
+                        model="gpt-4o",
+                        messages=[Message(role="user", content="Hello")],
+                    )
+                )
+
+        assert exc_info.value.status_code == 502
+        assert exc_info.value.retryable is True
