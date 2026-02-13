@@ -78,12 +78,22 @@ def _select_encoding(model: str | None) -> str:
     return DEFAULT_ENCODING
 
 
+@lru_cache(maxsize=5000)
 def count_tokens(text: str, encoding_name: str = DEFAULT_ENCODING) -> int:
-    """Count tokens in text using tiktoken."""
+    """Count tokens in text using tiktoken.
+
+    Results are cached in a 5000-entry LRU cache for performance.
+    Both params (text, encoding_name) are hashable strings.
+    """
     if not text:
         return 0
     encoding = get_encoding(encoding_name)
     return len(encoding.encode(text))
+
+
+def clear_token_cache() -> None:
+    """Clear the token counting LRU cache. Useful for test isolation."""
+    count_tokens.cache_clear()
 
 
 # =============================================================================

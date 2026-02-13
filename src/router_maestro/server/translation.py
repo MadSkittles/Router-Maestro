@@ -429,7 +429,18 @@ def translate_openai_chunk_to_anthropic_events(
 
     # Track latest usage info from any chunk that contains it
     if chunk.get("usage"):
-        state.last_usage = chunk["usage"]
+        usage = chunk["usage"]
+        state.last_usage = usage
+        ct = usage.get("completion_tokens", 0)
+        if ct > 0:
+            state.accumulated_completion_tokens = max(state.accumulated_completion_tokens, ct)
+        pt = usage.get("prompt_tokens", 0)
+        if pt > 0:
+            state.accumulated_prompt_tokens = max(state.accumulated_prompt_tokens, pt)
+        if usage.get("completion_tokens_details"):
+            state.completion_tokens_details = usage["completion_tokens_details"]
+        if usage.get("prompt_tokens_details"):
+            state.prompt_tokens_details = usage["prompt_tokens_details"]
 
     if not chunk.get("choices"):
         return events
@@ -573,10 +584,13 @@ def translate_openai_chunk_to_anthropic_events(
             )
             state.content_block_open = False
 
-        # Get usage from chunk or from tracked last_usage
-        usage = chunk.get("usage") or state.last_usage or {}
-        prompt_tokens = usage.get("prompt_tokens", 0)
-        completion_tokens = usage.get("completion_tokens", 0)
+        # Get usage from accumulated values, chunk, or tracked last_usage
+        prompt_tokens = state.accumulated_prompt_tokens or (
+            chunk.get("usage") or state.last_usage or {}
+        ).get("prompt_tokens", 0)
+        completion_tokens = state.accumulated_completion_tokens or (
+            chunk.get("usage") or state.last_usage or {}
+        ).get("completion_tokens", 0)
 
         # Prefer actual tokens from API when available
         # This gives Claude Code accurate context percentage based on actual API usage

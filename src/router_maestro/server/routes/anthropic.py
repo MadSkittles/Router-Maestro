@@ -30,6 +30,7 @@ from router_maestro.utils import (
     get_logger,
     map_openai_stop_reason_to_anthropic,
 )
+from router_maestro.utils.context_window import resolve_thinking_budget
 from router_maestro.utils.token_config import (
     count_tokens_via_anthropic_api,
     get_config_for_provider,
@@ -55,6 +56,49 @@ async def _resolve_provider_name(model: str) -> str | None:
         return provider_name
     except ProviderError:
         return None
+
+
+async def _apply_thinking_budget(
+    model_router: Router,
+    chat_request: ChatRequest,
+    original_model: str,
+) -> ChatRequest:
+    """Resolve thinking budget from server config and return updated request.
+
+    Uses chat_request.model (the translated/normalized name) for cache
+    lookups since translate_anthropic_to_openai may strip date suffixes.
+    Falls back to original_model for config key matching.
+
+    Returns the original request unchanged if no adjustment is needed.
+    """
+    from router_maestro.config import load_priorities_config
+
+    priorities = load_priorities_config()
+    thinking_config = priorities.thinking
+
+    # Use translated model name for cache lookup (handles date-suffix stripping)
+    translated_model = chat_request.model
+    model_info = await model_router.get_model_info(translated_model)
+    if model_info is None:
+        model_info = await model_router.get_model_info(original_model)
+
+    supports_thinking = model_info.supports_thinking if model_info else False
+    max_output = (model_info.max_output_tokens or 16384) if model_info else 16384
+
+    # Use translated model for config lookup (matches cache keys)
+    budget, thinking_type = resolve_thinking_budget(
+        client_budget=chat_request.thinking_budget,
+        client_thinking_type=chat_request.thinking_type,
+        model_id=translated_model,
+        max_output_tokens=max_output,
+        thinking_config=thinking_config,
+        supports_thinking=supports_thinking,
+    )
+
+    if budget != chat_request.thinking_budget or thinking_type != chat_request.thinking_type:
+        return chat_request.with_thinking(thinking_budget=budget, thinking_type=thinking_type)
+
+    return chat_request
 
 
 def _create_test_response() -> AnthropicMessagesResponse:
@@ -143,6 +187,9 @@ async def messages(request: AnthropicMessagesRequest):
 
     # Translate Anthropic request to OpenAI format
     chat_request = translate_anthropic_to_openai(request)
+
+    # Resolve thinking budget from server config if needed
+    chat_request = await _apply_thinking_budget(model_router, chat_request, request.model)
 
     if request.stream:
         # Resolve provider for accurate token estimation

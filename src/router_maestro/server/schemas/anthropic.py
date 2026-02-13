@@ -245,6 +245,11 @@ class AnthropicStreamState(BaseModel):
     estimated_input_tokens: int = 0  # Estimated input tokens from request
     last_usage: dict | None = None  # Track the latest usage from stream chunks
     message_complete: bool = False  # Track if message_stop was sent
+    # Accumulated token counts (providers send cumulative totals, not deltas)
+    accumulated_completion_tokens: int = 0
+    accumulated_prompt_tokens: int = 0
+    completion_tokens_details: dict | None = None  # reasoning_tokens, etc.
+    prompt_tokens_details: dict | None = None  # cached_tokens, etc.
 
 
 # Models API types

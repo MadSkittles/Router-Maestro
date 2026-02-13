@@ -221,6 +221,44 @@ class Router:
         self._models_cache_ttl.set(True)
         logger.info("Models cache initialized with %d entries", len(self._models_cache))
 
+        self._apply_model_overrides()
+
+    def _apply_model_overrides(self) -> None:
+        """Apply per-model token limit overrides from priorities config.
+
+        Handles both bare model keys (e.g. "claude-opus-4.6") and
+        provider-qualified keys (e.g. "github-copilot/claude-opus-4.6").
+        A bare key override is applied to all matching cache entries
+        (both bare and provider-qualified) for consistency.
+        """
+        priorities = self._get_priorities_config()
+        for key, override in priorities.model_overrides.items():
+            # Collect all cache keys that should receive this override
+            matching_keys: list[str] = []
+            if key in self._models_cache:
+                matching_keys.append(key)
+            # For bare model names, also apply to provider-qualified entries
+            if "/" not in key:
+                for cache_key in self._models_cache:
+                    if "/" in cache_key and cache_key.split("/", 1)[1] == key:
+                        matching_keys.append(cache_key)
+            for cache_key in matching_keys:
+                pname, info = self._models_cache[cache_key]
+                self._models_cache[cache_key] = (
+                    pname,
+                    info.with_overrides(
+                        max_prompt_tokens=override.max_prompt_tokens,
+                        max_output_tokens=override.max_output_tokens,
+                        max_context_window_tokens=override.max_context_window_tokens,
+                    ),
+                )
+
+    async def get_model_info(self, model_id: str) -> ModelInfo | None:
+        """Get ModelInfo for a model, or None if not found."""
+        await self._ensure_models_cache()
+        entry = self._models_cache.get(model_id)
+        return entry[1] if entry else None
+
     async def _resolve_provider(self, model_id: str) -> tuple[str, str, BaseProvider]:
         """Resolve model_id to provider.
 

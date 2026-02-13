@@ -14,7 +14,9 @@ from router_maestro.config.paths import (
 from router_maestro.config.priorities import (
     FallbackConfig,
     FallbackStrategy,
+    ModelOverride,
     PrioritiesConfig,
+    ThinkingBudgetConfig,
 )
 from router_maestro.config.providers import (
     CustomProviderConfig,
@@ -53,6 +55,8 @@ __all__ = [
     "PrioritiesConfig",
     "FallbackConfig",
     "FallbackStrategy",
+    "ModelOverride",
+    "ThinkingBudgetConfig",
     # Context models
     "ContextConfig",
     "ContextsConfig",
