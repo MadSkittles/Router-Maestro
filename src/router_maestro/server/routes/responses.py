@@ -5,6 +5,7 @@ import json
 import time
 import uuid
 from collections.abc import AsyncGenerator
+from dataclasses import dataclass, field
 from typing import Any
 
 from fastapi import APIRouter, HTTPException
@@ -283,6 +284,40 @@ async def create_response(request: ResponsesRequest):
         raise HTTPException(status_code=e.status_code, detail=str(e))
 
 
+@dataclass
+class _StreamMessageState:
+    """Tracks the open message during Responses API streaming."""
+
+    output_items: list[dict[str, Any]] = field(default_factory=list)
+    output_index: int = 0
+    content_index: int = 0
+    current_message_id: str | None = None
+    accumulated_content: str = ""
+    message_started: bool = False
+
+    def close_open_message(self, advance_index: bool = True) -> list[str]:
+        """Close the currently open message.
+
+        Returns SSE events to yield. Does nothing if no message is open.
+        """
+        if not self.message_started or not self.current_message_id:
+            return []
+        events = _close_message_events(
+            self.current_message_id,
+            self.output_index,
+            self.content_index,
+            self.accumulated_content,
+        )
+        self.output_items.append(
+            make_message_item(self.current_message_id, self.accumulated_content)
+        )
+        if advance_index:
+            self.output_index += 1
+        self.message_started = False
+        self.current_message_id = None
+        return events
+
+
 async def stream_response(
     model_router: Router,
     request: InternalResponsesRequest,
@@ -312,14 +347,7 @@ async def stream_response(
             "incomplete_details": None,
         }
 
-        output_items: list[dict[str, Any]] = []
-        output_index = 0
-        content_index = 0
-
-        current_message_id: str | None = None
-        accumulated_content = ""
-        message_started = False
-
+        state = _StreamMessageState()
         final_usage = None
         stream_completed = False
 
@@ -350,18 +378,18 @@ async def stream_response(
         async for chunk in stream:
             # Handle text content
             if chunk.content:
-                if not message_started:
-                    current_message_id = generate_id("msg")
-                    message_started = True
+                if not state.message_started:
+                    state.current_message_id = generate_id("msg")
+                    state.message_started = True
 
                     # Note: content starts as empty array, matching OpenAI spec
                     yield sse_event(
                         {
                             "type": "response.output_item.added",
-                            "output_index": output_index,
+                            "output_index": state.output_index,
                             "item": {
                                 "type": "message",
-                                "id": current_message_id,
+                                "id": state.current_message_id,
                                 "role": "assistant",
                                 "content": [],
                                 "status": "in_progress",
@@ -372,21 +400,21 @@ async def stream_response(
                     yield sse_event(
                         {
                             "type": "response.content_part.added",
-                            "item_id": current_message_id,
-                            "output_index": output_index,
-                            "content_index": content_index,
+                            "item_id": state.current_message_id,
+                            "output_index": state.output_index,
+                            "content_index": state.content_index,
                             "part": make_text_content(""),
                         }
                     )
 
-                accumulated_content += chunk.content
+                state.accumulated_content += chunk.content
 
                 yield sse_event(
                     {
                         "type": "response.output_text.delta",
-                        "item_id": current_message_id,
-                        "output_index": output_index,
-                        "content_index": content_index,
+                        "item_id": state.current_message_id,
+                        "output_index": state.output_index,
+                        "content_index": state.content_index,
                         "delta": chunk.content,
                     }
                 )
@@ -394,25 +422,14 @@ async def stream_response(
             # Handle tool call delta
             if chunk.tool_call_delta:
                 delta = chunk.tool_call_delta
-                if message_started and current_message_id:
-                    # Close current message
-                    for evt in _close_message_events(
-                        current_message_id,
-                        output_index,
-                        content_index,
-                        accumulated_content,
-                    ):
-                        yield evt
-                    output_items.append(make_message_item(current_message_id, accumulated_content))
-                    output_index += 1
-                    message_started = False
-                    current_message_id = None
+                for evt in state.close_open_message():
+                    yield evt
 
                 yield sse_event(
                     {
                         "type": "response.function_call_arguments.delta",
                         "item_id": delta.get("item_id", ""),
-                        "output_index": delta.get("output_index", output_index),
+                        "output_index": delta.get("output_index", state.output_index),
                         "delta": delta.get("delta", ""),
                     }
                 )
@@ -420,18 +437,8 @@ async def stream_response(
             # Handle complete tool call
             if chunk.tool_call:
                 tc = chunk.tool_call
-                if message_started and current_message_id:
-                    for evt in _close_message_events(
-                        current_message_id,
-                        output_index,
-                        content_index,
-                        accumulated_content,
-                    ):
-                        yield evt
-                    output_items.append(make_message_item(current_message_id, accumulated_content))
-                    output_index += 1
-                    message_started = False
-                    current_message_id = None
+                for evt in state.close_open_message():
+                    yield evt
 
                 fc_id = generate_id("fc")
                 fc_item = make_function_call_item(fc_id, tc.call_id, tc.name, tc.arguments)
@@ -439,7 +446,7 @@ async def stream_response(
                 yield sse_event(
                     {
                         "type": "response.output_item.added",
-                        "output_index": output_index,
+                        "output_index": state.output_index,
                         "item": make_function_call_item(
                             fc_id, tc.call_id, tc.name, "", "in_progress"
                         ),
@@ -450,7 +457,7 @@ async def stream_response(
                     {
                         "type": "response.function_call_arguments.delta",
                         "item_id": fc_id,
-                        "output_index": output_index,
+                        "output_index": state.output_index,
                         "delta": tc.arguments,
                     }
                 )
@@ -459,7 +466,7 @@ async def stream_response(
                     {
                         "type": "response.function_call_arguments.done",
                         "item_id": fc_id,
-                        "output_index": output_index,
+                        "output_index": state.output_index,
                         "arguments": tc.arguments,
                     }
                 )
@@ -467,13 +474,13 @@ async def stream_response(
                 yield sse_event(
                     {
                         "type": "response.output_item.done",
-                        "output_index": output_index,
+                        "output_index": state.output_index,
                         "item": fc_item,
                     }
                 )
 
-                output_items.append(fc_item)
-                output_index += 1
+                state.output_items.append(fc_item)
+                state.output_index += 1
 
             if chunk.usage:
                 final_usage = chunk.usage
@@ -481,15 +488,8 @@ async def stream_response(
             if chunk.finish_reason:
                 stream_completed = True
 
-                if message_started and current_message_id:
-                    for evt in _close_message_events(
-                        current_message_id,
-                        output_index,
-                        content_index,
-                        accumulated_content,
-                    ):
-                        yield evt
-                    output_items.append(make_message_item(current_message_id, accumulated_content))
+                for evt in state.close_open_message(advance_index=False):
+                    yield evt
 
                 yield sse_event(
                     {
@@ -497,7 +497,7 @@ async def stream_response(
                         "response": {
                             **base_response,
                             "status": "completed",
-                            "output": output_items,
+                            "output": state.output_items,
                             "usage": make_usage(final_usage),
                         },
                     }
@@ -506,15 +506,8 @@ async def stream_response(
         if not stream_completed:
             logger.warning("Stream ended without finish_reason, sending completion events")
 
-            if message_started and current_message_id:
-                for evt in _close_message_events(
-                    current_message_id,
-                    output_index,
-                    content_index,
-                    accumulated_content,
-                ):
-                    yield evt
-                output_items.append(make_message_item(current_message_id, accumulated_content))
+            for evt in state.close_open_message(advance_index=False):
+                yield evt
 
             yield sse_event(
                 {
@@ -522,7 +515,7 @@ async def stream_response(
                     "response": {
                         **base_response,
                         "status": "completed",
-                        "output": output_items,
+                        "output": state.output_items,
                         "usage": make_usage(final_usage),
                     },
                 }
@@ -533,7 +526,7 @@ async def stream_response(
             "Stream completed: req_id=%s, elapsed=%.1fms, output_items=%d",
             request_id,
             elapsed_ms,
-            len(output_items),
+            len(state.output_items),
         )
 
         # NOTE: Do NOT send "data: [DONE]\n\n" - agent-maestro doesn't send it
