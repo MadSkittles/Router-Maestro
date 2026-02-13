@@ -119,7 +119,13 @@ class CopilotProvider(BaseProvider):
                     read=600.0,
                     write=30.0,
                     pool=30.0,
-                )
+                ),
+                http2=True,
+                limits=httpx.Limits(
+                    max_connections=100,
+                    max_keepalive_connections=20,
+                    keepalive_expiry=30.0,
+                ),
             )
         return self._client
 
