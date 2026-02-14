@@ -1,7 +1,7 @@
 """Auth storage for credentials."""
 
 import json
-from enum import Enum
+from enum import StrEnum
 from pathlib import Path
 
 from pydantic import BaseModel, Field
@@ -9,7 +9,7 @@ from pydantic import BaseModel, Field
 from router_maestro.config.paths import AUTH_FILE
 
 
-class AuthType(str, Enum):
+class AuthType(StrEnum):
     """Authentication type."""
 
     OAUTH = "oauth"

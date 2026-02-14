@@ -1,11 +1,11 @@
 """Model priority configuration."""
 
-from enum import Enum
+from enum import StrEnum
 
 from pydantic import BaseModel, Field
 
 
-class FallbackStrategy(str, Enum):
+class FallbackStrategy(StrEnum):
     """Fallback strategy options."""
 
     PRIORITY = "priority"  # Fallback to next model in priorities list
