@@ -69,25 +69,27 @@ class CopilotProvider(BaseProvider):
             return  # Token still valid
 
         logger.debug("Refreshing Copilot token")
-        # Refresh the Copilot token using the GitHub token
-        client = self._get_client()
+        # Use a fresh short-lived client for token refresh to avoid blocking
+        # on the shared streaming HTTP/2 connection pool
         try:
-            copilot_token = await get_copilot_token(client, cred.refresh)
-            self._cached_token = copilot_token.token
-            self._token_expires = copilot_token.expires_at
-
-            # Update stored credential with new access token (immutable pattern)
-            updated_cred = OAuthCredential(
-                refresh=cred.refresh,
-                access=copilot_token.token,
-                expires=copilot_token.expires_at,
-            )
-            self.auth_manager.storage.set("github-copilot", updated_cred)
-            self.auth_manager.save()
-            logger.debug("Copilot token refreshed, expires at %d", copilot_token.expires_at)
+            async with httpx.AsyncClient(timeout=TIMEOUT_NON_STREAMING) as client:
+                copilot_token = await get_copilot_token(client, cred.refresh)
         except httpx.HTTPError as e:
             logger.error("Failed to refresh Copilot token: %s", e)
             raise ProviderError(f"Failed to refresh Copilot token: {e}", retryable=True)
+
+        self._cached_token = copilot_token.token
+        self._token_expires = copilot_token.expires_at
+
+        # Update stored credential with new access token (immutable pattern)
+        updated_cred = OAuthCredential(
+            refresh=cred.refresh,
+            access=copilot_token.token,
+            expires=copilot_token.expires_at,
+        )
+        self.auth_manager.storage.set("github-copilot", updated_cred)
+        self.auth_manager.save()
+        logger.debug("Copilot token refreshed, expires at %d", copilot_token.expires_at)
 
     def _get_headers(self, vision_request: bool = False) -> dict[str, str]:
         """Get headers for Copilot API requests.
@@ -333,14 +335,16 @@ class CopilotProvider(BaseProvider):
         await self.ensure_token()
 
         logger.debug("Fetching Copilot models from API")
-        client = self._get_client()
+        # Use a fresh short-lived client to avoid blocking on the shared
+        # streaming HTTP/2 connection pool
         try:
-            response = await client.get(
-                COPILOT_MODELS_URL,
-                headers=self._get_headers(),
-            )
-            response.raise_for_status()
-            data = response.json()
+            async with httpx.AsyncClient(timeout=TIMEOUT_NON_STREAMING) as client:
+                response = await client.get(
+                    COPILOT_MODELS_URL,
+                    headers=self._get_headers(),
+                )
+                response.raise_for_status()
+                data = response.json()
 
             models = []
             for model in data.get("data", []):
