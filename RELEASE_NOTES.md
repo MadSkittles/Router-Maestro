@@ -4,6 +4,17 @@ All notable changes to Router-Maestro are documented here.
 
 ---
 
+## v0.1.16 (2026-03-05)
+
+### Features
+
+- Auto-route to 1m model variant when `context-1m` beta header is detected ([#25](https://github.com/MadSkittles/Router-Maestro/pull/25))
+  - Claude CLI sends `anthropic-beta: context-1m-*` when user selects `[1m]` model variant
+  - Automatically rewrites model ID to the `-1m` variant (e.g. `claude-opus-4-6` → `claude-opus-4.6-1m`) when available in provider cache
+  - Add `find_extended_context_variant()` utility with normalized matching for dot/hyphen differences
+
+---
+
 ## v0.1.15 (2026-03-02)
 
 ### Bug Fixes
