@@ -5,7 +5,11 @@ from __future__ import annotations
 import pytest
 
 from router_maestro.providers.base import ModelInfo
-from router_maestro.utils.model_match import fuzzy_match_model, normalize_model_id
+from router_maestro.utils.model_match import (
+    find_extended_context_variant,
+    fuzzy_match_model,
+    normalize_model_id,
+)
 from router_maestro.utils.model_sort import strip_date_suffix
 
 # ── strip_date_suffix ──────────────────────────────────────────────────
@@ -185,3 +189,85 @@ class TestFuzzyMatchModel:
     def test_dots_in_query(self, sample_cache):
         result = fuzzy_match_model("claude-sonnet-4.5", sample_cache)
         assert result == "claude-sonnet-4-5-20250929"
+
+    def test_1m_context_window_suffix(self):
+        """claude-opus-4-6-1m (hyphens) should match claude-opus-4.6-1m (dot) in cache."""
+        cache = _make_cache(
+            [
+                ("claude-opus-4.6-1m", "anthropic", "Claude Opus 4.6 1M"),
+            ]
+        )
+        result = fuzzy_match_model("claude-opus-4-6-1m", cache)
+        assert result == "claude-opus-4.6-1m"
+
+
+# ── find_extended_context_variant ─────────────────────────────────────
+
+
+class TestFindExtendedContextVariant:
+    def test_finds_1m_variant_with_dot(self):
+        """Base model claude-opus-4-6 finds claude-opus-4.6-1m in cache."""
+        cache = _make_cache(
+            [
+                ("claude-opus-4-6-20250617", "github-copilot", "Claude Opus 4.6"),
+                ("claude-opus-4.6-1m", "github-copilot", "Claude Opus 4.6 1M"),
+            ]
+        )
+        result = find_extended_context_variant("claude-opus-4-6", cache)
+        assert result == "claude-opus-4.6-1m"
+
+    def test_finds_1m_variant_from_dated_model(self):
+        """Dated base model claude-opus-4-6-20250617 finds the -1m variant."""
+        cache = _make_cache(
+            [
+                ("claude-opus-4-6-20250617", "github-copilot", "Claude Opus 4.6"),
+                ("claude-opus-4.6-1m", "github-copilot", "Claude Opus 4.6 1M"),
+            ]
+        )
+        result = find_extended_context_variant("claude-opus-4-6-20250617", cache)
+        assert result == "claude-opus-4.6-1m"
+
+    def test_returns_none_when_no_1m_variant(self):
+        """Returns None when no -1m variant exists."""
+        cache = _make_cache(
+            [
+                ("claude-opus-4-6-20250617", "github-copilot", "Claude Opus 4.6"),
+            ]
+        )
+        result = find_extended_context_variant("claude-opus-4-6", cache)
+        assert result is None
+
+    def test_provider_prefix_filters(self):
+        """Provider prefix narrows search to that provider only."""
+        cache = _make_cache(
+            [
+                ("claude-opus-4.6-1m", "github-copilot", "Claude Opus 4.6 1M"),
+                ("claude-opus-4.6-1m", "anthropic", "Claude Opus 4.6 1M"),
+            ]
+        )
+        result = find_extended_context_variant("anthropic/claude-opus-4-6", cache)
+        assert result == "anthropic/claude-opus-4.6-1m"
+
+    def test_provider_prefix_no_match(self):
+        """Returns None when provider doesn't have the 1m variant."""
+        cache = _make_cache(
+            [
+                ("claude-opus-4.6-1m", "github-copilot", "Claude Opus 4.6 1M"),
+            ]
+        )
+        result = find_extended_context_variant("anthropic/claude-opus-4-6", cache)
+        assert result is None
+
+    def test_empty_cache(self):
+        result = find_extended_context_variant("claude-opus-4-6", {})
+        assert result is None
+
+    def test_sonnet_1m_variant(self):
+        """Works for other model families too (sonnet)."""
+        cache = _make_cache(
+            [
+                ("claude-sonnet-4.5-1m", "github-copilot", "Claude Sonnet 4.5 1M"),
+            ]
+        )
+        result = find_extended_context_variant("claude-sonnet-4-5", cache)
+        assert result == "claude-sonnet-4.5-1m"

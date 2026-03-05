@@ -112,6 +112,57 @@ def fuzzy_match_model(
     return _select_best(all_hits)
 
 
+def find_extended_context_variant(
+    model_id: str,
+    models_cache: dict[str, tuple[str, ModelInfo]],
+) -> str | None:
+    """Find the extended-context (1m) variant of a model in the cache.
+
+    Given a base model ID like ``claude-opus-4-6`` or ``claude-opus-4-6-20250617``,
+    search the cache for a matching ``-1m`` suffixed model (e.g. ``claude-opus-4.6-1m``).
+
+    The lookup normalizes both query and cache keys so that dot/hyphen differences
+    (``4.6`` vs ``4-6``) are handled transparently.
+
+    Args:
+        model_id: The base model ID from the request (may include provider prefix).
+        models_cache: Router's model cache mapping cache_key -> (provider_name, ModelInfo).
+
+    Returns:
+        The original cache key of the 1m variant, or None if not found.
+    """
+    if not models_cache:
+        return None
+
+    # Strip provider prefix for normalization, but remember it for filtering
+    provider_filter: str | None = None
+    bare_query = model_id
+    if "/" in model_id:
+        provider_filter, bare_query = model_id.split("/", 1)
+
+    normalized_query = normalize_model_id(bare_query)
+    # Target: normalized base + "-1m"
+    target = f"{normalized_query}-1m"
+
+    for cache_key, (provider_name, _model_info) in models_cache.items():
+        has_slash = "/" in cache_key
+        if provider_filter is not None:
+            if not has_slash:
+                continue
+            key_provider, bare_key = cache_key.split("/", 1)
+            if key_provider != provider_filter:
+                continue
+        else:
+            if has_slash:
+                continue
+            bare_key = cache_key
+
+        if normalize_model_id(bare_key) == target:
+            return cache_key
+
+    return None
+
+
 def _select_best(hits: list[tuple[str, str, ModelInfo]]) -> str:
     """Select the best model from a list of candidates.
 
