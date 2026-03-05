@@ -27,7 +27,7 @@ from router_maestro.providers import (
 )
 from router_maestro.utils import get_logger
 from router_maestro.utils.cache import TTLCache
-from router_maestro.utils.model_match import fuzzy_match_model
+from router_maestro.utils.model_match import find_extended_context_variant, fuzzy_match_model
 from router_maestro.utils.model_sort import sort_models
 
 logger = get_logger("routing")
@@ -258,6 +258,18 @@ class Router:
         await self._ensure_models_cache()
         entry = self._models_cache.get(model_id)
         return entry[1] if entry else None
+
+    async def find_extended_context_model(self, model_id: str) -> str | None:
+        """Find the extended-context (-1m) variant of a model in the cache.
+
+        Args:
+            model_id: Base model ID from the request.
+
+        Returns:
+            The cache key of the 1m variant, or None if not available.
+        """
+        await self._ensure_models_cache()
+        return find_extended_context_variant(model_id, self._models_cache)
 
     async def _resolve_provider(self, model_id: str) -> tuple[str, str, BaseProvider]:
         """Resolve model_id to provider.
