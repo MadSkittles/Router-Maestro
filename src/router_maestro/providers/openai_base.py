@@ -15,6 +15,7 @@ from router_maestro.providers.base import (
     ChatResponse,
     ChatStreamChunk,
 )
+from router_maestro.providers.tool_parsing import recover_tool_calls_from_content
 
 
 class OpenAIChatProvider(BaseProvider, ABC):
@@ -77,13 +78,20 @@ class OpenAIChatProvider(BaseProvider, ABC):
                 response.raise_for_status()
                 data = response.json()
                 message = data["choices"][0]["message"]
+                content = message.get("content")
+                tool_calls = message.get("tool_calls")
+                finish_reason = data["choices"][0].get("finish_reason", "stop")
+
+                content, tool_calls = recover_tool_calls_from_content(
+                    content, tool_calls, finish_reason
+                )
 
                 return ChatResponse(
-                    content=message.get("content"),
+                    content=content,
                     model=data.get("model", request.model),
-                    finish_reason=data["choices"][0].get("finish_reason", "stop"),
+                    finish_reason=finish_reason,
                     usage=data.get("usage"),
-                    tool_calls=message.get("tool_calls"),
+                    tool_calls=tool_calls,
                 )
             except httpx.HTTPStatusError as e:
                 self._raise_http_status_error(label, e, self._logger)

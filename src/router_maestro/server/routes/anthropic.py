@@ -240,6 +240,14 @@ async def messages(request: AnthropicMessagesRequest, raw_request: FastAPIReques
     try:
         response, provider_name = await model_router.chat_completion(chat_request)
 
+        logger.info(
+            "Upstream response from %s: content_len=%s, tool_calls=%s, finish_reason=%s",
+            provider_name,
+            len(response.content) if response.content else 0,
+            len(response.tool_calls) if response.tool_calls else 0,
+            response.finish_reason,
+        )
+
         # Build Anthropic response
         content = []
         if response.content:
