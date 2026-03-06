@@ -88,6 +88,10 @@ class AnthropicProvider(BaseProvider):
             if request.thinking_budget:
                 thinking_config["budget_tokens"] = request.thinking_budget
             payload["thinking"] = thinking_config
+        if request.tools:
+            payload["tools"] = request.tools
+        if request.tool_choice:
+            payload["tool_choice"] = request.tool_choice
 
         logger.debug("Anthropic chat completion: model=%s", request.model)
         async with httpx.AsyncClient() as client:
@@ -103,13 +107,23 @@ class AnthropicProvider(BaseProvider):
 
                 # Extract content from Anthropic response
                 content = ""
+                tool_calls = []
                 for block in data.get("content", []):
                     if block.get("type") == "text":
                         content += block.get("text", "")
+                    elif block.get("type") == "tool_use":
+                        tool_calls.append({
+                            "id": block.get("id", ""),
+                            "type": "function",
+                            "function": {
+                                "name": block.get("name", ""),
+                                "arguments": json.dumps(block.get("input", {})),
+                            },
+                        })
 
                 logger.debug("Anthropic chat completion successful")
                 return ChatResponse(
-                    content=content,
+                    content=content or None,
                     model=data.get("model", request.model),
                     finish_reason=data.get("stop_reason", "stop"),
                     usage={
@@ -120,6 +134,7 @@ class AnthropicProvider(BaseProvider):
                             + data.get("usage", {}).get("output_tokens", 0)
                         ),
                     },
+                    tool_calls=tool_calls if tool_calls else None,
                 )
             except httpx.HTTPStatusError as e:
                 retryable = e.response.status_code in (429, 500, 502, 503, 504, 529)

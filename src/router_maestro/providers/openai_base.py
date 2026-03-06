@@ -36,9 +36,18 @@ class OpenAIChatProvider(BaseProvider, ABC):
         return self.name
 
     def _build_payload(self, request: ChatRequest, stream: bool) -> dict:
+        messages = []
+        for m in request.messages:
+            msg: dict = {"role": m.role, "content": m.content}
+            if m.tool_call_id is not None:
+                msg["tool_call_id"] = m.tool_call_id
+            if m.tool_calls is not None:
+                msg["tool_calls"] = m.tool_calls
+            messages.append(msg)
+
         payload = {
             "model": request.model,
-            "messages": [{"role": m.role, "content": m.content} for m in request.messages],
+            "messages": messages,
             "temperature": request.temperature,
             "stream": stream,
         }
@@ -46,6 +55,10 @@ class OpenAIChatProvider(BaseProvider, ABC):
             payload["stream_options"] = {"include_usage": True}
         if request.max_tokens:
             payload["max_tokens"] = request.max_tokens
+        if request.tools:
+            payload["tools"] = request.tools
+        if request.tool_choice:
+            payload["tool_choice"] = request.tool_choice
         payload.update(self._get_payload_extra(request))
         return payload
 
@@ -63,12 +76,14 @@ class OpenAIChatProvider(BaseProvider, ABC):
                 )
                 response.raise_for_status()
                 data = response.json()
+                message = data["choices"][0]["message"]
 
                 return ChatResponse(
-                    content=data["choices"][0]["message"]["content"],
+                    content=message.get("content"),
                     model=data.get("model", request.model),
                     finish_reason=data["choices"][0].get("finish_reason", "stop"),
                     usage=data.get("usage"),
+                    tool_calls=message.get("tool_calls"),
                 )
             except httpx.HTTPStatusError as e:
                 self._raise_http_status_error(label, e, self._logger)
@@ -107,12 +122,14 @@ class OpenAIChatProvider(BaseProvider, ABC):
                             content = delta.get("content", "")
                             finish_reason = data["choices"][0].get("finish_reason")
                             usage = data.get("usage")
+                            tool_calls = delta.get("tool_calls")
 
-                            if content or finish_reason or usage:
+                            if content or finish_reason or usage or tool_calls:
                                 yield ChatStreamChunk(
                                     content=content,
                                     finish_reason=finish_reason,
                                     usage=usage,
+                                    tool_calls=tool_calls,
                                 )
             except httpx.HTTPStatusError as e:
                 self._raise_http_status_error(label, e, self._logger, stream=True)

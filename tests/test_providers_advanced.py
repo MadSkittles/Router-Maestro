@@ -1,5 +1,7 @@
 """Tests for provider base classes and error handling."""
 
+import logging
+
 import pytest
 
 from router_maestro.providers import (
@@ -17,6 +19,7 @@ from router_maestro.providers.base import (
     BaseProvider,
     ResponsesToolCall,
 )
+from router_maestro.providers.openai_base import OpenAIChatProvider
 
 
 class TestProviderError:
@@ -142,6 +145,28 @@ class TestChatResponse:
         assert response.model == "gpt-4o"
         assert response.finish_reason == "stop"
         assert response.usage is None
+        assert response.tool_calls is None
+
+    def test_response_with_tool_calls_no_content(self):
+        """Test response with tool_calls and no text content (tool_use scenario)."""
+        tool_calls = [
+            {
+                "id": "call_1",
+                "type": "function",
+                "function": {"name": "exec", "arguments": '{"command": "hostname"}'},
+            }
+        ]
+        response = ChatResponse(
+            content=None,
+            model="gpt-4o",
+            finish_reason="tool_calls",
+            tool_calls=tool_calls,
+        )
+        assert response.content is None
+        assert response.finish_reason == "tool_calls"
+        assert response.tool_calls is not None
+        assert len(response.tool_calls) == 1
+        assert response.tool_calls[0]["function"]["name"] == "exec"
 
     def test_response_with_usage(self):
         """Test response with usage."""
@@ -308,3 +333,90 @@ class TestBaseProviderAbstract:
         # Test default responses methods raise NotImplementedError
         with pytest.raises(NotImplementedError):
             await provider.responses_completion(ResponsesRequest(model="test", input="hi"))
+
+
+class TestOpenAIChatProviderBuildPayload:
+    """Tests for OpenAIChatProvider._build_payload with tools support."""
+
+    def _make_provider(self):
+        """Create a concrete OpenAIChatProvider for testing."""
+
+        class TestProvider(OpenAIChatProvider):
+            name = "test"
+
+            def __init__(self):
+                super().__init__(base_url="http://localhost", logger=logging.getLogger("test"))
+
+            def _get_headers(self):
+                return {}
+
+            def is_authenticated(self):
+                return True
+
+            async def list_models(self):
+                return []
+
+        return TestProvider()
+
+    def test_payload_includes_tools(self):
+        """Test that tools are included in payload."""
+        provider = self._make_provider()
+        tools = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "exec",
+                    "description": "Run a command",
+                    "parameters": {"type": "object", "properties": {"cmd": {"type": "string"}}},
+                },
+            }
+        ]
+        request = ChatRequest(
+            model="gpt-4o",
+            messages=[Message(role="user", content="hi")],
+            tools=tools,
+            tool_choice="auto",
+        )
+        payload = provider._build_payload(request, stream=False)
+
+        assert payload["tools"] == tools
+        assert payload["tool_choice"] == "auto"
+
+    def test_payload_without_tools(self):
+        """Test that tools fields are omitted when not provided."""
+        provider = self._make_provider()
+        request = ChatRequest(
+            model="gpt-4o",
+            messages=[Message(role="user", content="hi")],
+        )
+        payload = provider._build_payload(request, stream=False)
+
+        assert "tools" not in payload
+        assert "tool_choice" not in payload
+
+    def test_payload_serializes_tool_call_id(self):
+        """Test that tool role messages include tool_call_id."""
+        provider = self._make_provider()
+        request = ChatRequest(
+            model="gpt-4o",
+            messages=[
+                Message(role="user", content="hi"),
+                Message(
+                    role="assistant",
+                    content="",
+                    tool_calls=[{"id": "call_1", "type": "function", "function": {"name": "exec"}}],
+                ),
+                Message(role="tool", content="result", tool_call_id="call_1"),
+            ],
+        )
+        payload = provider._build_payload(request, stream=False)
+
+        # Assistant message should have tool_calls
+        assistant_msg = payload["messages"][1]
+        assert "tool_calls" in assistant_msg
+        assert assistant_msg["tool_calls"][0]["id"] == "call_1"
+
+        # Tool message should have tool_call_id
+        tool_msg = payload["messages"][2]
+        assert tool_msg["tool_call_id"] == "call_1"
+        assert tool_msg["role"] == "tool"

@@ -204,11 +204,13 @@ class CopilotProvider(BaseProvider):
                 )
 
             logger.debug("Copilot chat completion successful")
+            message = choices[0]["message"]
             return ChatResponse(
-                content=choices[0]["message"]["content"],
+                content=message.get("content"),
                 model=data.get("model", request.model),
                 finish_reason=choices[0].get("finish_reason", "stop"),
                 usage=data.get("usage"),
+                tool_calls=message.get("tool_calls"),
             )
         except httpx.HTTPStatusError as e:
             self._raise_http_status_error("Copilot", e, logger, include_body=True)

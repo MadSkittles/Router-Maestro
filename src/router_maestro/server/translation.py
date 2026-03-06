@@ -383,12 +383,18 @@ def translate_openai_to_anthropic(
             # Handle tool calls if present
             tool_calls = message.get("tool_calls", [])
             for tool_call in tool_calls:
+                arguments = tool_call.get("function", {}).get("arguments", {})
+                if isinstance(arguments, str):
+                    try:
+                        arguments = json.loads(arguments)
+                    except (json.JSONDecodeError, TypeError):
+                        arguments = {}
                 content.append(
                     AnthropicToolUseBlock(
                         type="tool_use",
                         id=tool_call.get("id", ""),
                         name=tool_call.get("function", {}).get("name", ""),
-                        input=tool_call.get("function", {}).get("arguments", {}),
+                        input=arguments,
                     )
                 )
 
