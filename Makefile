@@ -113,10 +113,11 @@ push: build
 
 buildx-setup:
 	@docker buildx inspect multiarch > /dev/null 2>&1 || docker buildx create --name multiarch --use
+	docker buildx use multiarch
 	docker buildx inspect --bootstrap
 
 build-multiarch: buildx-setup
-	docker buildx build --platform $(PLATFORMS) $(DOCKER_TAGS) --push .
+	docker buildx build --builder multiarch --platform $(PLATFORMS) $(DOCKER_TAGS) --push .
 
 shell:
 	docker run --rm -it $(IMAGE_NAME):latest /bin/sh
