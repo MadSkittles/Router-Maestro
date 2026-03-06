@@ -28,10 +28,10 @@ class TestRecoverToolCallsFromContent:
     def test_single_xml_tool_call(self):
         """Extract a single <tool_call> XML block."""
         xml_content = (
-            'I will check the hostname.\n'
-            '<tool_call>\n'
+            "I will check the hostname.\n"
+            "<tool_call>\n"
             '{"name": "exec", "arguments": {"command": "hostname"}}\n'
-            '</tool_call>'
+            "</tool_call>"
         )
         content, tool_calls = recover_tool_calls_from_content(
             content=xml_content,
@@ -55,7 +55,7 @@ class TestRecoverToolCallsFromContent:
             '<tool_call>{"name": "exec", "arguments": {"command": "hostname"}}</tool_call>\n'
             '<tool_call>{"name": "exec", "arguments": {"command": "uptime"}}</tool_call>\n'
             '<tool_call>{"name": "exec", "arguments": {"command": "df -h"}}</tool_call>\n'
-            '<tool_result>some result</tool_result>\n'
+            "<tool_result>some result</tool_result>\n"
             "I'll report back soon."
         )
         content, tool_calls = recover_tool_calls_from_content(
@@ -108,7 +108,7 @@ class TestRecoverToolCallsFromContent:
     def test_malformed_json_skipped(self):
         """Malformed JSON inside tag is skipped with a warning, no crash."""
         xml_content = (
-            '<tool_call>not valid json</tool_call>\n'
+            "<tool_call>not valid json</tool_call>\n"
             '<tool_call>{"name": "exec", "arguments": {"command": "ls"}}</tool_call>'
         )
         content, tool_calls = recover_tool_calls_from_content(
@@ -123,7 +123,7 @@ class TestRecoverToolCallsFromContent:
 
     def test_all_blocks_malformed_returns_original(self):
         """If all blocks are malformed, return original content unchanged."""
-        xml_content = '<tool_call>not json</tool_call>'
+        xml_content = "<tool_call>not json</tool_call>"
         content, tool_calls = recover_tool_calls_from_content(
             content=xml_content,
             tool_calls=None,
