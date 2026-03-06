@@ -4,6 +4,18 @@ All notable changes to Router-Maestro are documented here.
 
 ---
 
+## v0.1.18 (2026-03-06)
+
+### Bug Fixes
+
+- Recover tool calls from XML content when provider misplaces them ([#28](https://github.com/MadSkittles/Router-Maestro/pull/28))
+  - GitHub Copilot API sometimes returns `finish_reason="tool_calls"` but embeds tool calls as `<tool_call>` XML in `message.content` instead of the proper `message.tool_calls` field
+  - Add shared recovery utility (`tool_parsing.py`) that detects and extracts structured tool calls from XML content
+  - Integrate into `CopilotProvider` and `OpenAIChatProvider` non-streaming paths
+  - Add debug logging in Anthropic route for production diagnosis
+
+---
+
 ## v0.1.17 (2026-03-06)
 
 ### Bug Fixes
