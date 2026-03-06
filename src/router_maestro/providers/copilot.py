@@ -211,10 +211,8 @@ class CopilotProvider(BaseProvider):
             finish_reason = choices[0].get("finish_reason", "stop")
 
             logger.info(
-                "Copilot raw response: finish_reason=%s, tool_calls=%s, content=%.500s",
-                finish_reason,
-                tool_calls,
-                content,
+                "Copilot raw response: %s",
+                json.dumps(data, ensure_ascii=False)[:2000],
             )
 
             content, tool_calls = recover_tool_calls_from_content(
