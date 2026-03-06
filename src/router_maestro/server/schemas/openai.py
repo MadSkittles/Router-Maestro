@@ -1,13 +1,32 @@
 """OpenAI-compatible API schemas."""
 
+from typing import Any
+
 from pydantic import BaseModel, Field
+
+
+class ChatMessageFunction(BaseModel):
+    """Function details in a tool call."""
+
+    name: str
+    arguments: str
+
+
+class ChatMessageToolCall(BaseModel):
+    """A tool call in an assistant message."""
+
+    id: str
+    type: str = "function"
+    function: ChatMessageFunction
 
 
 class ChatMessage(BaseModel):
     """A message in the chat."""
 
     role: str
-    content: str
+    content: str | list | None = None
+    tool_calls: list[ChatMessageToolCall] | None = None
+    tool_call_id: str | None = None
 
 
 class ChatCompletionRequest(BaseModel):
@@ -23,6 +42,8 @@ class ChatCompletionRequest(BaseModel):
     presence_penalty: float | None = None
     stop: list[str] | str | None = None
     user: str | None = None
+    tools: list[dict[str, Any]] | None = None
+    tool_choice: str | dict[str, Any] | None = None
 
 
 class ChatCompletionChoice(BaseModel):
@@ -57,6 +78,7 @@ class ChatCompletionChunkDelta(BaseModel):
 
     role: str | None = None
     content: str | None = None
+    tool_calls: list[dict[str, Any]] | None = None
 
 
 class ChatCompletionChunkChoice(BaseModel):

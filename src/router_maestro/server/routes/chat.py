@@ -19,6 +19,7 @@ from router_maestro.server.schemas import (
     ChatCompletionResponse,
     ChatCompletionUsage,
     ChatMessage,
+    ChatMessageToolCall,
 )
 from router_maestro.server.streaming import sse_streaming_response
 from router_maestro.utils import get_logger
@@ -39,12 +40,28 @@ async def chat_completions(request: ChatCompletionRequest):
     model_router = get_router()
 
     # Convert to internal format
+    messages = []
+    for m in request.messages:
+        tool_calls_raw = None
+        if m.tool_calls:
+            tool_calls_raw = [tc.model_dump() for tc in m.tool_calls]
+        messages.append(
+            Message(
+                role=m.role,
+                content=m.content,
+                tool_call_id=m.tool_call_id,
+                tool_calls=tool_calls_raw,
+            )
+        )
+
     chat_request = ChatRequest(
         model=request.model,
-        messages=[Message(role=m.role, content=m.content) for m in request.messages],
+        messages=messages,
         temperature=request.temperature,
         max_tokens=request.max_tokens,
         stream=request.stream,
+        tools=request.tools,
+        tool_choice=request.tool_choice,
     )
 
     if request.stream:
@@ -61,6 +78,11 @@ async def chat_completions(request: ChatCompletionRequest):
                 total_tokens=response.usage.get("total_tokens", 0),
             )
 
+        # Build response message with optional tool_calls
+        response_tool_calls = None
+        if response.tool_calls:
+            response_tool_calls = [ChatMessageToolCall(**tc) for tc in response.tool_calls]
+
         return ChatCompletionResponse(
             id=f"chatcmpl-{uuid.uuid4().hex[:8]}",
             created=int(time.time()),
@@ -68,7 +90,11 @@ async def chat_completions(request: ChatCompletionRequest):
             choices=[
                 ChatCompletionChoice(
                     index=0,
-                    message=ChatMessage(role="assistant", content=response.content),
+                    message=ChatMessage(
+                        role="assistant",
+                        content=response.content,
+                        tool_calls=response_tool_calls,
+                    ),
                     finish_reason=response.finish_reason,
                 )
             ],
@@ -102,7 +128,7 @@ async def stream_response(model_router: Router, request: ChatRequest) -> AsyncGe
         yield f"data: {initial_chunk.model_dump_json()}\n\n"
 
         async for chunk in stream:
-            if chunk.content:
+            if chunk.content or chunk.tool_calls:
                 chunk_response = ChatCompletionChunk(
                     id=response_id,
                     created=created,
@@ -110,7 +136,10 @@ async def stream_response(model_router: Router, request: ChatRequest) -> AsyncGe
                     choices=[
                         ChatCompletionChunkChoice(
                             index=0,
-                            delta=ChatCompletionChunkDelta(content=chunk.content),
+                            delta=ChatCompletionChunkDelta(
+                                content=chunk.content if chunk.content else None,
+                                tool_calls=chunk.tool_calls,
+                            ),
                             finish_reason=None,
                         )
                     ],
