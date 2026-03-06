@@ -30,7 +30,7 @@ CLI_TOOLS = {
         "name": "OpenAI Codex",
         "description": "Generate config.toml for OpenAI Codex CLI",
     },
-    "gemini-cli": {
+    "gemini": {
         "name": "Gemini CLI",
         "description": "Generate .env for Gemini CLI",
     },
@@ -148,7 +148,7 @@ def config_callback(ctx: typer.Context) -> None:
         claude_code_config()
     elif tool_key == "codex":
         codex_config()
-    elif tool_key == "gemini-cli":
+    elif tool_key == "gemini":
         gemini_cli_config()
 
 
@@ -325,7 +325,7 @@ def _write_env_file(path: Path, env: dict[str, str]) -> None:
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
-@app.command(name="gemini-cli")
+@app.command(name="gemini")
 def gemini_cli_config() -> None:
     """Generate Gemini CLI .env for router-maestro."""
     # Step 1: Select level
@@ -358,10 +358,14 @@ def gemini_cli_config() -> None:
     # Load existing .env to preserve other variables
     existing_env = _parse_env_file(env_path)
 
+    # Strip provider prefix (e.g. "github-copilot/gemini-2.5-pro" -> "gemini-2.5-pro")
+    # Gemini CLI puts model name in URL path, so "/" would break routing
+    model_name = selected_model.split("/", 1)[-1] if "/" in selected_model else selected_model
+
     # Set Gemini CLI variables
     existing_env["GOOGLE_GEMINI_BASE_URL"] = gemini_url
     existing_env["GEMINI_API_KEY"] = auth_key
-    existing_env["GEMINI_MODEL"] = selected_model
+    existing_env["GEMINI_MODEL"] = model_name
     existing_env["GEMINI_TELEMETRY_ENABLED"] = "false"
 
     _write_env_file(env_path, existing_env)
@@ -369,7 +373,7 @@ def gemini_cli_config() -> None:
     console.print(
         Panel(
             f"[green]Created {env_path}[/green]\n\n"
-            f"Model: {selected_model}\n"
+            f"Model: {model_name}\n"
             f"Backend URL: {gemini_url}\n"
             f"Telemetry: disabled\n\n"
             "[dim]Start router-maestro server before using Gemini CLI:[/dim]\n"

@@ -51,10 +51,6 @@ async def verify_api_key(
     if not api_key:
         api_key = request.headers.get("x-api-key")
 
-    # Also check ?key= query parameter for Gemini API compatibility
-    if not api_key:
-        api_key = request.query_params.get("key")
-
     # Also check x-goog-api-key header for Gemini CLI compatibility
     if not api_key:
         api_key = request.headers.get("x-goog-api-key")
