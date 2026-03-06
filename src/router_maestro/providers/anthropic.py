@@ -112,14 +112,16 @@ class AnthropicProvider(BaseProvider):
                     if block.get("type") == "text":
                         content += block.get("text", "")
                     elif block.get("type") == "tool_use":
-                        tool_calls.append({
-                            "id": block.get("id", ""),
-                            "type": "function",
-                            "function": {
-                                "name": block.get("name", ""),
-                                "arguments": json.dumps(block.get("input", {})),
-                            },
-                        })
+                        tool_calls.append(
+                            {
+                                "id": block.get("id", ""),
+                                "type": "function",
+                                "function": {
+                                    "name": block.get("name", ""),
+                                    "arguments": json.dumps(block.get("input", {})),
+                                },
+                            }
+                        )
 
                 logger.debug("Anthropic chat completion successful")
                 return ChatResponse(
