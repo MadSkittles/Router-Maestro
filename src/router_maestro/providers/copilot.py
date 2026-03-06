@@ -22,6 +22,7 @@ from router_maestro.providers.base import (
     ResponsesStreamChunk,
     ResponsesToolCall,
 )
+from router_maestro.providers.tool_parsing import recover_tool_calls_from_content
 from router_maestro.utils import get_logger
 from router_maestro.utils.cache import TTLCache
 
@@ -205,12 +206,20 @@ class CopilotProvider(BaseProvider):
 
             logger.debug("Copilot chat completion successful")
             message = choices[0]["message"]
+            content = message.get("content")
+            tool_calls = message.get("tool_calls")
+            finish_reason = choices[0].get("finish_reason", "stop")
+
+            content, tool_calls = recover_tool_calls_from_content(
+                content, tool_calls, finish_reason
+            )
+
             return ChatResponse(
-                content=message.get("content"),
+                content=content,
                 model=data.get("model", request.model),
-                finish_reason=choices[0].get("finish_reason", "stop"),
+                finish_reason=finish_reason,
                 usage=data.get("usage"),
-                tool_calls=message.get("tool_calls"),
+                tool_calls=tool_calls,
             )
         except httpx.HTTPStatusError as e:
             self._raise_http_status_error("Copilot", e, logger, include_body=True)
