@@ -1,6 +1,22 @@
-# Release Notes
+# Changelog
 
 All notable changes to Router-Maestro are documented here.
+
+---
+
+## v0.1.17 (2026-03-06)
+
+### Bug Fixes
+
+- Fix 500 error when Anthropic API requests include `tools` parameter ([#27](https://github.com/MadSkittles/Router-Maestro/pull/27))
+  - Add `tool_calls` field to `ChatResponse` and allow `content` to be `None`
+  - Forward `tools`/`tool_choice` in OpenAI base and Anthropic native provider payloads
+  - Convert OpenAI-format `tool_calls` back to Anthropic `tool_use` blocks in both streaming and non-streaming responses
+  - Fix JSON string arguments not being parsed in `translate_openai_to_anthropic`
+
+### Documentation
+
+- Rename `RELEASE_NOTES.md` to `CHANGELOG.md`
 
 ---
 
