@@ -1021,3 +1021,182 @@ def _parse_sse_events(text: str) -> list[str]:
             if data and data != "[DONE]":
                 events.append(data)
     return events
+
+
+# ============================================================================
+# Tool parameters default schema tests
+# ============================================================================
+
+
+class TestToolParametersDefaults:
+    """Test that tools without parameters get valid default schema."""
+
+    def test_tool_without_parameters_gets_default(self):
+        """Tools with no parameters field should get a valid OpenAI schema."""
+        tools = [
+            GeminiTool(
+                function_declarations=[
+                    GeminiFunctionDeclaration(
+                        name="list_files",
+                        description="List files in directory",
+                        parameters=None,
+                    )
+                ]
+            )
+        ]
+        request = GeminiGenerateContentRequest(
+            contents=[
+                GeminiContent(
+                    parts=[GeminiPart(text="hello")], role="user"
+                )
+            ],
+            tools=tools,
+        )
+        chat_request = translate_gemini_to_openai(request, "test-model")
+        assert chat_request.tools is not None
+        assert len(chat_request.tools) == 1
+        params = chat_request.tools[0]["function"]["parameters"]
+        assert params["type"] == "object"
+        assert "properties" in params
+
+    def test_tool_with_empty_parameters_gets_default(self):
+        """Tools with empty {} parameters should get a valid schema."""
+        tools = [
+            GeminiTool(
+                function_declarations=[
+                    GeminiFunctionDeclaration(
+                        name="get_time",
+                        description="Get current time",
+                        parameters={},
+                    )
+                ]
+            )
+        ]
+        request = GeminiGenerateContentRequest(
+            contents=[
+                GeminiContent(
+                    parts=[GeminiPart(text="hello")], role="user"
+                )
+            ],
+            tools=tools,
+        )
+        chat_request = translate_gemini_to_openai(request, "test-model")
+        params = chat_request.tools[0]["function"]["parameters"]
+        assert params["type"] == "object"
+
+    def test_tool_with_valid_parameters_preserved(self):
+        """Tools with valid parameters should keep them as-is."""
+        tools = [
+            GeminiTool(
+                function_declarations=[
+                    GeminiFunctionDeclaration(
+                        name="read_file",
+                        description="Read a file",
+                        parameters={
+                            "type": "OBJECT",
+                            "properties": {
+                                "path": {"type": "STRING"}
+                            },
+                            "required": ["path"],
+                        },
+                    )
+                ]
+            )
+        ]
+        request = GeminiGenerateContentRequest(
+            contents=[
+                GeminiContent(
+                    parts=[GeminiPart(text="hello")], role="user"
+                )
+            ],
+            tools=tools,
+        )
+        chat_request = translate_gemini_to_openai(request, "test-model")
+        params = chat_request.tools[0]["function"]["parameters"]
+        assert params["type"] == "object"  # normalized from OBJECT
+        assert "path" in params["properties"]
+
+    def test_many_tools_without_parameters(self):
+        """Multiple tools without parameters (like Gemini CLI sends)."""
+        decls = [
+            GeminiFunctionDeclaration(
+                name=f"tool_{i}",
+                description=f"Tool {i}",
+                parameters=None,
+            )
+            for i in range(16)
+        ]
+        tools = [GeminiTool(function_declarations=decls)]
+        request = GeminiGenerateContentRequest(
+            contents=[
+                GeminiContent(
+                    parts=[GeminiPart(text="hello")], role="user"
+                )
+            ],
+            tools=tools,
+        )
+        chat_request = translate_gemini_to_openai(request, "test-model")
+        assert chat_request.tools is not None
+        assert len(chat_request.tools) == 16
+        for tool in chat_request.tools:
+            params = tool["function"]["parameters"]
+            assert params["type"] == "object"
+
+
+# ============================================================================
+# Auth middleware x-goog-api-key tests
+# ============================================================================
+
+
+class TestGoogApiKeyAuth:
+    """Test x-goog-api-key header authentication."""
+
+    @pytest.fixture
+    def auth_app(self):
+        """Create a FastAPI app with auth middleware."""
+        from router_maestro.server.middleware.auth import verify_api_key
+
+        app = FastAPI()
+
+        @app.get("/test")
+        async def test_endpoint(dep=pytest.importorskip("fastapi").Depends(verify_api_key)):
+            return {"ok": True}
+
+        return app
+
+    @pytest.fixture
+    def auth_client(self, auth_app):
+        return TestClient(auth_app)
+
+    @patch.dict("os.environ", {"ROUTER_MAESTRO_API_KEY": "test-key-123"})
+    def test_x_goog_api_key_accepted(self, auth_client):
+        """x-goog-api-key header should authenticate successfully."""
+        response = auth_client.get(
+            "/test", headers={"x-goog-api-key": "test-key-123"}
+        )
+        assert response.status_code == 200
+
+    @patch.dict("os.environ", {"ROUTER_MAESTRO_API_KEY": "test-key-123"})
+    def test_x_goog_api_key_wrong_key(self, auth_client):
+        """Wrong x-goog-api-key should return 401."""
+        response = auth_client.get(
+            "/test", headers={"x-goog-api-key": "wrong-key"}
+        )
+        assert response.status_code == 401
+
+    @patch.dict("os.environ", {"ROUTER_MAESTRO_API_KEY": "test-key-123"})
+    def test_bearer_still_works(self, auth_client):
+        """Bearer auth should still work alongside x-goog-api-key support."""
+        response = auth_client.get(
+            "/test",
+            headers={"Authorization": "Bearer test-key-123"},
+        )
+        assert response.status_code == 200
+
+    @patch.dict("os.environ", {"ROUTER_MAESTRO_API_KEY": "test-key-123"})
+    def test_x_api_key_still_works(self, auth_client):
+        """x-api-key header should still work."""
+        response = auth_client.get(
+            "/test", headers={"x-api-key": "test-key-123"}
+        )
+        assert response.status_code == 200
