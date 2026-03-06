@@ -205,15 +205,36 @@ class CopilotProvider(BaseProvider):
                 )
 
             logger.debug("Copilot chat completion successful")
-            message = choices[0]["message"]
-            content = message.get("content")
-            tool_calls = message.get("tool_calls")
-            finish_reason = choices[0].get("finish_reason", "stop")
 
-            logger.info(
-                "Copilot raw response: %s",
-                json.dumps(data, ensure_ascii=False)[:2000],
-            )
+            # Copilot may return multiple choices: one with text content and
+            # separate ones each containing a single tool_call. Merge them all.
+            content = None
+            tool_calls = []
+            finish_reason = "stop"
+
+            for choice in choices:
+                msg = choice.get("message", {})
+                # Take content from the first choice that has it
+                if content is None and msg.get("content"):
+                    content = msg["content"]
+                # Collect tool_calls from all choices
+                if msg.get("tool_calls"):
+                    tool_calls.extend(msg["tool_calls"])
+                # Use finish_reason from any choice (they should all match)
+                fr = choice.get("finish_reason")
+                if fr:
+                    finish_reason = fr
+
+            if len(choices) > 1:
+                logger.info(
+                    "Copilot returned %d choices: content=%s, tool_calls=%d, finish_reason=%s",
+                    len(choices),
+                    len(content) if content else 0,
+                    len(tool_calls),
+                    finish_reason,
+                )
+
+            tool_calls = tool_calls or None
 
             content, tool_calls = recover_tool_calls_from_content(
                 content, tool_calls, finish_reason
