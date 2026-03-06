@@ -35,6 +35,7 @@ Router-Maestro acts as a proxy that gives you access to models from multiple pro
 - [Configuration](#configuration)
 - [Deployment](#deployment)
 - [License](#license)
+- [Changelog](#changelog)
 
 ## Quick Start
 
@@ -414,6 +415,10 @@ See [docs/deployment.md](docs/deployment.md).
 ## License
 
 MIT License - see [LICENSE](LICENSE) file.
+
+## Changelog
+
+See [CHANGELOG.md](CHANGELOG.md) for release history.
 
 ## Contributing
 
