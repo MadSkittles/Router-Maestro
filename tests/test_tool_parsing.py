@@ -2,8 +2,6 @@
 
 import json
 
-import pytest
-
 from router_maestro.providers.tool_parsing import recover_tool_calls_from_content
 
 
