@@ -19,6 +19,7 @@ from router_maestro.server.schemas.anthropic import (
     AnthropicModelList,
     AnthropicStreamState,
     AnthropicTextBlock,
+    AnthropicToolUseBlock,
     AnthropicUsage,
 )
 from router_maestro.server.streaming import sse_streaming_response
@@ -243,6 +244,25 @@ async def messages(request: AnthropicMessagesRequest, raw_request: FastAPIReques
         content = []
         if response.content:
             content.append(AnthropicTextBlock(type="text", text=response.content))
+
+        # Convert OpenAI-format tool_calls to Anthropic tool_use blocks
+        if response.tool_calls:
+            for tc in response.tool_calls:
+                func = tc.get("function", {})
+                arguments = func.get("arguments", "{}")
+                if isinstance(arguments, str):
+                    try:
+                        arguments = json.loads(arguments)
+                    except (json.JSONDecodeError, TypeError):
+                        arguments = {}
+                content.append(
+                    AnthropicToolUseBlock(
+                        type="tool_use",
+                        id=tc.get("id", ""),
+                        name=func.get("name", ""),
+                        input=arguments,
+                    )
+                )
 
         usage = AnthropicUsage(
             input_tokens=response.usage.get("prompt_tokens", 0) if response.usage else 0,

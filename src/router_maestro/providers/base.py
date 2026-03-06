@@ -63,10 +63,11 @@ class ChatRequest:
 class ChatResponse:
     """Response from chat completion."""
 
-    content: str
+    content: str | None
     model: str
     finish_reason: str = "stop"
     usage: dict | None = None  # {"prompt_tokens": X, "completion_tokens": Y, "total_tokens": Z}
+    tool_calls: list[dict] | None = None  # OpenAI-format tool calls from assistant
 
 
 @dataclass

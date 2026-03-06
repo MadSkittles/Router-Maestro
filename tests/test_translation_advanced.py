@@ -351,6 +351,38 @@ class TestTranslateOpenAIToAnthropic:
         assert result.id == "req-123"
         assert len(result.content) == 0
 
+    def test_translate_response_with_tool_calls(self):
+        """Test translating response with tool_calls produces AnthropicToolUseBlock."""
+        openai_response = {
+            "choices": [
+                {
+                    "message": {
+                        "content": None,
+                        "tool_calls": [
+                            {
+                                "id": "call_abc",
+                                "type": "function",
+                                "function": {
+                                    "name": "exec",
+                                    "arguments": '{"command": "hostname"}',
+                                },
+                            }
+                        ],
+                    },
+                    "finish_reason": "tool_calls",
+                }
+            ],
+            "usage": {"prompt_tokens": 100, "completion_tokens": 20},
+        }
+        result = translate_openai_to_anthropic(openai_response, "claude-3", "req-456")
+
+        assert result.stop_reason == "tool_use"
+        tool_blocks = [b for b in result.content if b.type == "tool_use"]
+        assert len(tool_blocks) == 1
+        assert tool_blocks[0].id == "call_abc"
+        assert tool_blocks[0].name == "exec"
+        assert tool_blocks[0].input == {"command": "hostname"}
+
 
 class TestTranslateOpenAIChunkToAnthropicEvents:
     """Tests for streaming chunk translation."""
