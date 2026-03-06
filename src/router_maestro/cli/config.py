@@ -30,6 +30,10 @@ CLI_TOOLS = {
         "name": "OpenAI Codex",
         "description": "Generate config.toml for OpenAI Codex CLI",
     },
+    "gemini-cli": {
+        "name": "Gemini CLI",
+        "description": "Generate .env for Gemini CLI",
+    },
 }
 
 
@@ -46,6 +50,14 @@ def get_codex_paths() -> dict[str, Path]:
     return {
         "user": Path.home() / ".codex" / "config.toml",
         "project": Path.cwd() / ".codex" / "config.toml",
+    }
+
+
+def get_gemini_cli_paths() -> dict[str, Path]:
+    """Get Gemini CLI config paths."""
+    return {
+        "user": Path.home() / ".gemini" / ".env",
+        "project": Path.cwd() / ".gemini" / ".env",
     }
 
 
@@ -136,6 +148,8 @@ def config_callback(ctx: typer.Context) -> None:
         claude_code_config()
     elif tool_key == "codex":
         codex_config()
+    elif tool_key == "gemini-cli":
+        gemini_cli_config()
 
 
 @app.command(name="claude-code")
@@ -280,6 +294,88 @@ def codex_config() -> None:
             "  router-maestro server start\n\n"
             "[dim]Set API key environment variable (optional):[/dim]\n"
             "  export ROUTER_MAESTRO_API_KEY=your-key",
+            title="Success",
+            border_style="green",
+        )
+    )
+
+
+def _parse_env_file(path: Path) -> dict[str, str]:
+    """Parse a .env file into a dict, preserving order."""
+    env: dict[str, str] = {}
+    if not path.exists():
+        return env
+    try:
+        for line in path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if "=" in line:
+                key, _, value = line.partition("=")
+                env[key.strip()] = value.strip()
+    except OSError:
+        pass
+    return env
+
+
+def _write_env_file(path: Path, env: dict[str, str]) -> None:
+    """Write a dict as a .env file."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lines = [f"{k}={v}" for k, v in env.items()]
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+@app.command(name="gemini-cli")
+def gemini_cli_config() -> None:
+    """Generate Gemini CLI .env for router-maestro."""
+    # Step 1: Select level
+    console.print("\n[bold]Step 1: Select configuration level[/bold]")
+    console.print("  1. User-level (~/.gemini/.env)")
+    console.print("  2. Project-level (./.gemini/.env)")
+    choice = Prompt.ask("Select", choices=["1", "2"], default="1")
+
+    paths = get_gemini_cli_paths()
+    level = "user" if choice == "1" else "project"
+    env_path = paths[level]
+
+    # Step 2: Backup if exists
+    _backup_if_exists(env_path)
+
+    # Step 3: Select model
+    models = _fetch_and_display_models()
+
+    console.print("\n[bold]Step 2: Select model[/bold]")
+    selected_model = _select_model(models, "Enter number (or 0 for auto-routing)")
+
+    # Step 4: Generate config
+    auth_key = get_current_context_api_key() or "router-maestro"
+    client = get_admin_client()
+    base_url = (
+        client.endpoint.rstrip("/") if hasattr(client, "endpoint") else "http://localhost:8080"
+    )
+    gemini_url = f"{base_url}/api/gemini"
+
+    # Load existing .env to preserve other variables
+    existing_env = _parse_env_file(env_path)
+
+    # Set Gemini CLI variables
+    existing_env["GOOGLE_GEMINI_BASE_URL"] = gemini_url
+    existing_env["GEMINI_API_KEY"] = auth_key
+    existing_env["GEMINI_MODEL"] = selected_model
+    existing_env["GEMINI_TELEMETRY_ENABLED"] = "false"
+
+    _write_env_file(env_path, existing_env)
+
+    console.print(
+        Panel(
+            f"[green]Created {env_path}[/green]\n\n"
+            f"Model: {selected_model}\n"
+            f"Backend URL: {gemini_url}\n"
+            f"Telemetry: disabled\n\n"
+            "[dim]Start router-maestro server before using Gemini CLI:[/dim]\n"
+            "  router-maestro server start\n\n"
+            "[dim]Then run Gemini CLI normally:[/dim]\n"
+            "  gemini",
             title="Success",
             border_style="green",
         )
