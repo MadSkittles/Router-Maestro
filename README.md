@@ -16,6 +16,7 @@ Router-Maestro acts as a proxy that gives you access to models from multiple pro
 - **Multi-provider support**: GitHub Copilot (OAuth), OpenAI, Anthropic, and custom OpenAI-compatible endpoints
 - **Intelligent routing**: Priority-based model selection with automatic fallback on failure
 - **Dual API compatibility**: Both OpenAI (`/v1/...`) and Anthropic (`/v1/messages`) API formats
+- **Gemini API compatibility**: Gemini REST API format (`/api/gemini/v1beta/...`) for Gemini CLI/SDK
 - **Cross-provider translation**: Seamlessly route OpenAI requests to Anthropic providers and vice versa
 - **Configuration hot-reload**: Auto-reload config files every 5 minutes without server restart
 - **CLI management**: Full command-line interface for configuration and server control
@@ -97,6 +98,13 @@ router-maestro config claude-code
 
 ```bash
 router-maestro config codex
+# Follow the wizard to select models
+```
+
+#### Gemini CLI
+
+```bash
+router-maestro config gemini
 # Follow the wizard to select models
 ```
 
@@ -255,6 +263,7 @@ router-maestro model list
 | -------------------- | ----------------------------- |
 | `config claude-code` | Generate Claude Code settings |
 | `config codex`       | Generate Codex config (CLI/Extension/App) |
+| `config gemini`      | Generate Gemini CLI .env      |
 
 ## API Reference
 
@@ -293,6 +302,28 @@ POST /v1/messages/count_tokens
 
 ```bash
 POST /api/admin/models/refresh   # Refresh model cache
+```
+
+### Gemini-Compatible
+
+```bash
+# Generate content (non-streaming)
+POST /api/gemini/v1beta/models/{model}:generateContent
+{
+  "contents": [{"role": "user", "parts": [{"text": "Hello"}]}]
+}
+
+# Stream generate content (SSE)
+POST /api/gemini/v1beta/models/{model}:streamGenerateContent?alt=sse
+{
+  "contents": [{"role": "user", "parts": [{"text": "Hello"}]}]
+}
+
+# Count tokens
+POST /api/gemini/v1beta/models/{model}:countTokens
+{
+  "contents": [{"role": "user", "parts": [{"text": "Hello"}]}]
+}
 ```
 
 ## Configuration
