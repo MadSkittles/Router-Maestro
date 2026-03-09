@@ -4,6 +4,14 @@ All notable changes to Router-Maestro are documented here.
 
 ---
 
+## v0.1.20 (2026-03-09)
+
+### Bug Fixes
+
+- Fix Gemini tool call translation — non-streaming args + streaming premature emit ([#30](https://github.com/MadSkittles/Router-Maestro/pull/30))
+
+---
+
 ## v0.1.19 (2026-03-09)
 
 ### Features
