@@ -163,6 +163,18 @@ Runtime configuration follows XDG conventions:
 
 Models are identified by `provider/model-id` format (e.g., `github-copilot/gpt-4o`). The special model name `router-maestro` triggers auto-routing based on priority configuration. Fuzzy matching (`utils/model_match.py`) handles minor ID variations (e.g., `claude-opus-4-6` → `claude-opus-4.6`).
 
+### Branch Workflow
+
+Never commit directly to `master`. Always create a feature branch for changes:
+
+```bash
+git checkout -b feat/description   # new feature
+git checkout -b fix/description    # bug fix
+git checkout -b chore/description  # maintenance
+```
+
+After work is complete, open a PR to merge into `master`.
+
 ### Pre-Commit Workflow
 
 Run `/lint` and let Codex review the code before committing.
@@ -178,14 +190,21 @@ When releasing a new version, update these files:
 
 ### GitHub Operations
 
-Use the GitHub MCP tools instead of `gh` CLI for GitHub operations like creating PRs, issues, and reviews. The MCP tools work better with Enterprise Managed Users and provide structured responses.
+Use the `gh` CLI for GitHub operations like creating PRs, issues, and reviews.
 
-Available GitHub MCP tools:
-- `mcp__github__create_pull_request` - Create pull requests
-- `mcp__github__get_pull_request` - Get PR details
-- `mcp__github__create_pull_request_review` - Review PRs
-- `mcp__github__merge_pull_request` - Merge PRs
-- `mcp__github__get_pull_request_files` - Get files changed in a PR
-- `mcp__github__create_issue` - Create issues
-- `mcp__github__list_issues` - List issues
-- `mcp__github__search_code` - Search code in repositories
+```bash
+# Create a pull request
+gh pr create --title "Title" --body "Description"
+
+# View PR details
+gh pr view <number>
+
+# Merge a PR
+gh pr merge <number>
+
+# Create an issue
+gh issue create --title "Title" --body "Description"
+
+# List issues
+gh issue list
+```
