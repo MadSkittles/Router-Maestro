@@ -46,9 +46,7 @@ _NON_SCHEMA_FIELDS = frozenset({"default", "example", "const", "enum"})
 _MAX_SCHEMA_DEPTH = 100
 
 
-def normalize_schema_types(
-    schema: Any, *, _depth: int = 0, _seen: set[int] | None = None
-) -> Any:
+def normalize_schema_types(schema: Any, *, _depth: int = 0, _seen: set[int] | None = None) -> Any:
     """Normalize JSON Schema type values from uppercase to lowercase.
 
     Gemini uses Protocol Buffer-style uppercase types (e.g. ``"STRING"``,
@@ -70,10 +68,7 @@ def normalize_schema_types(
     _seen.add(obj_id)
 
     if isinstance(schema, list):
-        return [
-            normalize_schema_types(item, _depth=_depth + 1, _seen=_seen)
-            for item in schema
-        ]
+        return [normalize_schema_types(item, _depth=_depth + 1, _seen=_seen) for item in schema]
 
     normalized: dict[str, Any] = {}
     for key, value in schema.items():
@@ -85,9 +80,7 @@ def normalize_schema_types(
         elif key in _NON_SCHEMA_FIELDS:
             normalized[key] = value
         else:
-            normalized[key] = normalize_schema_types(
-                value, _depth=_depth + 1, _seen=_seen
-            )
+            normalized[key] = normalize_schema_types(value, _depth=_depth + 1, _seen=_seen)
     return normalized
 
 
@@ -128,9 +121,7 @@ def _map_finish_reason_to_gemini(reason: str | None) -> str | None:
 # ============================================================================
 
 
-def translate_gemini_to_openai(
-    request: GeminiGenerateContentRequest, model: str
-) -> ChatRequest:
+def translate_gemini_to_openai(request: GeminiGenerateContentRequest, model: str) -> ChatRequest:
     """Translate a Gemini generateContent request to an internal ChatRequest."""
     messages = _translate_contents_to_messages(
         contents=request.contents or [],
@@ -138,9 +129,7 @@ def translate_gemini_to_openai(
     )
     tools = _translate_gemini_tools(request.tools) if request.tools else None
     tool_choice = (
-        _translate_gemini_tool_config(request.tool_config)
-        if request.tool_config
-        else None
+        _translate_gemini_tool_config(request.tool_config) if request.tool_config else None
     )
 
     temperature = 1.0
@@ -170,13 +159,9 @@ def _translate_contents_to_messages(
 
     # System instruction -> system message
     if system_instruction and system_instruction.parts:
-        system_texts = [
-            p.text for p in system_instruction.parts if p.text is not None
-        ]
+        system_texts = [p.text for p in system_instruction.parts if p.text is not None]
         if system_texts:
-            messages.append(
-                Message(role="system", content="\n\n".join(system_texts))
-            )
+            messages.append(Message(role="system", content="\n\n".join(system_texts)))
 
     for content in contents:
         role = content.role or "user"
@@ -214,9 +199,7 @@ def _translate_user_content(content: GeminiContent) -> list[Message]:
             image_parts.append(
                 {
                     "type": "image_url",
-                    "image_url": {
-                        "url": f"data:{media_type};base64,{part.inline_data.data}"
-                    },
+                    "image_url": {"url": f"data:{media_type};base64,{part.inline_data.data}"},
                 }
             )
         elif part.text is not None:
@@ -227,15 +210,11 @@ def _translate_user_content(content: GeminiContent) -> list[Message]:
         if image_parts:
             content_parts: list[dict[str, Any]] = []
             if text_parts:
-                content_parts.append(
-                    {"type": "text", "text": "\n\n".join(text_parts)}
-                )
+                content_parts.append({"type": "text", "text": "\n\n".join(text_parts)})
             content_parts.extend(image_parts)
             messages.append(Message(role="user", content=content_parts))
         else:
-            messages.append(
-                Message(role="user", content="\n\n".join(text_parts))
-            )
+            messages.append(Message(role="user", content="\n\n".join(text_parts)))
 
     if not messages:
         messages.append(Message(role="user", content=""))
@@ -286,20 +265,14 @@ def _translate_gemini_tools(tools: list) -> list[dict[str, Any]] | None:
         if not declarations:
             continue
         for decl in declarations:
-            name = (
-                decl.name if hasattr(decl, "name") else decl.get("name", "")
-            )
+            name = decl.name if hasattr(decl, "name") else decl.get("name", "")
             if not name:
                 continue
             description = (
-                decl.description
-                if hasattr(decl, "description")
-                else decl.get("description", "")
+                decl.description if hasattr(decl, "description") else decl.get("description", "")
             ) or ""
             raw_params = (
-                decl.parameters
-                if hasattr(decl, "parameters")
-                else decl.get("parameters", {})
+                decl.parameters if hasattr(decl, "parameters") else decl.get("parameters", {})
             ) or {}
             parameters = normalize_schema_types(raw_params)
             # Ensure parameters has at least {"type": "object"} for OpenAI compat
@@ -411,14 +384,10 @@ def translate_openai_chunk_to_gemini(
         usage = chunk["usage"]
         ct = usage.get("completion_tokens", 0)
         if ct > 0:
-            state.accumulated_completion_tokens = max(
-                state.accumulated_completion_tokens, ct
-            )
+            state.accumulated_completion_tokens = max(state.accumulated_completion_tokens, ct)
         pt = usage.get("prompt_tokens", 0)
         if pt > 0:
-            state.accumulated_prompt_tokens = max(
-                state.accumulated_prompt_tokens, pt
-            )
+            state.accumulated_prompt_tokens = max(state.accumulated_prompt_tokens, pt)
 
     if not chunk.get("choices"):
         return None
@@ -461,9 +430,7 @@ def translate_openai_chunk_to_gemini(
                 # Continuation of existing tool call
                 idx = tc.get("index", 0)
                 if idx < len(state.tool_calls_buffer):
-                    state.tool_calls_buffer[idx]["arguments"] += tc[
-                        "function"
-                    ]["arguments"]
+                    state.tool_calls_buffer[idx]["arguments"] += tc["function"]["arguments"]
 
             # Emit function call for complete new starts
             if tc.get("id") and tc.get("function", {}).get("name"):
@@ -496,11 +463,7 @@ def translate_openai_chunk_to_gemini(
         final_parts: list[GeminiPart] = []
         for tc_buf in state.tool_calls_buffer:
             try:
-                args = (
-                    json.loads(tc_buf["arguments"])
-                    if tc_buf["arguments"]
-                    else {}
-                )
+                args = json.loads(tc_buf["arguments"]) if tc_buf["arguments"] else {}
             except json.JSONDecodeError:
                 args = {}
             final_parts.append(
@@ -514,9 +477,7 @@ def translate_openai_chunk_to_gemini(
             )
         state.tool_calls_buffer.clear()
 
-        prompt_tokens = (
-            state.accumulated_prompt_tokens or state.estimated_input_tokens
-        )
+        prompt_tokens = state.accumulated_prompt_tokens or state.estimated_input_tokens
         completion_tokens = state.accumulated_completion_tokens
 
         candidate = GeminiCandidate(

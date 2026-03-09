@@ -87,47 +87,31 @@ class TestNormalizeSchemaTypes:
     """Tests for schema type normalization (uppercase -> lowercase)."""
 
     def test_uppercase_string(self):
-        assert normalize_schema_types({"type": "STRING"}) == {
-            "type": "string"
-        }
+        assert normalize_schema_types({"type": "STRING"}) == {"type": "string"}
 
     def test_uppercase_object(self):
-        assert normalize_schema_types({"type": "OBJECT"}) == {
-            "type": "object"
-        }
+        assert normalize_schema_types({"type": "OBJECT"}) == {"type": "object"}
 
     def test_uppercase_array(self):
         assert normalize_schema_types({"type": "ARRAY"}) == {"type": "array"}
 
     def test_uppercase_boolean(self):
-        assert normalize_schema_types({"type": "BOOLEAN"}) == {
-            "type": "boolean"
-        }
+        assert normalize_schema_types({"type": "BOOLEAN"}) == {"type": "boolean"}
 
     def test_uppercase_number(self):
-        assert normalize_schema_types({"type": "NUMBER"}) == {
-            "type": "number"
-        }
+        assert normalize_schema_types({"type": "NUMBER"}) == {"type": "number"}
 
     def test_uppercase_integer(self):
-        assert normalize_schema_types({"type": "INTEGER"}) == {
-            "type": "integer"
-        }
+        assert normalize_schema_types({"type": "INTEGER"}) == {"type": "integer"}
 
     def test_lowercase_passthrough(self):
-        assert normalize_schema_types({"type": "string"}) == {
-            "type": "string"
-        }
+        assert normalize_schema_types({"type": "string"}) == {"type": "string"}
 
     def test_mixed_case(self):
-        assert normalize_schema_types({"type": "String"}) == {
-            "type": "string"
-        }
+        assert normalize_schema_types({"type": "String"}) == {"type": "string"}
 
     def test_type_unspecified_removed(self):
-        result = normalize_schema_types(
-            {"type": "TYPE_UNSPECIFIED", "description": "test"}
-        )
+        result = normalize_schema_types({"type": "TYPE_UNSPECIFIED", "description": "test"})
         assert "type" not in result
         assert result["description"] == "test"
 
@@ -174,9 +158,7 @@ class TestNormalizeSchemaTypes:
         assert normalize_schema_types(42) == 42
 
     def test_list_normalization(self):
-        result = normalize_schema_types(
-            [{"type": "STRING"}, {"type": "INTEGER"}]
-        )
+        result = normalize_schema_types([{"type": "STRING"}, {"type": "INTEGER"}])
         assert result == [{"type": "string"}, {"type": "integer"}]
 
     def test_deeply_nested(self):
@@ -230,9 +212,7 @@ class TestTranslateGeminiToOpenAI:
                     parts=[GeminiPart(text="Hello")],
                 )
             ],
-            system_instruction=GeminiContent(
-                parts=[GeminiPart(text="You are helpful")]
-            ),
+            system_instruction=GeminiContent(parts=[GeminiPart(text="You are helpful")]),
         )
         result = translate_gemini_to_openai(request, "model")
         assert result.messages[0].role == "system"
@@ -242,15 +222,9 @@ class TestTranslateGeminiToOpenAI:
     def test_multi_turn_conversation(self):
         request = GeminiGenerateContentRequest(
             contents=[
-                GeminiContent(
-                    role="user", parts=[GeminiPart(text="Hi")]
-                ),
-                GeminiContent(
-                    role="model", parts=[GeminiPart(text="Hello!")]
-                ),
-                GeminiContent(
-                    role="user", parts=[GeminiPart(text="How are you?")]
-                ),
+                GeminiContent(role="user", parts=[GeminiPart(text="Hi")]),
+                GeminiContent(role="model", parts=[GeminiPart(text="Hello!")]),
+                GeminiContent(role="user", parts=[GeminiPart(text="How are you?")]),
             ]
         )
         result = translate_gemini_to_openai(request, "model")
@@ -261,11 +235,7 @@ class TestTranslateGeminiToOpenAI:
 
     def test_generation_config(self):
         request = GeminiGenerateContentRequest(
-            contents=[
-                GeminiContent(
-                    role="user", parts=[GeminiPart(text="Hi")]
-                )
-            ],
+            contents=[GeminiContent(role="user", parts=[GeminiPart(text="Hi")])],
             generation_config=GeminiGenerationConfig(
                 temperature=0.7,
                 max_output_tokens=8192,
@@ -313,20 +283,13 @@ class TestTranslateGeminiToOpenAI:
         assert result.messages[0].role == "user"
         assert result.messages[1].role == "assistant"
         assert result.messages[1].tool_calls is not None
-        assert (
-            result.messages[1].tool_calls[0]["function"]["name"]
-            == "get_weather"
-        )
+        assert result.messages[1].tool_calls[0]["function"]["name"] == "get_weather"
         assert result.messages[2].role == "tool"
         assert result.messages[2].tool_call_id == "call_123"
 
     def test_tools_translation(self):
         request = GeminiGenerateContentRequest(
-            contents=[
-                GeminiContent(
-                    role="user", parts=[GeminiPart(text="Hi")]
-                )
-            ],
+            contents=[GeminiContent(role="user", parts=[GeminiPart(text="Hi")])],
             tools=[
                 GeminiTool(
                     function_declarations=[
@@ -335,9 +298,7 @@ class TestTranslateGeminiToOpenAI:
                             description="Get weather",
                             parameters={
                                 "type": "OBJECT",
-                                "properties": {
-                                    "location": {"type": "STRING"}
-                                },
+                                "properties": {"location": {"type": "STRING"}},
                                 "required": ["location"],
                             },
                         )
@@ -358,15 +319,9 @@ class TestTranslateGeminiToOpenAI:
 
     def test_tool_config_auto(self):
         request = GeminiGenerateContentRequest(
-            contents=[
-                GeminiContent(
-                    role="user", parts=[GeminiPart(text="Hi")]
-                )
-            ],
+            contents=[GeminiContent(role="user", parts=[GeminiPart(text="Hi")])],
             tool_config=GeminiToolConfig(
-                function_calling_config=GeminiFunctionCallingConfig(
-                    mode="AUTO"
-                )
+                function_calling_config=GeminiFunctionCallingConfig(mode="AUTO")
             ),
         )
         result = translate_gemini_to_openai(request, "model")
@@ -374,15 +329,9 @@ class TestTranslateGeminiToOpenAI:
 
     def test_tool_config_any(self):
         request = GeminiGenerateContentRequest(
-            contents=[
-                GeminiContent(
-                    role="user", parts=[GeminiPart(text="Hi")]
-                )
-            ],
+            contents=[GeminiContent(role="user", parts=[GeminiPart(text="Hi")])],
             tool_config=GeminiToolConfig(
-                function_calling_config=GeminiFunctionCallingConfig(
-                    mode="ANY"
-                )
+                function_calling_config=GeminiFunctionCallingConfig(mode="ANY")
             ),
         )
         result = translate_gemini_to_openai(request, "model")
@@ -390,15 +339,9 @@ class TestTranslateGeminiToOpenAI:
 
     def test_tool_config_none(self):
         request = GeminiGenerateContentRequest(
-            contents=[
-                GeminiContent(
-                    role="user", parts=[GeminiPart(text="Hi")]
-                )
-            ],
+            contents=[GeminiContent(role="user", parts=[GeminiPart(text="Hi")])],
             tool_config=GeminiToolConfig(
-                function_calling_config=GeminiFunctionCallingConfig(
-                    mode="NONE"
-                )
+                function_calling_config=GeminiFunctionCallingConfig(mode="NONE")
             ),
         )
         result = translate_gemini_to_openai(request, "model")
@@ -411,11 +354,7 @@ class TestTranslateGeminiToOpenAI:
 
     def test_default_temperature(self):
         request = GeminiGenerateContentRequest(
-            contents=[
-                GeminiContent(
-                    role="user", parts=[GeminiPart(text="Hi")]
-                )
-            ]
+            contents=[GeminiContent(role="user", parts=[GeminiPart(text="Hi")])]
         )
         result = translate_gemini_to_openai(request, "model")
         assert result.temperature == 1.0
@@ -460,12 +399,8 @@ class TestTranslateOpenAIToGemini:
 
     def test_input_tokens_fallback(self):
         """When response has no usage, input_tokens estimate is used."""
-        response = ChatResponse(
-            content="Hi", model="model", usage=None
-        )
-        result = translate_openai_to_gemini(
-            response, "model", input_tokens=42
-        )
+        response = ChatResponse(content="Hi", model="model", usage=None)
+        result = translate_openai_to_gemini(response, "model", input_tokens=42)
         assert result.usage_metadata.prompt_token_count == 42
 
     def test_empty_content(self):
@@ -482,9 +417,7 @@ class TestTranslateOpenAIToGemini:
             usage={"prompt_tokens": 5, "completion_tokens": 3},
         )
         result = translate_openai_to_gemini(response, "model")
-        data = json.loads(
-            result.model_dump_json(by_alias=True, exclude_none=True)
-        )
+        data = json.loads(result.model_dump_json(by_alias=True, exclude_none=True))
         assert "finishReason" in data["candidates"][0]
         assert "usageMetadata" in data
         assert "promptTokenCount" in data["usageMetadata"]
@@ -502,9 +435,7 @@ class TestTranslateOpenAIChunkToGemini:
     def test_text_chunk(self):
         state = GeminiStreamState()
         chunk = {
-            "choices": [
-                {"delta": {"content": "Hello"}, "finish_reason": None}
-            ],
+            "choices": [{"delta": {"content": "Hello"}, "finish_reason": None}],
             "usage": None,
         }
         result = translate_openai_chunk_to_gemini(chunk, state, "model")
@@ -600,9 +531,7 @@ class TestTranslateOpenAIChunkToGemini:
                         "tool_calls": [
                             {
                                 "index": 0,
-                                "function": {
-                                    "arguments": 'ation": "Tokyo"}'
-                                },
+                                "function": {"arguments": 'ation": "Tokyo"}'},
                             }
                         ]
                     },
@@ -629,9 +558,7 @@ class TestTranslateOpenAIChunkToGemini:
     def test_usage_tracking(self):
         state = GeminiStreamState()
         chunk = {
-            "choices": [
-                {"delta": {"content": "Hi"}, "finish_reason": None}
-            ],
+            "choices": [{"delta": {"content": "Hi"}, "finish_reason": None}],
             "usage": {"prompt_tokens": 20, "completion_tokens": 3},
         }
         translate_openai_chunk_to_gemini(chunk, state, "model")
@@ -656,11 +583,7 @@ class TestRouteHelpers:
 
     def test_estimate_input_tokens_non_empty(self):
         request = GeminiGenerateContentRequest(
-            contents=[
-                GeminiContent(
-                    role="user", parts=[GeminiPart(text="Hello world")]
-                )
-            ]
+            contents=[GeminiContent(role="user", parts=[GeminiPart(text="Hello world")])]
         )
         tokens = _estimate_input_tokens(request)
         assert tokens > 0
@@ -684,9 +607,7 @@ class TestGenerateContentEndpoint:
         response = client.post(
             "/api/gemini/v1beta/models/test:generateContent",
             json={
-                "contents": [
-                    {"role": "user", "parts": [{"text": "Hello"}]}
-                ],
+                "contents": [{"role": "user", "parts": [{"text": "Hello"}]}],
             },
         )
         assert response.status_code == 200
@@ -707,9 +628,7 @@ class TestGenerateContentEndpoint:
             response = client.post(
                 "/api/gemini/v1beta/models/gemini-2.5-pro:generateContent",
                 json={
-                    "contents": [
-                        {"role": "user", "parts": [{"text": "Hello"}]}
-                    ],
+                    "contents": [{"role": "user", "parts": [{"text": "Hello"}]}],
                 },
             )
         assert response.status_code == 200
@@ -718,9 +637,7 @@ class TestGenerateContentEndpoint:
         assert text == "Hello! How can I help?"
         assert data["candidates"][0]["finishReason"] == "STOP"
 
-    def test_generate_content_with_system_instruction(
-        self, client, mock_router
-    ):
+    def test_generate_content_with_system_instruction(self, client, mock_router):
         """Test generateContent with system instruction."""
         with patch(
             "router_maestro.server.routes.gemini.get_router",
@@ -729,19 +646,13 @@ class TestGenerateContentEndpoint:
             response = client.post(
                 "/api/gemini/v1beta/models/gemini-2.5-pro:generateContent",
                 json={
-                    "contents": [
-                        {"role": "user", "parts": [{"text": "Hi"}]}
-                    ],
-                    "systemInstruction": {
-                        "parts": [{"text": "You are a helpful assistant"}]
-                    },
+                    "contents": [{"role": "user", "parts": [{"text": "Hi"}]}],
+                    "systemInstruction": {"parts": [{"text": "You are a helpful assistant"}]},
                 },
             )
         assert response.status_code == 200
 
-    def test_generate_content_with_generation_config(
-        self, client, mock_router
-    ):
+    def test_generate_content_with_generation_config(self, client, mock_router):
         """Test generateContent with generation config."""
         with patch(
             "router_maestro.server.routes.gemini.get_router",
@@ -750,9 +661,7 @@ class TestGenerateContentEndpoint:
             response = client.post(
                 "/api/gemini/v1beta/models/gemini-2.5-pro:generateContent",
                 json={
-                    "contents": [
-                        {"role": "user", "parts": [{"text": "Hi"}]}
-                    ],
+                    "contents": [{"role": "user", "parts": [{"text": "Hi"}]}],
                     "generationConfig": {
                         "temperature": 0.5,
                         "maxOutputTokens": 1024,
@@ -776,9 +685,7 @@ class TestGenerateContentEndpoint:
             response = client.post(
                 "/api/gemini/v1beta/models/bad-model:generateContent",
                 json={
-                    "contents": [
-                        {"role": "user", "parts": [{"text": "Hi"}]}
-                    ],
+                    "contents": [{"role": "user", "parts": [{"text": "Hi"}]}],
                 },
             )
         assert response.status_code == 404
@@ -792,9 +699,7 @@ class TestStreamGenerateContentEndpoint:
         response = client.post(
             "/api/gemini/v1beta/models/test:streamGenerateContent",
             json={
-                "contents": [
-                    {"role": "user", "parts": [{"text": "Hello"}]}
-                ],
+                "contents": [{"role": "user", "parts": [{"text": "Hello"}]}],
             },
         )
         assert response.status_code == 200
@@ -818,9 +723,7 @@ class TestStreamGenerateContentEndpoint:
         """Test streaming with mocked router."""
 
         async def mock_stream():
-            yield ChatStreamChunk(
-                content="Hello ", finish_reason=None
-            )
+            yield ChatStreamChunk(content="Hello ", finish_reason=None)
             yield ChatStreamChunk(
                 content="world!",
                 finish_reason="stop",
@@ -828,21 +731,16 @@ class TestStreamGenerateContentEndpoint:
             )
 
         mock = AsyncMock()
-        mock.chat_completion_stream = AsyncMock(
-            return_value=(mock_stream(), "test-provider")
-        )
+        mock.chat_completion_stream = AsyncMock(return_value=(mock_stream(), "test-provider"))
 
         with patch(
             "router_maestro.server.routes.gemini.get_router",
             return_value=mock,
         ):
             response = client.post(
-                "/api/gemini/v1beta/models/gemini-2.5-pro"
-                ":streamGenerateContent",
+                "/api/gemini/v1beta/models/gemini-2.5-pro:streamGenerateContent",
                 json={
-                    "contents": [
-                        {"role": "user", "parts": [{"text": "Hi"}]}
-                    ],
+                    "contents": [{"role": "user", "parts": [{"text": "Hi"}]}],
                 },
             )
         assert response.status_code == 200
@@ -897,21 +795,13 @@ class TestGeminiSchemas:
 
     def test_generate_content_request_full(self):
         req = GeminiGenerateContentRequest(
-            contents=[
-                GeminiContent(
-                    role="user", parts=[GeminiPart(text="Hi")]
-                )
-            ],
-            system_instruction=GeminiContent(
-                parts=[GeminiPart(text="Be helpful")]
-            ),
+            contents=[GeminiContent(role="user", parts=[GeminiPart(text="Hi")])],
+            system_instruction=GeminiContent(parts=[GeminiPart(text="Be helpful")]),
             generation_config=GeminiGenerationConfig(temperature=0.5),
             tools=[
                 GeminiTool(
                     function_declarations=[
-                        GeminiFunctionDeclaration(
-                            name="test", description="A test"
-                        )
+                        GeminiFunctionDeclaration(name="test", description="A test")
                     ]
                 )
             ],
@@ -971,9 +861,7 @@ class TestGeminiSchemas:
     def test_request_from_camel_case_json(self):
         """Verify requests can be parsed from camelCase JSON."""
         data = {
-            "contents": [
-                {"role": "user", "parts": [{"text": "Hi"}]}
-            ],
+            "contents": [{"role": "user", "parts": [{"text": "Hi"}]}],
             "systemInstruction": {"parts": [{"text": "Be helpful"}]},
             "generationConfig": {
                 "temperature": 0.5,
@@ -987,9 +875,7 @@ class TestGeminiSchemas:
     def test_response_serializes_to_camel_case(self):
         """Verify responses serialize to camelCase JSON."""
         resp = GeminiGenerateContentResponse(
-            candidates=[
-                GeminiCandidate(finish_reason="STOP", index=0)
-            ],
+            candidates=[GeminiCandidate(finish_reason="STOP", index=0)],
             usage_metadata=GeminiUsageMetadata(
                 prompt_token_count=5,
                 candidates_token_count=3,
@@ -997,9 +883,7 @@ class TestGeminiSchemas:
             ),
             model_version="test",
         )
-        data = json.loads(
-            resp.model_dump_json(by_alias=True, exclude_none=True)
-        )
+        data = json.loads(resp.model_dump_json(by_alias=True, exclude_none=True))
         assert "finishReason" in data["candidates"][0]
         assert "usageMetadata" in data
         assert "promptTokenCount" in data["usageMetadata"]
@@ -1045,11 +929,7 @@ class TestToolParametersDefaults:
             )
         ]
         request = GeminiGenerateContentRequest(
-            contents=[
-                GeminiContent(
-                    parts=[GeminiPart(text="hello")], role="user"
-                )
-            ],
+            contents=[GeminiContent(parts=[GeminiPart(text="hello")], role="user")],
             tools=tools,
         )
         chat_request = translate_gemini_to_openai(request, "test-model")
@@ -1073,11 +953,7 @@ class TestToolParametersDefaults:
             )
         ]
         request = GeminiGenerateContentRequest(
-            contents=[
-                GeminiContent(
-                    parts=[GeminiPart(text="hello")], role="user"
-                )
-            ],
+            contents=[GeminiContent(parts=[GeminiPart(text="hello")], role="user")],
             tools=tools,
         )
         chat_request = translate_gemini_to_openai(request, "test-model")
@@ -1094,9 +970,7 @@ class TestToolParametersDefaults:
                         description="Read a file",
                         parameters={
                             "type": "OBJECT",
-                            "properties": {
-                                "path": {"type": "STRING"}
-                            },
+                            "properties": {"path": {"type": "STRING"}},
                             "required": ["path"],
                         },
                     )
@@ -1104,11 +978,7 @@ class TestToolParametersDefaults:
             )
         ]
         request = GeminiGenerateContentRequest(
-            contents=[
-                GeminiContent(
-                    parts=[GeminiPart(text="hello")], role="user"
-                )
-            ],
+            contents=[GeminiContent(parts=[GeminiPart(text="hello")], role="user")],
             tools=tools,
         )
         chat_request = translate_gemini_to_openai(request, "test-model")
@@ -1128,11 +998,7 @@ class TestToolParametersDefaults:
         ]
         tools = [GeminiTool(function_declarations=decls)]
         request = GeminiGenerateContentRequest(
-            contents=[
-                GeminiContent(
-                    parts=[GeminiPart(text="hello")], role="user"
-                )
-            ],
+            contents=[GeminiContent(parts=[GeminiPart(text="hello")], role="user")],
             tools=tools,
         )
         chat_request = translate_gemini_to_openai(request, "test-model")
@@ -1171,17 +1037,13 @@ class TestGoogApiKeyAuth:
     @patch.dict("os.environ", {"ROUTER_MAESTRO_API_KEY": "test-key-123"})
     def test_x_goog_api_key_accepted(self, auth_client):
         """x-goog-api-key header should authenticate successfully."""
-        response = auth_client.get(
-            "/test", headers={"x-goog-api-key": "test-key-123"}
-        )
+        response = auth_client.get("/test", headers={"x-goog-api-key": "test-key-123"})
         assert response.status_code == 200
 
     @patch.dict("os.environ", {"ROUTER_MAESTRO_API_KEY": "test-key-123"})
     def test_x_goog_api_key_wrong_key(self, auth_client):
         """Wrong x-goog-api-key should return 401."""
-        response = auth_client.get(
-            "/test", headers={"x-goog-api-key": "wrong-key"}
-        )
+        response = auth_client.get("/test", headers={"x-goog-api-key": "wrong-key"})
         assert response.status_code == 401
 
     @patch.dict("os.environ", {"ROUTER_MAESTRO_API_KEY": "test-key-123"})
@@ -1196,7 +1058,5 @@ class TestGoogApiKeyAuth:
     @patch.dict("os.environ", {"ROUTER_MAESTRO_API_KEY": "test-key-123"})
     def test_x_api_key_still_works(self, auth_client):
         """x-api-key header should still work."""
-        response = auth_client.get(
-            "/test", headers={"x-api-key": "test-key-123"}
-        )
+        response = auth_client.get("/test", headers={"x-api-key": "test-key-123"})
         assert response.status_code == 200

@@ -47,9 +47,7 @@ class GeminiPart(BaseModel):
 
     text: str | None = None
     function_call: GeminiFunctionCall | None = Field(default=None, alias="functionCall")
-    function_response: GeminiFunctionResponse | None = Field(
-        default=None, alias="functionResponse"
-    )
+    function_response: GeminiFunctionResponse | None = Field(default=None, alias="functionResponse")
     inline_data: GeminiInlineData | None = Field(default=None, alias="inlineData")
 
 
@@ -120,12 +118,8 @@ class GeminiGenerateContentRequest(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
     contents: list[GeminiContent] | None = None
-    system_instruction: GeminiContent | None = Field(
-        default=None, alias="systemInstruction"
-    )
-    generation_config: GeminiGenerationConfig | None = Field(
-        default=None, alias="generationConfig"
-    )
+    system_instruction: GeminiContent | None = Field(default=None, alias="systemInstruction")
+    generation_config: GeminiGenerationConfig | None = Field(default=None, alias="generationConfig")
     tools: list[GeminiTool] | None = None
     tool_config: GeminiToolConfig | None = Field(default=None, alias="toolConfig")
 
@@ -163,9 +157,7 @@ class GeminiGenerateContentResponse(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
     candidates: list[GeminiCandidate] = Field(default_factory=list)
-    usage_metadata: GeminiUsageMetadata | None = Field(
-        default=None, alias="usageMetadata"
-    )
+    usage_metadata: GeminiUsageMetadata | None = Field(default=None, alias="usageMetadata")
     model_version: str | None = Field(default=None, alias="modelVersion")
 
 

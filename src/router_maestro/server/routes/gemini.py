@@ -68,17 +68,13 @@ async def generate_content(
 
     # Handle test model
     if model == "test":
-        return _create_test_response(model).model_dump(
-            by_alias=True, exclude_none=True
-        )
+        return _create_test_response(model).model_dump(by_alias=True, exclude_none=True)
 
     model_router = get_router()
     chat_request = translate_gemini_to_openai(request, model)
 
     try:
-        response, _provider_name = await model_router.chat_completion(
-            chat_request
-        )
+        response, _provider_name = await model_router.chat_completion(chat_request)
         estimated_tokens = _estimate_input_tokens(request)
         return translate_openai_to_gemini(
             response, model, input_tokens=estimated_tokens
@@ -102,18 +98,14 @@ async def generate_content(
 # ============================================================================
 
 
-@router.post(
-    "/api/gemini/v1beta/models/{model_method}:streamGenerateContent"
-)
+@router.post("/api/gemini/v1beta/models/{model_method}:streamGenerateContent")
 async def stream_generate_content(
     model_method: str,
     request: GeminiGenerateContentRequest,
 ):
     """Handle Gemini streamGenerateContent (streaming) requests."""
     model = _extract_model_from_path(model_method)
-    logger.info(
-        "Received Gemini streamGenerateContent request: model=%s", model
-    )
+    logger.info("Received Gemini streamGenerateContent request: model=%s", model)
 
     # Handle test model
     if model == "test":
@@ -142,9 +134,7 @@ async def stream_generate_content(
 
     estimated_tokens = _estimate_input_tokens(request)
     return sse_streaming_response(
-        _stream_response(
-            model_router, chat_request, model, estimated_tokens
-        ),
+        _stream_response(model_router, chat_request, model, estimated_tokens),
     )
 
 
@@ -209,10 +199,7 @@ async def _stream_test_response(
             )
         ],
     )
-    yield (
-        f"data: {content_chunk.model_dump_json(exclude_none=True, by_alias=True)}"
-        "\r\n\r\n"
-    )
+    yield (f"data: {content_chunk.model_dump_json(exclude_none=True, by_alias=True)}\r\n\r\n")
 
     # Final chunk with finish reason and usage
     final_chunk = GeminiGenerateContentResponse(
@@ -229,10 +216,7 @@ async def _stream_test_response(
         ),
         model_version=model,
     )
-    yield (
-        f"data: {final_chunk.model_dump_json(exclude_none=True, by_alias=True)}"
-        "\r\n\r\n"
-    )
+    yield (f"data: {final_chunk.model_dump_json(exclude_none=True, by_alias=True)}\r\n\r\n")
 
 
 # ============================================================================
@@ -248,22 +232,16 @@ async def _stream_response(
 ) -> AsyncGenerator[str, None]:
     """Stream Gemini-format SSE response from the upstream provider."""
     try:
-        stream, _provider_name = (
-            await model_router.chat_completion_stream(request)
-        )
+        stream, _provider_name = await model_router.chat_completion_stream(request)
 
-        state = GeminiStreamState(
-            estimated_input_tokens=estimated_input_tokens
-        )
+        state = GeminiStreamState(estimated_input_tokens=estimated_input_tokens)
 
         async for chunk in stream:
             openai_chunk = {
                 "choices": [
                     {
                         "delta": {
-                            "content": (
-                                chunk.content if chunk.content else None
-                            ),
+                            "content": (chunk.content if chunk.content else None),
                             "tool_calls": chunk.tool_calls,
                         },
                         "finish_reason": chunk.finish_reason,
@@ -272,9 +250,7 @@ async def _stream_response(
                 "usage": chunk.usage,
             }
 
-            gemini_event = translate_openai_chunk_to_gemini(
-                openai_chunk, state, original_model
-            )
+            gemini_event = translate_openai_chunk_to_gemini(openai_chunk, state, original_model)
             if gemini_event is not None:
                 yield (
                     "data: "
@@ -306,8 +282,4 @@ def _sse_error_data(message: str) -> str:
             )
         ],
     )
-    return (
-        "data: "
-        f"{error_response.model_dump_json(exclude_none=True, by_alias=True)}"
-        "\r\n\r\n"
-    )
+    return f"data: {error_response.model_dump_json(exclude_none=True, by_alias=True)}\r\n\r\n"
