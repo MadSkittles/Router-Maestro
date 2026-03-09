@@ -334,6 +334,27 @@ def translate_openai_to_gemini(
     if response.content:
         parts.append(GeminiPart(text=response.content))
 
+    # Tool calls
+    if response.tool_calls:
+        for tc in response.tool_calls:
+            fn = tc.get("function", {})
+            name = fn.get("name", "")
+            raw_args = fn.get("arguments", "{}")
+            try:
+                args = json.loads(raw_args) if isinstance(raw_args, str) else raw_args
+            except json.JSONDecodeError:
+                args = {}
+            call_id = tc.get("id") or f"call_{name}"
+            parts.append(
+                GeminiPart(
+                    function_call=GeminiFunctionCall(
+                        name=name,
+                        args=args,
+                        id=call_id,
+                    )
+                )
+            )
+
     # Determine finish reason
     finish_reason = _map_finish_reason_to_gemini(response.finish_reason)
 
@@ -413,9 +434,8 @@ def translate_openai_chunk_to_gemini(
             ],
         )
 
-    # Tool call deltas
+    # Tool call deltas — only buffer, never emit mid-stream (args arrive across chunks)
     if delta.get("tool_calls"):
-        parts: list[GeminiPart] = []
         for tc in delta["tool_calls"]:
             if tc.get("id") and tc.get("function", {}).get("name"):
                 # New tool call start
@@ -431,29 +451,7 @@ def translate_openai_chunk_to_gemini(
                 idx = tc.get("index", 0)
                 if idx < len(state.tool_calls_buffer):
                     state.tool_calls_buffer[idx]["arguments"] += tc["function"]["arguments"]
-
-            # Emit function call for complete new starts
-            if tc.get("id") and tc.get("function", {}).get("name"):
-                parts.append(
-                    GeminiPart(
-                        function_call=GeminiFunctionCall(
-                            name=tc["function"]["name"],
-                            args={},
-                            id=tc["id"],
-                        )
-                    )
-                )
-
-        if parts:
-            state.has_sent_content = True
-            return GeminiGenerateContentResponse(
-                candidates=[
-                    GeminiCandidate(
-                        content=GeminiContent(parts=parts, role="model"),
-                        index=0,
-                    )
-                ],
-            )
+        # Do NOT emit here — wait for finish chunk where args are complete
 
     # Finish
     if finish_reason:

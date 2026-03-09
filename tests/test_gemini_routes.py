@@ -471,6 +471,7 @@ class TestTranslateOpenAIChunkToGemini:
         assert result is None
 
     def test_tool_call_chunk(self):
+        """Mid-stream tool call chunks should only buffer, not emit (args not yet complete)."""
         state = GeminiStreamState()
         chunk = {
             "choices": [
@@ -493,10 +494,11 @@ class TestTranslateOpenAIChunkToGemini:
             "usage": None,
         }
         result = translate_openai_chunk_to_gemini(chunk, state, "model")
-        assert result is not None
-        fc = result.candidates[0].content.parts[0].function_call
-        assert fc is not None
-        assert fc.name == "get_weather"
+        # Mid-stream chunks should return None — args not complete yet
+        assert result is None
+        # But the tool call should be buffered
+        assert len(state.tool_calls_buffer) == 1
+        assert state.tool_calls_buffer[0]["name"] == "get_weather"
 
     def test_tool_call_accumulation_on_finish(self):
         state = GeminiStreamState()
