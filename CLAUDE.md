@@ -171,7 +171,10 @@ Never commit directly to `master`. Always create a feature branch for changes:
 git checkout -b feat/description   # new feature
 git checkout -b fix/description    # bug fix
 git checkout -b chore/description  # maintenance
+git checkout -b docs/description   # documentation
 ```
+
+**Important:** Before making any changes, check the current branch with `git branch`. If on `master`, switch to an existing relevant branch or create a new one first. Do not stage, commit, or modify files while on `master`.
 
 After work is complete, open a PR to merge into `master`.
 
