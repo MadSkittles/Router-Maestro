@@ -4,6 +4,15 @@ All notable changes to Router-Maestro are documented here.
 
 ---
 
+## v0.1.22 (2026-03-15)
+
+### Features
+
+- Add `CLAUDE_CODE_ENABLE_LSP` environment variable to `config claude-code` generator ([#33](https://github.com/MadSkittles/Router-Maestro/pull/33))
+  - Enables LSP support by default in generated Claude Code settings
+
+---
+
 ## v0.1.21 (2026-03-15)
 
 ### Bug Fixes
