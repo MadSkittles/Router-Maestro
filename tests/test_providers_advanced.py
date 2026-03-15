@@ -273,19 +273,6 @@ class TestResponsesStreamChunk:
         assert chunk.tool_call is not None
         assert chunk.tool_call.call_id == "tc-1"
 
-    def test_tool_call_delta_chunk(self):
-        """Test chunk with tool call delta."""
-        chunk = ResponsesStreamChunk(
-            content="",
-            tool_call_delta={
-                "type": "function_call_arguments_delta",
-                "item_id": "item-1",
-                "call_id": "tc-1",
-                "delta": '{"loc":',
-            },
-        )
-        assert chunk.tool_call_delta is not None
-
 
 class TestResponsesToolCall:
     """Tests for ResponsesToolCall."""

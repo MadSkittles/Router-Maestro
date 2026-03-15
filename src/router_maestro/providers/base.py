@@ -165,7 +165,6 @@ class ResponsesStreamChunk:
     usage: dict | None = None
     # Tool call support
     tool_call: ResponsesToolCall | None = None  # A complete tool call
-    tool_call_delta: dict | None = None  # Partial tool call for streaming
 
 
 class ProviderError(Exception):

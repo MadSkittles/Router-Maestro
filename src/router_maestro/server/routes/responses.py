@@ -419,21 +419,6 @@ async def stream_response(
                     }
                 )
 
-            # Handle tool call delta
-            if chunk.tool_call_delta:
-                delta = chunk.tool_call_delta
-                for evt in state.close_open_message():
-                    yield evt
-
-                yield sse_event(
-                    {
-                        "type": "response.function_call_arguments.delta",
-                        "item_id": delta.get("item_id", ""),
-                        "output_index": delta.get("output_index", state.output_index),
-                        "delta": delta.get("delta", ""),
-                    }
-                )
-
             # Handle complete tool call
             if chunk.tool_call:
                 tc = chunk.tool_call
