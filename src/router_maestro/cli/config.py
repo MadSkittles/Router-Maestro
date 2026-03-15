@@ -191,6 +191,7 @@ def claude_code_config() -> None:
         "ANTHROPIC_MODEL": main_model,
         "ANTHROPIC_SMALL_FAST_MODEL": fast_model,
         "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
+        "CLAUDE_CODE_ENABLE_LSP": "1",
     }
 
     # Load existing settings to preserve other sections (e.g., MCP servers)
