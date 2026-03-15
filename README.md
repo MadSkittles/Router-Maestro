@@ -392,20 +392,18 @@ router-maestro model refresh
 
 ### Architecture
 
-```
-                    ┌─────────────────────────────────────────┐
-                    │                   VPS                    │
-                    │                                         │
-Internet ──────►   │  Traefik (ports 80/443)                 │
-  HTTPS            │    │  • Automatic HTTPS (Let's Encrypt)  │
-                    │    │  • HTTP → HTTPS redirect            │
-                    │    ▼                                     │
-                    │  Router-Maestro (port 8080)              │
-                    │    │  • OpenAI/Anthropic-compatible API  │
-                    │    │  • Multi-provider routing           │
-                    │    ▼                                     │
-                    │  LLM Providers (GitHub Copilot, etc.)    │
-                    └─────────────────────────────────────────┘
+```mermaid
+graph TD
+    Internet["🌐 Internet (HTTPS)"]
+    subgraph VPS
+        Traefik["Traefik (ports 80/443)\nAutomatic HTTPS · Let's Encrypt\nHTTP → HTTPS redirect"]
+        RM["Router-Maestro (port 8080)\nOpenAI / Anthropic-compatible API\nMulti-provider routing"]
+    end
+    Providers["LLM Providers\nGitHub Copilot · OpenAI · Anthropic"]
+
+    Internet -->|443| Traefik
+    Traefik -->|8080| RM
+    RM --> Providers
 ```
 
 - **Traefik** — reverse proxy that handles TLS termination and auto-renews HTTPS certificates via Let's Encrypt. Only needed for public-facing deployments.
