@@ -590,8 +590,8 @@ class CopilotProvider(BaseProvider):
 
                 stream_finished = False
                 final_usage = None
-                # Track current function call being streamed
-                current_fc: dict | None = None
+                # Track pending function calls being streamed, keyed by item_id
+                pending_fcs: dict[str, dict] = {}
 
                 async for line in response.aiter_lines():
                     if stream_finished:
@@ -625,54 +625,47 @@ class CopilotProvider(BaseProvider):
                     elif event_type == "response.output_item.added":
                         item = data.get("item", {})
                         if item.get("type") == "function_call":
-                            current_fc = {
-                                "id": item.get("id", ""),
+                            item_id = item.get("id", "")
+                            pending_fcs[item_id] = {
+                                "id": item_id,
                                 "call_id": item.get("call_id", ""),
                                 "name": item.get("name", ""),
                                 "arguments": "",
                                 "output_index": data.get("output_index", 0),
                             }
 
-                    # Handle function call arguments delta
+                    # Handle function call arguments delta - accumulate silently
                     elif event_type == "response.function_call_arguments.delta":
                         delta = data.get("delta", "")
-                        if current_fc and delta:
-                            current_fc["arguments"] += delta
-                            # Emit delta event for streaming
-                            yield ResponsesStreamChunk(
-                                content="",
-                                tool_call_delta={
-                                    "type": "function_call_arguments_delta",
-                                    "item_id": current_fc["id"],
-                                    "call_id": current_fc["call_id"],
-                                    "name": current_fc["name"],
-                                    "output_index": current_fc["output_index"],
-                                    "delta": delta,
-                                },
-                            )
+                        item_id = data.get("item_id", "")
+                        fc = pending_fcs.get(item_id)
+                        if fc and delta:
+                            fc["arguments"] += delta
 
                     # Handle function call arguments done
                     elif event_type == "response.function_call_arguments.done":
-                        if current_fc:
-                            current_fc["arguments"] = data.get("arguments", current_fc["arguments"])
+                        item_id = data.get("item_id", "")
+                        fc = pending_fcs.pop(item_id, None)
+                        if fc:
+                            fc["arguments"] = data.get("arguments", fc["arguments"])
                             # Emit complete tool call
                             yield ResponsesStreamChunk(
                                 content="",
                                 tool_call=ResponsesToolCall(
-                                    call_id=current_fc["call_id"],
-                                    name=current_fc["name"],
-                                    arguments=current_fc["arguments"],
+                                    call_id=fc["call_id"],
+                                    name=fc["name"],
+                                    arguments=fc["arguments"],
                                 ),
                             )
-                            current_fc = None
 
                     # Handle output_item.done for function calls
                     elif event_type == "response.output_item.done":
                         item = data.get("item", {})
                         if item.get("type") == "function_call":
+                            item_id = item.get("id", "")
                             # Only emit if not already done via function_call_arguments.done
-                            # (current_fc would be None if already emitted)
-                            if current_fc is not None:
+                            fc = pending_fcs.pop(item_id, None)
+                            if fc is not None:
                                 yield ResponsesStreamChunk(
                                     content="",
                                     tool_call=ResponsesToolCall(
@@ -681,7 +674,6 @@ class CopilotProvider(BaseProvider):
                                         arguments=item.get("arguments", "{}"),
                                     ),
                                 )
-                                current_fc = None
 
                     # Handle done event to get final usage
                     elif event_type == "response.done":
