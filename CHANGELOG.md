@@ -4,6 +4,16 @@ All notable changes to Router-Maestro are documented here.
 
 ---
 
+## v0.1.24 (2026-03-15)
+
+### Bug Fixes
+
+- Fix streaming tool call matching to use `output_index` instead of `item_id`
+  - Copilot obfuscates/encrypts item IDs differently across SSE events in the same stream, making ID-based matching impossible
+  - `output_index` is consistent across `output_item.added`, `arguments.delta`, `arguments.done`, and `output_item.done` events
+
+---
+
 ## v0.1.23 (2026-03-15)
 
 ### Bug Fixes
