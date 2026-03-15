@@ -590,8 +590,9 @@ class CopilotProvider(BaseProvider):
 
                 stream_finished = False
                 final_usage = None
-                # Track pending function calls being streamed, keyed by item_id
-                pending_fcs: dict[str, dict] = {}
+                # Track pending function calls being streamed, keyed by output_index
+                # (Copilot obfuscates item IDs differently across events, so we can't match by ID)
+                pending_fcs: dict[int, dict] = {}
 
                 async for line in response.aiter_lines():
                     if stream_finished:
@@ -625,27 +626,25 @@ class CopilotProvider(BaseProvider):
                     elif event_type == "response.output_item.added":
                         item = data.get("item", {})
                         if item.get("type") == "function_call":
-                            item_id = item.get("id", "")
-                            pending_fcs[item_id] = {
-                                "id": item_id,
+                            output_idx = data.get("output_index", 0)
+                            pending_fcs[output_idx] = {
                                 "call_id": item.get("call_id", ""),
                                 "name": item.get("name", ""),
                                 "arguments": "",
-                                "output_index": data.get("output_index", 0),
                             }
 
                     # Handle function call arguments delta - accumulate silently
                     elif event_type == "response.function_call_arguments.delta":
                         delta = data.get("delta", "")
-                        item_id = data.get("item_id", "")
-                        fc = pending_fcs.get(item_id)
+                        output_idx = data.get("output_index", 0)
+                        fc = pending_fcs.get(output_idx)
                         if fc and delta:
                             fc["arguments"] += delta
 
                     # Handle function call arguments done
                     elif event_type == "response.function_call_arguments.done":
-                        item_id = data.get("item_id", "")
-                        fc = pending_fcs.pop(item_id, None)
+                        output_idx = data.get("output_index", 0)
+                        fc = pending_fcs.pop(output_idx, None)
                         if fc:
                             fc["arguments"] = data.get("arguments", fc["arguments"])
                             # Emit complete tool call
@@ -662,9 +661,9 @@ class CopilotProvider(BaseProvider):
                     elif event_type == "response.output_item.done":
                         item = data.get("item", {})
                         if item.get("type") == "function_call":
-                            item_id = item.get("id", "")
+                            output_idx = data.get("output_index", 0)
                             # Only emit if not already done via function_call_arguments.done
-                            fc = pending_fcs.pop(item_id, None)
+                            fc = pending_fcs.pop(output_idx, None)
                             if fc is not None:
                                 yield ResponsesStreamChunk(
                                     content="",

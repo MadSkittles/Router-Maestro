@@ -4,6 +4,17 @@ All notable changes to Router-Maestro are documented here.
 
 ---
 
+## v0.1.23 (2026-03-15)
+
+### Bug Fixes
+
+- Fix parallel tool call state corruption in Responses API streaming ([#34](https://github.com/MadSkittles/Router-Maestro/pull/34))
+  - Replace single-state `current_fc` tracker with `pending_fcs` dict keyed by item ID, so concurrent tool calls are tracked independently
+- Fix duplicate/orphaned delta events with mismatched IDs in streaming tool calls ([#34](https://github.com/MadSkittles/Router-Maestro/pull/34))
+  - Remove `tool_call_delta` emission from copilot provider and dead handler in responses route; the complete tool call path already reconstructs the full SSE event sequence
+
+---
+
 ## v0.1.22 (2026-03-15)
 
 ### Features
