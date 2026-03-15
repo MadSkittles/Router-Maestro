@@ -28,7 +28,7 @@ dependencies = [
     # API Server
     "fastapi>=0.109.0",
     "uvicorn>=0.27.0",
-    "httpx>=0.26.0",
+    "httpx[socks]>=0.26.0",
     "h2>=4.0.0",
 
     # Data Validation
