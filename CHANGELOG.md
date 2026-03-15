@@ -4,6 +4,20 @@ All notable changes to Router-Maestro are documented here.
 
 ---
 
+## v0.1.21 (2026-03-15)
+
+### Bug Fixes
+
+- Add SOCKS proxy support to httpx dependency ([#32](https://github.com/MadSkittles/Router-Maestro/pull/32))
+  - Changed `httpx` to `httpx[socks]` to include the `socksio` package, fixing CLI failures when a SOCKS proxy is configured via `ALL_PROXY` environment variable
+
+### Documentation
+
+- Add `tool_choice` finish_reason behavior analysis and diagnostic script ([#31](https://github.com/MadSkittles/Router-Maestro/pull/31))
+- Enforce branch check before making changes in CLAUDE.md
+
+---
+
 ## v0.1.20 (2026-03-09)
 
 ### Bug Fixes
