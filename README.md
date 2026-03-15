@@ -35,6 +35,11 @@ Router-Maestro acts as a proxy that gives you access to models from multiple pro
 - [API Reference](#api-reference)
 - [Configuration](#configuration)
 - [Deployment](#deployment)
+  - [Architecture](#architecture)
+  - [Option A: Simple Docker (No HTTPS)](#option-a-simple-docker-no-https)
+  - [Option B: Production (Docker Compose + Traefik + HTTPS)](#option-b-production-docker-compose--traefik--https)
+  - [Remote Management](#remote-management)
+  - [Advanced Configuration](#advanced-configuration)
 - [License](#license)
 - [Changelog](#changelog)
 
@@ -385,63 +390,180 @@ router-maestro model refresh
 
 ## Deployment
 
-### Docker Deployment
+### Architecture
 
-Deploy to a VPS with Docker Compose:
+```
+                    ┌─────────────────────────────────────────┐
+                    │                   VPS                    │
+                    │                                         │
+Internet ──────►   │  Traefik (ports 80/443)                 │
+  HTTPS            │    │  • Automatic HTTPS (Let's Encrypt)  │
+                    │    │  • HTTP → HTTPS redirect            │
+                    │    ▼                                     │
+                    │  Router-Maestro (port 8080)              │
+                    │    │  • OpenAI/Anthropic-compatible API  │
+                    │    │  • Multi-provider routing           │
+                    │    ▼                                     │
+                    │  LLM Providers (GitHub Copilot, etc.)    │
+                    └─────────────────────────────────────────┘
+```
+
+- **Traefik** — reverse proxy that handles TLS termination and auto-renews HTTPS certificates via Let's Encrypt. Only needed for public-facing deployments.
+- **Router-Maestro** — the API server. Listens on port 8080, requires an API key for all requests, and routes them to configured LLM providers.
+
+### Option A: Simple Docker (No HTTPS)
+
+**Use when:** local testing, running behind an existing reverse proxy (Nginx, Caddy, etc.), or on an internal network.
+
+**Prerequisites:** Docker installed.
+
+**Step 1 — Generate an API key**
 
 ```bash
-# On your VPS
-git clone https://github.com/likanwen/router-maestro.git
-cd router-maestro
-cp .env.example .env  # Edit with your domain
+export ROUTER_MAESTRO_API_KEY=$(openssl rand -hex 32)
+echo "Save this key: $ROUTER_MAESTRO_API_KEY"
+```
+
+**Step 2 — Start the container**
+
+```bash
+docker run -d --name router-maestro \
+  -p 8080:8080 \
+  -e ROUTER_MAESTRO_API_KEY="$ROUTER_MAESTRO_API_KEY" \
+  -v ~/.local/share/router-maestro:/home/maestro/.local/share/router-maestro \
+  -v ~/.config/router-maestro:/home/maestro/.config/router-maestro \
+  likanwen/router-maestro:latest
+```
+
+**Step 3 — Authenticate with GitHub Copilot**
+
+```bash
+docker exec -it router-maestro router-maestro auth login github-copilot
+# 1. Visit the URL shown
+# 2. Enter the code
+# 3. Authorize "GitHub Copilot Chat"
+```
+
+**Step 4 — Verify**
+
+```bash
+curl http://localhost:8080/health
+# Expected: {"status":"ok"}
+
+curl http://localhost:8080/api/openai/v1/models \
+  -H "Authorization: Bearer $ROUTER_MAESTRO_API_KEY"
+# Expected: JSON list of available models
+```
+
+### Option B: Production (Docker Compose + Traefik + HTTPS)
+
+**Use when:** deploying to a public-facing VPS with a domain name. Provides automatic HTTPS via Let's Encrypt with Cloudflare DNS challenge.
+
+**Prerequisites:**
+- A VPS with Docker and Docker Compose installed
+- A domain name (e.g., `api.example.com`) with DNS pointing to your VPS
+- A Cloudflare account managing your domain's DNS (for automatic HTTPS)
+
+**Step 1 — Clone the repository**
+
+```bash
+git clone https://github.com/MadSkittles/Router-Maestro.git
+cd Router-Maestro
+```
+
+**Step 2 — Configure environment variables**
+
+```bash
+cp .env.example .env
+```
+
+Edit `.env` with your values:
+
+| Variable | Description | Example |
+|----------|-------------|---------|
+| `DOMAIN` | Your domain pointing to this VPS | `api.example.com` |
+| `CF_DNS_API_TOKEN` | Cloudflare API token with `Zone:DNS:Edit` permission. [Generate here](https://dash.cloudflare.com/profile/api-tokens) | `abc123...` |
+| `ACME_EMAIL` | Email for Let's Encrypt certificate expiry notifications | `you@example.com` |
+| `ROUTER_MAESTRO_API_KEY` | API key clients use to authenticate. Generate with `openssl rand -hex 32` | `a1b2c3...` |
+| `ROUTER_MAESTRO_LOG_LEVEL` | Log verbosity (`DEBUG`, `INFO`, `WARNING`, `ERROR`) | `INFO` |
+| `TRAEFIK_DASHBOARD_AUTH` | (Optional) Basic auth for Traefik dashboard. Generate with `htpasswd -nB admin`, then escape `$` as `$$` | `admin:$$2y$$05$$...` |
+
+**Step 3 — Start the services**
+
+```bash
 docker compose up -d
 ```
 
-Configure `.env`:
+This starts both Traefik (reverse proxy) and Router-Maestro. Traefik will automatically obtain an HTTPS certificate for your domain.
+
+**Step 4 — Authenticate with GitHub Copilot**
 
 ```bash
-DOMAIN=api.example.com
-CF_DNS_API_TOKEN=your_cloudflare_token  # For HTTPS
-ACME_EMAIL=your@email.com
-ROUTER_MAESTRO_API_KEY=$(openssl rand -hex 32)
+docker compose exec router-maestro router-maestro auth login github-copilot
+# 1. Visit the URL shown
+# 2. Enter the code
+# 3. Authorize "GitHub Copilot Chat"
 ```
 
-Authenticate inside the container:
+**Step 5 — Set up remote management (on your local machine)**
 
 ```bash
-docker compose exec router-maestro /bin/sh
-router-maestro auth login github-copilot
-# Follow OAuth flow, then exit
+pip install router-maestro   # install CLI locally if not already installed
+
+router-maestro context add my-vps \
+  --endpoint https://api.example.com \
+  --api-key YOUR_API_KEY
+
+router-maestro context set my-vps
+```
+
+Now all CLI commands run against your VPS:
+
+```bash
+router-maestro model list          # list models on VPS
+router-maestro auth list           # check auth status on VPS
+router-maestro config claude-code  # configure Claude Code to use VPS
+```
+
+**Step 6 — Verify**
+
+```bash
+curl https://api.example.com/health
+# Expected: {"status":"ok"}
+
+curl https://api.example.com/api/openai/v1/models \
+  -H "Authorization: Bearer YOUR_API_KEY"
+# Expected: JSON list of available models
 ```
 
 ### Remote Management
 
-Manage your VPS deployment from your local machine using contexts:
+Contexts let you manage any Router-Maestro server (local or remote) from your local CLI:
 
 ```bash
-# Add remote context
-router-maestro context add my-vps \
-  --endpoint https://api.example.com \
-  --api-key your_api_key
+# Add a remote server
+router-maestro context add my-vps --endpoint https://api.example.com --api-key YOUR_KEY
 
-# Switch to remote
-router-maestro context set my-vps
+# Switch between servers
+router-maestro context set my-vps     # target remote VPS
+router-maestro context set local      # target local server
 
-# Now all commands target the VPS
+# Test the connection
+router-maestro context test
+
+# All commands now target the active context
 router-maestro model list
+router-maestro auth login github-copilot
 ```
 
-### HTTPS with Traefik
+### Advanced Configuration
 
-The Docker Compose setup includes Traefik for automatic HTTPS via Let's Encrypt with DNS challenge.
+For additional deployment options, see [docs/deployment.md](docs/deployment.md):
 
-For detailed configuration options including:
-
-- Other DNS providers (Route53, DigitalOcean, etc.)
-- HTTP challenge setup
-- Traefik dashboard configuration
-
-See [docs/deployment.md](docs/deployment.md).
+- Alternative DNS providers (AWS Route53, DigitalOcean, GoDaddy, Namecheap, etc.)
+- HTTP challenge setup (when DNS challenge is not available)
+- Traefik dashboard configuration and security
+- Complete environment variables reference
 
 ## License
 
