@@ -4,6 +4,14 @@ All notable changes to Router-Maestro are documented here.
 
 ---
 
+## v0.1.27 (2026-03-31)
+
+### Fixes
+
+- Prepend `claude-opus-4-6[1m]` option at the top of the model list instead of the bottom ([#39](https://github.com/MadSkittles/Router-Maestro/pull/39))
+
+---
+
 ## v0.1.26 (2026-03-31)
 
 ### Features
