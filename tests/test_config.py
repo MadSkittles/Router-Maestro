@@ -3,6 +3,12 @@
 import tempfile
 from pathlib import Path
 
+from router_maestro.cli.config import (
+    _OPUS_1M_NATIVE_KEY,
+    _OPUS_1M_SOURCE_MODEL,
+    _maybe_inject_opus_1m,
+    _select_model,
+)
 from router_maestro.config.contexts import ContextConfig, ContextsConfig
 from router_maestro.config.providers import CustomProviderConfig, ModelConfig, ProvidersConfig
 from router_maestro.config.settings import load_config, save_config
@@ -84,3 +90,109 @@ class TestConfigIO:
 
             assert config.current == "local"
             assert path.exists()  # Should have created the file
+
+
+class TestSelectModel:
+    """Tests for _select_model helper in CLI config."""
+
+    def _make_models(self):
+        return [
+            {"provider": "github-copilot", "id": "gpt-4o", "name": "GPT-4o"},
+            {"provider": "github-copilot", "id": "claude-opus-4.6", "name": "Claude Opus 4.6"},
+        ]
+
+    def test_returns_provider_id(self, monkeypatch):
+        """Standard selection returns provider/id format."""
+        monkeypatch.setattr("router_maestro.cli.config.Prompt.ask", lambda *a, **kw: "1")
+        result = _select_model(self._make_models(), "Pick")
+        assert result == "github-copilot/gpt-4o"
+
+    def test_returns_custom_key(self, monkeypatch):
+        """Selection of model with custom_key returns the custom key."""
+        models = [
+            *self._make_models(),
+            {
+                "provider": "github-copilot",
+                "id": "claude-opus-4.6-1m",
+                "name": "Opus 4.6 (1M context)",
+                "custom_key": _OPUS_1M_NATIVE_KEY,
+            },
+        ]
+        monkeypatch.setattr("router_maestro.cli.config.Prompt.ask", lambda *a, **kw: "3")
+        result = _select_model(models, "Pick")
+        assert result == _OPUS_1M_NATIVE_KEY
+
+    def test_auto_routing(self, monkeypatch):
+        """Choice 0 returns router-maestro for auto-routing."""
+        monkeypatch.setattr("router_maestro.cli.config.Prompt.ask", lambda *a, **kw: "0")
+        result = _select_model(self._make_models(), "Pick")
+        assert result == "router-maestro"
+
+    def test_out_of_bounds_falls_back_to_auto_routing(self, monkeypatch):
+        """Out-of-range selection falls back to auto-routing."""
+        monkeypatch.setattr("router_maestro.cli.config.Prompt.ask", lambda *a, **kw: "99")
+        result = _select_model(self._make_models(), "Pick")
+        assert result == "router-maestro"
+
+    def test_non_numeric_input_falls_back_to_auto_routing(self, monkeypatch):
+        """Non-numeric input falls back to auto-routing."""
+        monkeypatch.setattr("router_maestro.cli.config.Prompt.ask", lambda *a, **kw: "gpt-4o")
+        result = _select_model(self._make_models(), "Pick")
+        assert result == "router-maestro"
+
+
+class TestMaybeInjectOpus1M:
+    """Tests for _maybe_inject_opus_1m — the production injection function."""
+
+    def test_appends_synthetic_entry_when_1m_model_present(self):
+        """Synthetic entry is appended when the source model exists."""
+        models = [
+            {"provider": "github-copilot", "id": "claude-opus-4.6", "name": "Claude Opus 4.6"},
+            {
+                "provider": "github-copilot",
+                "id": "claude-opus-4.6-1m",
+                "name": "Claude Opus 4.6 1M",
+            },
+        ]
+
+        result = _maybe_inject_opus_1m(models)
+
+        assert len(result) == 3
+        assert len(models) == 2  # original list not mutated
+        synthetic = result[-1]
+        assert synthetic["custom_key"] == _OPUS_1M_NATIVE_KEY
+        assert synthetic["display_key"] == _OPUS_1M_NATIVE_KEY
+        assert synthetic["name"] == "Opus 4.6 (1M context)"
+        assert synthetic["provider"] == "github-copilot"
+
+    def test_no_injection_when_1m_model_absent(self):
+        """No synthetic entry when the source model is not in the list."""
+        models = [
+            {"provider": "github-copilot", "id": "claude-opus-4.6", "name": "Claude Opus 4.6"},
+            {"provider": "github-copilot", "id": "gpt-4o", "name": "GPT-4o"},
+        ]
+
+        result = _maybe_inject_opus_1m(models)
+
+        assert len(result) == 2
+        assert result is models  # same list returned, no copy needed
+
+    def test_does_not_mutate_input_list(self):
+        """The input list is never mutated."""
+        models = [
+            {
+                "provider": "github-copilot",
+                "id": "claude-opus-4.6-1m",
+                "name": "Claude Opus 4.6 1M",
+            },
+        ]
+        original_len = len(models)
+
+        _maybe_inject_opus_1m(models)
+
+        assert len(models) == original_len
+
+    def test_source_model_constant_matches_expected_value(self):
+        """Guard against accidental changes to the source model constant."""
+        assert _OPUS_1M_SOURCE_MODEL == "github-copilot/claude-opus-4.6-1m"
+        assert _OPUS_1M_NATIVE_KEY == "claude-opus-4-6[1m]"

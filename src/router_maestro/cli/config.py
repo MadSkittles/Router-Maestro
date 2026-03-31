@@ -36,6 +36,12 @@ CLI_TOOLS = {
     },
 }
 
+# Claude Code native model ID for the 1M context variant of Opus 4.6.
+# When set as ANTHROPIC_MODEL, Claude Code sends the `anthropic-beta: context-1m-*`
+# header, which the router resolves to the actual provider model.
+_OPUS_1M_NATIVE_KEY = "claude-opus-4-6[1m]"
+_OPUS_1M_SOURCE_MODEL = "github-copilot/claude-opus-4.6-1m"
+
 
 def get_claude_code_paths() -> dict[str, Path]:
     """Get Claude Code settings paths."""
@@ -74,8 +80,8 @@ def _backup_if_exists(path: Path) -> None:
         console.print(f"[green]Backed up to {backup_path}[/green]")
 
 
-def _fetch_and_display_models() -> list[dict]:
-    """Fetch models from the server and display them in a table.
+def _fetch_models() -> list[dict]:
+    """Fetch models from the server.
 
     Exits the CLI if the server is unreachable or no models are available.
     """
@@ -94,15 +100,45 @@ def _fetch_and_display_models() -> list[dict]:
         console.print("[red]No models available. Please authenticate first.[/red]")
         raise typer.Exit(1)
 
+    return models
+
+
+def _display_models(models: list[dict]) -> None:
+    """Display models in a Rich table."""
     console.print("\n[bold]Available models:[/bold]")
     table = Table()
     table.add_column("#", style="dim")
     table.add_column("Model Key", style="green")
     table.add_column("Name", style="white")
     for i, model in enumerate(models, 1):
-        table.add_row(str(i), f"{model['provider']}/{model['id']}", model["name"])
+        key = model.get("display_key", f"{model['provider']}/{model['id']}")
+        table.add_row(str(i), key, model["name"])
     console.print(table)
 
+
+def _fetch_and_display_models() -> list[dict]:
+    """Fetch models from the server and display them in a table."""
+    models = _fetch_models()
+    _display_models(models)
+    return models
+
+
+def _maybe_inject_opus_1m(models: list[dict]) -> list[dict]:
+    """Append a Claude Code-native 1M context option if the source model exists.
+
+    Returns a new list (never mutates the input).
+    """
+    if any(f"{m['provider']}/{m['id']}" == _OPUS_1M_SOURCE_MODEL for m in models):
+        return [
+            *models,
+            {
+                "provider": "github-copilot",
+                "id": "claude-opus-4.6-1m",
+                "name": "Opus 4.6 (1M context)",
+                "display_key": _OPUS_1M_NATIVE_KEY,
+                "custom_key": _OPUS_1M_NATIVE_KEY,
+            },
+        ]
     return models
 
 
@@ -117,7 +153,10 @@ def _select_model(models: list[dict], prompt: str, default: str = "0") -> str:
         idx = int(choice) - 1
         if 0 <= idx < len(models):
             m = models[idx]
+            if "custom_key" in m:
+                return m["custom_key"]
             return f"{m['provider']}/{m['id']}"
+        console.print(f"[yellow]Invalid selection '{choice}', using auto-routing.[/yellow]")
     return "router-maestro"
 
 
@@ -169,7 +208,14 @@ def claude_code_config() -> None:
     _backup_if_exists(settings_path)
 
     # Step 3 & 4: Select models from server
-    models = _fetch_and_display_models()
+    models = _fetch_models()
+
+    # If the 1M variant is available, offer the Claude Code-native model key
+    # as an extra option. Claude Code sends the extended-context beta header
+    # when this key is used, and the router resolves it automatically.
+    models = _maybe_inject_opus_1m(models)
+
+    _display_models(models)
 
     console.print("\n[bold]Step 3: Select main model[/bold]")
     main_model = _select_model(models, "Enter number (or 0 for auto-routing)")
