@@ -124,13 +124,12 @@ def _fetch_and_display_models() -> list[dict]:
 
 
 def _maybe_inject_opus_1m(models: list[dict]) -> list[dict]:
-    """Append a Claude Code-native 1M context option if the source model exists.
+    """Prepend a Claude Code-native 1M context option if the source model exists.
 
     Returns a new list (never mutates the input).
     """
     if any(f"{m['provider']}/{m['id']}" == _OPUS_1M_SOURCE_MODEL for m in models):
         return [
-            *models,
             {
                 "provider": "github-copilot",
                 "id": "claude-opus-4.6-1m",
@@ -138,6 +137,7 @@ def _maybe_inject_opus_1m(models: list[dict]) -> list[dict]:
                 "display_key": _OPUS_1M_NATIVE_KEY,
                 "custom_key": _OPUS_1M_NATIVE_KEY,
             },
+            *models,
         ]
     return models
 

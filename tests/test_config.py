@@ -144,8 +144,8 @@ class TestSelectModel:
 class TestMaybeInjectOpus1M:
     """Tests for _maybe_inject_opus_1m — the production injection function."""
 
-    def test_appends_synthetic_entry_when_1m_model_present(self):
-        """Synthetic entry is appended when the source model exists."""
+    def test_prepends_synthetic_entry_when_1m_model_present(self):
+        """Synthetic entry is prepended when the source model exists."""
         models = [
             {"provider": "github-copilot", "id": "claude-opus-4.6", "name": "Claude Opus 4.6"},
             {
@@ -159,7 +159,7 @@ class TestMaybeInjectOpus1M:
 
         assert len(result) == 3
         assert len(models) == 2  # original list not mutated
-        synthetic = result[-1]
+        synthetic = result[0]
         assert synthetic["custom_key"] == _OPUS_1M_NATIVE_KEY
         assert synthetic["display_key"] == _OPUS_1M_NATIVE_KEY
         assert synthetic["name"] == "Opus 4.6 (1M context)"
