@@ -163,6 +163,10 @@ Runtime configuration follows XDG conventions:
 
 Models are identified by `provider/model-id` format (e.g., `github-copilot/gpt-4o`). The special model name `router-maestro` triggers auto-routing based on priority configuration. Fuzzy matching (`utils/model_match.py`) handles minor ID variations (e.g., `claude-opus-4-6` → `claude-opus-4.6`).
 
+### Search Tools
+
+When `ripgrep` (`rg`) is available on the system, prefer it over `grep` for faster and more ergonomic code search.
+
 ### Branch Workflow
 
 Never commit directly to `master`. Always create a feature branch for changes:
