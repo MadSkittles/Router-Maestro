@@ -133,7 +133,7 @@ def _maybe_inject_opus_1m(models: list[dict]) -> list[dict]:
             {
                 "provider": "github-copilot",
                 "id": "claude-opus-4.6-1m",
-                "name": "Opus 4.6 (1M context)",
+                "name": "Opus 4.6 1M (Auto-activated)",
                 "display_key": _OPUS_1M_NATIVE_KEY,
                 "custom_key": _OPUS_1M_NATIVE_KEY,
             },
