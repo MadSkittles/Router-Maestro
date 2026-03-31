@@ -4,6 +4,14 @@ All notable changes to Router-Maestro are documented here.
 
 ---
 
+## v0.1.28 (2026-03-31)
+
+### Fixes
+
+- Rename 1M option display name to "Opus 4.6 1M (Auto-activated)" to better distinguish from the internal provider model key ([#40](https://github.com/MadSkittles/Router-Maestro/pull/40))
+
+---
+
 ## v0.1.27 (2026-03-31)
 
 ### Fixes
