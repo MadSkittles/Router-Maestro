@@ -133,6 +133,30 @@ class CopilotProvider(BaseProvider):
             )
         return self._client
 
+    @staticmethod
+    def _sanitize_surrogates(text: str) -> str:
+        """Remove lone surrogate characters that cannot be encoded as UTF-8."""
+        return text.encode("utf-8", errors="replace").decode("utf-8")
+
+    def _sanitize_content(self, content: str | list) -> str | list:
+        """Sanitize message content to remove lone surrogate characters."""
+        if isinstance(content, str):
+            return self._sanitize_surrogates(content)
+        if isinstance(content, list):
+            result = []
+            for part in content:
+                is_text = (
+                    isinstance(part, dict)
+                    and part.get("type") == "text"
+                    and isinstance(part.get("text"), str)
+                )
+                if is_text:
+                    result.append({**part, "text": self._sanitize_surrogates(part["text"])})
+                else:
+                    result.append(part)
+            return result
+        return content
+
     def _build_messages_payload(self, request: ChatRequest) -> tuple[list[dict], bool]:
         """Build messages payload and detect if images are present.
 
@@ -146,7 +170,7 @@ class CopilotProvider(BaseProvider):
         has_images = False
 
         for m in request.messages:
-            msg: dict = {"role": m.role, "content": m.content}
+            msg: dict = {"role": m.role, "content": self._sanitize_content(m.content)}
             if m.tool_call_id:
                 msg["tool_call_id"] = m.tool_call_id
             if m.tool_calls:
