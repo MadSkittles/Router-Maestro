@@ -114,7 +114,7 @@ class TestSelectModel:
             {
                 "provider": "github-copilot",
                 "id": "claude-opus-4.6-1m",
-                "name": "Opus 4.6 (1M context)",
+                "name": "Opus 4.6 1M (Auto-activated)",
                 "custom_key": _OPUS_1M_NATIVE_KEY,
             },
         ]
@@ -162,7 +162,7 @@ class TestMaybeInjectOpus1M:
         synthetic = result[0]
         assert synthetic["custom_key"] == _OPUS_1M_NATIVE_KEY
         assert synthetic["display_key"] == _OPUS_1M_NATIVE_KEY
-        assert synthetic["name"] == "Opus 4.6 (1M context)"
+        assert synthetic["name"] == "Opus 4.6 1M (Auto-activated)"
         assert synthetic["provider"] == "github-copilot"
 
     def test_no_injection_when_1m_model_absent(self):
