@@ -4,6 +4,22 @@ All notable changes to Router-Maestro are documented here.
 
 ---
 
+## v0.1.26 (2026-03-31)
+
+### Features
+
+- Add Opus 4.6 1M context option to `config claude-code` wizard ([#38](https://github.com/MadSkittles/Router-Maestro/pull/38))
+  - When `github-copilot/claude-opus-4.6-1m` is available, offers `claude-opus-4-6[1m]` as a selectable model that activates Claude Code's native 1M context window
+  - Extracted `_fetch_models`, `_display_models`, and `_maybe_inject_opus_1m` for better testability
+  - Out-of-range model selection now warns instead of silently falling back to auto-routing
+
+### Documentation
+
+- Highlight 1M context support and fuzzy model matching in README features
+- Add ripgrep preference note to CLAUDE.md
+
+---
+
 ## v0.1.25 (2026-03-31)
 
 ### Bug Fixes
