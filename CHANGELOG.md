@@ -4,6 +4,20 @@ All notable changes to Router-Maestro are documented here.
 
 ---
 
+## v0.1.25 (2026-03-31)
+
+### Bug Fixes
+
+- Fix 500 Internal Server Error caused by lone UTF-16 surrogate characters in request messages ([#37](https://github.com/MadSkittles/Router-Maestro/pull/37))
+  - Sanitize message content in CopilotProvider to replace lone surrogates (e.g. `\udc8d`) before httpx JSON serialization
+
+### Documentation
+
+- Replace ASCII architecture diagram with Mermaid ([#36](https://github.com/MadSkittles/Router-Maestro/pull/36))
+- Rewrite README deployment section for clarity ([#35](https://github.com/MadSkittles/Router-Maestro/pull/35))
+
+---
+
 ## v0.1.24 (2026-03-15)
 
 ### Bug Fixes
