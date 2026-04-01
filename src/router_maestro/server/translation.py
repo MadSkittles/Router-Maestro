@@ -223,6 +223,7 @@ def _handle_user_message(message: AnthropicUserMessage | dict) -> list[Message]:
             other_blocks.append(block)
 
     result: list[Message] = []
+    all_image_blocks: list = []
 
     # Tool results become tool role messages in OpenAI format
     for block in tool_results:
@@ -230,7 +231,6 @@ def _handle_user_message(message: AnthropicUserMessage | dict) -> list[Message]:
         tool_use_id = _get_block_field(block, "tool_use_id", "")
 
         # Handle content as array of content blocks
-        image_blocks = []
         if isinstance(tool_content, list):
             text_parts = []
             for item in tool_content:
@@ -238,7 +238,7 @@ def _handle_user_message(message: AnthropicUserMessage | dict) -> list[Message]:
                 if item_type == "text":
                     text_parts.append(_get_block_field(item, "text", ""))
                 elif item_type == "image":
-                    image_blocks.append(item)
+                    all_image_blocks.append(item)
                 elif item_type == "tool_reference":
                     logger.debug(
                         "Skipping tool_reference block: %s",
@@ -256,14 +256,12 @@ def _handle_user_message(message: AnthropicUserMessage | dict) -> list[Message]:
             )
         )
 
-        # OpenAI tool messages only support text content, so inject images
-        # from tool results as a follow-up user message with multimodal content
-        if image_blocks:
-            multimodal = _extract_multimodal_content(image_blocks)
-            if isinstance(multimodal, list):
-                result.append(Message(role="user", content=multimodal))
-            elif multimodal:
-                result.append(Message(role="user", content=multimodal))
+    # OpenAI tool messages only support text content, so inject images
+    # from tool results as a follow-up user message after all tool messages
+    if all_image_blocks:
+        multimodal = _extract_multimodal_content(all_image_blocks)
+        if multimodal:
+            result.append(Message(role="user", content=multimodal))
 
     # Other content becomes user message - handle both text and images
     if other_blocks:
