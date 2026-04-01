@@ -270,6 +270,86 @@ class TestHandleUserMessage:
         result = _handle_user_message(msg)
         assert result[0].content == "Line 1\nLine 2"
 
+    def test_tool_result_with_image_injects_user_message(self):
+        """Test that images in tool_result are injected as a follow-up user message."""
+        msg = {
+            "role": "user",
+            "content": [
+                {
+                    "type": "tool_result",
+                    "tool_use_id": "tc-img",
+                    "content": [
+                        {"type": "text", "text": "Image file contents"},
+                        {
+                            "type": "image",
+                            "source": {
+                                "type": "base64",
+                                "media_type": "image/png",
+                                "data": "iVBORw0KGgo=",
+                            },
+                        },
+                    ],
+                }
+            ],
+        }
+        result = _handle_user_message(msg)
+        # Should produce: tool message + user message with image
+        assert len(result) == 2
+        assert result[0].role == "tool"
+        assert result[0].tool_call_id == "tc-img"
+        assert result[0].content == "Image file contents"
+        assert result[1].role == "user"
+        assert isinstance(result[1].content, list)
+        assert result[1].content[0]["type"] == "image_url"
+        assert "data:image/png;base64,iVBORw0KGgo=" in result[1].content[0]["image_url"]["url"]
+
+    def test_tool_result_with_only_image_no_text(self):
+        """Test tool_result containing only an image block."""
+        msg = {
+            "role": "user",
+            "content": [
+                {
+                    "type": "tool_result",
+                    "tool_use_id": "tc-img2",
+                    "content": [
+                        {
+                            "type": "image",
+                            "source": {
+                                "type": "base64",
+                                "media_type": "image/jpeg",
+                                "data": "/9j/4AAQ",
+                            },
+                        },
+                    ],
+                }
+            ],
+        }
+        result = _handle_user_message(msg)
+        assert len(result) == 2
+        assert result[0].role == "tool"
+        assert result[0].content == ""
+        assert result[1].role == "user"
+        assert isinstance(result[1].content, list)
+        assert result[1].content[0]["type"] == "image_url"
+
+    def test_tool_result_without_image_no_extra_message(self):
+        """Test that tool_result without images does NOT inject extra user message."""
+        msg = {
+            "role": "user",
+            "content": [
+                {
+                    "type": "tool_result",
+                    "tool_use_id": "tc-text",
+                    "content": [
+                        {"type": "text", "text": "Just text"},
+                    ],
+                }
+            ],
+        }
+        result = _handle_user_message(msg)
+        assert len(result) == 1
+        assert result[0].role == "tool"
+
 
 class TestHandleAssistantMessage:
     """Tests for assistant message handling."""

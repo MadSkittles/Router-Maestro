@@ -230,19 +230,20 @@ def _handle_user_message(message: AnthropicUserMessage | dict) -> list[Message]:
         tool_use_id = _get_block_field(block, "tool_use_id", "")
 
         # Handle content as array of content blocks
+        image_blocks = []
         if isinstance(tool_content, list):
             text_parts = []
             for item in tool_content:
                 item_type = _get_block_type(item)
                 if item_type == "text":
                     text_parts.append(_get_block_field(item, "text", ""))
+                elif item_type == "image":
+                    image_blocks.append(item)
                 elif item_type == "tool_reference":
                     logger.debug(
                         "Skipping tool_reference block: %s",
                         _get_block_field(item, "tool_name"),
                     )
-                elif item_type == "image":
-                    logger.debug("Skipping image in tool result")
                 elif item_type is not None:
                     logger.warning("Unknown content block type in tool_result: %s", item_type)
             tool_content = "\n".join(text_parts)
@@ -254,6 +255,15 @@ def _handle_user_message(message: AnthropicUserMessage | dict) -> list[Message]:
                 tool_call_id=tool_use_id,
             )
         )
+
+        # OpenAI tool messages only support text content, so inject images
+        # from tool results as a follow-up user message with multimodal content
+        if image_blocks:
+            multimodal = _extract_multimodal_content(image_blocks)
+            if isinstance(multimodal, list):
+                result.append(Message(role="user", content=multimodal))
+            elif multimodal:
+                result.append(Message(role="user", content=multimodal))
 
     # Other content becomes user message - handle both text and images
     if other_blocks:
