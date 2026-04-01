@@ -4,6 +4,16 @@ All notable changes to Router-Maestro are documented here.
 
 ---
 
+## v0.1.29 (2026-04-02)
+
+### Fixes
+
+- Passthrough images from Anthropic `tool_result` to OpenAI format instead of silently dropping them ([#41](https://github.com/MadSkittles/Router-Maestro/pull/41))
+  - Images in tool results are now extracted and injected as a follow-up user message with OpenAI multimodal `image_url` format
+  - All images from multiple tool results are collected and appended after all tool messages to avoid interleaved `tool`/`user` message sequences that OpenAI rejects
+
+---
+
 ## v0.1.28 (2026-03-31)
 
 ### Fixes
