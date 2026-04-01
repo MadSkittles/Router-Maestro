@@ -270,6 +270,140 @@ class TestHandleUserMessage:
         result = _handle_user_message(msg)
         assert result[0].content == "Line 1\nLine 2"
 
+    def test_tool_result_with_image_injects_user_message(self):
+        """Test that images in tool_result are injected as a follow-up user message."""
+        msg = {
+            "role": "user",
+            "content": [
+                {
+                    "type": "tool_result",
+                    "tool_use_id": "tc-img",
+                    "content": [
+                        {"type": "text", "text": "Image file contents"},
+                        {
+                            "type": "image",
+                            "source": {
+                                "type": "base64",
+                                "media_type": "image/png",
+                                "data": "iVBORw0KGgo=",
+                            },
+                        },
+                    ],
+                }
+            ],
+        }
+        result = _handle_user_message(msg)
+        # Should produce: tool message + user message with image
+        assert len(result) == 2
+        assert result[0].role == "tool"
+        assert result[0].tool_call_id == "tc-img"
+        assert result[0].content == "Image file contents"
+        assert result[1].role == "user"
+        assert isinstance(result[1].content, list)
+        assert result[1].content[0]["type"] == "image_url"
+        assert "data:image/png;base64,iVBORw0KGgo=" in result[1].content[0]["image_url"]["url"]
+
+    def test_tool_result_with_only_image_no_text(self):
+        """Test tool_result containing only an image block."""
+        msg = {
+            "role": "user",
+            "content": [
+                {
+                    "type": "tool_result",
+                    "tool_use_id": "tc-img2",
+                    "content": [
+                        {
+                            "type": "image",
+                            "source": {
+                                "type": "base64",
+                                "media_type": "image/jpeg",
+                                "data": "/9j/4AAQ",
+                            },
+                        },
+                    ],
+                }
+            ],
+        }
+        result = _handle_user_message(msg)
+        assert len(result) == 2
+        assert result[0].role == "tool"
+        assert result[0].content == ""
+        assert result[1].role == "user"
+        assert isinstance(result[1].content, list)
+        assert result[1].content[0]["type"] == "image_url"
+
+    def test_multiple_tool_results_with_images_no_interleaving(self):
+        """Test that multiple tool_results with images produce consecutive tool messages
+        followed by a single user message with all images (no interleaving)."""
+        msg = {
+            "role": "user",
+            "content": [
+                {
+                    "type": "tool_result",
+                    "tool_use_id": "tc-1",
+                    "content": [
+                        {"type": "text", "text": "First result"},
+                        {
+                            "type": "image",
+                            "source": {
+                                "type": "base64",
+                                "media_type": "image/png",
+                                "data": "img1data",
+                            },
+                        },
+                    ],
+                },
+                {
+                    "type": "tool_result",
+                    "tool_use_id": "tc-2",
+                    "content": [
+                        {"type": "text", "text": "Second result"},
+                        {
+                            "type": "image",
+                            "source": {
+                                "type": "base64",
+                                "media_type": "image/jpeg",
+                                "data": "img2data",
+                            },
+                        },
+                    ],
+                },
+            ],
+        }
+        result = _handle_user_message(msg)
+        # Should produce: tool, tool, user (with both images) — no interleaving
+        assert len(result) == 3
+        assert result[0].role == "tool"
+        assert result[0].tool_call_id == "tc-1"
+        assert result[0].content == "First result"
+        assert result[1].role == "tool"
+        assert result[1].tool_call_id == "tc-2"
+        assert result[1].content == "Second result"
+        assert result[2].role == "user"
+        assert isinstance(result[2].content, list)
+        # Both images should be in the single user message
+        assert len(result[2].content) == 2
+        assert "img1data" in result[2].content[0]["image_url"]["url"]
+        assert "img2data" in result[2].content[1]["image_url"]["url"]
+
+    def test_tool_result_without_image_no_extra_message(self):
+        """Test that tool_result without images does NOT inject extra user message."""
+        msg = {
+            "role": "user",
+            "content": [
+                {
+                    "type": "tool_result",
+                    "tool_use_id": "tc-text",
+                    "content": [
+                        {"type": "text", "text": "Just text"},
+                    ],
+                }
+            ],
+        }
+        result = _handle_user_message(msg)
+        assert len(result) == 1
+        assert result[0].role == "tool"
+
 
 class TestHandleAssistantMessage:
     """Tests for assistant message handling."""
