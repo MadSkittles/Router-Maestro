@@ -67,7 +67,7 @@ dev = [
 ]
 
 [project.scripts]
-router-maestro = "router_maestro.cli.main:app"
+router-maestro = "router_maestro.cli.entry:cli"
 
 [build-system]
 requires = ["hatchling"]
