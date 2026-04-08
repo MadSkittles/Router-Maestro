@@ -4,6 +4,16 @@ All notable changes to Router-Maestro are documented here.
 
 ---
 
+## v0.1.30 (2026-04-08)
+
+### Fixes
+
+- Suppress `KeyboardInterrupt` traceback when pressing Ctrl+C during CLI startup ([#42](https://github.com/MadSkittles/Router-Maestro/pull/42))
+  - Add lightweight `cli/entry.py` wrapper with lazy import inside `try/except KeyboardInterrupt`
+  - Ctrl+C during module import now exits cleanly with code 130 instead of dumping a full stack trace
+
+---
+
 ## v0.1.29 (2026-04-02)
 
 ### Fixes
