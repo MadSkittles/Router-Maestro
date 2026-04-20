@@ -4,6 +4,17 @@ All notable changes to Router-Maestro are documented here.
 
 ---
 
+## v0.1.31 (2026-04-20)
+
+### Fixes
+
+- Accept Anthropic `document` content blocks (e.g. PDF attachments) in user messages and `tool_result` content ([#43](https://github.com/MadSkittles/Router-Maestro/pull/43))
+  - Add `AnthropicDocumentBlock` / `AnthropicDocumentSource` to the user-content and tool_result-content unions, fixing a 422 `body.messages.*.content.str: Input should be a valid string` when Claude Code sent PDFs
+  - Translate document blocks through `_extract_multimodal_content` in Anthropic-native shape so `AnthropicProvider` forwards them upstream verbatim
+  - Documents nested inside `tool_result.content` are injected as a follow-up user message, mirroring the existing image behaviour
+
+---
+
 ## v0.1.30 (2026-04-08)
 
 ### Fixes
