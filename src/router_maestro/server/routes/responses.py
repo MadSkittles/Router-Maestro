@@ -20,6 +20,7 @@ from router_maestro.server.schemas import (
 )
 from router_maestro.server.streaming import sse_streaming_response
 from router_maestro.utils import get_logger
+from router_maestro.utils.reasoning import VALID_EFFORTS
 
 logger = get_logger("server.routes.responses")
 
@@ -237,6 +238,11 @@ async def create_response(request: ResponsesRequest):
         tool_choice=convert_tool_choice_to_internal(request.tool_choice),
         parallel_tool_calls=request.parallel_tool_calls,
     )
+
+    if request.reasoning:
+        effort = str(request.reasoning.get("effort", "")).lower() or None
+        if effort and effort in VALID_EFFORTS:
+            internal_request.reasoning_effort = effort
 
     if request.stream:
         return sse_streaming_response(

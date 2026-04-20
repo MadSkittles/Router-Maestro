@@ -23,6 +23,7 @@ from router_maestro.server.schemas import (
 )
 from router_maestro.server.streaming import sse_streaming_response
 from router_maestro.utils import get_logger
+from router_maestro.utils.reasoning import VALID_EFFORTS, effort_to_budget
 
 logger = get_logger("server.routes.chat")
 
@@ -63,6 +64,22 @@ async def chat_completions(request: ChatCompletionRequest):
         tools=request.tools,
         tool_choice=request.tool_choice,
     )
+
+    # Reasoning / thinking passthrough.
+    # Prefer OpenAI-style ``reasoning_effort``; also accept Anthropic-style
+    # ``thinking`` for SDKs that forward it via the OpenAI endpoint.
+    effort = (request.reasoning_effort or "").lower() or None
+    if effort and effort in VALID_EFFORTS:
+        chat_request.reasoning_effort = effort
+        chat_request.thinking_budget = effort_to_budget(effort)
+        chat_request.thinking_type = "enabled"
+    elif request.thinking:
+        t_type = request.thinking.get("type")
+        t_budget = request.thinking.get("budget_tokens")
+        if t_type:
+            chat_request.thinking_type = t_type
+        if isinstance(t_budget, int):
+            chat_request.thinking_budget = t_budget
 
     if request.stream:
         return sse_streaming_response(stream_response(model_router, chat_request))

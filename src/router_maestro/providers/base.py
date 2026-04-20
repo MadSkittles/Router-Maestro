@@ -36,6 +36,8 @@ class ChatRequest:
     tool_choice: str | dict | None = None
     thinking_budget: int | None = None
     thinking_type: str | None = None  # "enabled", "adaptive", "disabled"
+    # OpenAI-style effort: "low" | "medium" | "high" | "xhigh" (Router-Maestro extension)
+    reasoning_effort: str | None = None
     extra: dict = field(default_factory=dict)
 
     def with_thinking(
@@ -55,6 +57,7 @@ class ChatRequest:
             tool_choice=self.tool_choice,
             thinking_budget=thinking_budget,
             thinking_type=thinking_type,
+            reasoning_effort=self.reasoning_effort,
             extra=self.extra,
         )
 
@@ -144,6 +147,7 @@ class ResponsesRequest:
     tools: list[dict] | None = None
     tool_choice: str | dict | None = None
     parallel_tool_calls: bool | None = None
+    reasoning_effort: str | None = None
 
 
 @dataclass

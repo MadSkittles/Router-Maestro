@@ -25,6 +25,7 @@ from router_maestro.providers.base import (
 from router_maestro.providers.tool_parsing import recover_tool_calls_from_content
 from router_maestro.utils import get_logger
 from router_maestro.utils.cache import TTLCache
+from router_maestro.utils.reasoning import downgrade_for_upstream
 
 logger = get_logger("providers.copilot")
 
@@ -497,6 +498,14 @@ class CopilotProvider(BaseProvider):
             payload["tool_choice"] = request.tool_choice
         if request.parallel_tool_calls is not None:
             payload["parallel_tool_calls"] = request.parallel_tool_calls
+        upstream_effort = downgrade_for_upstream(request.reasoning_effort)
+        if upstream_effort is not None:
+            if request.reasoning_effort == "xhigh":
+                logger.warning(
+                    "Copilot Responses does not accept reasoning_effort=xhigh; "
+                    "downgrading to high"
+                )
+            payload["reasoning"] = {"effort": upstream_effort}
         return payload
 
     def _extract_response_content(self, data: dict) -> str:
