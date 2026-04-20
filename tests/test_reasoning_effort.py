@@ -82,9 +82,7 @@ class TestOpenAIPayloadEffort:
     def test_xhigh_downgraded_with_warning(self, caplog):
         provider = self._provider()
         with caplog.at_level(logging.WARNING, logger="stub"):
-            payload = provider._build_payload(
-                _stub_request(reasoning_effort="xhigh"), stream=False
-            )
+            payload = provider._build_payload(_stub_request(reasoning_effort="xhigh"), stream=False)
         assert payload["reasoning_effort"] == "high"
         assert any("xhigh" in rec.message for rec in caplog.records)
 
@@ -102,25 +100,19 @@ class TestOpenAIPayloadEffort:
 class TestCopilotResponsesPayloadEffort:
     def test_responses_payload_writes_reasoning(self):
         provider = CopilotProvider()
-        req = ResponsesRequest(
-            model="gpt-5", input="hi", reasoning_effort="high"
-        )
+        req = ResponsesRequest(model="gpt-5", input="hi", reasoning_effort="high")
         payload = provider._build_responses_payload(req)
         assert payload["reasoning"] == {"effort": "high"}
 
     def test_responses_payload_downgrades_xhigh(self):
         provider = CopilotProvider()
-        req = ResponsesRequest(
-            model="gpt-5", input="hi", reasoning_effort="xhigh"
-        )
+        req = ResponsesRequest(model="gpt-5", input="hi", reasoning_effort="xhigh")
         payload = provider._build_responses_payload(req)
         assert payload["reasoning"] == {"effort": "high"}
 
     def test_responses_payload_omits_when_unset(self):
         provider = CopilotProvider()
-        payload = provider._build_responses_payload(
-            ResponsesRequest(model="gpt-5", input="hi")
-        )
+        payload = provider._build_responses_payload(ResponsesRequest(model="gpt-5", input="hi"))
         assert "reasoning" not in payload
 
 

@@ -510,8 +510,7 @@ class CopilotProvider(BaseProvider):
         if upstream_effort is not None:
             if request.reasoning_effort == "xhigh":
                 logger.warning(
-                    "Copilot Responses does not accept reasoning_effort=xhigh; "
-                    "downgrading to high"
+                    "Copilot Responses does not accept reasoning_effort=xhigh; downgrading to high"
                 )
             payload["reasoning"] = {"effort": upstream_effort}
         return payload
