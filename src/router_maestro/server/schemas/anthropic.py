@@ -29,12 +29,32 @@ class AnthropicImageBlock(BaseModel):
     source: AnthropicImageSource
 
 
-class AnthropicToolResultContentBlock(BaseModel):
-    """Content block within tool result (text, image, or tool_reference)."""
+class AnthropicDocumentSource(BaseModel):
+    """Document source — supports base64, url, text, or nested content."""
 
-    type: Literal["text", "image", "tool_reference"]
+    type: Literal["base64", "url", "text", "content"]
+    media_type: str | None = None
+    data: str | None = None
+    url: str | None = None
+    content: str | list | None = None
+
+
+class AnthropicDocumentBlock(BaseModel):
+    """Document content block (e.g. PDF, plain text)."""
+
+    type: Literal["document"] = "document"
+    source: AnthropicDocumentSource
+    title: str | None = None
+    context: str | None = None
+    citations: dict | None = None
+
+
+class AnthropicToolResultContentBlock(BaseModel):
+    """Content block within tool result (text, image, document, or tool_reference)."""
+
+    type: Literal["text", "image", "document", "tool_reference"]
     text: str | None = None
-    source: AnthropicImageSource | None = None
+    source: AnthropicImageSource | AnthropicDocumentSource | None = None
     tool_name: str | None = None  # For tool_reference type (Claude Code MCP metadata)
 
 
@@ -63,7 +83,9 @@ class AnthropicThinkingBlock(BaseModel):
     thinking: str
 
 
-AnthropicUserContentBlock = AnthropicTextBlock | AnthropicImageBlock | AnthropicToolResultBlock
+AnthropicUserContentBlock = (
+    AnthropicTextBlock | AnthropicImageBlock | AnthropicDocumentBlock | AnthropicToolResultBlock
+)
 AnthropicAssistantContentBlock = AnthropicTextBlock | AnthropicToolUseBlock | AnthropicThinkingBlock
 
 

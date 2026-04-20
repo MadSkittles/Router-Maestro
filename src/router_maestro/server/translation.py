@@ -32,6 +32,30 @@ def _get_block_type(block) -> str | None:
     return _get_block_field(block, "type")
 
 
+def _document_block_to_dict(block) -> dict | None:
+    """Convert an Anthropic document block to a plain dict for passthrough.
+
+    Returned in Anthropic-native shape so AnthropicProvider forwards it verbatim.
+    """
+    source = _get_block_field(block, "source")
+    if source is None:
+        return None
+    src_type = _get_block_field(source, "type")
+    if src_type is None:
+        return None
+    src_dict: dict = {"type": src_type}
+    for f in ("media_type", "data", "url", "content"):
+        v = _get_block_field(source, f)
+        if v is not None:
+            src_dict[f] = v
+    doc: dict = {"type": "document", "source": src_dict}
+    for f in ("title", "context", "citations"):
+        v = _get_block_field(block, f)
+        if v is not None:
+            doc[f] = v
+    return doc
+
+
 def translate_anthropic_to_openai(request: AnthropicMessagesRequest) -> ChatRequest:
     """Translate Anthropic Messages request to OpenAI ChatCompletion request."""
     messages = _translate_messages(request.messages, request.system)
@@ -239,6 +263,8 @@ def _handle_user_message(message: AnthropicUserMessage | dict) -> list[Message]:
                     text_parts.append(_get_block_field(item, "text", ""))
                 elif item_type == "image":
                     all_image_blocks.append(item)
+                elif item_type == "document":
+                    all_image_blocks.append(item)
                 elif item_type == "tool_reference":
                     logger.debug(
                         "Skipping tool_reference block: %s",
@@ -355,6 +381,10 @@ def _extract_multimodal_content(blocks: list) -> str | list:
                         "image_url": {"url": f"data:{media_type};base64,{data}"},
                     }
                 )
+        elif block_type == "document":
+            doc_part = _document_block_to_dict(block)
+            if doc_part is not None:
+                image_parts.append(doc_part)
 
     # If no images, return simple text string
     if not image_parts:
