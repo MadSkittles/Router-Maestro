@@ -4,6 +4,15 @@ All notable changes to Router-Maestro are documented here.
 
 ---
 
+## v0.1.33 (2026-04-20)
+
+### Chores
+
+- Re-release of v0.1.32 after a PyPI upload conflict left v0.1.32 unpublishable (no functional change)
+- Apply `ruff format` to `providers/copilot.py` and `tests/test_reasoning_effort.py` ([#46](https://github.com/MadSkittles/Router-Maestro/pull/46))
+
+---
+
 ## v0.1.32 (2026-04-20)
 
 ### Features
