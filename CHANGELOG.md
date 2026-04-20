@@ -4,6 +4,25 @@ All notable changes to Router-Maestro are documented here.
 
 ---
 
+## v0.1.32 (2026-04-20)
+
+### Features
+
+- End-to-end `reasoning_effort` / `thinking` passthrough across all entrypoints ([#44](https://github.com/MadSkittles/Router-Maestro/pull/44))
+  - OpenAI Chat (`/api/openai/v1/chat/completions`), Responses (`/api/openai/v1/responses`), and Anthropic Messages now all accept and forward reasoning intensity
+  - New `xhigh` extension level (24000 budget); auto-downgrades to `high` for OpenAI/Copilot upstreams that reject it
+  - New shared `utils/reasoning.py` module with `effort_to_budget` / `budget_to_effort` mapping
+  - OpenAI native provider now writes `reasoning_effort` into the upstream payload (previously dropped)
+
+### Fixes
+
+- Drop Codex CLI `namespace` tools before sending to Copilot ([#45](https://github.com/MadSkittles/Router-Maestro/pull/45))
+  - Codex CLI groups MCP servers as `tools[].type="namespace"` entries; Copilot's Responses API rejects these with `Missing required parameter: 'tools[N].tools'`, breaking every Codex turn
+  - Add `"namespace"` to `CopilotProvider.UNSUPPORTED_TOOL_TYPES` so the existing filter strips them
+  - Side effect: Codex's MCP servers are not exposed through Copilot until a real MCP proxy is added
+
+---
+
 ## v0.1.31 (2026-04-20)
 
 ### Fixes
