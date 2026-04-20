@@ -44,6 +44,11 @@ class ChatCompletionRequest(BaseModel):
     user: str | None = None
     tools: list[dict[str, Any]] | None = None
     tool_choice: str | dict[str, Any] | None = None
+    # OpenAI-style reasoning effort: "low" | "medium" | "high"
+    # Router-Maestro additionally accepts "xhigh" (downgraded for upstream).
+    reasoning_effort: str | None = None
+    # Anthropic-style passthrough; some SDKs forward {"type": "...", "budget_tokens": N}
+    thinking: dict[str, Any] | None = None
 
 
 class ChatCompletionChoice(BaseModel):

@@ -108,6 +108,9 @@ class ResponsesRequest(BaseModel):
     tools: list[ResponsesFunctionTool | dict[str, Any]] | None = None
     tool_choice: str | ResponsesToolChoiceFunction | dict[str, Any] | None = None
     parallel_tool_calls: bool | None = None
+    # OpenAI Responses native shape: {"effort": "low"|"medium"|"high"}
+    # Router-Maestro additionally accepts "xhigh" (downgraded for upstream).
+    reasoning: dict[str, Any] | None = None
 
 
 # ============================================================================

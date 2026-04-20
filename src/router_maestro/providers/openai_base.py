@@ -16,6 +16,7 @@ from router_maestro.providers.base import (
     ChatStreamChunk,
 )
 from router_maestro.providers.tool_parsing import recover_tool_calls_from_content
+from router_maestro.utils.reasoning import budget_to_effort, downgrade_for_upstream
 
 
 class OpenAIChatProvider(BaseProvider, ABC):
@@ -60,6 +61,20 @@ class OpenAIChatProvider(BaseProvider, ABC):
             payload["tools"] = request.tools
         if request.tool_choice:
             payload["tool_choice"] = request.tool_choice
+
+        # Forward OpenAI-style reasoning_effort. Fall back to deriving it from
+        # thinking_budget when only the Anthropic-style budget is set. xhigh is
+        # downgraded to "high" since vanilla OpenAI/Copilot reject it.
+        effort = request.reasoning_effort or budget_to_effort(request.thinking_budget)
+        upstream_effort = downgrade_for_upstream(effort)
+        if upstream_effort is not None:
+            if effort == "xhigh":
+                self._logger.warning(
+                    "%s does not accept reasoning_effort=xhigh; downgrading to high",
+                    self._error_label(),
+                )
+            payload["reasoning_effort"] = upstream_effort
+
         payload.update(self._get_payload_extra(request))
         return payload
 
