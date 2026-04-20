@@ -221,6 +221,32 @@ class TestExtractMultimodalContent:
         assert result[0]["type"] == "image_url"
         assert "image/jpeg" in result[0]["image_url"]["url"]
 
+    def test_document_block_passes_through(self):
+        """Document blocks should be preserved in Anthropic-native shape."""
+        blocks = [
+            {"type": "text", "text": "Summarize this:"},
+            {
+                "type": "document",
+                "source": {
+                    "type": "base64",
+                    "media_type": "application/pdf",
+                    "data": "JVBERi0xLjQK",
+                },
+                "title": "spec.pdf",
+            },
+        ]
+        result = _extract_multimodal_content(blocks)
+        assert isinstance(result, list)
+        assert len(result) == 2
+        assert result[0] == {"type": "text", "text": "Summarize this:"}
+        assert result[1]["type"] == "document"
+        assert result[1]["source"] == {
+            "type": "base64",
+            "media_type": "application/pdf",
+            "data": "JVBERi0xLjQK",
+        }
+        assert result[1]["title"] == "spec.pdf"
+
 
 class TestHandleUserMessage:
     """Tests for user message handling."""
@@ -403,6 +429,70 @@ class TestHandleUserMessage:
         result = _handle_user_message(msg)
         assert len(result) == 1
         assert result[0].role == "tool"
+
+    def test_tool_result_with_document_injects_user_message(self):
+        """Documents in tool_result should be carried in a follow-up user message."""
+        msg = {
+            "role": "user",
+            "content": [
+                {
+                    "type": "tool_result",
+                    "tool_use_id": "tc-doc",
+                    "content": [
+                        {"type": "text", "text": "PDF file read: spec.pdf (2KB)"},
+                        {
+                            "type": "document",
+                            "source": {
+                                "type": "base64",
+                                "media_type": "application/pdf",
+                                "data": "JVBERi0xLjQK",
+                            },
+                        },
+                    ],
+                }
+            ],
+        }
+        result = _handle_user_message(msg)
+        assert len(result) == 2
+        assert result[0].role == "tool"
+        assert result[0].tool_call_id == "tc-doc"
+        assert result[0].content == "PDF file read: spec.pdf (2KB)"
+        assert result[1].role == "user"
+        assert isinstance(result[1].content, list)
+        assert result[1].content[0]["type"] == "document"
+        assert result[1].content[0]["source"]["data"] == "JVBERi0xLjQK"
+
+    def test_user_message_with_document_block_parses(self):
+        """AnthropicMessagesRequest should accept user messages containing document blocks."""
+        from router_maestro.server.schemas.anthropic import AnthropicMessagesRequest
+
+        req = AnthropicMessagesRequest.model_validate(
+            {
+                "model": "claude-opus-4-5",
+                "max_tokens": 100,
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": "What does this PDF say?"},
+                            {
+                                "type": "document",
+                                "source": {
+                                    "type": "base64",
+                                    "media_type": "application/pdf",
+                                    "data": "JVBERi0xLjQK",
+                                },
+                            },
+                        ],
+                    }
+                ],
+            }
+        )
+        assert len(req.messages) == 1
+        blocks = req.messages[0].content
+        assert isinstance(blocks, list)
+        assert blocks[1].type == "document"
+        assert blocks[1].source.media_type == "application/pdf"
 
 
 class TestHandleAssistantMessage:
