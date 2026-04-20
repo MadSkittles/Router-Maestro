@@ -441,8 +441,16 @@ class CopilotProvider(BaseProvider):
             logger.error("Failed to list Copilot models: %s", e)
             raise ProviderError(f"Failed to list models: {e}", retryable=True)
 
-    # Tools that are not supported by Copilot Responses API
-    UNSUPPORTED_TOOL_TYPES = {"web_search", "web_search_preview", "code_interpreter"}
+    # Tools that are not supported by Copilot Responses API.
+    # ``namespace`` is emitted by Codex CLI to group MCP servers behind a
+    # tool-search facade; Copilot rejects it with
+    # ``Missing required parameter: 'tools[N].tools'``.
+    UNSUPPORTED_TOOL_TYPES = {
+        "web_search",
+        "web_search_preview",
+        "code_interpreter",
+        "namespace",
+    }
 
     def _filter_unsupported_tools(self, tools: list[dict] | None) -> list[dict] | None:
         """Filter out tools that are not supported by Copilot API.
