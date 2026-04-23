@@ -25,7 +25,7 @@ from router_maestro.providers.base import (
 from router_maestro.providers.tool_parsing import recover_tool_calls_from_content
 from router_maestro.utils import get_logger
 from router_maestro.utils.cache import TTLCache
-from router_maestro.utils.reasoning import downgrade_for_upstream
+from router_maestro.utils.reasoning import budget_to_effort, downgrade_for_upstream
 
 logger = get_logger("providers.copilot")
 
@@ -33,6 +33,54 @@ COPILOT_BASE_URL = "https://api.githubcopilot.com"
 COPILOT_CHAT_URL = f"{COPILOT_BASE_URL}/chat/completions"
 COPILOT_MODELS_URL = f"{COPILOT_BASE_URL}/models"
 COPILOT_RESPONSES_URL = f"{COPILOT_BASE_URL}/responses"
+
+
+def apply_copilot_chat_reasoning(
+    payload: dict,
+    model: str,
+    thinking_budget: int | None,
+    reasoning_effort: str | None,
+) -> None:
+    """Inject reasoning fields into a Copilot ``/chat/completions`` payload.
+
+    Copilot's gateway exposes a different control surface per model family:
+
+    * ``claude-*`` accepts the gateway's ``thinking_budget`` integer field.
+      ``reasoning_effort`` is also accepted on some Claude versions but with
+      per-model enum allowlists (e.g. opus-4.7 only allows ``medium``).
+      Sticking to ``thinking_budget`` keeps the request portable.
+    * ``gpt-5*``/``o1``/``o3``/``o4`` reasoning models accept
+      ``reasoning_effort`` (``low``/``medium``/``high``/``xhigh``) but reject
+      ``thinking_budget`` outright (``invalid_thinking_budget``).
+    * ``gpt-4*``, ``gpt-3.5*``, ``gemini-*`` reject both fields, so we omit them.
+
+    For ``gpt-5.4*`` the gateway also requires ``max_completion_tokens`` instead
+    of ``max_tokens``; this function performs that rewrite when present.
+    """
+    bare = model.split("/", 1)[1] if "/" in model else model
+    bare_lower = bare.lower()
+
+    is_claude = bare_lower.startswith("claude-")
+    is_openai_reasoning = (
+        bare_lower.startswith("gpt-5")
+        or bare_lower.startswith("o1")
+        or bare_lower.startswith("o3")
+        or bare_lower.startswith("o4")
+    )
+
+    if is_claude:
+        if thinking_budget is not None:
+            payload["thinking_budget"] = thinking_budget
+    elif is_openai_reasoning:
+        effort = reasoning_effort or budget_to_effort(thinking_budget)
+        # Copilot's gpt-5* line natively accepts xhigh (verified against the
+        # gateway's supported_values list), so don't downgrade here.
+        if effort in ("low", "medium", "high", "xhigh"):
+            payload["reasoning_effort"] = effort
+
+    if bare_lower.startswith("gpt-5.4") and "max_tokens" in payload:
+        payload["max_completion_tokens"] = payload.pop("max_tokens")
+
 
 # Model cache TTL in seconds (5 minutes)
 MODELS_CACHE_TTL = 300
@@ -205,10 +253,22 @@ class CopilotProvider(BaseProvider):
             payload["tools"] = request.tools
         if request.tool_choice:
             payload["tool_choice"] = request.tool_choice
-        if request.thinking_budget is not None:
-            payload["thinking_budget"] = request.thinking_budget
+        apply_copilot_chat_reasoning(
+            payload,
+            request.model,
+            request.thinking_budget,
+            request.reasoning_effort,
+        )
 
-        logger.debug("Copilot chat completion: model=%s", request.model)
+        logger.debug(
+            "Copilot chat completion: model=%s thinking_budget=%s reasoning_effort=%s "
+            "payload_thinking_budget=%s payload_reasoning_effort=%s",
+            request.model,
+            request.thinking_budget,
+            request.reasoning_effort,
+            payload.get("thinking_budget"),
+            payload.get("reasoning_effort"),
+        )
         client = self._get_client()
         try:
             response = await client.post(
@@ -297,10 +357,22 @@ class CopilotProvider(BaseProvider):
             payload["tools"] = request.tools
         if request.tool_choice:
             payload["tool_choice"] = request.tool_choice
-        if request.thinking_budget is not None:
-            payload["thinking_budget"] = request.thinking_budget
+        apply_copilot_chat_reasoning(
+            payload,
+            request.model,
+            request.thinking_budget,
+            request.reasoning_effort,
+        )
 
-        logger.debug("Copilot streaming chat: model=%s", request.model)
+        logger.debug(
+            "Copilot streaming chat: model=%s thinking_budget=%s reasoning_effort=%s "
+            "payload_thinking_budget=%s payload_reasoning_effort=%s",
+            request.model,
+            request.thinking_budget,
+            request.reasoning_effort,
+            payload.get("thinking_budget"),
+            payload.get("reasoning_effort"),
+        )
         client = self._get_client()
         try:
             async with client.stream(
