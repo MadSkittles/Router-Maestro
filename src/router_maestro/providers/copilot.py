@@ -49,24 +49,58 @@ def _claude_supports_reasoning(bare_lower: str) -> bool:
     )
 
 
+_EFFORT_ORDER = ("low", "medium", "high", "xhigh")
+
+
+def _pick_closest_effort(desired: str, allowed: list[str]) -> str | None:
+    """Pick the value from ``allowed`` closest to ``desired`` on the L/M/H/XH ladder.
+
+    Strategy when an exact match is unavailable: prefer the next *higher* tier
+    (the user asked for thinking — give them more, not less), and fall back to
+    the next lower tier if no higher tier is offered. Returns ``None`` only if
+    ``allowed`` is empty.
+    """
+    if not allowed:
+        return None
+    if desired in allowed:
+        return desired
+    try:
+        target = _EFFORT_ORDER.index(desired)
+    except ValueError:
+        # Unknown tier — give them whatever the catalog ranks highest.
+        return max(allowed, key=lambda v: _EFFORT_ORDER.index(v) if v in _EFFORT_ORDER else -1)
+    higher = [v for v in allowed if v in _EFFORT_ORDER and _EFFORT_ORDER.index(v) > target]
+    if higher:
+        return min(higher, key=lambda v: _EFFORT_ORDER.index(v))
+    lower = [v for v in allowed if v in _EFFORT_ORDER and _EFFORT_ORDER.index(v) < target]
+    if lower:
+        return max(lower, key=lambda v: _EFFORT_ORDER.index(v))
+    return allowed[0]
+
+
 def apply_copilot_chat_reasoning(
     payload: dict,
     model: str,
     thinking_budget: int | None,
     reasoning_effort: str | None,
+    catalog_effort_values: list[str] | None = None,
 ) -> None:
     """Inject reasoning fields into a Copilot ``/chat/completions`` payload.
 
-    Copilot's gateway exposes a different control surface per model family:
+    When ``catalog_effort_values`` is provided (from the model's
+    ``capabilities.supports.reasoning_effort`` advertisement), it is the
+    authoritative allowlist — we map the desired effort onto the catalog's
+    enum and send it. This means we automatically pick up new tiers (e.g.
+    if Copilot opens ``high`` on opus-4.7) without a code change.
 
-    * ``claude-*`` accepts the gateway's ``thinking_budget`` integer field.
-      ``reasoning_effort`` is also accepted on some Claude versions but with
-      per-model enum allowlists (e.g. opus-4.7 only allows ``medium``).
-      Sticking to ``thinking_budget`` keeps the request portable.
-    * ``gpt-5*``/``o1``/``o3``/``o4`` reasoning models accept
-      ``reasoning_effort`` (``low``/``medium``/``high``/``xhigh``) but reject
-      ``thinking_budget`` outright (``invalid_thinking_budget``).
-    * ``gpt-4*``, ``gpt-3.5*``, ``gemini-*`` reject both fields, so we omit them.
+    When the catalog says nothing (``None``), we fall back to the hardcoded
+    per-family heuristic:
+
+    * ``claude-opus-4.6*`` / ``claude-sonnet-4.6`` accept ``low``/``medium``/``high``.
+    * ``claude-opus-4.7`` only accepts ``medium`` (clamp).
+    * Older Claudes (4.5 / sonnet-4 / haiku) take no reasoning field.
+    * ``gpt-5*`` / ``o1`` / ``o3`` / ``o4`` accept ``low``/``medium``/``high``/``xhigh``.
+    * ``gpt-4*``, ``gemini-*`` take no reasoning field.
 
     For ``gpt-5.4*`` the gateway also requires ``max_completion_tokens`` instead
     of ``max_tokens``; this function performs that rewrite when present.
@@ -82,24 +116,39 @@ def apply_copilot_chat_reasoning(
         or bare_lower.startswith("o4")
     )
 
+    # Catalog-driven path: trust whatever Copilot advertises.
+    if catalog_effort_values is not None:
+        if not catalog_effort_values:
+            # Catalog explicitly says no reasoning supported — emit nothing.
+            pass
+        else:
+            desired = reasoning_effort or budget_to_effort(thinking_budget)
+            if desired is None and thinking_budget is not None:
+                # Client asked for thinking without a clear effort — be
+                # aggressive and aim for the top of the catalog.
+                desired = "high"
+            if desired is not None:
+                picked = _pick_closest_effort(desired, catalog_effort_values)
+                if picked is not None:
+                    payload["reasoning_effort"] = picked
+        if bare_lower.startswith("gpt-5.4") and "max_tokens" in payload:
+            payload["max_completion_tokens"] = payload.pop("max_tokens")
+        return
+
+    # Hardcoded fallback when the catalog hasn't been fetched yet.
     if is_claude:
         if not _claude_supports_reasoning(bare_lower):
             # Older Claudes (sonnet-4 / sonnet-4.5 / opus-4.5 / haiku-4.5)
             # have no reasoning control on Copilot.
             pass
         else:
-            # Claude 4.6+/4.7 on Copilot exposes reasoning_effort. Be aggressive:
-            # if the client asked for thinking but didn't give us enough budget
-            # to map cleanly, default to "high" — the user wants more reasoning,
-            # not less.
             effort = reasoning_effort or budget_to_effort(thinking_budget)
             if effort == "xhigh":
                 effort = "high"  # Claude effort enum tops out at high
             if effort is None and thinking_budget is not None:
                 effort = "high"
-            # opus-4.7's gateway only accepts "medium" (per Copilot's
-            # supported_values check). Clamp anything else to medium so the
-            # request doesn't fail.
+            # opus-4.7's gateway only accepts "medium" today. Clamp anything
+            # else to medium so the request doesn't fail.
             if bare_lower.startswith("claude-opus-4.7") and effort in (
                 "low",
                 "medium",
@@ -245,6 +294,23 @@ class CopilotProvider(BaseProvider):
 
         return headers
 
+    def _catalog_effort_values(self, model: str) -> list[str] | None:
+        """Look up the catalog-advertised reasoning_effort allowlist for ``model``.
+
+        Pulls from the in-memory model cache only — never blocks the request
+        on a network fetch. Returns ``None`` if the cache is cold or the model
+        isn't in it, in which case ``apply_copilot_chat_reasoning`` falls back
+        to the hardcoded heuristic.
+        """
+        cached = self._models_ttl_cache.get()
+        if not cached:
+            return None
+        bare = model.split("/", 1)[1] if "/" in model else model
+        for info in cached:
+            if info.id == bare or info.id == model:
+                return info.reasoning_effort_values
+        return None
+
     def _get_client(self) -> httpx.AsyncClient:
         """Get or create a reusable HTTP client."""
         if self._client is None or self._client.is_closed:
@@ -340,6 +406,7 @@ class CopilotProvider(BaseProvider):
             request.model,
             request.thinking_budget,
             request.reasoning_effort,
+            catalog_effort_values=self._catalog_effort_values(request.model),
         )
 
         logger.debug(
@@ -485,6 +552,7 @@ class CopilotProvider(BaseProvider):
             request.model,
             request.thinking_budget,
             request.reasoning_effort,
+            catalog_effort_values=self._catalog_effort_values(request.model),
         )
 
         logger.debug(
@@ -623,6 +691,13 @@ class CopilotProvider(BaseProvider):
                     caps = model.get("capabilities", {})
                     limits = caps.get("limits", {})
                     supports = caps.get("supports", {})
+                    reasoning_values = supports.get("reasoning_effort")
+                    # Catalog field is optional and shape-flexible — accept
+                    # list/tuple of strings or treat anything else as "unset".
+                    if isinstance(reasoning_values, (list, tuple)):
+                        reasoning_values = [str(v) for v in reasoning_values if isinstance(v, str)]
+                    else:
+                        reasoning_values = None
                     models.append(
                         ModelInfo(
                             id=model["id"],
@@ -633,6 +708,7 @@ class CopilotProvider(BaseProvider):
                             max_context_window_tokens=limits.get("max_context_window_tokens"),
                             supports_thinking=bool(supports.get("thinking")),
                             supports_vision=bool(supports.get("vision")),
+                            reasoning_effort_values=reasoning_values,
                         )
                     )
 

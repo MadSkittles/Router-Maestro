@@ -125,3 +125,84 @@ def test_o_series_treated_as_reasoning():
     apply_copilot_chat_reasoning(p, "o3-mini", None, "medium")
     assert p.get("reasoning_effort") == "medium"
     assert "thinking_budget" not in p
+
+
+# --- Catalog-driven path: trust whatever the model's
+# capabilities.supports.reasoning_effort advertises ---
+
+
+def test_catalog_exact_match_wins():
+    """If desired effort is in the catalog, send it as-is."""
+    p = _base_payload()
+    apply_copilot_chat_reasoning(
+        p, "claude-opus-4.7", None, "high", catalog_effort_values=["low", "medium", "high"]
+    )
+    assert p.get("reasoning_effort") == "high"
+
+
+def test_catalog_overrides_hardcoded_clamp():
+    """If Copilot one day opens 'high' on opus-4.7, we should use it
+    instead of the hardcoded medium clamp."""
+    p = _base_payload()
+    apply_copilot_chat_reasoning(
+        p, "claude-opus-4.7", 16000, None, catalog_effort_values=["medium", "high"]
+    )
+    # budget=16000 → desired "xhigh" → no exact match → step down to nearest
+    # available, which here is "high" (highest in the allowlist).
+    assert p.get("reasoning_effort") == "high"
+
+
+def test_catalog_picks_next_higher_when_desired_missing():
+    """Desired 'low' but catalog only offers ['medium','high'] → pick medium."""
+    p = _base_payload()
+    apply_copilot_chat_reasoning(
+        p, "claude-opus-4.7", None, "low", catalog_effort_values=["medium", "high"]
+    )
+    assert p.get("reasoning_effort") == "medium"
+
+
+def test_catalog_falls_back_lower_when_no_higher_available():
+    """Desired 'xhigh' but catalog tops out at 'medium' → step down."""
+    p = _base_payload()
+    apply_copilot_chat_reasoning(
+        p, "claude-opus-4.7", None, "xhigh", catalog_effort_values=["low", "medium"]
+    )
+    assert p.get("reasoning_effort") == "medium"
+
+
+def test_catalog_empty_list_means_no_reasoning():
+    """Catalog explicitly says no reasoning_effort → emit nothing."""
+    p = _base_payload()
+    apply_copilot_chat_reasoning(p, "claude-haiku-4.5", 16000, "high", catalog_effort_values=[])
+    assert "reasoning_effort" not in p
+
+
+def test_catalog_preserves_xhigh_for_gpt5():
+    p = _base_payload()
+    apply_copilot_chat_reasoning(
+        p,
+        "gpt-5.4",
+        None,
+        "xhigh",
+        catalog_effort_values=["low", "medium", "high", "xhigh"],
+    )
+    assert p.get("reasoning_effort") == "xhigh"
+
+
+def test_catalog_path_still_rewrites_max_tokens_for_gpt54():
+    p = _base_payload()
+    apply_copilot_chat_reasoning(
+        p, "gpt-5.4", None, "medium", catalog_effort_values=["low", "medium", "high"]
+    )
+    assert "max_tokens" not in p
+    assert p.get("max_completion_tokens") == 100
+
+
+def test_catalog_thinking_budget_maps_through_normal_table():
+    """In the catalog path, budget→effort uses the normal mapping table."""
+    p = _base_payload()
+    apply_copilot_chat_reasoning(
+        p, "claude-sonnet-4.6", 8192, None, catalog_effort_values=["low", "medium", "high"]
+    )
+    # 8192 → "high" per EFFORT_TO_BUDGET threshold
+    assert p.get("reasoning_effort") == "high"
