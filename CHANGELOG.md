@@ -4,6 +4,25 @@ All notable changes to Router-Maestro are documented here.
 
 ---
 
+## v0.1.35 (2026-04-23)
+
+### Features
+
+- **Claude reasoning passthrough on Copilot.** Surface upstream chain-of-thought back to Anthropic-compatible clients as `thinking` content blocks, with `thinking_delta` + `signature_delta` SSE events for streaming. Mirrors vscode-copilot-chat's field discovery (`reasoning_text` / `cot_summary` / `thinking` for text; `reasoning_opaque` / `cot_id` / `signature` for the signature). Gated behind explicit `thinking={type:"enabled"|"adaptive"}` so traces never leak to clients that didn't ask for them.
+
+### Fixes
+
+- **Per-Claude-family reasoning dispatch on Copilot.** `apply_copilot_chat_reasoning` now sends `reasoning_effort` (not `thinking_budget`) for `claude-opus-4.7` / `claude-opus-4.6*` / `claude-sonnet-4.6` — the Copilot gateway's actual control surface for those models. `opus-4.7` only accepts `medium` so we clamp; older models (`4.5`, `sonnet-4`, `haiku-4.5`) send neither field.
+- Lower effort thresholds (`low=1024`, `medium=4096`, `high=8192`, `xhigh=16384`) so it's easier to reach the higher tiers — Copilot is free unlimited.
+- Tolerate `choices=[]` with `completion_tokens>0` as a thinking-only success — but only on a reasoning-capable Claude AND when the client opted into thinking. Otherwise keep the 500 path so malformed upstream responses stay visible.
+- Bump non-streaming HTTP read timeout 120s → 240s. `claude-opus-4.6` / `claude-sonnet-4.6` at high effort routinely take >2min on Copilot's side.
+
+### Docs
+
+- Drop hardcoded production domain from `CLAUDE.md`.
+
+---
+
 ## v0.1.34 (2026-04-23)
 
 ### Fixes
