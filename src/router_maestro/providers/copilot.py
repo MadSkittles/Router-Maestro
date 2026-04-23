@@ -168,8 +168,6 @@ def _extract_reasoning_from_chunk(part: dict | None) -> tuple[str, str | None]:
     return text, sig
 
 
-
-
 class CopilotProvider(BaseProvider):
     """GitHub Copilot provider."""
 
@@ -383,11 +381,7 @@ class CopilotProvider(BaseProvider):
                 # asked for thinking on a known reasoning model — otherwise a
                 # malformed upstream response would silently look like a blank
                 # assistant message.
-                if (
-                    completion_tokens > 0
-                    and reasoning_capable
-                    and _thinking_requested(request)
-                ):
+                if completion_tokens > 0 and reasoning_capable and _thinking_requested(request):
                     logger.warning(
                         "Copilot returned empty choices but completion_tokens=%d; "
                         "treating as thinking-only response",
