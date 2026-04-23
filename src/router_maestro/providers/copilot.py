@@ -123,6 +123,17 @@ def apply_copilot_chat_reasoning(
 MODELS_CACHE_TTL = 300
 
 
+def _thinking_requested(request: ChatRequest) -> bool:
+    """Whether the client opted into reasoning passthrough.
+
+    We only surface upstream chain-of-thought to clients that explicitly asked
+    for it. Reasoning traces can leak prompt fragments, hidden instructions,
+    and tool-planning state, so emitting them by default would be a
+    sensitive-data exposure surface.
+    """
+    return request.thinking_type in ("enabled", "adaptive")
+
+
 def _extract_reasoning_from_chunk(part: dict | None) -> tuple[str, str | None]:
     """Pull reasoning text/signature out of a Copilot message or delta.
 
@@ -357,12 +368,26 @@ class CopilotProvider(BaseProvider):
             usage = data.get("usage") or {}
             completion_tokens = usage.get("completion_tokens") or 0
 
+            bare_lower = (
+                request.model.split("/", 1)[1] if "/" in request.model else request.model
+            ).lower()
+            reasoning_capable = bare_lower.startswith("claude-") and _claude_supports_reasoning(
+                bare_lower
+            )
+
             if not choices:
-                # Some Copilot/Claude reasoning models can finish their thinking
-                # budget without producing visible text — they return empty
-                # choices but a non-zero completion_tokens. Treat that as a
-                # legitimate empty response instead of a 500 error.
-                if completion_tokens > 0:
+                # Reasoning-capable Claude models can spend their whole budget
+                # on hidden reasoning and finish without emitting visible text.
+                # That comes back as choices=[] with completion_tokens>0. Only
+                # absorb it as an empty success when the client explicitly
+                # asked for thinking on a known reasoning model — otherwise a
+                # malformed upstream response would silently look like a blank
+                # assistant message.
+                if (
+                    completion_tokens > 0
+                    and reasoning_capable
+                    and _thinking_requested(request)
+                ):
                     logger.warning(
                         "Copilot returned empty choices but completion_tokens=%d; "
                         "treating as thinking-only response",
@@ -404,12 +429,13 @@ class CopilotProvider(BaseProvider):
                 fr = choice.get("finish_reason")
                 if fr:
                     finish_reason = fr
-                # Collect reasoning text/signature
-                t, sig = _extract_reasoning_from_chunk(msg)
-                if t:
-                    thinking_text += t
-                if sig and thinking_signature is None:
-                    thinking_signature = sig
+                # Collect reasoning text/signature only if the client opted in
+                if _thinking_requested(request):
+                    t, sig = _extract_reasoning_from_chunk(msg)
+                    if t:
+                        thinking_text += t
+                    if sig and thinking_signature is None:
+                        thinking_signature = sig
 
             if len(choices) > 1:
                 logger.info(
@@ -508,7 +534,10 @@ class CopilotProvider(BaseProvider):
                         content = delta.get("content", "")
                         finish_reason = data["choices"][0].get("finish_reason")
                         tool_calls = delta.get("tool_calls")
-                        thinking_text, thinking_sig = _extract_reasoning_from_chunk(delta)
+                        if _thinking_requested(request):
+                            thinking_text, thinking_sig = _extract_reasoning_from_chunk(delta)
+                        else:
+                            thinking_text, thinking_sig = "", None
 
                         if (
                             content
