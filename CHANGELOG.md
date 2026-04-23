@@ -4,6 +4,21 @@ All notable changes to Router-Maestro are documented here.
 
 ---
 
+## v0.1.34 (2026-04-23)
+
+### Fixes
+
+- Per-model reasoning dispatch on Copilot's `/chat/completions` endpoint
+  - Previously the chat path blindly forwarded `thinking_budget`, which the Copilot gateway rejects with `400 invalid_thinking_budget` for OpenAI reasoning models (`gpt-5*`, `o1`, `o3`, `o4`). This broke clients that send Anthropic-style `thinking` (e.g. Cherry Studio → `gpt-5.x`).
+  - New `apply_copilot_chat_reasoning()` routes by model family: Claude keeps `thinking_budget`, GPT-5 / o-series get `reasoning_effort` (with `xhigh` preserved natively — Copilot accepts it), GPT-4 / Gemini omit both fields.
+  - `gpt-5.4*` requires `max_completion_tokens` instead of `max_tokens`; the helper rewrites the field automatically.
+
+### Logging
+
+- Copilot chat / streaming now log `thinking_budget` and `reasoning_effort` (both incoming `ChatRequest` values and the resolved outbound payload values) at DEBUG, so operators can verify what was actually sent to the gateway.
+
+---
+
 ## v0.1.33 (2026-04-20)
 
 ### Chores
