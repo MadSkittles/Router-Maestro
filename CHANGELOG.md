@@ -4,6 +4,14 @@ All notable changes to Router-Maestro are documented here.
 
 ---
 
+## v0.1.37 (2026-04-24)
+
+### Fixes
+
+- **`ROUTER_MAESTRO_LOG_LEVEL` is no longer silently clobbered by the CLI.** `router-maestro server start --log-level` previously hardcoded its default to `INFO` and then wrote that default into `ROUTER_MAESTRO_LOG_LEVEL` before the FastAPI app read it. Setting the env var (e.g. in `docker-compose.yml`) had no effect unless you also passed the flag. The CLI option now defaults to whatever `ROUTER_MAESTRO_LOG_LEVEL` already contains, so Docker / systemd users can flip the level via env without changing the launch command.
+
+---
+
 ## v0.1.36 (2026-04-23)
 
 ### Features

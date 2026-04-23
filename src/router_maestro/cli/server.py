@@ -27,10 +27,11 @@ def start(
     api_key: str | None = typer.Option(None, "--api-key", "-k", help="API key for authentication"),
     reload: bool = typer.Option(False, "--reload", help="Enable auto-reload (development)"),
     log_level: str = typer.Option(
-        "INFO",
+        os.environ.get("ROUTER_MAESTRO_LOG_LEVEL", "INFO"),
         "--log-level",
         "-l",
-        help="Log level (DEBUG, INFO, WARNING, ERROR)",
+        help="Log level (DEBUG, INFO, WARNING, ERROR). "
+        "Defaults to $ROUTER_MAESTRO_LOG_LEVEL when set, else INFO.",
         case_sensitive=False,
     ),
 ) -> None:
