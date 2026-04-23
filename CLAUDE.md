@@ -39,7 +39,7 @@ The API key is configured via `ROUTER_MAESTRO_API_KEY` env var. For VS Code debu
 
 ### Docker Deployment
 
-Production deployment uses `docker-compose.yml` with Traefik reverse proxy. The OpenClaw server runs the production instance at `https://likanwen.xyz/api/`. Use `make build-multiarch` to build for both amd64 and arm64 (requires the `multiarch` buildx builder).
+Production deployment uses `docker-compose.yml` with Traefik reverse proxy. Use `make build-multiarch` to build for both amd64 and arm64 (requires the `multiarch` buildx builder).
 
 ## Architecture Overview
 

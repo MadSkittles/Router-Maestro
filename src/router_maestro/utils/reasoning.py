@@ -12,10 +12,10 @@ an upstream that does not accept it, providers should downgrade to ``"high"``.
 from __future__ import annotations
 
 EFFORT_TO_BUDGET: dict[str, int] = {
-    "low": 4096,
-    "medium": 8192,
-    "high": 16384,
-    "xhigh": 24000,
+    "low": 1024,
+    "medium": 4096,
+    "high": 8192,
+    "xhigh": 16384,
 }
 
 VALID_EFFORTS: tuple[str, ...] = ("low", "medium", "high", "xhigh")

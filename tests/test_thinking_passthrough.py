@@ -87,7 +87,7 @@ class TestCopilotPayloadThinking:
 
     @pytest.mark.asyncio
     async def test_copilot_payload_includes_thinking_budget(self):
-        """Verify payload contains thinking_budget when set."""
+        """Verify Claude payload contains reasoning_effort when client requests thinking."""
         from router_maestro.providers.copilot import CopilotProvider
 
         provider = CopilotProvider()
@@ -95,7 +95,7 @@ class TestCopilotPayloadThinking:
         provider._token_expires = 9999999999
 
         request = ChatRequest(
-            model="claude-opus-4.6",
+            model="claude-opus-4.7",
             messages=[Message(role="user", content="Hello")],
             thinking_budget=16000,
         )
@@ -114,7 +114,7 @@ class TestCopilotPayloadThinking:
                         "finish_reason": "stop",
                     }
                 ],
-                "model": "claude-opus-4.6",
+                "model": "claude-opus-4.7",
                 "usage": {"prompt_tokens": 10, "completion_tokens": 5},
             }
             return mock_response
@@ -127,8 +127,9 @@ class TestCopilotPayloadThinking:
         with patch.object(provider, "ensure_token", new_callable=AsyncMock):
             await provider.chat_completion(request)
 
-        assert "thinking_budget" in captured_payload
-        assert captured_payload["thinking_budget"] == 16000
+        assert "thinking_budget" not in captured_payload
+        # opus-4.7's gateway only accepts "medium" — anything else clamps.
+        assert captured_payload.get("reasoning_effort") == "medium"
 
     @pytest.mark.asyncio
     async def test_copilot_payload_omits_thinking_when_none(self):

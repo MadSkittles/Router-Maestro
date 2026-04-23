@@ -18,7 +18,7 @@ class TestTimeoutConstants:
 
     def test_non_streaming_timeout_values(self):
         assert TIMEOUT_NON_STREAMING.connect == 30.0
-        assert TIMEOUT_NON_STREAMING.read == 120.0
+        assert TIMEOUT_NON_STREAMING.read == 240.0
         assert TIMEOUT_NON_STREAMING.write == 30.0
         assert TIMEOUT_NON_STREAMING.pool == 30.0
 

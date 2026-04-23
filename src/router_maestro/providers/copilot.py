@@ -35,6 +35,20 @@ COPILOT_MODELS_URL = f"{COPILOT_BASE_URL}/models"
 COPILOT_RESPONSES_URL = f"{COPILOT_BASE_URL}/responses"
 
 
+def _claude_supports_reasoning(bare_lower: str) -> bool:
+    """Whether a Claude model on Copilot exposes any reasoning control.
+
+    Per the Copilot model picker (vscode-copilot-chat), the 4.6+ generations
+    accept ``reasoning_effort``. Older models (sonnet-4, sonnet-4.5,
+    opus-4.5, haiku-4.5) have no reasoning control surface.
+    """
+    return (
+        bare_lower.startswith("claude-opus-4.7")
+        or bare_lower.startswith("claude-opus-4.6")
+        or bare_lower.startswith("claude-sonnet-4.6")
+    )
+
+
 def apply_copilot_chat_reasoning(
     payload: dict,
     model: str,
@@ -69,8 +83,31 @@ def apply_copilot_chat_reasoning(
     )
 
     if is_claude:
-        if thinking_budget is not None:
-            payload["thinking_budget"] = thinking_budget
+        if not _claude_supports_reasoning(bare_lower):
+            # Older Claudes (sonnet-4 / sonnet-4.5 / opus-4.5 / haiku-4.5)
+            # have no reasoning control on Copilot.
+            pass
+        else:
+            # Claude 4.6+/4.7 on Copilot exposes reasoning_effort. Be aggressive:
+            # if the client asked for thinking but didn't give us enough budget
+            # to map cleanly, default to "high" — the user wants more reasoning,
+            # not less.
+            effort = reasoning_effort or budget_to_effort(thinking_budget)
+            if effort == "xhigh":
+                effort = "high"  # Claude effort enum tops out at high
+            if effort is None and thinking_budget is not None:
+                effort = "high"
+            # opus-4.7's gateway only accepts "medium" (per Copilot's
+            # supported_values check). Clamp anything else to medium so the
+            # request doesn't fail.
+            if bare_lower.startswith("claude-opus-4.7") and effort in (
+                "low",
+                "medium",
+                "high",
+            ):
+                effort = "medium"
+            if effort in ("low", "medium", "high"):
+                payload["reasoning_effort"] = effort
     elif is_openai_reasoning:
         effort = reasoning_effort or budget_to_effort(thinking_budget)
         # Copilot's gpt-5* line natively accepts xhigh (verified against the
@@ -84,6 +121,51 @@ def apply_copilot_chat_reasoning(
 
 # Model cache TTL in seconds (5 minutes)
 MODELS_CACHE_TTL = 300
+
+
+def _thinking_requested(request: ChatRequest) -> bool:
+    """Whether the client opted into reasoning passthrough.
+
+    We only surface upstream chain-of-thought to clients that explicitly asked
+    for it. Reasoning traces can leak prompt fragments, hidden instructions,
+    and tool-planning state, so emitting them by default would be a
+    sensitive-data exposure surface.
+    """
+    return request.thinking_type in ("enabled", "adaptive")
+
+
+def _extract_reasoning_from_chunk(part: dict | None) -> tuple[str, str | None]:
+    """Pull reasoning text/signature out of a Copilot message or delta.
+
+    Mirrors vscode-copilot-chat's ``extractThinkingDeltaFromChoice``: Copilot
+    streams reasoning under several legacy field names depending on the
+    upstream model family.
+
+    Returns ``(text, signature)`` where either may be empty/None.
+    """
+    if not part:
+        return "", None
+
+    text = ""
+    for key in ("reasoning_text", "cot_summary", "thinking"):
+        val = part.get(key)
+        if isinstance(val, str) and val:
+            text = val
+            break
+        if isinstance(val, dict):
+            inner = val.get("text") or val.get("content")
+            if isinstance(inner, str) and inner:
+                text = inner
+                break
+
+    sig: str | None = None
+    for key in ("reasoning_opaque", "cot_id", "signature"):
+        val = part.get(key)
+        if isinstance(val, str) and val:
+            sig = val
+            break
+
+    return text, sig
 
 
 class CopilotProvider(BaseProvider):
@@ -281,7 +363,37 @@ class CopilotProvider(BaseProvider):
             data = response.json()
 
             choices = data.get("choices", [])
+            usage = data.get("usage") or {}
+            completion_tokens = usage.get("completion_tokens") or 0
+
+            bare_lower = (
+                request.model.split("/", 1)[1] if "/" in request.model else request.model
+            ).lower()
+            reasoning_capable = bare_lower.startswith("claude-") and _claude_supports_reasoning(
+                bare_lower
+            )
+
             if not choices:
+                # Reasoning-capable Claude models can spend their whole budget
+                # on hidden reasoning and finish without emitting visible text.
+                # That comes back as choices=[] with completion_tokens>0. Only
+                # absorb it as an empty success when the client explicitly
+                # asked for thinking on a known reasoning model — otherwise a
+                # malformed upstream response would silently look like a blank
+                # assistant message.
+                if completion_tokens > 0 and reasoning_capable and _thinking_requested(request):
+                    logger.warning(
+                        "Copilot returned empty choices but completion_tokens=%d; "
+                        "treating as thinking-only response",
+                        completion_tokens,
+                    )
+                    return ChatResponse(
+                        content="",
+                        model=data.get("model", request.model),
+                        finish_reason="stop",
+                        usage=usage or None,
+                        tool_calls=None,
+                    )
                 logger.error("Copilot API returned empty choices: %s", json.dumps(data)[:500])
                 raise ProviderError(
                     f"Copilot API returned empty choices: {json.dumps(data)[:500]}",
@@ -296,6 +408,8 @@ class CopilotProvider(BaseProvider):
             content = None
             tool_calls = []
             finish_reason = "stop"
+            thinking_text = ""
+            thinking_signature: str | None = None
 
             for choice in choices:
                 msg = choice.get("message", {})
@@ -309,6 +423,13 @@ class CopilotProvider(BaseProvider):
                 fr = choice.get("finish_reason")
                 if fr:
                     finish_reason = fr
+                # Collect reasoning text/signature only if the client opted in
+                if _thinking_requested(request):
+                    t, sig = _extract_reasoning_from_chunk(msg)
+                    if t:
+                        thinking_text += t
+                    if sig and thinking_signature is None:
+                        thinking_signature = sig
 
             if len(choices) > 1:
                 logger.info(
@@ -331,6 +452,8 @@ class CopilotProvider(BaseProvider):
                 finish_reason=finish_reason,
                 usage=data.get("usage"),
                 tool_calls=tool_calls,
+                thinking=thinking_text or None,
+                thinking_signature=thinking_signature,
             )
         except httpx.HTTPStatusError as e:
             self._raise_http_status_error("Copilot", e, logger, include_body=True)
@@ -405,13 +528,26 @@ class CopilotProvider(BaseProvider):
                         content = delta.get("content", "")
                         finish_reason = data["choices"][0].get("finish_reason")
                         tool_calls = delta.get("tool_calls")
+                        if _thinking_requested(request):
+                            thinking_text, thinking_sig = _extract_reasoning_from_chunk(delta)
+                        else:
+                            thinking_text, thinking_sig = "", None
 
-                        if content or finish_reason or usage or tool_calls:
+                        if (
+                            content
+                            or finish_reason
+                            or usage
+                            or tool_calls
+                            or thinking_text
+                            or thinking_sig
+                        ):
                             yield ChatStreamChunk(
                                 content=content,
                                 finish_reason=finish_reason,
                                 usage=usage,
                                 tool_calls=tool_calls,
+                                thinking=thinking_text or None,
+                                thinking_signature=thinking_sig,
                             )
 
                         # Mark stream as finished after receiving finish_reason
