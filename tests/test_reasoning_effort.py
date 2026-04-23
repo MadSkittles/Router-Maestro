@@ -42,11 +42,11 @@ class TestEffortMapping:
     @pytest.mark.parametrize(
         "effort,expected",
         [
-            ("low", 4096),
-            ("medium", 8192),
-            ("high", 16384),
-            ("xhigh", 24000),
-            ("HIGH", 16384),
+            ("low", 1024),
+            ("medium", 4096),
+            ("high", 8192),
+            ("xhigh", 16384),
+            ("HIGH", 8192),
             (None, None),
             ("bogus", None),
         ],
@@ -57,9 +57,11 @@ class TestEffortMapping:
     def test_budget_to_effort_picks_highest_fitting(self):
         assert budget_to_effort(None) is None
         assert budget_to_effort(100) is None
-        assert budget_to_effort(4096) == "low"
-        assert budget_to_effort(8192) == "medium"
-        assert budget_to_effort(20000) == "high"
+        assert budget_to_effort(1024) == "low"
+        assert budget_to_effort(4096) == "medium"
+        assert budget_to_effort(8000) == "medium"
+        assert budget_to_effort(8192) == "high"
+        assert budget_to_effort(16000) == "high"
         assert budget_to_effort(EFFORT_TO_BUDGET["xhigh"]) == "xhigh"
 
     def test_downgrade_for_upstream(self):

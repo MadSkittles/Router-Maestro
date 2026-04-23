@@ -8,7 +8,7 @@ from typing import NoReturn
 
 import httpx
 
-TIMEOUT_NON_STREAMING = httpx.Timeout(connect=30.0, read=120.0, write=30.0, pool=30.0)
+TIMEOUT_NON_STREAMING = httpx.Timeout(connect=30.0, read=240.0, write=30.0, pool=30.0)
 TIMEOUT_STREAMING = httpx.Timeout(connect=30.0, read=600.0, write=30.0, pool=30.0)
 
 
@@ -71,6 +71,9 @@ class ChatResponse:
     finish_reason: str = "stop"
     usage: dict | None = None  # {"prompt_tokens": X, "completion_tokens": Y, "total_tokens": Z}
     tool_calls: list[dict] | None = None  # OpenAI-format tool calls from assistant
+    # Reasoning trace (Anthropic "thinking" / OpenAI "reasoning_text" / Copilot "cot_summary")
+    thinking: str | None = None
+    thinking_signature: str | None = None
 
 
 @dataclass
@@ -81,6 +84,8 @@ class ChatStreamChunk:
     finish_reason: str | None = None
     usage: dict | None = None  # Token usage info (typically in final chunk)
     tool_calls: list[dict] | None = None  # Tool call deltas for streaming
+    thinking: str | None = None  # Incremental reasoning text delta
+    thinking_signature: str | None = None  # Opaque/encrypted reasoning id, if provided
 
 
 @dataclass

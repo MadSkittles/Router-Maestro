@@ -19,6 +19,7 @@ from router_maestro.server.schemas.anthropic import (
     AnthropicModelList,
     AnthropicStreamState,
     AnthropicTextBlock,
+    AnthropicThinkingBlock,
     AnthropicToolUseBlock,
     AnthropicUsage,
 )
@@ -248,8 +249,17 @@ async def messages(request: AnthropicMessagesRequest, raw_request: FastAPIReques
             response.finish_reason,
         )
 
-        # Build Anthropic response
+        # Build Anthropic response. Per spec, thinking blocks must come
+        # BEFORE the text block they reasoned about.
         content = []
+        if response.thinking:
+            content.append(
+                AnthropicThinkingBlock(
+                    type="thinking",
+                    thinking=response.thinking,
+                    signature=response.thinking_signature,
+                )
+            )
         if response.content:
             content.append(AnthropicTextBlock(type="text", text=response.content))
 
@@ -393,15 +403,21 @@ async def stream_response(
         state = AnthropicStreamState(estimated_input_tokens=estimated_input_tokens)
 
         async for chunk in stream:
-            # Build OpenAI-style chunk for translation
+            # Build OpenAI-style chunk for translation. Forward reasoning
+            # under both legacy field names so the translator can pick it up.
+            delta: dict = {
+                "content": chunk.content if chunk.content else None,
+                "tool_calls": chunk.tool_calls,
+            }
+            if chunk.thinking:
+                delta["reasoning_text"] = chunk.thinking
+            if chunk.thinking_signature:
+                delta["reasoning_opaque"] = chunk.thinking_signature
             openai_chunk = {
                 "id": response_id,
                 "choices": [
                     {
-                        "delta": {
-                            "content": chunk.content if chunk.content else None,
-                            "tool_calls": chunk.tool_calls,
-                        },
+                        "delta": delta,
                         "finish_reason": chunk.finish_reason,
                     }
                 ],

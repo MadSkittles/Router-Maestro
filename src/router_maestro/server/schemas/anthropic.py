@@ -81,6 +81,7 @@ class AnthropicThinkingBlock(BaseModel):
 
     type: Literal["thinking"] = "thinking"
     thinking: str
+    signature: str | None = None
 
 
 AnthropicUserContentBlock = (
@@ -263,6 +264,7 @@ class AnthropicStreamState(BaseModel):
     message_start_sent: bool = False
     content_block_index: int = 0
     content_block_open: bool = False
+    thinking_block_open: bool = False  # True while a thinking content_block is open
     tool_calls: dict[int, dict] = Field(default_factory=dict)
     estimated_input_tokens: int = 0  # Estimated input tokens from request
     last_usage: dict | None = None  # Track the latest usage from stream chunks

@@ -11,6 +11,7 @@ from router_maestro.server.schemas.anthropic import (
     AnthropicMessagesResponse,
     AnthropicStreamState,
     AnthropicTextBlock,
+    AnthropicThinkingBlock,
     AnthropicToolUseBlock,
     AnthropicUsage,
     AnthropicUserMessage,
@@ -413,8 +414,35 @@ def translate_openai_to_anthropic(
     if "choices" in openai_response:
         for choice in openai_response["choices"]:
             message = choice.get("message", {})
-            msg_content = message.get("content")
 
+            # Reasoning trace, if any, comes before text per Anthropic ordering
+            think_text = ""
+            think_sig: str | None = None
+            for key in ("reasoning_text", "cot_summary", "thinking"):
+                val = message.get(key)
+                if isinstance(val, str) and val:
+                    think_text = val
+                    break
+                if isinstance(val, dict):
+                    inner = val.get("text") or val.get("content")
+                    if isinstance(inner, str) and inner:
+                        think_text = inner
+                        break
+            for key in ("reasoning_opaque", "cot_id", "signature"):
+                val = message.get(key)
+                if isinstance(val, str) and val:
+                    think_sig = val
+                    break
+            if think_text or think_sig:
+                content.append(
+                    AnthropicThinkingBlock(
+                        type="thinking",
+                        thinking=think_text,
+                        signature=think_sig,
+                    )
+                )
+
+            msg_content = message.get("content")
             if msg_content:
                 content.append(AnthropicTextBlock(type="text", text=msg_content))
 
@@ -525,6 +553,89 @@ def translate_openai_chunk_to_anthropic_events(
         )
         state.message_start_sent = True
 
+    # Handle reasoning / thinking deltas. Copilot streams reasoning under
+    # several legacy field names (reasoning_text / cot_summary / thinking).
+    # Anthropic streaming requires a thinking content_block to be opened
+    # before its deltas are emitted, and closed before any text/tool block.
+    thinking_text = ""
+    for key in ("reasoning_text", "cot_summary", "thinking"):
+        val = delta.get(key)
+        if isinstance(val, str) and val:
+            thinking_text = val
+            break
+        if isinstance(val, dict):
+            inner = val.get("text") or val.get("content")
+            if isinstance(inner, str) and inner:
+                thinking_text = inner
+                break
+    thinking_signature = None
+    for key in ("reasoning_opaque", "cot_id", "signature"):
+        val = delta.get(key)
+        if isinstance(val, str) and val:
+            thinking_signature = val
+            break
+
+    if thinking_text or thinking_signature:
+        # Open thinking block if one isn't already open
+        if not state.thinking_block_open:
+            # Close any other open block (text/tool) first
+            if state.content_block_open:
+                events.append(
+                    {
+                        "type": "content_block_stop",
+                        "index": state.content_block_index,
+                    }
+                )
+                state.content_block_index += 1
+                state.content_block_open = False
+            events.append(
+                {
+                    "type": "content_block_start",
+                    "index": state.content_block_index,
+                    "content_block": {
+                        "type": "thinking",
+                        "thinking": "",
+                    },
+                }
+            )
+            state.thinking_block_open = True
+            state.content_block_open = True
+
+        if thinking_text:
+            events.append(
+                {
+                    "type": "content_block_delta",
+                    "index": state.content_block_index,
+                    "delta": {
+                        "type": "thinking_delta",
+                        "thinking": thinking_text,
+                    },
+                }
+            )
+        if thinking_signature:
+            events.append(
+                {
+                    "type": "content_block_delta",
+                    "index": state.content_block_index,
+                    "delta": {
+                        "type": "signature_delta",
+                        "signature": thinking_signature,
+                    },
+                }
+            )
+
+    # Close any open thinking block before text/tool content arrives
+    if state.thinking_block_open and (delta.get("content") or delta.get("tool_calls")):
+        events.append(
+            {
+                "type": "content_block_stop",
+                "index": state.content_block_index,
+            }
+        )
+        state.content_block_index += 1
+        state.content_block_open = False
+        state.thinking_block_open = False
+
     # Handle text content
     if delta.get("content"):
         # Close tool block if open
@@ -627,6 +738,7 @@ def translate_openai_chunk_to_anthropic_events(
                 }
             )
             state.content_block_open = False
+            state.thinking_block_open = False
 
         # Get usage from accumulated values, chunk, or tracked last_usage
         prompt_tokens = state.accumulated_prompt_tokens or (
