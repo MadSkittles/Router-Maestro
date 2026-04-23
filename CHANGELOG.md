@@ -4,6 +4,14 @@ All notable changes to Router-Maestro are documented here.
 
 ---
 
+## v0.1.36 (2026-04-23)
+
+### Features
+
+- **Catalog-driven `reasoning_effort` dispatch on Copilot.** Read each model's `capabilities.supports.reasoning_effort` allowlist from Copilot's `/models` response and use it as the source of truth when picking which effort tier to send. When the desired tier isn't offered, step to the nearest available (prefer next higher, else next lower). The old hardcoded heuristic stays as a fallback when the catalog is silent. As a side effect, `gemini-3*` / `gpt-5-mini` / `gpt-5.4-mini` get correct reasoning routing without further code changes — and any future tier opened upstream (e.g. `high` on opus-4.7) will be picked up automatically.
+
+---
+
 ## v0.1.35 (2026-04-23)
 
 ### Features
