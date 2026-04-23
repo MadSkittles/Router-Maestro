@@ -100,6 +100,11 @@ class ModelInfo:
     max_context_window_tokens: int | None = None
     supports_thinking: bool = False
     supports_vision: bool = False
+    # Per-model reasoning_effort allowlist as advertised by the upstream
+    # catalog (Copilot's ``capabilities.supports.reasoning_effort``).
+    # ``None`` means "the catalog didn't say" — callers should fall back
+    # to a hardcoded heuristic. ``[]`` means "explicitly no reasoning".
+    reasoning_effort_values: list[str] | None = None
 
     def with_overrides(
         self,
@@ -126,6 +131,7 @@ class ModelInfo:
             ),
             supports_thinking=self.supports_thinking,
             supports_vision=self.supports_vision,
+            reasoning_effort_values=self.reasoning_effort_values,
         )
 
 
