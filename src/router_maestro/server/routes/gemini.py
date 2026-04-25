@@ -23,6 +23,9 @@ from router_maestro.server.translation_gemini import (
     translate_openai_to_gemini,
 )
 from router_maestro.utils import get_logger
+from router_maestro.utils.responses_bridge import (
+    is_experimental_responses_enabled,
+)
 
 logger = get_logger("server.routes.gemini")
 
@@ -52,6 +55,35 @@ def _estimate_input_tokens(request: GeminiGenerateContentRequest) -> int:
         return 0
 
 
+def _maybe_enable_responses_api(request: ChatRequest, model: str) -> ChatRequest:
+    """Opt this ChatRequest into Copilot /responses when the env flag is on.
+
+    The Copilot provider is the authoritative gate
+    (``should_use_responses_for_chat``): it checks the resolved provider name
+    and model eligibility and falls through to ``/chat/completions`` when
+    either fails. Setting the flag here is a no-op for non-Copilot or
+    non-GPT-5 backends — we don't pre-filter on the raw path model so
+    aliases/fuzzy matches resolve through the router instead of the entry
+    route.
+    """
+    if not is_experimental_responses_enabled():
+        return request
+    return ChatRequest(
+        model=request.model,
+        messages=request.messages,
+        temperature=request.temperature,
+        max_tokens=request.max_tokens,
+        stream=request.stream,
+        tools=request.tools,
+        tool_choice=request.tool_choice,
+        thinking_budget=request.thinking_budget,
+        thinking_type=request.thinking_type,
+        reasoning_effort=request.reasoning_effort,
+        use_responses_api=True,
+        extra=request.extra,
+    )
+
+
 # ============================================================================
 # POST /api/gemini/v1beta/models/{model}:generateContent
 # ============================================================================
@@ -72,6 +104,7 @@ async def generate_content(
 
     model_router = get_router()
     chat_request = translate_gemini_to_openai(request, model)
+    chat_request = _maybe_enable_responses_api(chat_request, model)
 
     try:
         response, _provider_name = await model_router.chat_completion(chat_request)
@@ -121,7 +154,8 @@ async def stream_generate_content(
     #     len(chat_request.tools) if chat_request.tools else 0,
     #     chat_request.max_tokens,
     # )
-    # Enable streaming
+    # Enable streaming, preserving every other ChatRequest field so reasoning
+    # metadata and the experimental flag survive into the provider call.
     chat_request = ChatRequest(
         model=chat_request.model,
         messages=chat_request.messages,
@@ -130,7 +164,13 @@ async def stream_generate_content(
         stream=True,
         tools=chat_request.tools,
         tool_choice=chat_request.tool_choice,
+        thinking_budget=chat_request.thinking_budget,
+        thinking_type=chat_request.thinking_type,
+        reasoning_effort=chat_request.reasoning_effort,
+        use_responses_api=chat_request.use_responses_api,
+        extra=chat_request.extra,
     )
+    chat_request = _maybe_enable_responses_api(chat_request, model)
 
     estimated_tokens = _estimate_input_tokens(request)
     return sse_streaming_response(

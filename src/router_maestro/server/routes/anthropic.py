@@ -34,6 +34,9 @@ from router_maestro.utils import (
     map_openai_stop_reason_to_anthropic,
 )
 from router_maestro.utils.context_window import resolve_thinking_budget
+from router_maestro.utils.responses_bridge import (
+    is_experimental_responses_enabled,
+)
 from router_maestro.utils.token_config import (
     count_tokens_via_anthropic_api,
     get_config_for_provider,
@@ -224,11 +227,33 @@ async def messages(request: AnthropicMessagesRequest, raw_request: FastAPIReques
             tool_choice=chat_request.tool_choice,
             thinking_budget=chat_request.thinking_budget,
             thinking_type=chat_request.thinking_type,
+            reasoning_effort=chat_request.reasoning_effort,
+            use_responses_api=chat_request.use_responses_api,
             extra=chat_request.extra,
         )
 
     # Resolve thinking budget from server config if needed
     chat_request = await _apply_thinking_budget(model_router, chat_request, effective_model)
+
+    # Experimental: opt this request into Copilot's /responses endpoint when
+    # the flag is on. The Copilot provider gates on the resolved provider +
+    # model and falls back to /chat/completions for ineligible models, so we
+    # don't pre-filter on the entry-route model string here.
+    if is_experimental_responses_enabled():
+        chat_request = ChatRequest(
+            model=chat_request.model,
+            messages=chat_request.messages,
+            temperature=chat_request.temperature,
+            max_tokens=chat_request.max_tokens,
+            stream=chat_request.stream,
+            tools=chat_request.tools,
+            tool_choice=chat_request.tool_choice,
+            thinking_budget=chat_request.thinking_budget,
+            thinking_type=chat_request.thinking_type,
+            reasoning_effort=chat_request.reasoning_effort,
+            use_responses_api=True,
+            extra=chat_request.extra,
+        )
 
     if request.stream:
         # Resolve provider for accurate token estimation

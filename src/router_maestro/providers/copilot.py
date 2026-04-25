@@ -385,6 +385,24 @@ class CopilotProvider(BaseProvider):
 
     async def chat_completion(self, request: ChatRequest) -> ChatResponse:
         """Generate a chat completion via Copilot."""
+        # Experimental: route GPT-5.x ChatRequests through /responses when the
+        # entry route opted in. Anthropic/Gemini set use_responses_api=True
+        # under the ROUTER_MAESTRO_EXPERIMENTAL_RESPONSES_API flag.
+        from router_maestro.utils.responses_bridge import (
+            chat_request_to_responses_request,
+            responses_response_to_chat_response,
+            should_use_responses_for_chat,
+        )
+
+        if should_use_responses_for_chat(request, self.name):
+            logger.info(
+                "Routing chat request via /responses (experimental): model=%s",
+                request.model,
+            )
+            responses_req = chat_request_to_responses_request(request)
+            responses_resp = await self.responses_completion(responses_req)
+            return responses_response_to_chat_response(responses_resp, request.model)
+
         await self.ensure_token()
 
         messages, has_images = self._build_messages_payload(request)
@@ -531,6 +549,22 @@ class CopilotProvider(BaseProvider):
 
     async def chat_completion_stream(self, request: ChatRequest) -> AsyncIterator[ChatStreamChunk]:
         """Generate a streaming chat completion via Copilot."""
+        from router_maestro.utils.responses_bridge import (
+            chat_request_to_responses_request,
+            responses_chunk_to_chat_chunk,
+            should_use_responses_for_chat,
+        )
+
+        if should_use_responses_for_chat(request, self.name):
+            logger.info(
+                "Streaming chat request via /responses (experimental): model=%s",
+                request.model,
+            )
+            responses_req = chat_request_to_responses_request(request)
+            async for resp_chunk in self.responses_completion_stream(responses_req):
+                yield responses_chunk_to_chat_chunk(resp_chunk)
+            return
+
         await self.ensure_token()
 
         messages, has_images = self._build_messages_payload(request)
@@ -796,7 +830,9 @@ class CopilotProvider(BaseProvider):
                 logger.warning(
                     "Copilot Responses does not accept reasoning_effort=xhigh; downgrading to high"
                 )
-            payload["reasoning"] = {"effort": upstream_effort}
+            # ``summary: auto`` opts in to reasoning_summary_text events so we
+            # can forward chain-of-thought as Anthropic thinking blocks.
+            payload["reasoning"] = {"effort": upstream_effort, "summary": "auto"}
         return payload
 
     def _extract_response_content(self, data: dict) -> str:
@@ -815,6 +851,26 @@ class CopilotProvider(BaseProvider):
                     if content_item.get("type") == "output_text":
                         content += content_item.get("text", "")
         return content
+
+    def _extract_reasoning(self, data: dict) -> tuple[str | None, str | None]:
+        """Extract aggregated reasoning summary text and signature.
+
+        Returns ``(thinking_text, thinking_signature)``. Both are ``None``
+        when the response has no reasoning output.
+        """
+        text_parts: list[str] = []
+        signature: str | None = None
+        for output in data.get("output", []):
+            if output.get("type") != "reasoning":
+                continue
+            if signature is None:
+                signature = output.get("id")
+            for summary in output.get("summary", []) or []:
+                if isinstance(summary, dict):
+                    chunk = summary.get("text") or ""
+                    if chunk:
+                        text_parts.append(chunk)
+        return ("".join(text_parts) or None, signature)
 
     def _extract_tool_calls(self, data: dict) -> list[ResponsesToolCall]:
         """Extract tool calls from Responses API response.
@@ -857,10 +913,31 @@ class CopilotProvider(BaseProvider):
 
             content = self._extract_response_content(data)
             tool_calls = self._extract_tool_calls(data)
+            thinking, thinking_sig = self._extract_reasoning(data)
 
             usage = None
             if "usage" in data:
                 usage = data["usage"]
+
+            from router_maestro.utils.responses_bridge import map_responses_status_to_chat
+
+            status = data.get("status")
+            incomplete_reason = None
+            incomplete = data.get("incomplete_details")
+            if isinstance(incomplete, dict):
+                incomplete_reason = incomplete.get("reason")
+
+            # Surface terminal upstream failures as provider errors instead of
+            # silently returning a blank successful completion.
+            if status in ("failed", "cancelled"):
+                err = data.get("error") or {}
+                msg = err.get("message") if isinstance(err, dict) else None
+                raise ProviderError(
+                    f"Copilot /responses {status}: {msg or 'no error message'}",
+                    status_code=502,
+                )
+
+            finish_reason = map_responses_status_to_chat(status, incomplete_reason)
 
             logger.debug("Copilot responses completion successful")
             return ResponsesResponse(
@@ -868,6 +945,9 @@ class CopilotProvider(BaseProvider):
                 model=data.get("model", request.model),
                 usage=usage,
                 tool_calls=tool_calls if tool_calls else None,
+                thinking=thinking,
+                thinking_signature=thinking_sig,
+                finish_reason=finish_reason,
             )
         except httpx.HTTPStatusError as e:
             self._raise_http_status_error("Copilot", e, logger, include_body=True)
@@ -914,6 +994,7 @@ class CopilotProvider(BaseProvider):
 
                 stream_finished = False
                 final_usage = None
+                emitted_tool_call = False
                 # Track pending function calls being streamed, keyed by output_index
                 # (Copilot obfuscates item IDs differently across events, so we can't match by ID)
                 pending_fcs: dict[int, dict] = {}
@@ -931,7 +1012,7 @@ class CopilotProvider(BaseProvider):
                         if not stream_finished:
                             yield ResponsesStreamChunk(
                                 content="",
-                                finish_reason="stop",
+                                finish_reason=("tool_calls" if emitted_tool_call else "stop"),
                                 usage=final_usage,
                             )
                             stream_finished = True
@@ -945,6 +1026,21 @@ class CopilotProvider(BaseProvider):
                         delta_text = data.get("delta", "")
                         if delta_text:
                             yield ResponsesStreamChunk(content=delta_text)
+
+                    # Reasoning summary (chain-of-thought) deltas — surfaced so
+                    # entry routes (Anthropic, Gemini) can forward them as
+                    # thinking blocks. The opaque ``item_id`` is sent once on
+                    # the closing ``done`` event so the translator can attach
+                    # a single signature_delta rather than one per text delta.
+                    elif event_type == "response.reasoning_summary_text.delta":
+                        delta = data.get("delta", "")
+                        if delta:
+                            yield ResponsesStreamChunk(content="", thinking=delta)
+
+                    elif event_type == "response.reasoning_summary_text.done":
+                        item_id = data.get("item_id")
+                        if item_id:
+                            yield ResponsesStreamChunk(content="", thinking_signature=item_id)
 
                     # Handle function call output_item.added - start of a new function call
                     elif event_type == "response.output_item.added":
@@ -972,6 +1068,7 @@ class CopilotProvider(BaseProvider):
                         if fc:
                             fc["arguments"] = data.get("arguments", fc["arguments"])
                             # Emit complete tool call
+                            emitted_tool_call = True
                             yield ResponsesStreamChunk(
                                 content="",
                                 tool_call=ResponsesToolCall(
@@ -989,6 +1086,7 @@ class CopilotProvider(BaseProvider):
                             # Only emit if not already done via function_call_arguments.done
                             fc = pending_fcs.pop(output_idx, None)
                             if fc is not None:
+                                emitted_tool_call = True
                                 yield ResponsesStreamChunk(
                                     content="",
                                     tool_call=ResponsesToolCall(
@@ -1000,24 +1098,60 @@ class CopilotProvider(BaseProvider):
 
                     # Handle done event to get final usage
                     elif event_type == "response.done":
+                        from router_maestro.utils.responses_bridge import (
+                            map_responses_status_to_chat,
+                        )
+
                         resp = data.get("response", {})
                         final_usage = resp.get("usage")
+                        status = resp.get("status")
+                        if status in ("failed", "cancelled"):
+                            err = resp.get("error") or {}
+                            msg = err.get("message") if isinstance(err, dict) else None
+                            raise ProviderError(
+                                f"Copilot /responses {status}: {msg or 'no error message'}",
+                                status_code=502,
+                            )
+                        incomplete = resp.get("incomplete_details") or {}
+                        finish = (
+                            map_responses_status_to_chat(status, incomplete.get("reason")) or "stop"
+                        )
+                        if emitted_tool_call and finish == "stop":
+                            finish = "tool_calls"
                         yield ResponsesStreamChunk(
                             content="",
-                            finish_reason="stop",
+                            finish_reason=finish,
                             usage=final_usage,
                         )
                         stream_finished = True
 
                     # Handle completed events
                     elif event_type == "response.completed":
+                        from router_maestro.utils.responses_bridge import (
+                            map_responses_status_to_chat,
+                        )
+
                         # Final response received - emit finish chunk
                         resp = data.get("response", {})
                         if not final_usage:
                             final_usage = resp.get("usage")
+                        status = resp.get("status")
+                        if status in ("failed", "cancelled"):
+                            err = resp.get("error") or {}
+                            msg = err.get("message") if isinstance(err, dict) else None
+                            raise ProviderError(
+                                f"Copilot /responses {status}: {msg or 'no error message'}",
+                                status_code=502,
+                            )
+                        incomplete = resp.get("incomplete_details") or {}
+                        finish = (
+                            map_responses_status_to_chat(status, incomplete.get("reason")) or "stop"
+                        )
+                        if emitted_tool_call and finish == "stop":
+                            finish = "tool_calls"
                         yield ResponsesStreamChunk(
                             content="",
-                            finish_reason="stop",
+                            finish_reason=finish,
                             usage=final_usage,
                         )
                         stream_finished = True
@@ -1027,7 +1161,7 @@ class CopilotProvider(BaseProvider):
                     logger.debug("Stream ended without completion event, emitting final chunk")
                     yield ResponsesStreamChunk(
                         content="",
-                        finish_reason="stop",
+                        finish_reason="tool_calls" if emitted_tool_call else "stop",
                         usage=final_usage,
                     )
 

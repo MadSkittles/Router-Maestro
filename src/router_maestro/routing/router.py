@@ -323,6 +323,8 @@ class Router:
             tool_choice=original_request.tool_choice,
             thinking_budget=original_request.thinking_budget,
             thinking_type=original_request.thinking_type,
+            reasoning_effort=original_request.reasoning_effort,
+            use_responses_api=original_request.use_responses_api,
             extra=original_request.extra,
         )
 
