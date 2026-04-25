@@ -104,13 +104,13 @@ class TestCopilotResponsesPayloadEffort:
         provider = CopilotProvider()
         req = ResponsesRequest(model="gpt-5", input="hi", reasoning_effort="high")
         payload = provider._build_responses_payload(req)
-        assert payload["reasoning"] == {"effort": "high"}
+        assert payload["reasoning"] == {"effort": "high", "summary": "auto"}
 
     def test_responses_payload_downgrades_xhigh(self):
         provider = CopilotProvider()
         req = ResponsesRequest(model="gpt-5", input="hi", reasoning_effort="xhigh")
         payload = provider._build_responses_payload(req)
-        assert payload["reasoning"] == {"effort": "high"}
+        assert payload["reasoning"] == {"effort": "high", "summary": "auto"}
 
     def test_responses_payload_omits_when_unset(self):
         provider = CopilotProvider()

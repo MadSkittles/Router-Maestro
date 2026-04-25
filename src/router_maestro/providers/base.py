@@ -38,6 +38,11 @@ class ChatRequest:
     thinking_type: str | None = None  # "enabled", "adaptive", "disabled"
     # OpenAI-style effort: "low" | "medium" | "high" | "xhigh" (Router-Maestro extension)
     reasoning_effort: str | None = None
+    # Experimental: when True, eligible providers (currently Copilot+gpt-5.x)
+    # should fulfil this chat request via the /responses endpoint instead of
+    # /chat/completions. Set by entry routes (Anthropic, Gemini) when the
+    # ROUTER_MAESTRO_EXPERIMENTAL_RESPONSES_API flag is on.
+    use_responses_api: bool = False
     extra: dict = field(default_factory=dict)
 
     def with_thinking(
@@ -58,6 +63,7 @@ class ChatRequest:
             thinking_budget=thinking_budget,
             thinking_type=thinking_type,
             reasoning_effort=self.reasoning_effort,
+            use_responses_api=self.use_responses_api,
             extra=self.extra,
         )
 
@@ -169,6 +175,13 @@ class ResponsesResponse:
     model: str
     usage: dict | None = None
     tool_calls: list[ResponsesToolCall] | None = None
+    # Reasoning summary text aggregated from /responses' "reasoning" output items.
+    thinking: str | None = None
+    thinking_signature: str | None = None
+    # Upstream completion status mapped to chat-style finish reason
+    # ("stop" | "length" | "content_filter" | "tool_calls"). None means
+    # the bridge should pick a default based on tool_calls presence.
+    finish_reason: str | None = None
 
 
 @dataclass
@@ -180,6 +193,10 @@ class ResponsesStreamChunk:
     usage: dict | None = None
     # Tool call support
     tool_call: ResponsesToolCall | None = None  # A complete tool call
+    # Incremental reasoning summary text delta (from
+    # ``response.reasoning_summary_text.delta`` events).
+    thinking: str | None = None
+    thinking_signature: str | None = None
 
 
 class ProviderError(Exception):
