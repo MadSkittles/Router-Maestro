@@ -207,9 +207,7 @@ class TestRequestHasNonTextContent:
     def test_audio_block_detected(self):
         req = ChatRequest(
             model="m",
-            messages=[
-                Message(role="user", content=[{"type": "input_audio", "input_audio": {}}])
-            ],
+            messages=[Message(role="user", content=[{"type": "input_audio", "input_audio": {}}])],
         )
         assert request_has_non_text_content(req) is True
 
@@ -575,9 +573,7 @@ class TestCopilotResponsesFailureRaises:
             patch.object(provider, "_get_client", return_value=mock_client),
         ):
             with pytest.raises(ProviderError) as exc:
-                await provider.responses_completion(
-                    ResponsesRequest(model="gpt-5.4", input="hi")
-                )
+                await provider.responses_completion(ResponsesRequest(model="gpt-5.4", input="hi"))
             assert status in str(exc.value)
             assert "upstream" in str(exc.value)
 
@@ -612,9 +608,7 @@ class TestCopilotResponsesFailureRaises:
             patch.object(provider, "_get_headers", return_value={}),
             patch.object(provider, "_get_client", return_value=mock_client),
         ):
-            out = await provider.responses_completion(
-                ResponsesRequest(model="gpt-5.4", input="hi")
-            )
+            out = await provider.responses_completion(ResponsesRequest(model="gpt-5.4", input="hi"))
         assert out.content == "ok"
         assert out.finish_reason == "stop"
 

@@ -1012,9 +1012,7 @@ class CopilotProvider(BaseProvider):
                         if not stream_finished:
                             yield ResponsesStreamChunk(
                                 content="",
-                                finish_reason=(
-                                    "tool_calls" if emitted_tool_call else "stop"
-                                ),
+                                finish_reason=("tool_calls" if emitted_tool_call else "stop"),
                                 usage=final_usage,
                             )
                             stream_finished = True
@@ -1042,9 +1040,7 @@ class CopilotProvider(BaseProvider):
                     elif event_type == "response.reasoning_summary_text.done":
                         item_id = data.get("item_id")
                         if item_id:
-                            yield ResponsesStreamChunk(
-                                content="", thinking_signature=item_id
-                            )
+                            yield ResponsesStreamChunk(content="", thinking_signature=item_id)
 
                     # Handle function call output_item.added - start of a new function call
                     elif event_type == "response.output_item.added":
@@ -1118,8 +1114,7 @@ class CopilotProvider(BaseProvider):
                             )
                         incomplete = resp.get("incomplete_details") or {}
                         finish = (
-                            map_responses_status_to_chat(status, incomplete.get("reason"))
-                            or "stop"
+                            map_responses_status_to_chat(status, incomplete.get("reason")) or "stop"
                         )
                         if emitted_tool_call and finish == "stop":
                             finish = "tool_calls"
@@ -1150,8 +1145,7 @@ class CopilotProvider(BaseProvider):
                             )
                         incomplete = resp.get("incomplete_details") or {}
                         finish = (
-                            map_responses_status_to_chat(status, incomplete.get("reason"))
-                            or "stop"
+                            map_responses_status_to_chat(status, incomplete.get("reason")) or "stop"
                         )
                         if emitted_tool_call and finish == "stop":
                             finish = "tool_calls"

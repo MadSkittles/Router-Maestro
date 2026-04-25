@@ -182,9 +182,7 @@ def _chat_tool_choice_to_responses(tool_choice: str | dict | None) -> str | dict
     if isinstance(tool_choice, str):
         return tool_choice
     if isinstance(tool_choice, dict):
-        if tool_choice.get("type") == "function" and isinstance(
-            tool_choice.get("function"), dict
-        ):
+        if tool_choice.get("type") == "function" and isinstance(tool_choice.get("function"), dict):
             return {"type": "function", "name": tool_choice["function"].get("name", "")}
         return tool_choice
     return None
