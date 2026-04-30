@@ -191,6 +191,9 @@ class TestFindReasoningVariantModel:
             "anthropic/claude-opus-4.7": ("anthropic", anthropic._models[0]),
         }
         r._models_cache_ttl.set(True)
+        # Without this, _ensure_providers_fresh() reloads providers from disk
+        # and clears the mock models cache (CI Python 3.11/3.12 hit this).
+        r._providers_ttl.set(True)
         return r
 
     @pytest.mark.asyncio
