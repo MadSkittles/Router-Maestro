@@ -50,6 +50,13 @@ router = APIRouter()
 
 TEST_RESPONSE_TEXT = "This is a test response from Router-Maestro."
 
+# Real Anthropic protocol ping event used as the SSE keepalive frame for
+# this route. SSE comments (the shared default) don't reset Claude Code's
+# "time since last protocol event" timer, which fires at ~15s and cancels
+# the stream while a slow upstream (e.g. claude-opus-4.7-1m) is still
+# producing its first content token.
+ANTHROPIC_PING_FRAME = f"event: ping\ndata: {json.dumps({'type': 'ping'})}\n\n"
+
 
 async def _resolve_provider_name(model: str) -> str | None:
     """Resolve which provider will handle a model.
@@ -197,7 +204,10 @@ async def messages(request: AnthropicMessagesRequest, raw_request: FastAPIReques
     # Handle test model
     if request.model == "test":
         if request.stream:
-            return sse_streaming_response(_stream_test_response())
+            return sse_streaming_response(
+                _stream_test_response(),
+                keepalive_frame=ANTHROPIC_PING_FRAME,
+            )
         return _create_test_response()
 
     model_router = get_router()
@@ -267,6 +277,7 @@ async def messages(request: AnthropicMessagesRequest, raw_request: FastAPIReques
         estimated_tokens = _estimate_input_tokens(request, provider_name)
         return sse_streaming_response(
             stream_response(model_router, chat_request, request.model, estimated_tokens),
+            keepalive_frame=ANTHROPIC_PING_FRAME,
         )
 
     try:

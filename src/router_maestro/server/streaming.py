@@ -11,6 +11,8 @@ logger = get_logger("server.streaming")
 
 SSE_KEEPALIVE_INTERVAL = 5.0  # seconds
 
+SSE_KEEPALIVE_COMMENT = ": keepalive\n\n"
+
 SSE_HEADERS = {
     "Cache-Control": "no-cache",
     "Connection": "keep-alive",
@@ -20,14 +22,20 @@ SSE_HEADERS = {
 
 async def resilient_sse_generator(
     inner: AsyncGenerator[str, None],
+    keepalive_frame: str = SSE_KEEPALIVE_COMMENT,
 ) -> AsyncGenerator[str, None]:
-    """Wrap an SSE generator with keepalive comments and error handling.
+    """Wrap an SSE generator with keepalive frames and error handling.
 
-    Emits ``: keepalive\\n\\n`` every ``SSE_KEEPALIVE_INTERVAL`` seconds when
-    no data is produced by the inner generator.  SSE comments are ignored by
-    compliant clients but keep bytes flowing on the wire, preventing
-    intermediary proxies and client-side socket timeouts from killing the
-    connection.
+    Emits ``keepalive_frame`` every ``SSE_KEEPALIVE_INTERVAL`` seconds when
+    no data is produced by the inner generator.  Defaults to a SSE comment
+    (``: keepalive\\n\\n``), which is ignored by compliant clients but keeps
+    bytes flowing on the wire to prevent intermediary proxies and client
+    socket timeouts from killing the connection.
+
+    Routes whose clients track a "time since last *protocol* event" timer
+    (notably Claude Code, which times out at ~15s of comment-only traffic
+    on the Anthropic Messages stream) should pass a real protocol event
+    frame here instead — e.g. ``event: ping\\ndata: {"type":"ping"}\\n\\n``.
 
     Exception handling:
     - ``asyncio.CancelledError`` — logged as client disconnect, re-raised
@@ -57,7 +65,7 @@ async def resilient_sse_generator(
                 yield value
             else:
                 # Timeout — no data within the keepalive interval
-                yield ": keepalive\n\n"
+                yield keepalive_frame
 
     except asyncio.CancelledError:
         logger.info("Client disconnected (stream cancelled)")
@@ -78,14 +86,19 @@ async def resilient_sse_generator(
 
 def sse_streaming_response(
     generator: AsyncGenerator[str, None],
+    keepalive_frame: str = SSE_KEEPALIVE_COMMENT,
 ) -> StreamingResponse:
     """Create a ``StreamingResponse`` with SSE headers and keepalive wrapper.
 
     This is the single entry-point that all streaming endpoints should use
     instead of constructing ``StreamingResponse`` directly.
+
+    ``keepalive_frame`` overrides the default SSE comment with a route-
+    specific protocol event when the client requires one (see
+    ``resilient_sse_generator`` for context).
     """
     return StreamingResponse(
-        resilient_sse_generator(generator),
+        resilient_sse_generator(generator, keepalive_frame=keepalive_frame),
         media_type="text/event-stream",
         headers=SSE_HEADERS,
     )
