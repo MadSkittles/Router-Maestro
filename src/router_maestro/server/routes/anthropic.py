@@ -25,6 +25,7 @@ from router_maestro.server.schemas.anthropic import (
 )
 from router_maestro.server.streaming import sse_streaming_response
 from router_maestro.server.translation import (
+    build_message_start_event,
     translate_anthropic_to_openai,
     translate_openai_chunk_to_anthropic_events,
 )
@@ -426,11 +427,22 @@ async def stream_response(
     estimated_input_tokens: int = 0,
 ) -> AsyncGenerator[str, None]:
     """Stream Anthropic Messages API response."""
+    response_id = f"msg_{uuid.uuid4().hex[:24]}"
+    state = AnthropicStreamState(estimated_input_tokens=estimated_input_tokens)
+
+    # Emit message_start (and a ping) BEFORE awaiting the upstream stream so
+    # the client receives bytes within milliseconds. Large-context requests
+    # (e.g. claude-opus-4.7-1m) can take 8+ seconds to produce their first
+    # token, which exceeds Claude Code's first-byte timeout and causes the
+    # client to cancel before any data arrives. Sending message_start eagerly
+    # resets that timer with a valid Anthropic protocol event.
+    start_event = build_message_start_event(state, original_model, response_id=response_id)
+    if start_event is not None:
+        yield f"event: {start_event['type']}\ndata: {json.dumps(start_event)}\n\n"
+    yield f"event: ping\ndata: {json.dumps({'type': 'ping'})}\n\n"
+
     try:
         stream, provider_name = await model_router.chat_completion_stream(request)
-        response_id = f"msg_{uuid.uuid4().hex[:24]}"
-
-        state = AnthropicStreamState(estimated_input_tokens=estimated_input_tokens)
 
         async for chunk in stream:
             # Build OpenAI-style chunk for translation. Forward reasoning
