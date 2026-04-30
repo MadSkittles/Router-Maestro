@@ -147,3 +147,88 @@ class TestRouterCacheInvalidation:
 
         assert router._priorities_cache.get() is None
         assert not router._priorities_cache.is_valid
+
+
+class TestFindReasoningVariantModel:
+    """Provider-scoping behavior of Router.find_reasoning_variant_model.
+
+    Regression coverage for the HIGH bug where a bare-key variant lookup could
+    cross providers — e.g. ``anthropic/claude-opus-4.7`` requests being silently
+    rewritten to a ``github-copilot/claude-opus-4.7-high`` cache entry.
+    """
+
+    @pytest.fixture
+    def router(self):
+        """Router with two providers serving overlapping models."""
+        copilot = MockProvider(
+            name="github-copilot",
+            models=[
+                ModelInfo(id="claude-opus-4.7", name="Opus 4.7", provider="github-copilot"),
+                ModelInfo(
+                    id="claude-opus-4.7-high", name="Opus 4.7 High", provider="github-copilot"
+                ),
+                ModelInfo(
+                    id="claude-opus-4.7-xhigh", name="Opus 4.7 xHigh", provider="github-copilot"
+                ),
+            ],
+        )
+        anthropic = MockProvider(
+            name="anthropic",
+            models=[
+                ModelInfo(id="claude-opus-4.7", name="Opus 4.7", provider="anthropic"),
+            ],
+        )
+        r = Router.__new__(Router)
+        r.providers = {"github-copilot": copilot, "anthropic": anthropic}
+        _init_router_caches(r)
+        # Match the real cache shape: bare key (first registered wins) +
+        # provider-prefixed keys for both providers.
+        r._models_cache = {
+            "claude-opus-4.7": ("github-copilot", copilot._models[0]),
+            "github-copilot/claude-opus-4.7": ("github-copilot", copilot._models[0]),
+            "github-copilot/claude-opus-4.7-high": ("github-copilot", copilot._models[1]),
+            "github-copilot/claude-opus-4.7-xhigh": ("github-copilot", copilot._models[2]),
+            "anthropic/claude-opus-4.7": ("anthropic", anthropic._models[0]),
+        }
+        r._models_cache_ttl.set(True)
+        # Without this, _ensure_providers_fresh() reloads providers from disk
+        # and clears the mock models cache (CI Python 3.11/3.12 hit this).
+        r._providers_ttl.set(True)
+        return r
+
+    @pytest.mark.asyncio
+    async def test_bare_request_finds_high_variant(self, router):
+        """Bare request with high effort routes to the -high variant."""
+        result = await router.find_reasoning_variant_model("claude-opus-4.7", "high")
+        # Provider gets resolved internally, so the result is provider-qualified.
+        assert result == "github-copilot/claude-opus-4.7-high"
+
+    @pytest.mark.asyncio
+    async def test_anthropic_prefix_does_not_cross_to_copilot(self, router):
+        """An anthropic-scoped request must not borrow Copilot's variant."""
+        result = await router.find_reasoning_variant_model("anthropic/claude-opus-4.7", "high")
+        # Anthropic doesn't have a -high variant; must return None rather than
+        # silently jumping providers.
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_copilot_prefix_finds_xhigh(self, router):
+        result = await router.find_reasoning_variant_model(
+            "github-copilot/claude-opus-4.7", "xhigh"
+        )
+        assert result == "github-copilot/claude-opus-4.7-xhigh"
+
+    @pytest.mark.asyncio
+    async def test_non_high_effort_returns_none(self, router):
+        """low/medium are handled by reasoning_effort passthrough, not variants."""
+        assert await router.find_reasoning_variant_model("claude-opus-4.7", "medium") is None
+        assert await router.find_reasoning_variant_model("claude-opus-4.7", "low") is None
+        assert await router.find_reasoning_variant_model("claude-opus-4.7", None) is None
+
+    @pytest.mark.asyncio
+    async def test_already_effort_encoded_returns_none(self, router):
+        """Don't re-route a request that already targets a variant."""
+        result = await router.find_reasoning_variant_model(
+            "github-copilot/claude-opus-4.7-high", "high"
+        )
+        assert result is None

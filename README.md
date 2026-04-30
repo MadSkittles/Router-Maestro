@@ -13,7 +13,8 @@ Router-Maestro acts as a proxy that gives you access to models from multiple pro
 
 ## Features
 
-- **1M context support**: Activate Opus 4.6 with 1M context window via GitHub Copilot — just select `claude-opus-4-6[1m]` during `config claude-code` setup
+- **1M context support**: Activate Opus 4.6 *or* Opus 4.7 with a 1M context window via GitHub Copilot — just select `claude-opus-4-6[1m]` or `claude-opus-4-7[1m]` during `config claude-code` setup. Claude Code's `[1m]` beta header is auto-mapped to the right Copilot variant (`claude-opus-4.6-1m` / `claude-opus-4.7-1m-internal`).
+- **Transparent reasoning-tier routing**: Requests for `claude-opus-4.7` with `reasoning_effort: "high"` or `"xhigh"` (or an Anthropic-style `thinking.budget_tokens` ≥ 8192) are auto-rewritten to the dedicated Copilot variants `claude-opus-4.7-high` / `claude-opus-4.7-xhigh` — no client changes needed.
 - **Fuzzy model matching**: No need to type exact model IDs. Subagents, agent teams, and tools that hardcode model names (e.g. `opus-4-6`, `claude-sonnet-4.5`) are resolved automatically to the correct provider model
 - **Multi-provider support**: GitHub Copilot (OAuth), OpenAI, Anthropic, and custom OpenAI-compatible endpoints
 - **Intelligent routing**: Priority-based model selection with automatic fallback on failure

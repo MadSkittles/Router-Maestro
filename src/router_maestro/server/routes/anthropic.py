@@ -232,8 +232,13 @@ async def messages(request: AnthropicMessagesRequest, raw_request: FastAPIReques
             extra=chat_request.extra,
         )
 
-    # Resolve thinking budget from server config if needed
+    # Resolve thinking budget from server config FIRST so that the
+    # reasoning-variant rewrite below sees the effective budget (otherwise a
+    # config-only thinking budget would never trigger a -high/-xhigh route).
     chat_request = await _apply_thinking_budget(model_router, chat_request, effective_model)
+
+    chat_request = await model_router.rewrite_to_reasoning_variant(chat_request)
+    effective_model = chat_request.model
 
     # Experimental: opt this request into Copilot's /responses endpoint when
     # the flag is on. The Copilot provider gates on the resolved provider +

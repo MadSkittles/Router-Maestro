@@ -116,10 +116,13 @@ def find_extended_context_variant(
     model_id: str,
     models_cache: dict[str, tuple[str, ModelInfo]],
 ) -> str | None:
-    """Find the extended-context (1m) variant of a model in the cache.
+    """Find the extended-context variant of a model in the cache.
 
-    Given a base model ID like ``claude-opus-4-6`` or ``claude-opus-4-6-20250617``,
-    search the cache for a matching ``-1m`` suffixed model (e.g. ``claude-opus-4.6-1m``).
+    Given a base model ID like ``claude-opus-4-6`` or ``claude-opus-4-7``,
+    search the cache for a matching ``-1m`` suffixed model (e.g.
+    ``claude-opus-4.6-1m``) or a ``-1m-internal`` suffixed model (e.g.
+    ``claude-opus-4.7-1m-internal``). The plain ``-1m`` variant is preferred
+    when both are present.
 
     The lookup normalizes both query and cache keys so that dot/hyphen differences
     (``4.6`` vs ``4-6``) are handled transparently.
@@ -129,7 +132,7 @@ def find_extended_context_variant(
         models_cache: Router's model cache mapping cache_key -> (provider_name, ModelInfo).
 
     Returns:
-        The original cache key of the 1m variant, or None if not found.
+        The original cache key of the variant, or None if not found.
     """
     if not models_cache:
         return None
@@ -141,10 +144,73 @@ def find_extended_context_variant(
         provider_filter, bare_query = model_id.split("/", 1)
 
     normalized_query = normalize_model_id(bare_query)
-    # Target: normalized base + "-1m"
-    target = f"{normalized_query}-1m"
+    # Target candidates, in preference order. Plain "-1m" wins when both exist
+    # (keeps the 4.6 behavior); "-1m-internal" is the fallback for opus-4.7.
+    targets = (f"{normalized_query}-1m", f"{normalized_query}-1m-internal")
+    matches: dict[str, str] = {}
 
-    for cache_key, (provider_name, _model_info) in models_cache.items():
+    for cache_key, (_provider_name, _model_info) in models_cache.items():
+        has_slash = "/" in cache_key
+        if provider_filter is not None:
+            if not has_slash:
+                continue
+            key_provider, bare_key = cache_key.split("/", 1)
+            if key_provider != provider_filter:
+                continue
+        else:
+            if has_slash:
+                continue
+            bare_key = cache_key
+
+        normalized_key = normalize_model_id(bare_key)
+        if normalized_key in targets and normalized_key not in matches:
+            matches[normalized_key] = cache_key
+
+    for target in targets:
+        if target in matches:
+            return matches[target]
+    return None
+
+
+_REASONING_SUFFIXES: tuple[str, ...] = ("-low", "-medium", "-high", "-xhigh")
+
+
+def find_reasoning_variant(
+    model_id: str,
+    effort: str,
+    models_cache: dict[str, tuple[str, ModelInfo]],
+) -> str | None:
+    """Find a ``<model>-<effort>`` variant in the cache.
+
+    For example, given ``claude-opus-4-7`` and ``effort="high"``, returns the
+    cache key of ``claude-opus-4.7-high`` if present. Returns ``None`` when
+    ``model_id`` already encodes a reasoning suffix or when no matching variant
+    exists.
+
+    Args:
+        model_id: The base model ID from the request (may include provider prefix).
+        effort: Reasoning effort tier (``"high"`` or ``"xhigh"``).
+        models_cache: Router's model cache mapping cache_key -> (provider_name, ModelInfo).
+
+    Returns:
+        The original cache key of the variant, or None if not found.
+    """
+    if not models_cache:
+        return None
+
+    provider_filter: str | None = None
+    bare_query = model_id
+    if "/" in model_id:
+        provider_filter, bare_query = model_id.split("/", 1)
+
+    normalized_query = normalize_model_id(bare_query)
+    # If the request already targets an effort-encoded variant, leave it alone.
+    if any(normalized_query.endswith(suffix) for suffix in _REASONING_SUFFIXES):
+        return None
+
+    target = f"{normalized_query}-{effort}"
+
+    for cache_key, (_provider_name, _model_info) in models_cache.items():
         has_slash = "/" in cache_key
         if provider_filter is not None:
             if not has_slash:
