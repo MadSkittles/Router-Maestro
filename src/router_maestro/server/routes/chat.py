@@ -81,6 +81,8 @@ async def chat_completions(request: ChatCompletionRequest):
         if isinstance(t_budget, int):
             chat_request.thinking_budget = t_budget
 
+    chat_request = await model_router.rewrite_to_reasoning_variant(chat_request)
+
     if request.stream:
         return sse_streaming_response(stream_response(model_router, chat_request))
 

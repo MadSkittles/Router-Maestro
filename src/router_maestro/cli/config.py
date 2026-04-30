@@ -36,11 +36,29 @@ CLI_TOOLS = {
     },
 }
 
-# Claude Code native model ID for the 1M context variant of Opus 4.6.
+# Claude Code native model IDs for 1M context variants.
 # When set as ANTHROPIC_MODEL, Claude Code sends the `anthropic-beta: context-1m-*`
 # header, which the router resolves to the actual provider model.
 _OPUS_1M_NATIVE_KEY = "claude-opus-4-6[1m]"
 _OPUS_1M_SOURCE_MODEL = "github-copilot/claude-opus-4.6-1m"
+_OPUS_47_1M_NATIVE_KEY = "claude-opus-4-7[1m]"
+_OPUS_47_1M_SOURCE_MODEL = "github-copilot/claude-opus-4.7-1m-internal"
+
+_INJECTABLE_1M_VARIANTS: tuple[tuple[str, str, str, str], ...] = (
+    # (source_model, native_key, bare_id, display_name)
+    (
+        _OPUS_1M_SOURCE_MODEL,
+        _OPUS_1M_NATIVE_KEY,
+        "claude-opus-4.6-1m",
+        "Opus 4.6 1M (Auto-activated)",
+    ),
+    (
+        _OPUS_47_1M_SOURCE_MODEL,
+        _OPUS_47_1M_NATIVE_KEY,
+        "claude-opus-4.7-1m-internal",
+        "Opus 4.7 1M Internal (Auto-activated)",
+    ),
+)
 
 
 def get_claude_code_paths() -> dict[str, Path]:
@@ -124,22 +142,26 @@ def _fetch_and_display_models() -> list[dict]:
 
 
 def _maybe_inject_opus_1m(models: list[dict]) -> list[dict]:
-    """Prepend a Claude Code-native 1M context option if the source model exists.
+    """Prepend Claude Code-native 1M context options for any source models present.
 
     Returns a new list (never mutates the input).
     """
-    if any(f"{m['provider']}/{m['id']}" == _OPUS_1M_SOURCE_MODEL for m in models):
-        return [
-            {
-                "provider": "github-copilot",
-                "id": "claude-opus-4.6-1m",
-                "name": "Opus 4.6 1M (Auto-activated)",
-                "display_key": _OPUS_1M_NATIVE_KEY,
-                "custom_key": _OPUS_1M_NATIVE_KEY,
-            },
-            *models,
-        ]
-    return models
+    available_keys = {f"{m['provider']}/{m['id']}" for m in models}
+    injected: list[dict] = []
+    for source_model, native_key, bare_id, display_name in _INJECTABLE_1M_VARIANTS:
+        if source_model in available_keys:
+            injected.append(
+                {
+                    "provider": "github-copilot",
+                    "id": bare_id,
+                    "name": display_name,
+                    "display_key": native_key,
+                    "custom_key": native_key,
+                }
+            )
+    if not injected:
+        return models
+    return [*injected, *models]
 
 
 def _select_model(models: list[dict], prompt: str, default: str = "0") -> str:

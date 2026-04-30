@@ -7,6 +7,7 @@ import pytest
 from router_maestro.providers.base import ModelInfo
 from router_maestro.utils.model_match import (
     find_extended_context_variant,
+    find_reasoning_variant,
     fuzzy_match_model,
     normalize_model_id,
 )
@@ -271,3 +272,89 @@ class TestFindExtendedContextVariant:
         )
         result = find_extended_context_variant("claude-sonnet-4-5", cache)
         assert result == "claude-sonnet-4.5-1m"
+
+    def test_finds_1m_internal_variant(self):
+        """Base model claude-opus-4-7 finds claude-opus-4.7-1m-internal in cache."""
+        cache = _make_cache(
+            [
+                ("claude-opus-4.7", "github-copilot", "Claude Opus 4.7"),
+                (
+                    "claude-opus-4.7-1m-internal",
+                    "github-copilot",
+                    "Claude Opus 4.7 1M (Internal)",
+                ),
+            ]
+        )
+        result = find_extended_context_variant("claude-opus-4-7", cache)
+        assert result == "claude-opus-4.7-1m-internal"
+
+    def test_prefers_plain_1m_over_internal(self):
+        """When both -1m and -1m-internal exist, the plain -1m wins."""
+        cache = _make_cache(
+            [
+                ("claude-opus-4.7-1m", "github-copilot", "Claude Opus 4.7 1M"),
+                (
+                    "claude-opus-4.7-1m-internal",
+                    "github-copilot",
+                    "Claude Opus 4.7 1M (Internal)",
+                ),
+            ]
+        )
+        result = find_extended_context_variant("claude-opus-4-7", cache)
+        assert result == "claude-opus-4.7-1m"
+
+
+# ── find_reasoning_variant ─────────────────────────────────────────────
+
+
+class TestFindReasoningVariant:
+    def test_finds_high_variant(self):
+        """Base model claude-opus-4-7 with effort=high finds the -high variant."""
+        cache = _make_cache(
+            [
+                ("claude-opus-4.7", "github-copilot", "Claude Opus 4.7"),
+                ("claude-opus-4.7-high", "github-copilot", "Claude Opus 4.7 High"),
+                ("claude-opus-4.7-xhigh", "github-copilot", "Claude Opus 4.7 xHigh"),
+            ]
+        )
+        result = find_reasoning_variant("claude-opus-4-7", "high", cache)
+        assert result == "claude-opus-4.7-high"
+
+    def test_finds_xhigh_variant(self):
+        cache = _make_cache(
+            [
+                ("claude-opus-4.7", "github-copilot", "Claude Opus 4.7"),
+                ("claude-opus-4.7-xhigh", "github-copilot", "Claude Opus 4.7 xHigh"),
+            ]
+        )
+        result = find_reasoning_variant("claude-opus-4-7", "xhigh", cache)
+        assert result == "claude-opus-4.7-xhigh"
+
+    def test_returns_none_when_variant_missing(self):
+        cache = _make_cache(
+            [
+                ("claude-opus-4.7", "github-copilot", "Claude Opus 4.7"),
+            ]
+        )
+        assert find_reasoning_variant("claude-opus-4-7", "high", cache) is None
+
+    def test_skips_when_already_effort_encoded(self):
+        """A request that already targets -high should not re-route to itself."""
+        cache = _make_cache(
+            [
+                ("claude-opus-4.7-high", "github-copilot", "Claude Opus 4.7 High"),
+            ]
+        )
+        assert find_reasoning_variant("claude-opus-4-7-high", "high", cache) is None
+
+    def test_provider_prefix_filters(self):
+        cache = _make_cache(
+            [
+                ("claude-opus-4.7-high", "github-copilot", "Claude Opus 4.7 High"),
+            ]
+        )
+        result = find_reasoning_variant("github-copilot/claude-opus-4-7", "high", cache)
+        assert result == "github-copilot/claude-opus-4.7-high"
+
+    def test_empty_cache(self):
+        assert find_reasoning_variant("claude-opus-4-7", "high", {}) is None

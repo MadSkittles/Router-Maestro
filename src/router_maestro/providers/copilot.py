@@ -41,7 +41,13 @@ def _claude_supports_reasoning(bare_lower: str) -> bool:
     Per the Copilot model picker (vscode-copilot-chat), the 4.6+ generations
     accept ``reasoning_effort``. Older models (sonnet-4, sonnet-4.5,
     opus-4.5, haiku-4.5) have no reasoning control surface.
+
+    The opus-4.7 ``-high`` / ``-xhigh`` / ``-1m-internal`` variants encode the
+    reasoning tier (or lack thereof) in the model name itself, so they should
+    not receive a separate ``reasoning_effort`` field.
     """
+    if bare_lower.endswith(("-high", "-xhigh", "-1m-internal")):
+        return False
     return (
         bare_lower.startswith("claude-opus-4.7")
         or bare_lower.startswith("claude-opus-4.6")

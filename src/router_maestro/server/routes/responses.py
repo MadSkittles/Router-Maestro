@@ -244,6 +244,8 @@ async def create_response(request: ResponsesRequest):
         if effort and effort in VALID_EFFORTS:
             internal_request.reasoning_effort = effort
 
+    internal_request = await model_router.rewrite_to_reasoning_variant(internal_request)
+
     if request.stream:
         return sse_streaming_response(
             stream_response(model_router, internal_request, request_id, start_time),

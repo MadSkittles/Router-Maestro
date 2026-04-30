@@ -58,6 +58,30 @@ def test_claude_old_models_send_no_reasoning_field():
         assert "reasoning_effort" not in p, model
 
 
+def test_claude_47_variants_send_no_reasoning_field():
+    """The -high / -xhigh / -1m-internal variants encode the tier in their
+    name; the provider must not also inject reasoning_effort.
+    """
+    for model in (
+        "claude-opus-4.7-high",
+        "claude-opus-4.7-xhigh",
+        "claude-opus-4.7-1m-internal",
+    ):
+        p = _base_payload()
+        apply_copilot_chat_reasoning(p, model, 16000, "high")
+        assert "reasoning_effort" not in p, model
+        assert "thinking_budget" not in p, model
+
+
+def test_claude_47_dated_alias_still_supports_reasoning():
+    """A future dated alias like claude-opus-4.7-20260101 must keep reasoning
+    support — it is *not* one of the tier-encoded variants."""
+    p = _base_payload()
+    apply_copilot_chat_reasoning(p, "claude-opus-4.7-20260101", 16000, "high")
+    # Subject to the existing 4.7 medium clamp, but reasoning_effort still set.
+    assert p.get("reasoning_effort") == "medium"
+
+
 def test_claude_with_provider_prefix():
     p = _base_payload()
     apply_copilot_chat_reasoning(p, "github-copilot/claude-sonnet-4.6", 8192, "high")
