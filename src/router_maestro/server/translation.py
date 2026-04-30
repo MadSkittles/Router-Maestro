@@ -489,6 +489,47 @@ def translate_openai_to_anthropic(
     )
 
 
+def build_message_start_event(
+    state: AnthropicStreamState, model: str, response_id: str = ""
+) -> dict | None:
+    """Build an Anthropic ``message_start`` event and mark state as sent.
+
+    Returns ``None`` when ``message_start`` has already been emitted, allowing
+    callers to safely call this in multiple places (e.g. eagerly at stream
+    open AND from the chunk translator) without double-sending.
+    """
+    if state.message_start_sent:
+        return None
+
+    input_tokens = 0
+    if state.last_usage:
+        input_tokens = state.last_usage.get("prompt_tokens", 0)
+    elif state.estimated_input_tokens:
+        input_tokens = state.estimated_input_tokens
+
+    state.message_start_sent = True
+    return {
+        "type": "message_start",
+        "message": {
+            "id": response_id,
+            "type": "message",
+            "role": "assistant",
+            "content": [],
+            "model": model,
+            "stop_reason": None,
+            "stop_sequence": None,
+            "usage": {
+                "input_tokens": input_tokens,
+                "output_tokens": 1,
+                "cache_creation_input_tokens": None,
+                "cache_read_input_tokens": None,
+                "server_tool_use": None,
+                "service_tier": "standard",
+            },
+        },
+    }
+
+
 def translate_openai_chunk_to_anthropic_events(
     chunk: dict, state: AnthropicStreamState, model: str
 ) -> list[dict]:
@@ -521,37 +562,9 @@ def translate_openai_chunk_to_anthropic_events(
     delta = choice.get("delta", {})
 
     # Send message_start if not sent yet
-    if not state.message_start_sent:
-        # Determine input tokens: prefer actual usage, fall back to estimate
-        input_tokens = 0
-        if state.last_usage:
-            input_tokens = state.last_usage.get("prompt_tokens", 0)
-        elif state.estimated_input_tokens:
-            input_tokens = state.estimated_input_tokens
-
-        events.append(
-            {
-                "type": "message_start",
-                "message": {
-                    "id": chunk.get("id", ""),
-                    "type": "message",
-                    "role": "assistant",
-                    "content": [],
-                    "model": model,
-                    "stop_reason": None,
-                    "stop_sequence": None,
-                    "usage": {
-                        "input_tokens": input_tokens,
-                        "output_tokens": 1,
-                        "cache_creation_input_tokens": None,
-                        "cache_read_input_tokens": None,
-                        "server_tool_use": None,
-                        "service_tier": "standard",
-                    },
-                },
-            }
-        )
-        state.message_start_sent = True
+    start_event = build_message_start_event(state, model, response_id=chunk.get("id", ""))
+    if start_event is not None:
+        events.append(start_event)
 
     # Handle reasoning / thinking deltas. Copilot streams reasoning under
     # several legacy field names (reasoning_text / cot_summary / thinking).

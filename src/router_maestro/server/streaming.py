@@ -9,7 +9,7 @@ from router_maestro.utils import get_logger
 
 logger = get_logger("server.streaming")
 
-SSE_KEEPALIVE_INTERVAL = 15.0  # seconds
+SSE_KEEPALIVE_INTERVAL = 5.0  # seconds
 
 SSE_HEADERS = {
     "Cache-Control": "no-cache",
