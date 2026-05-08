@@ -4,6 +4,14 @@ All notable changes to Router-Maestro are documented here.
 
 ---
 
+## v0.3.3 (2026-05-08)
+
+### Fixes
+
+- **Streaming 4xx errors now carry the upstream response body.** When a Copilot or OpenAI-compatible upstream returned a 4xx during a streaming chat, `response.raise_for_status()` fired before the body was iterated. Reading `response.text` on a streamed-but-unread response raises `httpx.ResponseNotRead`, which the shared error helper silently swallowed — so logs and SSE `error` events showed `Copilot stream API error: 400 -` with no detail. The body is now pulled inside the `async with client.stream(...)` block, so both the log and the client's SSE error event include the actual upstream payload (e.g. `{"error":{"message":"Could not process image"}}`). Affects `chat_completion_stream` on `CopilotProvider` and the shared `OpenAIChatProvider` streaming path.
+
+---
+
 ## v0.1.37 (2026-04-24)
 
 ### Fixes
