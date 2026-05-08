@@ -1,5 +1,6 @@
 """GitHub Copilot provider implementation."""
 
+import contextlib
 import json
 import time
 from collections.abc import AsyncIterator
@@ -612,6 +613,15 @@ class CopilotProvider(BaseProvider):
                 json=payload,
                 headers=self._get_headers(vision_request=has_images),
             ) as response:
+                # Streamed responses defer body reads; if the upstream returns
+                # an error status, pull the body *inside* the stream context
+                # so the connection is still open. Reading after the
+                # `async with` exits raises StreamClosed and the helper would
+                # log "Copilot stream API error: 4xx -" with no upstream
+                # detail (the original symptom this fix addresses).
+                if response.status_code >= 400:
+                    with contextlib.suppress(Exception):
+                        await response.aread()
                 response.raise_for_status()
 
                 stream_finished = False

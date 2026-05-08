@@ -1,5 +1,6 @@
 """Shared OpenAI-compatible chat provider logic."""
 
+import contextlib
 import json
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator
@@ -128,6 +129,15 @@ class OpenAIChatProvider(BaseProvider, ABC):
                     headers=self._get_headers(),
                     timeout=TIMEOUT_STREAMING,
                 ) as response:
+                    # Streamed responses defer body reads; if the upstream
+                    # returns an error status, pull the body *inside* the
+                    # stream context so the connection is still open. After
+                    # the `async with` exits the response is closed and
+                    # `aread()` would raise StreamClosed, leaving the log as
+                    # "API error: 4xx -" with no upstream detail.
+                    if response.status_code >= 400:
+                        with contextlib.suppress(Exception):
+                            await response.aread()
                     response.raise_for_status()
 
                     async for line in response.aiter_lines():
@@ -155,7 +165,9 @@ class OpenAIChatProvider(BaseProvider, ABC):
                                     tool_calls=tool_calls,
                                 )
             except httpx.HTTPStatusError as e:
-                self._raise_http_status_error(label, e, self._logger, stream=True)
+                self._raise_http_status_error(
+                    label, e, self._logger, stream=True, include_body=True
+                )
             except httpx.TimeoutException as e:
                 self._raise_timeout_error(label, e, self._logger, stream=True)
             except httpx.HTTPError as e:
