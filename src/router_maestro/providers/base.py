@@ -285,6 +285,13 @@ class BaseProvider(ABC):
         if include_body:
             try:
                 error_body = error.response.text
+            except httpx.ResponseNotRead:
+                # Streamed responses must be read before .text is available.
+                # Callers should `await response.aread()` first; if they
+                # didn't, surface that explicitly so the log isn't blank.
+                error_body = (
+                    "<response body not read; pre-read with aread() in the streaming handler>"
+                )
             except Exception:
                 error_body = ""
             logger.error(
