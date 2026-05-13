@@ -1164,24 +1164,18 @@ class CopilotProvider(BaseProvider):
                         if fc and delta:
                             fc["arguments"] += delta
 
-                    # Handle function call arguments done
+                    # Handle function call arguments done — finalize arguments
+                    # but DON'T emit yet. Copilot CAPI sends the ``namespace``
+                    # field (required for MCP-namespaced tools like
+                    # ``kusto/execute_query``) on the *later* ``output_item.done``
+                    # event, not on this one. Emitting here loses namespace and
+                    # the next turn 400s with ``Missing namespace for
+                    # function_call 'X'``. Defer to output_item.done.
                     elif event_type == "response.function_call_arguments.done":
                         output_idx = data.get("output_index", 0)
-                        fc = pending_fcs.pop(output_idx, None)
+                        fc = pending_fcs.get(output_idx)
                         if fc:
                             fc["arguments"] = data.get("arguments", fc["arguments"])
-                            # Emit complete tool call
-                            emitted_tool_call = True
-                            yield ResponsesStreamChunk(
-                                content="",
-                                tool_call=ResponsesToolCall(
-                                    call_id=fc["call_id"],
-                                    name=fc["name"],
-                                    arguments=fc["arguments"],
-                                    kind=fc.get("kind", "function"),
-                                    namespace=fc.get("namespace"),
-                                ),
-                            )
 
                     elif event_type == "response.custom_tool_call_input.done":
                         output_idx = data.get("output_index", 0)
@@ -1200,24 +1194,29 @@ class CopilotProvider(BaseProvider):
                                 ),
                             )
 
-                    # Handle output_item.done for function calls
+                    # Handle output_item.done for function calls. Copilot
+                    # delivers ``namespace`` (for MCP tools) on this event only.
                     elif event_type == "response.output_item.done":
                         item = data.get("item", {})
                         if item.get("type") == "function_call":
                             output_idx = data.get("output_index", 0)
-                            # Only emit if not already done via function_call_arguments.done
-                            fc = pending_fcs.pop(output_idx, None)
-                            if fc is not None:
-                                emitted_tool_call = True
-                                yield ResponsesStreamChunk(
-                                    content="",
-                                    tool_call=ResponsesToolCall(
-                                        call_id=item.get("call_id", ""),
-                                        name=item.get("name", ""),
-                                        arguments=item.get("arguments", "{}"),
-                                        namespace=item.get("namespace") or fc.get("namespace"),
-                                    ),
-                                )
+                            fc = pending_fcs.pop(output_idx, None) or {}
+                            # Prefer the final item payload (carries namespace
+                            # and the canonical arguments). Fall back to the
+                            # bookkeeping dict if the item is sparse.
+                            emitted_tool_call = True
+                            yield ResponsesStreamChunk(
+                                content="",
+                                tool_call=ResponsesToolCall(
+                                    call_id=item.get("call_id") or fc.get("call_id", ""),
+                                    name=item.get("name") or fc.get("name", ""),
+                                    arguments=item.get("arguments")
+                                    or fc.get("arguments", "")
+                                    or "{}",
+                                    kind=fc.get("kind", "function"),
+                                    namespace=item.get("namespace") or fc.get("namespace"),
+                                ),
+                            )
                         elif item.get("type") == "custom_tool_call":
                             # Fallback: if custom_tool_call_input.done didn't
                             # fire (or pending_fcs was already drained), emit

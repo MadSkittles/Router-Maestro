@@ -167,6 +167,18 @@ class TestNamespacePreservation:
                 "output_index": 0,
                 "arguments": '{"query":"Heartbeat | take 5"}',
             },
+            {
+                "type": "response.output_item.done",
+                "output_index": 0,
+                "item": {
+                    "type": "function_call",
+                    "id": "fc-1",
+                    "call_id": "call_kusto_1",
+                    "name": "execute_query",
+                    "namespace": "kusto",
+                    "arguments": '{"query":"Heartbeat | take 5"}',
+                },
+            },
             {"type": "response.completed", "response": {"status": "completed"}},
         ]
         provider = _make_provider_with_stream(_sse_lines(events))
@@ -181,13 +193,20 @@ class TestNamespacePreservation:
 
     @pytest.mark.asyncio
     async def test_namespace_only_on_done_event(self):
-        # Hypothetical: Copilot attaches namespace only on output_item.done,
-        # not on added. The fallback path must catch this.
+        # This is the actual production wire shape: Copilot CAPI attaches
+        # namespace ONLY on output_item.done, NOT on output_item.added (which
+        # arrives before the model has decided which namespaced tool to invoke).
+        # We must defer emission until output_item.done so the field is present.
         events = [
             {
                 "type": "response.output_item.added",
                 "output_index": 0,
                 "item": {"type": "function_call", "call_id": "c1", "name": "x"},
+            },
+            {
+                "type": "response.function_call_arguments.done",
+                "output_index": 0,
+                "arguments": "{}",
             },
             {
                 "type": "response.output_item.done",
@@ -224,13 +243,80 @@ class TestNamespacePreservation:
                 "output_index": 0,
                 "arguments": '{"city":"NYC"}',
             },
+            {
+                "type": "response.output_item.done",
+                "output_index": 0,
+                "item": {
+                    "type": "function_call",
+                    "call_id": "c1",
+                    "name": "weather",
+                    "arguments": '{"city":"NYC"}',
+                },
+            },
             {"type": "response.completed", "response": {"status": "completed"}},
         ]
         provider = _make_provider_with_stream(_sse_lines(events))
         chunks = await _collect(provider)
         tool_chunks = [c for c in chunks if c.tool_call is not None]
+        assert len(tool_chunks) == 1
         assert tool_chunks[0].tool_call is not None
         assert tool_chunks[0].tool_call.namespace is None
+
+    @pytest.mark.asyncio
+    async def test_emission_deferred_until_output_item_done(self):
+        # Reproduction of the v0.3.9 production bug: arguments.done fires
+        # BEFORE output_item.done, and Copilot only puts namespace on
+        # output_item.done. Emitting on arguments.done loses namespace and
+        # the next turn 400s with ``Missing namespace for function_call 'X'``.
+        events = [
+            {
+                "type": "response.output_item.added",
+                "output_index": 0,
+                "item": {
+                    "type": "function_call",
+                    "call_id": "call_late_ns",
+                    "name": "execute_query",
+                },  # no namespace yet
+            },
+            {
+                "type": "response.function_call_arguments.delta",
+                "output_index": 0,
+                "delta": '{"query":',
+            },
+            {
+                "type": "response.function_call_arguments.delta",
+                "output_index": 0,
+                "delta": '"x"}',
+            },
+            {
+                "type": "response.function_call_arguments.done",
+                "output_index": 0,
+                "arguments": '{"query":"x"}',
+            },  # still no namespace; we MUST NOT emit here
+            {
+                "type": "response.output_item.done",
+                "output_index": 0,
+                "item": {
+                    "type": "function_call",
+                    "call_id": "call_late_ns",
+                    "name": "execute_query",
+                    "namespace": "mcp__kusto_mcp__",
+                    "arguments": '{"query":"x"}',
+                },
+            },
+            {"type": "response.completed", "response": {"status": "completed"}},
+        ]
+        provider = _make_provider_with_stream(_sse_lines(events))
+        chunks = await _collect(provider)
+        tool_chunks = [c for c in chunks if c.tool_call is not None]
+        assert len(tool_chunks) == 1, (
+            f"expected exactly one emission deferred to output_item.done, got {len(tool_chunks)}"
+        )
+        tc = tool_chunks[0].tool_call
+        assert tc is not None
+        assert tc.name == "execute_query"
+        assert tc.namespace == "mcp__kusto_mcp__"
+        assert tc.arguments == '{"query":"x"}'
 
 
 class TestUnknownEventNoise:

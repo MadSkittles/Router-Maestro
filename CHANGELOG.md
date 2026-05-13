@@ -4,7 +4,13 @@ All notable changes to Router-Maestro are documented here.
 
 ---
 
-## v0.3.9 (2026-05-13)
+## v0.3.10 (2026-05-13)
+
+### Fixes
+
+- **MCP `function_call` round-trips no longer drop the `namespace` field mid-stream.** v0.3.8 added namespace preservation on the dataclass and v0.3.9 stopped dropping the namespace tool registry, but Kusto MCP still 400'd with `Missing namespace for function_call 'execute_query'. It does not exist in the default namespace. Round-trip the model's function_call item with its namespace field included.` The remaining bug was in the SSE event ordering inside `copilot.py`: Copilot CAPI sends function_call events in the order `output_item.added` → `function_call_arguments.delta` × N → `function_call_arguments.done` → `output_item.done`, and the **`namespace` field is only present on the final `output_item.done` event** (matching codex's `ev_function_call_with_namespace` test fixture in `codex-rs/core/tests/common/responses.rs:829-844`). The streaming parser was emitting the `ResponsesToolCall` on `function_call_arguments.done` and popping the bookkeeping entry, so when `output_item.done` arrived with the namespace, the fallback `if fc is not None` branch never ran. Emission is now deferred to `output_item.done` for all function_call items, with the in-progress dict kept alive (`pending_fcs.get` instead of `pop`) on `function_call_arguments.done`. The namespace, arguments, and item identity all come from the canonical `output_item.done` payload, with the bookkeeping dict only used as a fallback for sparse items. A new regression test (`test_emission_deferred_until_output_item_done`) reproduces the exact production wire shape that v0.3.8 and v0.3.9 missed.
+
+---
 
 ### Fixes
 
