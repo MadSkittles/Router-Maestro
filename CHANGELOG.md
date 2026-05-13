@@ -4,6 +4,14 @@ All notable changes to Router-Maestro are documented here.
 
 ---
 
+## v0.3.6 (2026-05-13)
+
+### Fixes
+
+- **Streaming responses no longer crash with `Internal server error` when log messages contain bracket-syntax.** v0.3.5 made it more likely we'd hit a latent bug introduced earlier: the console `RichHandler` was configured with `markup=True`, so any log line containing user-supplied content with bracket sequences that look like Rich markup tags (e.g. Codex file references like `[/Users/likanwen/.codex/config.toml:55]` echoed back inside the request payload that `copilot.py` debug-logs at `responses_completion_stream`) raised `MarkupError` from inside `logger.debug()`. The exception propagated out of the `async for chunk in stream` loop in `routes/responses.py` and aborted the SSE response after ~20ms, surfacing to the client as `stream disconnected before completion: Internal server error`. The handler is now created with `markup=False`, so log messages are emitted as literal text — no behavior change for our own log calls (we never used Rich markup tags in log strings) and a regression test pins it down.
+
+---
+
 ## v0.3.5 (2026-05-13)
 
 ### Fixes
