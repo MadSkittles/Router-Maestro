@@ -792,14 +792,16 @@ class CopilotProvider(BaseProvider):
             raise ProviderError(f"Failed to list models: {e}", retryable=True)
 
     # Tools that are not supported by Copilot Responses API.
-    # ``namespace`` is emitted by Codex CLI to group MCP servers behind a
-    # tool-search facade; Copilot rejects it with
+    # ``namespace`` items are conditionally allowed: if they carry an inner
+    # ``tools`` array (Codex's MCP registry shape) they MUST pass through
+    # so Copilot can resolve namespaced function_calls like
+    # ``kusto/execute_query``. Bare namespace items without an inner
+    # ``tools`` array are dropped because Copilot rejects them with
     # ``Missing required parameter: 'tools[N].tools'``.
     UNSUPPORTED_TOOL_TYPES = {
         "web_search",
         "web_search_preview",
         "code_interpreter",
-        "namespace",
     }
 
     def _filter_unsupported_tools(self, tools: list[dict] | None) -> list[dict] | None:
@@ -817,9 +819,22 @@ class CopilotProvider(BaseProvider):
         filtered = []
         for tool in tools:
             tool_type = tool.get("type", "function")
-            # Only include function tools, filter out unsupported built-in tools
             if tool_type == "function":
                 filtered.append(tool)
+            elif tool_type == "namespace":
+                # Codex's MCP discovery returns namespace items wrapping
+                # the actual function tools. Pass through ONLY when the
+                # inner ``tools`` array is present and non-empty —
+                # otherwise Copilot 400s with
+                # ``Missing required parameter: 'tools[N].tools'``.
+                inner = tool.get("tools")
+                if isinstance(inner, list) and inner:
+                    filtered.append(tool)
+                else:
+                    logger.debug(
+                        "Filtering out empty namespace tool: %s",
+                        tool.get("name"),
+                    )
             elif tool_type not in self.UNSUPPORTED_TOOL_TYPES:
                 filtered.append(tool)
             else:
