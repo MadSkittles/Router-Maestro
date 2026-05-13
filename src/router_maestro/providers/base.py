@@ -148,6 +148,10 @@ class ResponsesToolCall:
     call_id: str
     name: str
     arguments: str
+    # ``True`` for custom (free-form text) tools like Codex's ``apply_patch``.
+    # The route forwards these as ``custom_tool_call`` items with raw ``input``
+    # rather than function_call items with JSON ``arguments``.
+    is_custom: bool = False
 
 
 @dataclass

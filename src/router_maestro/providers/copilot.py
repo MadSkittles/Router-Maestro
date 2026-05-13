@@ -849,6 +849,11 @@ class CopilotProvider(BaseProvider):
             # ``summary: auto`` opts in to reasoning_summary_text events so we
             # can forward chain-of-thought as Anthropic thinking blocks.
             payload["reasoning"] = {"effort": upstream_effort, "summary": "auto"}
+            # Copilot CAPI doesn't stream reasoning_summary_text deltas for some
+            # models; the summary instead arrives in output_item.done.item.summary[].
+            # Asking for encrypted_content also lets us round-trip reasoning state
+            # across turns (matches vscode-copilot-chat reference client).
+            payload["include"] = ["reasoning.encrypted_content"]
         return payload
 
     def _extract_response_content(self, data: dict) -> str:
@@ -1011,9 +1016,17 @@ class CopilotProvider(BaseProvider):
                 stream_finished = False
                 final_usage = None
                 emitted_tool_call = False
+                # Set when reasoning_summary_text.delta arrives (BYOK behaviour);
+                # used to skip the duplicate summary that output_item.done would
+                # otherwise re-emit.
+                received_reasoning_summary = False
                 # Track pending function calls being streamed, keyed by output_index
                 # (Copilot obfuscates item IDs differently across events, so we can't match by ID)
                 pending_fcs: dict[int, dict] = {}
+                # Diagnostic: count any event types we don't explicitly handle
+                # so we can spot custom_tool_call_input.* or other channels we
+                # might be dropping.
+                unknown_event_counts: dict[str, int] = {}
 
                 async for line in response.aiter_lines():
                     if stream_finished:
@@ -1051,6 +1064,7 @@ class CopilotProvider(BaseProvider):
                     elif event_type == "response.reasoning_summary_text.delta":
                         delta = data.get("delta", "")
                         if delta:
+                            received_reasoning_summary = True
                             yield ResponsesStreamChunk(content="", thinking=delta)
 
                     elif event_type == "response.reasoning_summary_text.done":
@@ -1067,10 +1081,30 @@ class CopilotProvider(BaseProvider):
                                 "call_id": item.get("call_id", ""),
                                 "name": item.get("name", ""),
                                 "arguments": "",
+                                "is_custom": False,
+                            }
+                        elif item.get("type") == "custom_tool_call":
+                            # Custom tools (e.g. Codex's apply_patch) stream
+                            # raw text via custom_tool_call_input.delta. Same
+                            # bookkeeping as function_call but flagged so the
+                            # route emits the right event shape downstream.
+                            output_idx = data.get("output_index", 0)
+                            pending_fcs[output_idx] = {
+                                "call_id": item.get("call_id", ""),
+                                "name": item.get("name", ""),
+                                "arguments": "",
+                                "is_custom": True,
                             }
 
                     # Handle function call arguments delta - accumulate silently
                     elif event_type == "response.function_call_arguments.delta":
+                        delta = data.get("delta", "")
+                        output_idx = data.get("output_index", 0)
+                        fc = pending_fcs.get(output_idx)
+                        if fc and delta:
+                            fc["arguments"] += delta
+
+                    elif event_type == "response.custom_tool_call_input.delta":
                         delta = data.get("delta", "")
                         output_idx = data.get("output_index", 0)
                         fc = pending_fcs.get(output_idx)
@@ -1091,6 +1125,24 @@ class CopilotProvider(BaseProvider):
                                     call_id=fc["call_id"],
                                     name=fc["name"],
                                     arguments=fc["arguments"],
+                                    is_custom=fc.get("is_custom", False),
+                                ),
+                            )
+
+                    elif event_type == "response.custom_tool_call_input.done":
+                        output_idx = data.get("output_index", 0)
+                        fc = pending_fcs.pop(output_idx, None)
+                        if fc:
+                            # Custom tool deltas use ``input`` not ``arguments``.
+                            fc["arguments"] = data.get("input", fc["arguments"])
+                            emitted_tool_call = True
+                            yield ResponsesStreamChunk(
+                                content="",
+                                tool_call=ResponsesToolCall(
+                                    call_id=fc["call_id"],
+                                    name=fc["name"],
+                                    arguments=fc["arguments"],
+                                    is_custom=True,
                                 ),
                             )
 
@@ -1111,6 +1163,53 @@ class CopilotProvider(BaseProvider):
                                         arguments=item.get("arguments", "{}"),
                                     ),
                                 )
+                        elif item.get("type") == "custom_tool_call":
+                            # Fallback: if custom_tool_call_input.done didn't
+                            # fire (or pending_fcs was already drained), emit
+                            # from the final item payload.
+                            output_idx = data.get("output_index", 0)
+                            fc = pending_fcs.pop(output_idx, None)
+                            if fc is not None:
+                                emitted_tool_call = True
+                                yield ResponsesStreamChunk(
+                                    content="",
+                                    tool_call=ResponsesToolCall(
+                                        call_id=item.get("call_id", ""),
+                                        name=item.get("name", ""),
+                                        arguments=item.get("input", ""),
+                                        is_custom=True,
+                                    ),
+                                )
+                        elif item.get("type") == "reasoning":
+                            # Copilot CAPI delivers the reasoning summary here
+                            # rather than via reasoning_summary_text.delta.
+                            # Forward each summary segment as a thinking chunk
+                            # only if we didn't already get them as deltas
+                            # (BYOK models stream both — don't duplicate).
+                            summary_list = item.get("summary", []) or []
+                            logger.info(
+                                "Copilot /responses reasoning item: "
+                                "received_delta_summary=%s summary_segments=%d "
+                                "encrypted=%s id=%s",
+                                received_reasoning_summary,
+                                len(summary_list),
+                                bool(item.get("encrypted_content")),
+                                item.get("id"),
+                            )
+                            if not received_reasoning_summary:
+                                for summary in summary_list:
+                                    if isinstance(summary, dict):
+                                        text = summary.get("text") or ""
+                                        if text:
+                                            yield ResponsesStreamChunk(content="", thinking=text)
+                            sig = item.get("encrypted_content") or item.get("id")
+                            if sig:
+                                yield ResponsesStreamChunk(content="", thinking_signature=sig)
+                        else:
+                            unknown_event_counts[f"output_item.done:{item.get('type')}"] = (
+                                unknown_event_counts.get(f"output_item.done:{item.get('type')}", 0)
+                                + 1
+                            )
 
                     # Handle done event to get final usage
                     elif event_type == "response.done":
@@ -1129,11 +1228,32 @@ class CopilotProvider(BaseProvider):
                                 status_code=502,
                             )
                         incomplete = resp.get("incomplete_details") or {}
-                        finish = (
-                            map_responses_status_to_chat(status, incomplete.get("reason")) or "stop"
-                        )
+                        incomplete_reason = incomplete.get("reason")
+                        finish = map_responses_status_to_chat(status, incomplete_reason) or "stop"
                         if emitted_tool_call and finish == "stop":
                             finish = "tool_calls"
+                        if status == "incomplete":
+                            logger.warning(
+                                "Copilot /responses stream incomplete: model=%s status=%s "
+                                "incomplete_reason=%s mapped_finish=%s emitted_tool_call=%s "
+                                "usage=%s",
+                                request.model,
+                                status,
+                                incomplete_reason,
+                                finish,
+                                emitted_tool_call,
+                                final_usage,
+                            )
+                        else:
+                            logger.info(
+                                "Copilot /responses stream done: model=%s status=%s "
+                                "mapped_finish=%s emitted_tool_call=%s usage=%s",
+                                request.model,
+                                status,
+                                finish,
+                                emitted_tool_call,
+                                final_usage,
+                            )
                         yield ResponsesStreamChunk(
                             content="",
                             finish_reason=finish,
@@ -1160,17 +1280,45 @@ class CopilotProvider(BaseProvider):
                                 status_code=502,
                             )
                         incomplete = resp.get("incomplete_details") or {}
-                        finish = (
-                            map_responses_status_to_chat(status, incomplete.get("reason")) or "stop"
-                        )
+                        incomplete_reason = incomplete.get("reason")
+                        finish = map_responses_status_to_chat(status, incomplete_reason) or "stop"
                         if emitted_tool_call and finish == "stop":
                             finish = "tool_calls"
+                        if status == "incomplete":
+                            logger.warning(
+                                "Copilot /responses stream incomplete (via .completed): "
+                                "model=%s status=%s incomplete_reason=%s mapped_finish=%s "
+                                "emitted_tool_call=%s usage=%s",
+                                request.model,
+                                status,
+                                incomplete_reason,
+                                finish,
+                                emitted_tool_call,
+                                final_usage,
+                            )
+                        else:
+                            logger.info(
+                                "Copilot /responses stream completed: model=%s status=%s "
+                                "mapped_finish=%s emitted_tool_call=%s usage=%s",
+                                request.model,
+                                status,
+                                finish,
+                                emitted_tool_call,
+                                final_usage,
+                            )
                         yield ResponsesStreamChunk(
                             content="",
                             finish_reason=finish,
                             usage=final_usage,
                         )
                         stream_finished = True
+
+                    # Catch-all: count any other event types so we can spot
+                    # things we silently drop (e.g. custom_tool_call_input.*).
+                    else:
+                        unknown_event_counts[event_type] = (
+                            unknown_event_counts.get(event_type, 0) + 1
+                        )
 
                 # If stream ended without explicit completion event, emit final chunk
                 if not stream_finished:
@@ -1179,6 +1327,13 @@ class CopilotProvider(BaseProvider):
                         content="",
                         finish_reason="tool_calls" if emitted_tool_call else "stop",
                         usage=final_usage,
+                    )
+
+                if unknown_event_counts:
+                    logger.warning(
+                        "Copilot /responses unhandled event types: model=%s counts=%s",
+                        request.model,
+                        unknown_event_counts,
                     )
 
         except httpx.TimeoutException as e:

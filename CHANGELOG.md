@@ -4,6 +4,21 @@ All notable changes to Router-Maestro are documented here.
 
 ---
 
+## v0.3.4 (2026-05-13)
+
+### Fixes
+
+- **`router-maestro config codex` no longer writes invalid project-level keys.** Selecting project-level scope used to dump `model_provider` and `[model_providers.router-maestro]` into `./.codex/config.toml`, which Codex CLI 0.130+ rejects with `Ignored unsupported project-local config keys`. Project-level configs now contain only the `model = "..."` override (and inherit the provider definition from `~/.codex/config.toml`); re-running the command also self-heals existing project files written by older releases, while leaving any user-added providers untouched.
+
+- **gpt-5.5 via Codex no longer stops mid-task before writing files.** Three gaps were causing the Responses-API stream to silently drop most of the model's output when used through Codex's `apply_patch` flow:
+  1. **Custom tools were unhandled.** Codex registers `apply_patch` as a `type: "custom"` tool. gpt-5.5 streamed the patch body via `response.custom_tool_call_input.delta` (hundreds of events per call), and the Copilot provider had no branch for them — every byte of the patch was discarded, so Codex saw zero tool calls and aborted. The provider now recognizes `custom_tool_call` items, accumulates the input deltas, and the route forwards them as `custom_tool_call` events with raw `input` (not JSON `arguments`) so Codex parses them correctly.
+  2. **Reasoning summaries from CAPI models were dropped.** Copilot CAPI delivers `gpt-5.x` chain-of-thought inside `output_item.done.item.summary[]` rather than as `reasoning_summary_text.delta` events. The provider now reads the summary array on `output_item.done` and forwards it as thinking chunks, with a `received_delta_summary` guard so BYOK models that stream both don't get duplicated.
+  3. **`reasoning.encrypted_content` was not requested.** The Responses payload now sets `include: ["reasoning.encrypted_content"]`, matching the upstream vscode-copilot-chat reference client, so reasoning state can round-trip across turns.
+
+  The provider also logs a one-line `unhandled event types` warning when the upstream stream contains events the bridge doesn't recognize, so future stream-shape changes are easier to spot.
+
+---
+
 ## v0.3.3 (2026-05-08)
 
 ### Fixes
