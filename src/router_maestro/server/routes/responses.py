@@ -578,7 +578,7 @@ async def stream_response(
                 for evt in state.close_open_message():
                     yield evt
 
-                if tc.is_custom:
+                if tc.kind == "custom":
                     # Custom tool call (e.g. apply_patch) — free-form text input,
                     # not JSON arguments. Round-trip as custom_tool_call so codex
                     # parses ``input`` as raw text.
@@ -626,6 +626,47 @@ async def stream_response(
                         }
                     )
                     state.output_items.append(ctc_item)
+                    state.output_index += 1
+                elif tc.kind == "tool_search":
+                    # Codex's MCP tool-discovery dispatcher matches on
+                    # ResponseItem::ToolSearchCall (codex-rs/core/src/tools/
+                    # router.rs). Wrapping this as a function_call(name=
+                    # "tool_search") makes the dispatcher silently abort the
+                    # call (the registry has no function tool of that name)
+                    # and Codex writes ``output: 'aborted'`` to the conversation
+                    # — the model retries forever (v0.3.5/v0.3.6 bug).
+                    # Codex only requires output_item.done with the full
+                    # item; arguments must be a dict, not a JSON string.
+                    try:
+                        args_obj = json.loads(tc.arguments) if tc.arguments else {}
+                    except (TypeError, ValueError):
+                        args_obj = {}
+                    tsc_item = {
+                        "type": "tool_search_call",
+                        "call_id": tc.call_id,
+                        "execution": "client",
+                        "status": "completed",
+                        "arguments": args_obj,
+                    }
+                    yield sse_event(
+                        {
+                            "type": "response.output_item.added",
+                            "output_index": state.output_index,
+                            "item": {
+                                **tsc_item,
+                                "status": "in_progress",
+                                "arguments": {},
+                            },
+                        }
+                    )
+                    yield sse_event(
+                        {
+                            "type": "response.output_item.done",
+                            "output_index": state.output_index,
+                            "item": tsc_item,
+                        }
+                    )
+                    state.output_items.append(tsc_item)
                     state.output_index += 1
                 else:
                     fc_id = generate_id("fc")

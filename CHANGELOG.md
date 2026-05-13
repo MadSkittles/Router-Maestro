@@ -4,6 +4,15 @@ All notable changes to Router-Maestro are documented here.
 
 ---
 
+## v0.3.7 (2026-05-13)
+
+### Fixes
+
+- **Codex's `tool_search` (MCP discovery) actually works now.** v0.3.5 unblocked gpt-5.5 by forwarding Copilot's `tool_search_call` events as `function_call(name="tool_search")` items. That was wrong: Codex's tool dispatcher (`codex-rs/core/src/tools/router.rs`) matches on `ResponseItem::ToolSearchCall` specifically — the function-call shape with `name="tool_search"` is looked up in Codex's function-tool registry, finds nothing (because `tool_search` is a top-level tool type, not a function), and the call gets silently aborted. Codex writes `function_call_output: 'aborted'` to the conversation, the model sees the abort, retries verbatim, and loops forever. The route now emits an actual `tool_search_call` item with `execution: "client"` and a dict-shaped `arguments` payload, matching the wire format codex's SSE parser asserts on (`codex-rs/codex-api/src/sse/responses.rs::parses_tool_search_call_items`). This restores `/init`, MCP discovery, and any other gpt-5.x flow that goes through `tool_search`.
+  - Internal: `ResponsesToolCall` gained a `kind: Literal["function", "custom", "tool_search"]` field that drives the route's branch selection. The legacy `is_custom: bool` is now a derived `@property` so existing call sites (and any out-of-tree consumers) keep working.
+
+---
+
 ## v0.3.6 (2026-05-13)
 
 ### Fixes
