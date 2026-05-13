@@ -4,6 +4,15 @@ All notable changes to Router-Maestro are documented here.
 
 ---
 
+## v0.3.11 (2026-05-13)
+
+### Fixes
+
+- **MCP `function_call` round-trips finally work end-to-end (Kusto, ado-mcp, context7, …).** v0.3.8/9/10 each tried to preserve the `namespace` field along the assistant→model→assistant path, and each failed because the field was already gone by the time their fix-points executed. The actual root cause was upstream of every previous fix: `ResponsesFunctionCallInput` in `schemas/responses.py` is a Pydantic v2 `BaseModel`, which **silently drops unknown fields by default**. When Codex CLI POSTed a `function_call` item with `{type, call_id, name, arguments, status, namespace}`, FastAPI parsed it through that schema and the `namespace` field was discarded *before* `convert_input_to_internal` ever saw it. Every "namespace preservation" added in v0.3.8/9/10 was reading from a dict that had already been stripped at the request boundary. Fix: add `model_config = ConfigDict(extra="allow")` to `ResponsesFunctionCallInput` (and `ResponsesFunctionCallOutput` for symmetry), plus declare `namespace: str | None = None` explicitly so it shows up in `model_dump()`. Three new schema-level regression tests (`test_pydantic_input_model_preserves_namespace`, `test_pydantic_input_model_preserves_unknown_extras`, `test_responses_request_preserves_namespace_through_full_parse`) drive the schema directly — these would have caught the bug in v0.3.8 if they'd existed.
+  - Lesson worth keeping: when a Pydantic schema sits on a request boundary, ALL field-preservation tests must drive the schema, not bypass it. Calling `convert_input_to_internal` with a hand-built dict (as the v0.3.8 tests did) skipped the very layer that was dropping the field.
+
+---
+
 ## v0.3.10 (2026-05-13)
 
 ### Fixes
@@ -11,6 +20,8 @@ All notable changes to Router-Maestro are documented here.
 - **MCP `function_call` round-trips no longer drop the `namespace` field mid-stream.** v0.3.8 added namespace preservation on the dataclass and v0.3.9 stopped dropping the namespace tool registry, but Kusto MCP still 400'd with `Missing namespace for function_call 'execute_query'. It does not exist in the default namespace. Round-trip the model's function_call item with its namespace field included.` The remaining bug was in the SSE event ordering inside `copilot.py`: Copilot CAPI sends function_call events in the order `output_item.added` → `function_call_arguments.delta` × N → `function_call_arguments.done` → `output_item.done`, and the **`namespace` field is only present on the final `output_item.done` event** (matching codex's `ev_function_call_with_namespace` test fixture in `codex-rs/core/tests/common/responses.rs:829-844`). The streaming parser was emitting the `ResponsesToolCall` on `function_call_arguments.done` and popping the bookkeeping entry, so when `output_item.done` arrived with the namespace, the fallback `if fc is not None` branch never ran. Emission is now deferred to `output_item.done` for all function_call items, with the in-progress dict kept alive (`pending_fcs.get` instead of `pop`) on `function_call_arguments.done`. The namespace, arguments, and item identity all come from the canonical `output_item.done` payload, with the bookkeeping dict only used as a fallback for sparse items. A new regression test (`test_emission_deferred_until_output_item_done`) reproduces the exact production wire shape that v0.3.8 and v0.3.9 missed.
 
 ---
+
+## v0.3.9 (2026-05-13)
 
 ### Fixes
 
