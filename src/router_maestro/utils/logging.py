@@ -43,11 +43,15 @@ def setup_logging(
 
     # Console handler (Rich with colors)
     if console:
+        # markup=False: log messages often contain user-supplied content (file
+        # paths, code, JSON payloads) where bracket sequences like
+        # `[/Users/foo/.codex/config.toml:55]` would otherwise be parsed as
+        # Rich markup and raise MarkupError mid-stream.
         console_handler = RichHandler(
             show_time=True,
             show_path=False,
             rich_tracebacks=True,
-            markup=True,
+            markup=False,
         )
         console_handler.setLevel(getattr(logging, level.upper(), logging.INFO))
         logger.addHandler(console_handler)
