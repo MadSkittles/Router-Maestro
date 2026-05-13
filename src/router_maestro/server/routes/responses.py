@@ -95,16 +95,20 @@ def convert_input_to_internal(
                 items.append({"type": "message", "role": role, "content": content})
 
             elif item_type == "function_call":
-                items.append(
-                    {
-                        "type": "function_call",
-                        "id": item.get("id"),
-                        "call_id": item.get("call_id"),
-                        "name": item.get("name"),
-                        "arguments": item.get("arguments", "{}"),
-                        "status": item.get("status", "completed"),
-                    }
-                )
+                fc_item: dict[str, Any] = {
+                    "type": "function_call",
+                    "id": item.get("id"),
+                    "call_id": item.get("call_id"),
+                    "name": item.get("name"),
+                    "arguments": item.get("arguments", "{}"),
+                    "status": item.get("status", "completed"),
+                }
+                # Preserve MCP namespace verbatim. Copilot CAPI rejects the
+                # next turn with ``Missing namespace for function_call 'X'``
+                # if a previously-namespaced call is round-tripped without it.
+                if item.get("namespace") is not None:
+                    fc_item["namespace"] = item["namespace"]
+                items.append(fc_item)
 
             elif item_type == "function_call_output":
                 output = item.get("output", "")
@@ -215,10 +219,15 @@ def make_message_item(msg_id: str, text: str, status: str = "completed") -> dict
 
 
 def make_function_call_item(
-    fc_id: str, call_id: str, name: str, arguments: str, status: str = "completed"
+    fc_id: str,
+    call_id: str,
+    name: str,
+    arguments: str,
+    status: str = "completed",
+    namespace: str | None = None,
 ) -> dict[str, Any]:
     """Create function_call output item."""
-    return {
+    item: dict[str, Any] = {
         "type": "function_call",
         "id": fc_id,
         "call_id": call_id,
@@ -226,6 +235,9 @@ def make_function_call_item(
         "arguments": arguments,
         "status": status,
     }
+    if namespace is not None:
+        item["namespace"] = namespace
+    return item
 
 
 @router.post("/api/openai/v1/responses")
@@ -291,7 +303,15 @@ async def create_response(request: ResponsesRequest):
         if response.tool_calls:
             for tc in response.tool_calls:
                 fc_id = generate_id("fc")
-                output.append(make_function_call_item(fc_id, tc.call_id, tc.name, tc.arguments))
+                output.append(
+                    make_function_call_item(
+                        fc_id,
+                        tc.call_id,
+                        tc.name,
+                        tc.arguments,
+                        namespace=tc.namespace,
+                    )
+                )
 
         return ResponsesResponse(
             id=response_id,
@@ -670,14 +690,25 @@ async def stream_response(
                     state.output_index += 1
                 else:
                     fc_id = generate_id("fc")
-                    fc_item = make_function_call_item(fc_id, tc.call_id, tc.name, tc.arguments)
+                    fc_item = make_function_call_item(
+                        fc_id,
+                        tc.call_id,
+                        tc.name,
+                        tc.arguments,
+                        namespace=tc.namespace,
+                    )
 
                     yield sse_event(
                         {
                             "type": "response.output_item.added",
                             "output_index": state.output_index,
                             "item": make_function_call_item(
-                                fc_id, tc.call_id, tc.name, "", "in_progress"
+                                fc_id,
+                                tc.call_id,
+                                tc.name,
+                                "",
+                                "in_progress",
+                                namespace=tc.namespace,
                             ),
                         }
                     )

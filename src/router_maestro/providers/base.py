@@ -157,6 +157,11 @@ class ResponsesToolCall:
     #                     it as a function_call(name="tool_search") makes the
     #                     dispatcher silently abort the call (v0.3.5/0.3.6 bug).
     kind: Literal["function", "custom", "tool_search"] = "function"
+    # MCP namespace, when the upstream emits one (e.g. Copilot CAPI's
+    # ``kusto/execute_query`` → namespace="kusto"). Must round-trip back to
+    # the upstream verbatim or the next turn 400s with
+    # ``Missing namespace for function_call 'X'`` (v0.3.7 → v0.3.8 bug).
+    namespace: str | None = None
 
     @property
     def is_custom(self) -> bool:
