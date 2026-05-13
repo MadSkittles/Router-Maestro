@@ -925,6 +925,7 @@ class CopilotProvider(BaseProvider):
                         call_id=output.get("call_id", ""),
                         name=output.get("name", ""),
                         arguments=output.get("arguments", "{}"),
+                        namespace=output.get("namespace"),
                     )
                 )
         return tool_calls
@@ -1097,6 +1098,9 @@ class CopilotProvider(BaseProvider):
                                 "name": item.get("name", ""),
                                 "arguments": "",
                                 "kind": "function",
+                                # MCP namespace (e.g. "kusto"). Required on
+                                # round-trip or Copilot 400s the next turn.
+                                "namespace": item.get("namespace"),
                             }
                         elif item.get("type") == "custom_tool_call":
                             # Custom tools (e.g. Codex's apply_patch) stream
@@ -1160,6 +1164,7 @@ class CopilotProvider(BaseProvider):
                                     name=fc["name"],
                                     arguments=fc["arguments"],
                                     kind=fc.get("kind", "function"),
+                                    namespace=fc.get("namespace"),
                                 ),
                             )
 
@@ -1195,6 +1200,7 @@ class CopilotProvider(BaseProvider):
                                         call_id=item.get("call_id", ""),
                                         name=item.get("name", ""),
                                         arguments=item.get("arguments", "{}"),
+                                        namespace=item.get("namespace") or fc.get("namespace"),
                                     ),
                                 )
                         elif item.get("type") == "custom_tool_call":

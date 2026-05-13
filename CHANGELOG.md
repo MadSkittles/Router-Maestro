@@ -4,6 +4,15 @@ All notable changes to Router-Maestro are documented here.
 
 ---
 
+## v0.3.8 (2026-05-13)
+
+### Fixes
+
+- **MCP tool calls (Kusto, ado-mcp, context7, …) no longer 400 mid-stream.** v0.3.7 unblocked Codex's MCP discovery via `tool_search`, so the model could finally see and call namespaced MCP tools — but the very next turn died with `Copilot API error: 400 - Missing namespace for function_call 'execute_query'. It does not exist in the default namespace. Round-trip the model's function_call item with its namespace field included.` Copilot CAPI attaches a `namespace` field (e.g. `"kusto"`) to MCP-routed `function_call` items; Codex echoes that field back on the next turn so Copilot can resolve which MCP server owns the tool. Router-Maestro stripped the field at three points — `copilot.py`'s `output_item.added`/`output_item.done` parsers, the `_extract_tool_calls` non-streaming path, and `responses.py`'s `convert_input_to_internal()` — because each layer used an explicit field whitelist. The whitelists now include `namespace`, the `ResponsesToolCall` dataclass carries it through, and `make_function_call_item` emits it on the wire when present (and omits the key entirely when absent, so non-MCP tool calls keep their old shape and Copilot doesn't see a literal `null`).
+  - Reference: agent-maestro uses zod `looseObject()` (`agent-maestro/src/server/schemas/openai.ts:541-548`) which preserves unknown fields automatically — the same dynamic that protected it from this bug.
+
+---
+
 ## v0.3.7 (2026-05-13)
 
 ### Fixes

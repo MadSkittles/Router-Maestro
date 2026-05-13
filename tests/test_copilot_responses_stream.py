@@ -139,6 +139,100 @@ class TestToolSearchCallForwarding:
         assert tc.arguments == '{"query": "x"}'
 
 
+class TestNamespacePreservation:
+    """MCP-namespaced function_calls must preserve `namespace` end-to-end.
+
+    Copilot CAPI rejects the next turn with
+    ``Missing namespace for function_call 'X'`` if a previously-namespaced
+    call is round-tripped without it (v0.3.7 → v0.3.8 bug).
+    """
+
+    @pytest.mark.asyncio
+    async def test_namespace_captured_from_output_item_added(self):
+        events = [
+            {
+                "type": "response.output_item.added",
+                "output_index": 0,
+                "item": {
+                    "type": "function_call",
+                    "id": "fc-1",
+                    "call_id": "call_kusto_1",
+                    "name": "execute_query",
+                    "namespace": "kusto",
+                    "arguments": "",
+                },
+            },
+            {
+                "type": "response.function_call_arguments.done",
+                "output_index": 0,
+                "arguments": '{"query":"Heartbeat | take 5"}',
+            },
+            {"type": "response.completed", "response": {"status": "completed"}},
+        ]
+        provider = _make_provider_with_stream(_sse_lines(events))
+        chunks = await _collect(provider)
+        tool_chunks = [c for c in chunks if c.tool_call is not None]
+        assert len(tool_chunks) == 1
+        tc = tool_chunks[0].tool_call
+        assert tc is not None
+        assert tc.name == "execute_query"
+        assert tc.namespace == "kusto"
+        assert tc.kind == "function"
+
+    @pytest.mark.asyncio
+    async def test_namespace_only_on_done_event(self):
+        # Hypothetical: Copilot attaches namespace only on output_item.done,
+        # not on added. The fallback path must catch this.
+        events = [
+            {
+                "type": "response.output_item.added",
+                "output_index": 0,
+                "item": {"type": "function_call", "call_id": "c1", "name": "x"},
+            },
+            {
+                "type": "response.output_item.done",
+                "output_index": 0,
+                "item": {
+                    "type": "function_call",
+                    "call_id": "c1",
+                    "name": "x",
+                    "namespace": "ns1",
+                    "arguments": "{}",
+                },
+            },
+            {"type": "response.completed", "response": {"status": "completed"}},
+        ]
+        provider = _make_provider_with_stream(_sse_lines(events))
+        chunks = await _collect(provider)
+        tool_chunks = [c for c in chunks if c.tool_call is not None]
+        assert len(tool_chunks) == 1
+        tc = tool_chunks[0].tool_call
+        assert tc is not None
+        assert tc.namespace == "ns1"
+
+    @pytest.mark.asyncio
+    async def test_no_namespace_stays_none(self):
+        # Regression: standard (non-MCP) function_calls don't carry namespace.
+        events = [
+            {
+                "type": "response.output_item.added",
+                "output_index": 0,
+                "item": {"type": "function_call", "call_id": "c1", "name": "weather"},
+            },
+            {
+                "type": "response.function_call_arguments.done",
+                "output_index": 0,
+                "arguments": '{"city":"NYC"}',
+            },
+            {"type": "response.completed", "response": {"status": "completed"}},
+        ]
+        provider = _make_provider_with_stream(_sse_lines(events))
+        chunks = await _collect(provider)
+        tool_chunks = [c for c in chunks if c.tool_call is not None]
+        assert tool_chunks[0].tool_call is not None
+        assert tool_chunks[0].tool_call.namespace is None
+
+
 class TestUnknownEventNoise:
     """Benign upstream events should not trigger the unhandled-event warning."""
 

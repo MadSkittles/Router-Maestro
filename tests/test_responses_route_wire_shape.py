@@ -199,6 +199,70 @@ class TestFunctionCallWireShape:
         assert done[0]["item"]["arguments"] == '{"location": "NYC"}'
 
 
+class TestFunctionCallNamespaceWireShape:
+    """Namespaced function_calls must emit `namespace` field downstream
+    so Codex can echo it back next turn — Copilot 400s otherwise."""
+
+    @pytest.mark.asyncio
+    async def test_namespace_emitted_in_output_item(self):
+        events = await _drive(
+            [
+                ResponsesStreamChunk(
+                    content="",
+                    tool_call=ResponsesToolCall(
+                        call_id="call_kusto_1",
+                        name="execute_query",
+                        arguments='{"query":"x"}',
+                        kind="function",
+                        namespace="kusto",
+                    ),
+                ),
+                ResponsesStreamChunk(content="", finish_reason="stop"),
+            ]
+        )
+        done = [
+            e
+            for e in events
+            if e.get("type") == "response.output_item.done"
+            and e.get("item", {}).get("type") == "function_call"
+        ]
+        assert len(done) == 1
+        assert done[0]["item"]["namespace"] == "kusto"
+
+        added = [
+            e
+            for e in events
+            if e.get("type") == "response.output_item.added"
+            and e.get("item", {}).get("type") == "function_call"
+        ]
+        assert len(added) == 1
+        assert added[0]["item"]["namespace"] == "kusto"
+
+    @pytest.mark.asyncio
+    async def test_no_namespace_no_field_in_output(self):
+        events = await _drive(
+            [
+                ResponsesStreamChunk(
+                    content="",
+                    tool_call=ResponsesToolCall(
+                        call_id="c1",
+                        name="weather",
+                        arguments="{}",
+                        kind="function",
+                    ),
+                ),
+                ResponsesStreamChunk(content="", finish_reason="stop"),
+            ]
+        )
+        done = [
+            e
+            for e in events
+            if e.get("type") == "response.output_item.done"
+            and e.get("item", {}).get("type") == "function_call"
+        ]
+        assert "namespace" not in done[0]["item"]
+
+
 class TestCustomToolCallWireShape:
     """Custom tools (apply_patch) must still emit custom_tool_call shape."""
 
