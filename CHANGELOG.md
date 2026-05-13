@@ -4,6 +4,18 @@ All notable changes to Router-Maestro are documented here.
 
 ---
 
+## v0.3.5 (2026-05-13)
+
+### Fixes
+
+- **gpt-5.5 via Codex no longer stops mid-task during exploration.** v0.3.4 fixed `apply_patch`-driven stalls; this release fixes the next variant — gpt-5.5 stopping after only "Explored" some files (e.g. when the user runs Codex's `/init`). Codex CLI ≥ v0.130 registers a `tool_search` tool (`type: "tool_search"`, `execution: "client"`) so the model can dynamically discover MCP tools; gpt-5.5 invokes it via `output_item.done` items of type `tool_search_call`, which the Copilot provider had no branch for. The event was silently bucketed into `unknown_event_counts`, Codex never received a tool call, the model "explored, said it would search, then ended the turn." The provider now translates `tool_search_call` into a regular `function_call` named `tool_search` (JSON-encoded arguments), which the route emits as standard `response.function_call_arguments.*` + `output_item.done` events — the shape Codex's client-side `tool_search` executor expects.
+
+- **Reasoning items echoed back across turns are explicitly preserved.** `convert_input_to_internal()` now has a dedicated `type: "reasoning"` branch that forwards `id`, `summary`, and (when present) `encrypted_content` upstream — mirroring vscode-copilot-chat's `extractThinkingData` pattern. Previously these items hit a generic fallback that worked for most shapes but didn't normalize the field set, so non-Codex clients echoing slightly different reasoning shapes could leak unknown sibling fields to Copilot. This is preparation for stateful Copilot models: today Copilot CAPI for gpt-5.5 returns empty reasoning items (no encrypted content), but the input-side handler will round-trip cleanly the moment Copilot starts honoring `include: ["reasoning.encrypted_content"]`.
+
+- **`unhandled event types` warning is no longer noisy.** Five upstream events that the route synthesizes its own equivalents from (`response.created`, `response.in_progress`, `response.content_part.added`, `response.content_part.done`, `response.output_text.done`) and one benign `output_item.done:message` are now filtered out of the diagnostic. The warning fires only when an event type genuinely needs attention, making future stream-shape regressions easier to spot.
+
+---
+
 ## v0.3.4 (2026-05-13)
 
 ### Fixes

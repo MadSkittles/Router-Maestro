@@ -35,6 +35,21 @@ COPILOT_CHAT_URL = f"{COPILOT_BASE_URL}/chat/completions"
 COPILOT_MODELS_URL = f"{COPILOT_BASE_URL}/models"
 COPILOT_RESPONSES_URL = f"{COPILOT_BASE_URL}/responses"
 
+# Upstream /responses events we intentionally don't consume because the route
+# (server/routes/responses.py) synthesizes its own equivalents from the deltas
+# we DO consume. Filtering them keeps the ``unknown_event_counts`` warning
+# focused on event types that genuinely need our attention.
+_BENIGN_UPSTREAM_EVENTS = frozenset(
+    {
+        "response.created",
+        "response.in_progress",
+        "response.content_part.added",
+        "response.content_part.done",
+        "response.output_text.done",
+    }
+)
+_BENIGN_DONE_ITEM_TYPES = frozenset({"message"})
+
 
 def _claude_supports_reasoning(bare_lower: str) -> bool:
     """Whether a Claude model on Copilot exposes any reasoning control.
@@ -1095,6 +1110,23 @@ class CopilotProvider(BaseProvider):
                                 "arguments": "",
                                 "is_custom": True,
                             }
+                        elif item.get("type") == "tool_search_call":
+                            # Codex CLI registers a `tool_search` tool
+                            # (execution=client) so the model can dynamically
+                            # discover MCP tools. gpt-5.x calls it via this
+                            # item type; forward as a regular function_call
+                            # named "tool_search" so Codex executes it and
+                            # returns a function_call_output.
+                            # NOTE: arguments arrive whole on output_item.done;
+                            # if Copilot ever streams them via a dedicated
+                            # delta event we'll spot it via unknown_event_counts.
+                            output_idx = data.get("output_index", 0)
+                            pending_fcs[output_idx] = {
+                                "call_id": item.get("call_id", ""),
+                                "name": "tool_search",
+                                "arguments": "",
+                                "is_custom": False,
+                            }
 
                     # Handle function call arguments delta - accumulate silently
                     elif event_type == "response.function_call_arguments.delta":
@@ -1205,11 +1237,36 @@ class CopilotProvider(BaseProvider):
                             sig = item.get("encrypted_content") or item.get("id")
                             if sig:
                                 yield ResponsesStreamChunk(content="", thinking_signature=sig)
-                        else:
-                            unknown_event_counts[f"output_item.done:{item.get('type')}"] = (
-                                unknown_event_counts.get(f"output_item.done:{item.get('type')}", 0)
-                                + 1
+                        elif item.get("type") == "tool_search_call":
+                            # Forward as function_call so Codex's client-side
+                            # tool_search executor receives it. Arguments arrive
+                            # as a dict here; serialize because function_call
+                            # arguments are JSON strings downstream.
+                            output_idx = data.get("output_index", 0)
+                            fc = pending_fcs.pop(output_idx, None)
+                            args = item.get("arguments")
+                            if isinstance(args, str):
+                                args_str = args
+                            elif args is None:
+                                args_str = "{}"
+                            else:
+                                args_str = json.dumps(args)
+                            call_id = item.get("call_id") or (fc and fc.get("call_id")) or ""
+                            emitted_tool_call = True
+                            yield ResponsesStreamChunk(
+                                content="",
+                                tool_call=ResponsesToolCall(
+                                    call_id=call_id,
+                                    name="tool_search",
+                                    arguments=args_str,
+                                    is_custom=False,
+                                ),
                             )
+                        else:
+                            item_type = item.get("type")
+                            if item_type not in _BENIGN_DONE_ITEM_TYPES:
+                                key = f"output_item.done:{item_type}"
+                                unknown_event_counts[key] = unknown_event_counts.get(key, 0) + 1
 
                     # Handle done event to get final usage
                     elif event_type == "response.done":
@@ -1315,10 +1372,14 @@ class CopilotProvider(BaseProvider):
 
                     # Catch-all: count any other event types so we can spot
                     # things we silently drop (e.g. custom_tool_call_input.*).
+                    # ``_BENIGN_UPSTREAM_EVENTS`` are intentionally skipped —
+                    # the route synthesizes equivalents from the deltas we
+                    # already consume.
                     else:
-                        unknown_event_counts[event_type] = (
-                            unknown_event_counts.get(event_type, 0) + 1
-                        )
+                        if event_type not in _BENIGN_UPSTREAM_EVENTS:
+                            unknown_event_counts[event_type] = (
+                                unknown_event_counts.get(event_type, 0) + 1
+                            )
 
                 # If stream ended without explicit completion event, emit final chunk
                 if not stream_finished:
