@@ -85,6 +85,28 @@ def get_gemini_cli_paths() -> dict[str, Path]:
     }
 
 
+def _build_router_maestro_provider_table(openai_url: str) -> tomlkit.items.Table:
+    """Build the `[model_providers.router-maestro]` TOML table for Codex user config."""
+    table = tomlkit.table()
+    table["name"] = "Router Maestro"
+    table["base_url"] = openai_url
+    table["env_key"] = "ROUTER_MAESTRO_API_KEY"
+    table["wire_api"] = "responses"
+    return table
+
+
+def _user_codex_has_router_maestro_provider(user_config_path: Path) -> bool:
+    """Return True iff the user-level Codex config sets `model_provider = "router-maestro"`."""
+    if not user_config_path.exists():
+        return False
+    try:
+        with open(user_config_path, "rb") as f:
+            data = tomllib.load(f)
+    except (tomllib.TOMLDecodeError, OSError):
+        return False
+    return data.get("model_provider") == "router-maestro"
+
+
 def _backup_if_exists(path: Path) -> None:
     """Prompt to backup an existing config file before overwriting."""
     if not path.exists():
@@ -336,33 +358,56 @@ def codex_config() -> None:
 
     # Update configuration
     existing_config["model"] = selected_model
-    existing_config["model_provider"] = "router-maestro"
 
-    # Create or update model_providers section
-    if "model_providers" not in existing_config:
-        existing_config["model_providers"] = tomlkit.table()
-
-    provider_config = tomlkit.table()
-    provider_config["name"] = "Router Maestro"
-    provider_config["base_url"] = openai_url
-    provider_config["env_key"] = "ROUTER_MAESTRO_API_KEY"
-    provider_config["wire_api"] = "responses"
-    existing_config["model_providers"]["router-maestro"] = provider_config
+    if level == "user":
+        existing_config["model_provider"] = "router-maestro"
+        if "model_providers" not in existing_config:
+            existing_config["model_providers"] = tomlkit.table()
+        existing_config["model_providers"]["router-maestro"] = _build_router_maestro_provider_table(
+            openai_url
+        )
+    else:
+        # Codex CLI 0.130+ rejects model_provider/model_providers at project scope.
+        # Strip the keys this command wrote in older releases so the file stops
+        # tripping the "Ignored unsupported project-local config keys" warning.
+        existing_config.pop("model_provider", None)
+        providers = existing_config.get("model_providers")
+        if providers is not None:
+            providers.pop("router-maestro", None)
+            if len(providers) == 0:
+                existing_config.pop("model_providers", None)
 
     # Write config
     config_path.parent.mkdir(parents=True, exist_ok=True)
     with open(config_path, "w", encoding="utf-8") as f:
         f.write(tomlkit.dumps(existing_config))
 
-    console.print(
-        Panel(
+    if level == "user":
+        body = (
             f"[green]Created {config_path}[/green]\n\n"
             f"Model: {selected_model}\n\n"
             f"Endpoint: {openai_url}\n\n"
             "[dim]Start router-maestro server before using Codex:[/dim]\n"
             "  router-maestro server start\n\n"
             "[dim]Set API key environment variable (optional):[/dim]\n"
-            "  export ROUTER_MAESTRO_API_KEY=your-key",
+            "  export ROUTER_MAESTRO_API_KEY=your-key"
+        )
+    else:
+        if _user_codex_has_router_maestro_provider(paths["user"]):
+            inheritance_line = f"[dim]Inheriting provider from {paths['user']}.[/dim]"
+        else:
+            inheritance_line = (
+                "[yellow]User-level Router-Maestro config not found.[/yellow]\n"
+                "Run [bold]router-maestro config codex[/bold] and pick option 1 first,\n"
+                "otherwise Codex won't know how to reach the server."
+            )
+        body = (
+            f"[green]Created {config_path}[/green]\n\nModel: {selected_model}\n\n{inheritance_line}"
+        )
+
+    console.print(
+        Panel(
+            body,
             title="Success",
             border_style="green",
         )
