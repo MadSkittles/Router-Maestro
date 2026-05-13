@@ -174,12 +174,18 @@ def make_usage(raw_usage: dict[str, Any] | None) -> dict[str, Any] | None:
 
     input_tokens = raw_usage.get("input_tokens", 0)
     output_tokens = raw_usage.get("output_tokens", 0)
+    upstream_input_details = raw_usage.get("input_tokens_details") or {}
+    upstream_output_details = raw_usage.get("output_tokens_details") or {}
 
     return {
         "input_tokens": input_tokens,
-        "input_tokens_details": {"cached_tokens": 0},
+        "input_tokens_details": {
+            "cached_tokens": upstream_input_details.get("cached_tokens", 0),
+        },
         "output_tokens": output_tokens,
-        "output_tokens_details": {"reasoning_tokens": 0},
+        "output_tokens_details": {
+            "reasoning_tokens": upstream_output_details.get("reasoning_tokens", 0),
+        },
         "total_tokens": input_tokens + output_tokens,
     }
 
@@ -302,6 +308,16 @@ class _StreamMessageState:
     current_message_id: str | None = None
     accumulated_content: str = ""
     message_started: bool = False
+    # Reasoning summary state. ``current_reasoning_id`` is the local
+    # ``rs-…`` id we assign; ``upstream_reasoning_id`` is whatever Copilot
+    # sent on ``response.reasoning_summary_text.done`` (we forward it as the
+    # ``encrypted_content`` field so Codex can correlate).
+    current_reasoning_id: str | None = None
+    upstream_reasoning_id: str | None = None
+    accumulated_reasoning: str = ""
+    reasoning_started: bool = False
+    summary_index: int = 0
+    reasoning_item_count: int = 0
 
     def close_open_message(self, advance_index: bool = True) -> list[str]:
         """Close the currently open message.
@@ -323,6 +339,64 @@ class _StreamMessageState:
             self.output_index += 1
         self.message_started = False
         self.current_message_id = None
+        return events
+
+    def close_open_reasoning(self, advance_index: bool = True) -> list[str]:
+        """Close any open reasoning summary block + reasoning item.
+
+        Emits the OpenAI Responses-API event sequence:
+          response.reasoning_summary_text.done
+          response.reasoning_summary_part.done
+          response.output_item.done (item.type == "reasoning")
+        """
+        if not self.reasoning_started or not self.current_reasoning_id:
+            return []
+        rs_id = self.current_reasoning_id
+        text = self.accumulated_reasoning
+        summary_part = {"type": "summary_text", "text": text}
+        reasoning_item = {
+            "type": "reasoning",
+            "id": rs_id,
+            "summary": [summary_part],
+        }
+        if self.upstream_reasoning_id:
+            reasoning_item["encrypted_content"] = self.upstream_reasoning_id
+        events = [
+            sse_event(
+                {
+                    "type": "response.reasoning_summary_text.done",
+                    "item_id": rs_id,
+                    "output_index": self.output_index,
+                    "summary_index": self.summary_index,
+                    "text": text,
+                }
+            ),
+            sse_event(
+                {
+                    "type": "response.reasoning_summary_part.done",
+                    "item_id": rs_id,
+                    "output_index": self.output_index,
+                    "summary_index": self.summary_index,
+                    "part": summary_part,
+                }
+            ),
+            sse_event(
+                {
+                    "type": "response.output_item.done",
+                    "output_index": self.output_index,
+                    "item": reasoning_item,
+                }
+            ),
+        ]
+        self.output_items.append(reasoning_item)
+        self.reasoning_item_count += 1
+        if advance_index:
+            self.output_index += 1
+        self.reasoning_started = False
+        self.current_reasoning_id = None
+        self.upstream_reasoning_id = None
+        self.accumulated_reasoning = ""
+        self.summary_index = 0
         return events
 
 
@@ -384,8 +458,64 @@ async def stream_response(
         )
 
         async for chunk in stream:
+            # Handle reasoning summary text deltas. gpt-5.x and other thinking
+            # models stream chain-of-thought via these events; if we don't
+            # forward them, Codex sees only the final user-visible message and
+            # the model appears to "stop without doing anything" because all
+            # of its planning tokens vanished. We open a separate
+            # ``reasoning`` output item so messages and tool_calls keep their
+            # own item indices.
+            if chunk.thinking:
+                if state.message_started:
+                    for evt in state.close_open_message():
+                        yield evt
+                if not state.reasoning_started:
+                    state.current_reasoning_id = generate_id("rs")
+                    state.reasoning_started = True
+                    state.summary_index = 0
+                    yield sse_event(
+                        {
+                            "type": "response.output_item.added",
+                            "output_index": state.output_index,
+                            "item": {
+                                "type": "reasoning",
+                                "id": state.current_reasoning_id,
+                                "summary": [],
+                            },
+                        }
+                    )
+                    yield sse_event(
+                        {
+                            "type": "response.reasoning_summary_part.added",
+                            "item_id": state.current_reasoning_id,
+                            "output_index": state.output_index,
+                            "summary_index": state.summary_index,
+                            "part": {"type": "summary_text", "text": ""},
+                        }
+                    )
+                state.accumulated_reasoning += chunk.thinking
+                yield sse_event(
+                    {
+                        "type": "response.reasoning_summary_text.delta",
+                        "item_id": state.current_reasoning_id,
+                        "output_index": state.output_index,
+                        "summary_index": state.summary_index,
+                        "delta": chunk.thinking,
+                    }
+                )
+
+            if chunk.thinking_signature:
+                state.upstream_reasoning_id = chunk.thinking_signature
+                for evt in state.close_open_reasoning():
+                    yield evt
+
             # Handle text content
             if chunk.content:
+                # Close any open reasoning before switching to a message item
+                # so the output indices stay monotonic and Codex can replay
+                # the items in order.
+                for evt in state.close_open_reasoning():
+                    yield evt
                 if not state.message_started:
                     state.current_message_id = generate_id("msg")
                     state.message_started = True
@@ -430,50 +560,102 @@ async def stream_response(
             # Handle complete tool call
             if chunk.tool_call:
                 tc = chunk.tool_call
+                for evt in state.close_open_reasoning():
+                    yield evt
                 for evt in state.close_open_message():
                     yield evt
 
-                fc_id = generate_id("fc")
-                fc_item = make_function_call_item(fc_id, tc.call_id, tc.name, tc.arguments)
-
-                yield sse_event(
-                    {
-                        "type": "response.output_item.added",
-                        "output_index": state.output_index,
-                        "item": make_function_call_item(
-                            fc_id, tc.call_id, tc.name, "", "in_progress"
-                        ),
+                if tc.is_custom:
+                    # Custom tool call (e.g. apply_patch) — free-form text input,
+                    # not JSON arguments. Round-trip as custom_tool_call so codex
+                    # parses ``input`` as raw text.
+                    ctc_id = generate_id("ctc")
+                    ctc_item = {
+                        "type": "custom_tool_call",
+                        "id": ctc_id,
+                        "call_id": tc.call_id,
+                        "name": tc.name,
+                        "input": tc.arguments,
+                        "status": "completed",
                     }
-                )
+                    yield sse_event(
+                        {
+                            "type": "response.output_item.added",
+                            "output_index": state.output_index,
+                            "item": {
+                                **ctc_item,
+                                "input": "",
+                                "status": "in_progress",
+                            },
+                        }
+                    )
+                    yield sse_event(
+                        {
+                            "type": "response.custom_tool_call_input.delta",
+                            "item_id": ctc_id,
+                            "output_index": state.output_index,
+                            "delta": tc.arguments,
+                        }
+                    )
+                    yield sse_event(
+                        {
+                            "type": "response.custom_tool_call_input.done",
+                            "item_id": ctc_id,
+                            "output_index": state.output_index,
+                            "input": tc.arguments,
+                        }
+                    )
+                    yield sse_event(
+                        {
+                            "type": "response.output_item.done",
+                            "output_index": state.output_index,
+                            "item": ctc_item,
+                        }
+                    )
+                    state.output_items.append(ctc_item)
+                    state.output_index += 1
+                else:
+                    fc_id = generate_id("fc")
+                    fc_item = make_function_call_item(fc_id, tc.call_id, tc.name, tc.arguments)
 
-                yield sse_event(
-                    {
-                        "type": "response.function_call_arguments.delta",
-                        "item_id": fc_id,
-                        "output_index": state.output_index,
-                        "delta": tc.arguments,
-                    }
-                )
+                    yield sse_event(
+                        {
+                            "type": "response.output_item.added",
+                            "output_index": state.output_index,
+                            "item": make_function_call_item(
+                                fc_id, tc.call_id, tc.name, "", "in_progress"
+                            ),
+                        }
+                    )
 
-                yield sse_event(
-                    {
-                        "type": "response.function_call_arguments.done",
-                        "item_id": fc_id,
-                        "output_index": state.output_index,
-                        "arguments": tc.arguments,
-                    }
-                )
+                    yield sse_event(
+                        {
+                            "type": "response.function_call_arguments.delta",
+                            "item_id": fc_id,
+                            "output_index": state.output_index,
+                            "delta": tc.arguments,
+                        }
+                    )
 
-                yield sse_event(
-                    {
-                        "type": "response.output_item.done",
-                        "output_index": state.output_index,
-                        "item": fc_item,
-                    }
-                )
+                    yield sse_event(
+                        {
+                            "type": "response.function_call_arguments.done",
+                            "item_id": fc_id,
+                            "output_index": state.output_index,
+                            "arguments": tc.arguments,
+                        }
+                    )
 
-                state.output_items.append(fc_item)
-                state.output_index += 1
+                    yield sse_event(
+                        {
+                            "type": "response.output_item.done",
+                            "output_index": state.output_index,
+                            "item": fc_item,
+                        }
+                    )
+
+                    state.output_items.append(fc_item)
+                    state.output_index += 1
 
             if chunk.usage:
                 final_usage = chunk.usage
@@ -481,6 +663,8 @@ async def stream_response(
             if chunk.finish_reason:
                 stream_completed = True
 
+                for evt in state.close_open_reasoning():
+                    yield evt
                 for evt in state.close_open_message(advance_index=False):
                     yield evt
 
@@ -497,8 +681,18 @@ async def stream_response(
                 )
 
         if not stream_completed:
-            logger.warning("Stream ended without finish_reason, sending completion events")
+            logger.warning(
+                "Stream ended without finish_reason: req_id=%s model=%s output_items=%d "
+                "accumulated_text_len=%d message_started=%s — emitting fallback completion",
+                request_id,
+                request.model,
+                len(state.output_items),
+                len(state.accumulated_content),
+                state.message_started,
+            )
 
+            for evt in state.close_open_reasoning():
+                yield evt
             for evt in state.close_open_message(advance_index=False):
                 yield evt
 
@@ -515,11 +709,31 @@ async def stream_response(
             )
 
         elapsed_ms = (time.time() - start_time) * 1000
+        function_call_count = sum(
+            1 for item in state.output_items if item.get("type") == "function_call"
+        )
+        message_count = sum(1 for item in state.output_items if item.get("type") == "message")
+        reasoning_count = sum(1 for item in state.output_items if item.get("type") == "reasoning")
         logger.info(
-            "Stream completed: req_id=%s, elapsed=%.1fms, output_items=%d",
+            "Stream completed: req_id=%s model=%s elapsed=%.1fms output_items=%d "
+            "(messages=%d, function_calls=%d, reasoning=%d) text_len=%d "
+            "reasoning_text_len=%d stream_completed=%s usage=%s",
             request_id,
+            request.model,
             elapsed_ms,
             len(state.output_items),
+            message_count,
+            function_call_count,
+            reasoning_count,
+            len(state.accumulated_content),
+            sum(
+                len(part.get("text", ""))
+                for item in state.output_items
+                if item.get("type") == "reasoning"
+                for part in item.get("summary", [])
+            ),
+            stream_completed,
+            final_usage,
         )
 
         # NOTE: Do NOT send "data: [DONE]\n\n" - agent-maestro doesn't send it
