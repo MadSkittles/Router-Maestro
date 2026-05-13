@@ -13,6 +13,10 @@ These tests pin the input-side behavior down.
 """
 
 from router_maestro.server.routes.responses import convert_input_to_internal
+from router_maestro.server.schemas.responses import (
+    ResponsesFunctionCallInput,
+    ResponsesRequest,
+)
 
 
 def test_function_call_namespace_preserved():
@@ -70,3 +74,67 @@ def test_function_call_explicit_none_namespace_omitted():
     )
     assert isinstance(items, list)
     assert "namespace" not in items[0]
+
+
+# ---------------------------------------------------------------------------
+# Pydantic schema-level regression tests (v0.3.10 root cause)
+# ---------------------------------------------------------------------------
+#
+# The convert_input_to_internal tests above bypass Pydantic. The actual
+# v0.3.8/9/10 bug was that ``ResponsesFunctionCallInput`` silently dropped
+# ``namespace`` *before* convert_input_to_internal ever saw it because
+# Pydantic v2 ignores extra fields by default. These tests pin the schema
+# down so a future refactor can't strip the field again.
+
+
+def test_pydantic_input_model_preserves_namespace():
+    m = ResponsesFunctionCallInput(
+        type="function_call",
+        call_id="c1",
+        name="execute_query",
+        arguments="{}",
+        namespace="mcp__kusto_mcp__",
+    )
+    dumped = m.model_dump(exclude_none=True)
+    assert dumped["namespace"] == "mcp__kusto_mcp__"
+
+
+def test_pydantic_input_model_preserves_unknown_extras():
+    # extra="allow" lets future Copilot fields (tool_metadata, etc.) survive
+    # without us having to ship a release for each one.
+    m = ResponsesFunctionCallInput(
+        type="function_call",
+        call_id="c1",
+        name="x",
+        arguments="{}",
+        tool_metadata={"key": "v"},
+    )
+    dumped = m.model_dump(exclude_none=True)
+    assert dumped["tool_metadata"] == {"key": "v"}
+
+
+def test_responses_request_preserves_namespace_through_full_parse():
+    # End-to-end mirror of how FastAPI parses the Codex request body.
+    req = ResponsesRequest(
+        model="gpt-5.5",
+        input=[
+            {
+                "type": "function_call",
+                "call_id": "call_kusto_1",
+                "name": "execute_query",
+                "namespace": "mcp__kusto_mcp__",
+                "arguments": '{"query":"x"}',
+                "status": "completed",
+            },
+            {
+                "type": "function_call_output",
+                "call_id": "call_kusto_1",
+                "output": "ok",
+            },
+        ],
+    )
+    items = convert_input_to_internal(req.input)
+    fc = items[0]
+    assert fc["type"] == "function_call"
+    assert fc["namespace"] == "mcp__kusto_mcp__"
+    assert fc["call_id"] == "call_kusto_1"

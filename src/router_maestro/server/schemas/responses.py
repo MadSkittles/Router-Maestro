@@ -2,7 +2,7 @@
 
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 # ============================================================================
 # Input Types
@@ -28,7 +28,16 @@ class ResponsesInputMessage(BaseModel):
 
 
 class ResponsesFunctionCallInput(BaseModel):
-    """A function call from a previous assistant response."""
+    """A function call from a previous assistant response.
+
+    ``extra="allow"`` is critical: Codex echoes back upstream-emitted fields
+    (notably ``namespace`` for MCP-routed tools like ``kusto/execute_query``)
+    that this schema doesn't enumerate. Without ``allow``, Pydantic silently
+    drops them at the FastAPI request boundary and Copilot CAPI 400s the next
+    turn with ``Missing namespace for function_call 'X'`` (v0.3.8/9/10 bug).
+    """
+
+    model_config = ConfigDict(extra="allow")
 
     type: str = "function_call"
     id: str | None = None
@@ -36,10 +45,16 @@ class ResponsesFunctionCallInput(BaseModel):
     name: str
     arguments: str
     status: str = "completed"
+    # MCP namespace echoed back from a prior turn — required by Copilot CAPI
+    # when the original ``function_call`` was emitted with a namespace, e.g.
+    # ``mcp__kusto_mcp__``. Declared explicitly so it survives ``model_dump``.
+    namespace: str | None = None
 
 
 class ResponsesFunctionCallOutput(BaseModel):
     """Output/result from a function call execution."""
+
+    model_config = ConfigDict(extra="allow")
 
     type: str = "function_call_output"
     call_id: str
