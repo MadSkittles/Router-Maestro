@@ -4,6 +4,14 @@ All notable changes to Router-Maestro are documented here.
 
 ---
 
+## v0.3.9 (2026-05-13)
+
+### Fixes
+
+- **MCP tool registries (Kusto, ado-mcp, context7, …) actually reach the model now.** v0.3.8 preserved the `namespace` field on `function_call` round-trips, but the underlying MCP tool calls still 400'd with `Missing namespace for function_call 'execute_query'. It does not exist in the default namespace.` because we were silently dropping the namespace tool registry itself from the request. The Codex `/responses` request carries tools shaped as `{"type": "namespace", "name": "mcp__kusto_mcp__", "tools": [{"type": "function", "name": "execute_query", ...}, ...]}` — a wrapper around the actual function definitions. We were filtering ALL `type: "namespace"` items out (added in an earlier release to suppress a `Missing required parameter: 'tools[N].tools'` 400 from Copilot), so the model received `tool_search_call` results referencing tools Copilot's request validator had no record of. The filter now keeps namespace items that carry a non-empty inner `tools` array (the legitimate registry shape) and only drops the empty/missing variants that were the original 400's actual cause.
+
+---
+
 ## v0.3.8 (2026-05-13)
 
 ### Fixes
