@@ -1096,7 +1096,7 @@ class CopilotProvider(BaseProvider):
                                 "call_id": item.get("call_id", ""),
                                 "name": item.get("name", ""),
                                 "arguments": "",
-                                "is_custom": False,
+                                "kind": "function",
                             }
                         elif item.get("type") == "custom_tool_call":
                             # Custom tools (e.g. Codex's apply_patch) stream
@@ -1108,15 +1108,17 @@ class CopilotProvider(BaseProvider):
                                 "call_id": item.get("call_id", ""),
                                 "name": item.get("name", ""),
                                 "arguments": "",
-                                "is_custom": True,
+                                "kind": "custom",
                             }
                         elif item.get("type") == "tool_search_call":
                             # Codex CLI registers a `tool_search` tool
                             # (execution=client) so the model can dynamically
-                            # discover MCP tools. gpt-5.x calls it via this
-                            # item type; forward as a regular function_call
-                            # named "tool_search" so Codex executes it and
-                            # returns a function_call_output.
+                            # discover MCP tools. Codex's dispatcher matches on
+                            # ResponseItem::ToolSearchCall — wrapping this as a
+                            # function_call(name="tool_search") makes the call
+                            # silently abort (registry has no function tool of
+                            # that name). Tag with kind="tool_search" so the
+                            # route emits a real tool_search_call item.
                             # NOTE: arguments arrive whole on output_item.done;
                             # if Copilot ever streams them via a dedicated
                             # delta event we'll spot it via unknown_event_counts.
@@ -1125,7 +1127,7 @@ class CopilotProvider(BaseProvider):
                                 "call_id": item.get("call_id", ""),
                                 "name": "tool_search",
                                 "arguments": "",
-                                "is_custom": False,
+                                "kind": "tool_search",
                             }
 
                     # Handle function call arguments delta - accumulate silently
@@ -1157,7 +1159,7 @@ class CopilotProvider(BaseProvider):
                                     call_id=fc["call_id"],
                                     name=fc["name"],
                                     arguments=fc["arguments"],
-                                    is_custom=fc.get("is_custom", False),
+                                    kind=fc.get("kind", "function"),
                                 ),
                             )
 
@@ -1174,7 +1176,7 @@ class CopilotProvider(BaseProvider):
                                     call_id=fc["call_id"],
                                     name=fc["name"],
                                     arguments=fc["arguments"],
-                                    is_custom=True,
+                                    kind="custom",
                                 ),
                             )
 
@@ -1209,7 +1211,7 @@ class CopilotProvider(BaseProvider):
                                         call_id=item.get("call_id", ""),
                                         name=item.get("name", ""),
                                         arguments=item.get("input", ""),
-                                        is_custom=True,
+                                        kind="custom",
                                     ),
                                 )
                         elif item.get("type") == "reasoning":
@@ -1238,10 +1240,13 @@ class CopilotProvider(BaseProvider):
                             if sig:
                                 yield ResponsesStreamChunk(content="", thinking_signature=sig)
                         elif item.get("type") == "tool_search_call":
-                            # Forward as function_call so Codex's client-side
-                            # tool_search executor receives it. Arguments arrive
-                            # as a dict here; serialize because function_call
-                            # arguments are JSON strings downstream.
+                            # Forward as kind="tool_search" so the route emits
+                            # an actual tool_search_call wire item — codex's
+                            # dispatcher refuses anything else (see v0.3.7
+                            # changelog). Arguments arrive as a dict here;
+                            # serialize to a JSON string for transport on the
+                            # ResponsesToolCall dataclass; the route deserializes
+                            # before re-emitting.
                             output_idx = data.get("output_index", 0)
                             fc = pending_fcs.pop(output_idx, None)
                             args = item.get("arguments")
@@ -1259,7 +1264,7 @@ class CopilotProvider(BaseProvider):
                                     call_id=call_id,
                                     name="tool_search",
                                     arguments=args_str,
-                                    is_custom=False,
+                                    kind="tool_search",
                                 ),
                             )
                         else:

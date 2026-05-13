@@ -4,7 +4,7 @@ from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from logging import Logger
-from typing import NoReturn
+from typing import Literal, NoReturn
 
 import httpx
 
@@ -148,10 +148,19 @@ class ResponsesToolCall:
     call_id: str
     name: str
     arguments: str
-    # ``True`` for custom (free-form text) tools like Codex's ``apply_patch``.
-    # The route forwards these as ``custom_tool_call`` items with raw ``input``
-    # rather than function_call items with JSON ``arguments``.
-    is_custom: bool = False
+    # Discriminates how the route emits this call to the downstream client:
+    #   - "function"    → standard ``function_call`` item with JSON ``arguments``
+    #   - "custom"      → ``custom_tool_call`` with raw ``input`` (e.g. apply_patch)
+    #   - "tool_search" → ``tool_search_call`` with ``execution: "client"`` and a
+    #                     dict ``arguments`` payload. Codex's MCP tool-discovery
+    #                     dispatcher only matches this exact item type — wrapping
+    #                     it as a function_call(name="tool_search") makes the
+    #                     dispatcher silently abort the call (v0.3.5/0.3.6 bug).
+    kind: Literal["function", "custom", "tool_search"] = "function"
+
+    @property
+    def is_custom(self) -> bool:
+        return self.kind == "custom"
 
 
 @dataclass

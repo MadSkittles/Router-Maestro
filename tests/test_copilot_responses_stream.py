@@ -104,6 +104,7 @@ class TestToolSearchCallForwarding:
         tc = tool_chunks[0].tool_call
         assert tc is not None
         assert tc.name == "tool_search"
+        assert tc.kind == "tool_search"
         assert tc.is_custom is False
         assert tc.call_id == "call_abc123"
         # Arguments must be a JSON string (function_call shape downstream).
@@ -134,6 +135,7 @@ class TestToolSearchCallForwarding:
         assert len(tool_chunks) == 1
         tc = tool_chunks[0].tool_call
         assert tc is not None
+        assert tc.kind == "tool_search"
         assert tc.arguments == '{"query": "x"}'
 
 
