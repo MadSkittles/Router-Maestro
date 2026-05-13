@@ -153,6 +153,48 @@ class TestConvertInputToInternal:
         result = convert_input_to_internal(input_data)
         assert result[0]["output"] == '{"temp": 72}'
 
+    def test_reasoning_item_preserved_with_encrypted_content(self):
+        """Reasoning items echoed back from prior turns must keep id, summary,
+        and encrypted_content so Copilot can correlate chain-of-thought."""
+        input_data = [
+            {
+                "type": "reasoning",
+                "id": "rs-abc",
+                "summary": [{"type": "summary_text", "text": "thinking..."}],
+                "encrypted_content": "blob",
+            }
+        ]
+        result = convert_input_to_internal(input_data)
+        assert result == [
+            {
+                "type": "reasoning",
+                "id": "rs-abc",
+                "summary": [{"type": "summary_text", "text": "thinking..."}],
+                "encrypted_content": "blob",
+            }
+        ]
+
+    def test_reasoning_item_without_encrypted_content_omits_key(self):
+        """No encrypted_content key on the way in → none on the way out."""
+        input_data = [
+            {
+                "type": "reasoning",
+                "id": "rs-abc",
+                "summary": [{"type": "summary_text", "text": "..."}],
+            }
+        ]
+        result = convert_input_to_internal(input_data)
+        assert "encrypted_content" not in result[0]
+        assert result[0]["type"] == "reasoning"
+        assert result[0]["id"] == "rs-abc"
+
+    def test_reasoning_item_missing_summary_normalizes_to_empty_list(self):
+        """Some Codex versions echo reasoning items without a summary field;
+        we must still produce a valid reasoning item."""
+        input_data = [{"type": "reasoning", "id": "rs-xyz"}]
+        result = convert_input_to_internal(input_data)
+        assert result[0]["summary"] == []
+
 
 class TestConvertToolsToInternal:
     """Tests for tools conversion."""

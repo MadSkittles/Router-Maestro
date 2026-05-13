@@ -117,6 +117,19 @@ def convert_input_to_internal(
                         "output": output,
                     }
                 )
+
+            elif item_type == "reasoning":
+                # Echoed back from a prior turn — preserve the full shape so
+                # Copilot can correlate chain-of-thought across turns. Mirrors
+                # vscode-copilot-chat responsesApi.ts:216-230 (extractThinkingData).
+                reasoning_item: dict[str, Any] = {
+                    "type": "reasoning",
+                    "id": item.get("id"),
+                    "summary": item.get("summary", []) or [],
+                }
+                if item.get("encrypted_content"):
+                    reasoning_item["encrypted_content"] = item["encrypted_content"]
+                items.append(reasoning_item)
             else:
                 items.append(convert_content_to_serializable(item))
 
