@@ -46,6 +46,12 @@ _BENIGN_UPSTREAM_EVENTS = frozenset(
         "response.content_part.added",
         "response.content_part.done",
         "response.output_text.done",
+        # Reasoning ``part`` events are pure structure envelopes (no text
+        # payload — that arrives via ``reasoning_summary_text.delta``). The
+        # route synthesizes its own added/done events from the deltas we DO
+        # consume, mirroring how ``content_part.*`` is handled for messages.
+        "response.reasoning_summary_part.added",
+        "response.reasoning_summary_part.done",
     }
 )
 _BENIGN_DONE_ITEM_TYPES = frozenset({"message"})

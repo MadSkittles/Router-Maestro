@@ -388,3 +388,50 @@ class TestUnknownEventNoise:
         warnings = [r for r in caplog.records if "unhandled event types" in r.getMessage()]
         assert len(warnings) == 1
         assert "brand_new_event_type_we_dont_know" in warnings[0].getMessage()
+
+    @pytest.mark.asyncio
+    async def test_reasoning_summary_part_events_skipped_from_warning(self, caplog):
+        """``reasoning_summary_part.added/done`` are pure structure envelopes.
+
+        The route synthesizes its own equivalents from the
+        ``reasoning_summary_text.delta`` we already consume — same pattern as
+        ``content_part.*`` for messages. Without the skip, every xhigh request
+        produced a noisy ``unhandled event types`` warning that drowned out
+        genuinely-unknown events.
+        """
+        events = [
+            {"type": "response.created", "response": {}},
+            {
+                "type": "response.reasoning_summary_part.added",
+                "item_id": "rs-1",
+                "summary_index": 0,
+                "part": {"type": "summary_text", "text": ""},
+            },
+            {
+                "type": "response.reasoning_summary_text.delta",
+                "item_id": "rs-1",
+                "delta": "thinking...",
+            },
+            {
+                "type": "response.reasoning_summary_text.done",
+                "item_id": "rs-1",
+                "text": "thinking...",
+            },
+            {
+                "type": "response.reasoning_summary_part.done",
+                "item_id": "rs-1",
+                "summary_index": 0,
+                "part": {"type": "summary_text", "text": "thinking..."},
+            },
+            {"type": "response.completed", "response": {"status": "completed"}},
+        ]
+        provider = _make_provider_with_stream(_sse_lines(events))
+
+        with caplog.at_level(logging.WARNING, logger="providers.copilot"):
+            await _collect(provider)
+
+        warnings = [r for r in caplog.records if "unhandled event types" in r.getMessage()]
+        assert warnings == [], (
+            "reasoning_summary_part envelopes leaked into the unknown-event warning: "
+            f"{[w.getMessage() for w in warnings]}"
+        )
