@@ -199,6 +199,86 @@ class TestFunctionCallWireShape:
         assert done[0]["item"]["arguments"] == '{"location": "NYC"}'
 
 
+class TestReasoningRoundTrip:
+    """The reasoning output_item must preserve the upstream (id, blob) pair.
+
+    Copilot signs ``encrypted_content`` against the upstream reasoning item
+    id (e.g. ``rs_…``). When Codex round-trips the reasoning item back on
+    the next turn, the (id, blob) pair has to match what Copilot emitted —
+    otherwise the next request 400s with ``Encrypted content could not be
+    decrypted``. The route MUST use ``chunk.thinking_id`` as the item id,
+    NOT a locally-generated ``rs-…`` slug.
+    """
+
+    @pytest.mark.asyncio
+    async def test_upstream_reasoning_id_used_on_output_item(self):
+        upstream_id = "rs_upstream_xyz_12345"
+        encrypted_blob = "ENC_BLOB_" + "Z" * 200
+        events = await _drive(
+            [
+                # First reasoning delta — carries upstream id.
+                ResponsesStreamChunk(content="", thinking="planning...", thinking_id=upstream_id),
+                # Final reasoning chunk — id + encrypted blob from
+                # output_item.done in the upstream stream.
+                ResponsesStreamChunk(
+                    content="",
+                    thinking_id=upstream_id,
+                    thinking_signature=encrypted_blob,
+                ),
+                ResponsesStreamChunk(content="hello", finish_reason="stop"),
+            ]
+        )
+
+        # output_item.added for reasoning must carry the upstream id, not a
+        # locally-generated ``rs-…`` slug.
+        added_reasoning = [
+            e
+            for e in events
+            if e.get("type") == "response.output_item.added"
+            and e.get("item", {}).get("type") == "reasoning"
+        ]
+        assert len(added_reasoning) == 1
+        assert added_reasoning[0]["item"]["id"] == upstream_id
+
+        # output_item.done must pair the upstream id with the encrypted blob.
+        done_reasoning = [
+            e
+            for e in events
+            if e.get("type") == "response.output_item.done"
+            and e.get("item", {}).get("type") == "reasoning"
+        ]
+        assert len(done_reasoning) == 1
+        item = done_reasoning[0]["item"]
+        assert item["id"] == upstream_id, (
+            f"reasoning item id must be the upstream id, got {item['id']!r} "
+            f"(this would 400 the next turn with 'Encrypted content could not be decrypted')"
+        )
+        assert item["encrypted_content"] == encrypted_blob
+
+    @pytest.mark.asyncio
+    async def test_reasoning_summary_text_events_use_upstream_id(self):
+        # The summary_text.delta / .done events must reference the same
+        # upstream id (codex correlates them by item_id).
+        upstream_id = "rs_upstream_abc"
+        events = await _drive(
+            [
+                ResponsesStreamChunk(content="", thinking="thinking...", thinking_id=upstream_id),
+                ResponsesStreamChunk(
+                    content="",
+                    thinking_id=upstream_id,
+                    thinking_signature="BLOB",
+                ),
+                ResponsesStreamChunk(content="ok", finish_reason="stop"),
+            ]
+        )
+
+        for evt in events:
+            if evt.get("type", "").startswith("response.reasoning_summary"):
+                assert evt.get("item_id") == upstream_id, (
+                    f"{evt['type']} should reference upstream id, got {evt.get('item_id')!r}"
+                )
+
+
 class TestFunctionCallNamespaceWireShape:
     """Namespaced function_calls must emit `namespace` field downstream
     so Codex can echo it back next turn — Copilot 400s otherwise."""

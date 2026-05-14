@@ -126,12 +126,22 @@ def convert_input_to_internal(
                 # Echoed back from a prior turn — preserve the full shape so
                 # Copilot can correlate chain-of-thought across turns. Mirrors
                 # vscode-copilot-chat responsesApi.ts:216-230 (extractThinkingData).
+                #
+                # Codex CLI's ``ResponseItem::Reasoning`` marks ``id`` as
+                # ``#[serde(default, skip_serializing)]`` (see openai/codex
+                # codex-rs/protocol/src/models.rs), so it NEVER sends the id
+                # back on round-trip. Copilot CAPI signs ``encrypted_content``
+                # against the upstream id and rejects (id, blob) pairs that
+                # don't match. Without an id, the blob is unverifiable, so we
+                # MUST strip it — otherwise Copilot 400s with ``Encrypted
+                # content could not be decrypted``. (See openai/codex#17541
+                # and the parallel litellm bug BerriAI/litellm#22189.)
                 reasoning_item: dict[str, Any] = {
                     "type": "reasoning",
                     "id": item.get("id"),
                     "summary": item.get("summary", []) or [],
                 }
-                if item.get("encrypted_content"):
+                if item.get("encrypted_content") and item.get("id"):
                     reasoning_item["encrypted_content"] = item["encrypted_content"]
                 items.append(reasoning_item)
             else:
@@ -307,6 +317,24 @@ async def create_response(request: ResponsesRequest):
         response_id = generate_id("resp")
         output: list[dict[str, Any]] = []
 
+        # Emit the reasoning item BEFORE the message so the (id, blob) pair
+        # round-trips back to Copilot intact. ``thinking_id`` must be the
+        # upstream id (Copilot signs ``thinking_signature`` against it) — see
+        # base.py ResponsesResponse for the rationale.
+        if response.thinking_id or response.thinking:
+            reasoning_item: dict[str, Any] = {
+                "type": "reasoning",
+                "id": response.thinking_id or generate_id("rs"),
+                "summary": (
+                    [{"type": "summary_text", "text": response.thinking}]
+                    if response.thinking
+                    else []
+                ),
+            }
+            if response.thinking_signature:
+                reasoning_item["encrypted_content"] = response.thinking_signature
+            output.append(reasoning_item)
+
         if response.content:
             message_id = generate_id("msg")
             output.append(make_message_item(message_id, response.content))
@@ -352,12 +380,17 @@ class _StreamMessageState:
     current_message_id: str | None = None
     accumulated_content: str = ""
     message_started: bool = False
-    # Reasoning summary state. ``current_reasoning_id`` is the local
-    # ``rs-…`` id we assign; ``upstream_reasoning_id`` is whatever Copilot
-    # sent on ``response.reasoning_summary_text.done`` (we forward it as the
-    # ``encrypted_content`` field so Codex can correlate).
+    # Reasoning summary state. ``current_reasoning_id`` is the upstream
+    # reasoning item id (e.g. ``rs_…``) when Copilot supplies it on the
+    # first ``reasoning_summary_text.delta``, falling back to a locally-
+    # generated ``rs-…`` only if the upstream never sent one.
+    # ``upstream_encrypted_content`` is the verifiable blob from
+    # ``output_item.done.item.encrypted_content``; it is signed against the
+    # upstream id, so the (id, blob) pair MUST round-trip together — pairing
+    # the blob with a local id 400s the next turn with ``Encrypted content
+    # could not be decrypted``.
     current_reasoning_id: str | None = None
-    upstream_reasoning_id: str | None = None
+    upstream_encrypted_content: str | None = None
     accumulated_reasoning: str = ""
     reasoning_started: bool = False
     summary_index: int = 0
@@ -403,8 +436,8 @@ class _StreamMessageState:
             "id": rs_id,
             "summary": [summary_part],
         }
-        if self.upstream_reasoning_id:
-            reasoning_item["encrypted_content"] = self.upstream_reasoning_id
+        if self.upstream_encrypted_content:
+            reasoning_item["encrypted_content"] = self.upstream_encrypted_content
         events = [
             sse_event(
                 {
@@ -438,7 +471,7 @@ class _StreamMessageState:
             self.output_index += 1
         self.reasoning_started = False
         self.current_reasoning_id = None
-        self.upstream_reasoning_id = None
+        self.upstream_encrypted_content = None
         self.accumulated_reasoning = ""
         self.summary_index = 0
         return events
@@ -514,7 +547,12 @@ async def stream_response(
                     for evt in state.close_open_message():
                         yield evt
                 if not state.reasoning_started:
-                    state.current_reasoning_id = generate_id("rs")
+                    # Prefer the upstream reasoning item id (e.g. ``rs_…``)
+                    # supplied on the delta event. Copilot signs the
+                    # encrypted_content blob against this id, so emitting a
+                    # locally-generated id would mismatch the blob and 400
+                    # the next turn.
+                    state.current_reasoning_id = chunk.thinking_id or generate_id("rs")
                     state.reasoning_started = True
                     state.summary_index = 0
                     yield sse_event(
@@ -548,8 +586,15 @@ async def stream_response(
                     }
                 )
 
+            # The upstream id may also arrive separately (e.g. on
+            # output_item.done before any text deltas arrive). Capture it
+            # so close_open_reasoning emits the correct (id, blob) pair.
+            if chunk.thinking_id and state.reasoning_started:
+                if state.current_reasoning_id != chunk.thinking_id:
+                    state.current_reasoning_id = chunk.thinking_id
+
             if chunk.thinking_signature:
-                state.upstream_reasoning_id = chunk.thinking_signature
+                state.upstream_encrypted_content = chunk.thinking_signature
                 for evt in state.close_open_reasoning():
                     yield evt
 

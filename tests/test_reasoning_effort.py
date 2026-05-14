@@ -100,20 +100,78 @@ class TestOpenAIPayloadEffort:
 
 
 class TestCopilotResponsesPayloadEffort:
+    @staticmethod
+    def _seed_catalog(provider: CopilotProvider, model_id: str, allowed: list[str]) -> None:
+        """Prime the model cache so ``_catalog_effort_values`` returns ``allowed``."""
+        from router_maestro.providers.base import ModelInfo
+
+        provider._models_ttl_cache.set(
+            [
+                ModelInfo(
+                    id=model_id,
+                    name=model_id,
+                    provider="github-copilot",
+                    reasoning_effort_values=allowed,
+                )
+            ]
+        )
+
     def test_responses_payload_writes_reasoning(self):
         provider = CopilotProvider()
+        self._seed_catalog(provider, "gpt-5", ["low", "medium", "high"])
         req = ResponsesRequest(model="gpt-5", input="hi", reasoning_effort="high")
         payload = provider._build_responses_payload(req)
         assert payload["reasoning"] == {"effort": "high", "summary": "auto"}
 
-    def test_responses_payload_downgrades_xhigh(self):
+    def test_responses_payload_preserves_xhigh_when_catalog_advertises_it(self):
+        # Regression: chat path is catalog-driven and preserves ``xhigh`` for
+        # gpt-5.5 (catalog: ['none','low','medium','high','xhigh']). Responses
+        # path used to unconditionally downgrade — codex+gpt-5.5 silently ran
+        # at ``high`` while chat ran at ``xhigh``. Both paths must agree.
         provider = CopilotProvider()
-        req = ResponsesRequest(model="gpt-5", input="hi", reasoning_effort="xhigh")
+        self._seed_catalog(provider, "gpt-5.5", ["none", "low", "medium", "high", "xhigh"])
+        req = ResponsesRequest(model="gpt-5.5", input="hi", reasoning_effort="xhigh")
+        payload = provider._build_responses_payload(req)
+        assert payload["reasoning"] == {"effort": "xhigh", "summary": "auto"}
+
+    def test_responses_payload_picks_closest_when_xhigh_unsupported(self):
+        # gpt-5-mini's catalog tops out at ``high``. Asking for ``xhigh`` must
+        # land on ``high`` (not silently fall back to nothing).
+        provider = CopilotProvider()
+        self._seed_catalog(provider, "gpt-5-mini", ["low", "medium", "high"])
+        req = ResponsesRequest(model="gpt-5-mini", input="hi", reasoning_effort="xhigh")
+        payload = provider._build_responses_payload(req)
+        assert payload["reasoning"] == {"effort": "high", "summary": "auto"}
+
+    def test_responses_payload_clamps_to_catalog_for_clamped_models(self):
+        # claude-opus-4.7's catalog only advertises ``medium``. Asking for
+        # ``xhigh`` must clamp down to ``medium`` — same as the chat path.
+        provider = CopilotProvider()
+        self._seed_catalog(provider, "claude-opus-4.7", ["medium"])
+        req = ResponsesRequest(model="claude-opus-4.7", input="hi", reasoning_effort="xhigh")
+        payload = provider._build_responses_payload(req)
+        assert payload["reasoning"] == {"effort": "medium", "summary": "auto"}
+
+    def test_responses_payload_omits_when_catalog_says_no_reasoning(self):
+        # An empty catalog list means "no reasoning supported" — emit nothing.
+        provider = CopilotProvider()
+        self._seed_catalog(provider, "gpt-4o", [])
+        req = ResponsesRequest(model="gpt-4o", input="hi", reasoning_effort="high")
+        payload = provider._build_responses_payload(req)
+        assert "reasoning" not in payload
+
+    def test_responses_payload_falls_back_to_downgrade_when_catalog_cold(self):
+        # Cold cache (no list_models call yet) — fall back to the
+        # downgrade_for_upstream heuristic so we never block on a fetch.
+        provider = CopilotProvider()
+        # No _seed_catalog call → cache is cold.
+        req = ResponsesRequest(model="gpt-5.5", input="hi", reasoning_effort="xhigh")
         payload = provider._build_responses_payload(req)
         assert payload["reasoning"] == {"effort": "high", "summary": "auto"}
 
     def test_responses_payload_omits_when_unset(self):
         provider = CopilotProvider()
+        self._seed_catalog(provider, "gpt-5", ["low", "medium", "high", "xhigh"])
         payload = provider._build_responses_payload(ResponsesRequest(model="gpt-5", input="hi"))
         assert "reasoning" not in payload
 
