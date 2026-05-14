@@ -1105,9 +1105,16 @@ class CopilotProvider(BaseProvider):
                             yield ResponsesStreamChunk(content="", thinking=delta)
 
                     elif event_type == "response.reasoning_summary_text.done":
-                        item_id = data.get("item_id")
-                        if item_id:
-                            yield ResponsesStreamChunk(content="", thinking_signature=item_id)
+                        # Don't yield ``thinking_signature=item_id`` here. The
+                        # Codex path treats every signature as ``encrypted_content``
+                        # and round-trips it to Copilot, which then 400s with
+                        # ``Encrypted content could not be decrypted`` because
+                        # ``item_id`` is just a local identifier, not the real
+                        # encrypted blob. The real blob arrives later on
+                        # ``output_item.done.item.encrypted_content``; emit the
+                        # signature there so both Codex and Anthropic round-trips
+                        # use the verifiable value.
+                        pass
 
                     # Handle function call output_item.added - start of a new function call
                     elif event_type == "response.output_item.added":

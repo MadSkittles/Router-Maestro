@@ -435,3 +435,53 @@ class TestUnknownEventNoise:
             "reasoning_summary_part envelopes leaked into the unknown-event warning: "
             f"{[w.getMessage() for w in warnings]}"
         )
+
+
+class TestThinkingSignatureSource:
+    """The reasoning ``thinking_signature`` must be the upstream encrypted blob.
+
+    Codex round-trips it back to Copilot as ``encrypted_content``; if we emit
+    the local ``item_id`` (a short identifier, not a verifiable blob), Copilot
+    400s the next turn with ``Encrypted content could not be decrypted``.
+    """
+
+    @pytest.mark.asyncio
+    async def test_signature_is_encrypted_blob_not_item_id(self):
+        encrypted_blob = "ENC_BLOB_" + "X" * 200  # stand-in for the real ~2KB blob
+        events = [
+            {"type": "response.created", "response": {}},
+            {
+                "type": "response.reasoning_summary_text.delta",
+                "item_id": "rs-upstream-1",
+                "delta": "thinking...",
+            },
+            {
+                "type": "response.reasoning_summary_text.done",
+                "item_id": "rs-upstream-1",
+                "text": "thinking...",
+            },
+            {
+                "type": "response.output_item.done",
+                "output_index": 0,
+                "item": {
+                    "type": "reasoning",
+                    "id": "rs-upstream-1",
+                    "encrypted_content": encrypted_blob,
+                    "summary": [{"type": "summary_text", "text": "thinking..."}],
+                },
+            },
+            {"type": "response.completed", "response": {"status": "completed"}},
+        ]
+        provider = _make_provider_with_stream(_sse_lines(events))
+
+        chunks = await _collect(provider)
+
+        sigs = [c.thinking_signature for c in chunks if c.thinking_signature]
+        # Exactly one signature must be emitted, and it must be the encrypted
+        # blob — not the local ``item_id``. The previous behavior emitted
+        # ``rs-upstream-1`` first (from summary_text.done), which the route
+        # latched as the final encrypted_content and the encrypted blob
+        # arriving later was silently dropped.
+        assert sigs == [encrypted_blob], (
+            f"expected exactly one signature == encrypted blob, got {sigs!r}"
+        )
