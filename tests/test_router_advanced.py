@@ -517,6 +517,24 @@ class TestRouterCreateRequestWithModel:
         assert new_request.max_output_tokens == 1000
         assert new_request.instructions == "Be helpful"
 
+    def test_create_responses_request_preserves_reasoning_effort(self, router):
+        """reasoning_effort must survive provider/fallback rebuild.
+
+        Regression: codex sent ``reasoning: {effort: xhigh}`` on /responses,
+        the route set it on the internal request, but the rebuild dropped it
+        before the Copilot provider saw it — so ``_build_responses_payload``
+        omitted the ``reasoning`` block entirely and Copilot ran at default
+        (medium) instead of xhigh.
+        """
+        original = ResponsesRequest(
+            model="github-copilot/gpt-5.5",
+            input="Hello",
+            reasoning_effort="xhigh",
+        )
+        new_request = router._create_responses_request_with_model(original, "gpt-5.5")
+
+        assert new_request.reasoning_effort == "xhigh"
+
     def test_create_chat_request_with_tools(self, router):
         """Test creating a ChatRequest preserving tools."""
         original = ChatRequest(

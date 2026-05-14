@@ -631,6 +631,7 @@ class Router:
             tools=original_request.tools,
             tool_choice=original_request.tool_choice,
             parallel_tool_calls=original_request.parallel_tool_calls,
+            reasoning_effort=original_request.reasoning_effort,
         )
 
     async def _execute_responses_with_fallback(
