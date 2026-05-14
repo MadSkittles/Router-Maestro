@@ -195,6 +195,14 @@ class ResponsesResponse:
     tool_calls: list[ResponsesToolCall] | None = None
     # Reasoning summary text aggregated from /responses' "reasoning" output items.
     thinking: str | None = None
+    # Upstream reasoning item id (e.g. ``rs_…``). Must round-trip back to
+    # Copilot as the reasoning item's ``id`` because the encrypted blob below
+    # was signed against this id; pairing the blob with a different id 400s
+    # with ``Encrypted content could not be decrypted``.
+    thinking_id: str | None = None
+    # Upstream encrypted reasoning blob (``encrypted_content``). Round-trips
+    # alongside ``thinking_id`` so Copilot can verify and continue chain-of-
+    # thought across turns.
     thinking_signature: str | None = None
     # Upstream completion status mapped to chat-style finish reason
     # ("stop" | "length" | "content_filter" | "tool_calls"). None means
@@ -214,6 +222,9 @@ class ResponsesStreamChunk:
     # Incremental reasoning summary text delta (from
     # ``response.reasoning_summary_text.delta`` events).
     thinking: str | None = None
+    # Upstream reasoning item id (carried separately from the encrypted blob —
+    # see ResponsesResponse.thinking_id).
+    thinking_id: str | None = None
     thinking_signature: str | None = None
 
 

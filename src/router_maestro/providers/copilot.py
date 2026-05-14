@@ -46,6 +46,12 @@ _BENIGN_UPSTREAM_EVENTS = frozenset(
         "response.content_part.added",
         "response.content_part.done",
         "response.output_text.done",
+        # Reasoning ``part`` events are pure structure envelopes (no text
+        # payload — that arrives via ``reasoning_summary_text.delta``). The
+        # route synthesizes its own added/done events from the deltas we DO
+        # consume, mirroring how ``content_part.*`` is handled for messages.
+        "response.reasoning_summary_part.added",
+        "response.reasoning_summary_part.done",
     }
 )
 _BENIGN_DONE_ITEM_TYPES = frozenset({"message"})
@@ -870,12 +876,31 @@ class CopilotProvider(BaseProvider):
             payload["tool_choice"] = request.tool_choice
         if request.parallel_tool_calls is not None:
             payload["parallel_tool_calls"] = request.parallel_tool_calls
-        upstream_effort = downgrade_for_upstream(request.reasoning_effort)
-        if upstream_effort is not None:
-            if request.reasoning_effort == "xhigh":
+        # Catalog-driven path: trust whatever Copilot's
+        # ``capabilities.supports.reasoning_effort`` advertises for this model.
+        # Mirrors the chat path at copilot.py:147-164 — both paths must agree,
+        # otherwise codex+gpt-5.x silently runs at ``high`` while chat runs at
+        # ``xhigh``. Falls back to ``downgrade_for_upstream`` when the catalog
+        # is cold (first request after restart) so we never block on a fetch.
+        catalog = self._catalog_effort_values(request.model)
+        if catalog is not None:
+            if not catalog:
+                upstream_effort: str | None = None
+            else:
+                desired = request.reasoning_effort
+                if desired is None:
+                    upstream_effort = None
+                else:
+                    upstream_effort = _pick_closest_effort(desired, catalog)
+        else:
+            upstream_effort = downgrade_for_upstream(request.reasoning_effort)
+            if request.reasoning_effort == "xhigh" and upstream_effort == "high":
                 logger.warning(
-                    "Copilot Responses does not accept reasoning_effort=xhigh; downgrading to high"
+                    "Copilot Responses catalog cold for %s; "
+                    "downgrading reasoning_effort=xhigh to high as a precaution",
+                    request.model,
                 )
+        if upstream_effort is not None:
             # ``summary: auto`` opts in to reasoning_summary_text events so we
             # can forward chain-of-thought as Anthropic thinking blocks.
             payload["reasoning"] = {"effort": upstream_effort, "summary": "auto"}
@@ -903,25 +928,31 @@ class CopilotProvider(BaseProvider):
                         content += content_item.get("text", "")
         return content
 
-    def _extract_reasoning(self, data: dict) -> tuple[str | None, str | None]:
-        """Extract aggregated reasoning summary text and signature.
+    def _extract_reasoning(self, data: dict) -> tuple[str | None, str | None, str | None]:
+        """Extract aggregated reasoning summary text, upstream id, and blob.
 
-        Returns ``(thinking_text, thinking_signature)``. Both are ``None``
-        when the response has no reasoning output.
+        Returns ``(thinking_text, thinking_id, thinking_signature)``. All
+        three are ``None`` when the response has no reasoning output. The
+        ``id`` and the ``encrypted_content`` blob must be round-tripped
+        together — the blob is signed against its id, so pairing it with a
+        locally-generated id 400s the next turn.
         """
         text_parts: list[str] = []
-        signature: str | None = None
+        upstream_id: str | None = None
+        encrypted: str | None = None
         for output in data.get("output", []):
             if output.get("type") != "reasoning":
                 continue
-            if signature is None:
-                signature = output.get("id")
+            if upstream_id is None:
+                upstream_id = output.get("id")
+            if encrypted is None:
+                encrypted = output.get("encrypted_content")
             for summary in output.get("summary", []) or []:
                 if isinstance(summary, dict):
                     chunk = summary.get("text") or ""
                     if chunk:
                         text_parts.append(chunk)
-        return ("".join(text_parts) or None, signature)
+        return ("".join(text_parts) or None, upstream_id, encrypted)
 
     def _extract_tool_calls(self, data: dict) -> list[ResponsesToolCall]:
         """Extract tool calls from Responses API response.
@@ -965,7 +996,7 @@ class CopilotProvider(BaseProvider):
 
             content = self._extract_response_content(data)
             tool_calls = self._extract_tool_calls(data)
-            thinking, thinking_sig = self._extract_reasoning(data)
+            thinking, thinking_id, thinking_sig = self._extract_reasoning(data)
 
             usage = None
             if "usage" in data:
@@ -998,6 +1029,7 @@ class CopilotProvider(BaseProvider):
                 usage=usage,
                 tool_calls=tool_calls if tool_calls else None,
                 thinking=thinking,
+                thinking_id=thinking_id,
                 thinking_signature=thinking_sig,
                 finish_reason=finish_reason,
             )
@@ -1096,12 +1128,29 @@ class CopilotProvider(BaseProvider):
                         delta = data.get("delta", "")
                         if delta:
                             received_reasoning_summary = True
-                            yield ResponsesStreamChunk(content="", thinking=delta)
+                            # Surface upstream item_id (e.g. ``rs_…``) on
+                            # every delta so the route can use it as the
+                            # reasoning item's id. Pairing the upstream-signed
+                            # ``encrypted_content`` blob with a different id
+                            # 400s the next turn with ``Encrypted content
+                            # could not be decrypted``.
+                            yield ResponsesStreamChunk(
+                                content="",
+                                thinking=delta,
+                                thinking_id=data.get("item_id"),
+                            )
 
                     elif event_type == "response.reasoning_summary_text.done":
-                        item_id = data.get("item_id")
-                        if item_id:
-                            yield ResponsesStreamChunk(content="", thinking_signature=item_id)
+                        # Don't yield ``thinking_signature=item_id`` here. The
+                        # Codex path treats every signature as ``encrypted_content``
+                        # and round-trips it to Copilot, which then 400s with
+                        # ``Encrypted content could not be decrypted`` because
+                        # ``item_id`` is just a local identifier, not the real
+                        # encrypted blob. The real blob arrives later on
+                        # ``output_item.done.item.encrypted_content``; emit the
+                        # signature there so both Codex and Anthropic round-trips
+                        # use the verifiable value.
+                        pass
 
                     # Handle function call output_item.added - start of a new function call
                     elif event_type == "response.output_item.added":
@@ -1250,15 +1299,35 @@ class CopilotProvider(BaseProvider):
                                 bool(item.get("encrypted_content")),
                                 item.get("id"),
                             )
+                            upstream_id = item.get("id")
+                            encrypted_blob = item.get("encrypted_content")
                             if not received_reasoning_summary:
                                 for summary in summary_list:
                                     if isinstance(summary, dict):
                                         text = summary.get("text") or ""
                                         if text:
-                                            yield ResponsesStreamChunk(content="", thinking=text)
-                            sig = item.get("encrypted_content") or item.get("id")
-                            if sig:
-                                yield ResponsesStreamChunk(content="", thinking_signature=sig)
+                                            # Carry upstream id on each
+                                            # synthesized chunk so the route
+                                            # uses it as the reasoning item's
+                                            # id from the very first delta.
+                                            yield ResponsesStreamChunk(
+                                                content="",
+                                                thinking=text,
+                                                thinking_id=upstream_id,
+                                            )
+                            # Emit the upstream id and the encrypted blob
+                            # separately so the route can pair them on the
+                            # reasoning output item it forwards to Codex. The
+                            # blob is only valid against its own id; using a
+                            # locally-generated id (or worse, treating the id
+                            # as the signature) 400s the next turn with
+                            # ``Encrypted content could not be decrypted``.
+                            if upstream_id or encrypted_blob:
+                                yield ResponsesStreamChunk(
+                                    content="",
+                                    thinking_id=upstream_id,
+                                    thinking_signature=encrypted_blob,
+                                )
                         elif item.get("type") == "tool_search_call":
                             # Forward as kind="tool_search" so the route emits
                             # an actual tool_search_call wire item — codex's

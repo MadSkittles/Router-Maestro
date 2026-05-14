@@ -388,3 +388,175 @@ class TestUnknownEventNoise:
         warnings = [r for r in caplog.records if "unhandled event types" in r.getMessage()]
         assert len(warnings) == 1
         assert "brand_new_event_type_we_dont_know" in warnings[0].getMessage()
+
+    @pytest.mark.asyncio
+    async def test_reasoning_summary_part_events_skipped_from_warning(self, caplog):
+        """``reasoning_summary_part.added/done`` are pure structure envelopes.
+
+        The route synthesizes its own equivalents from the
+        ``reasoning_summary_text.delta`` we already consume — same pattern as
+        ``content_part.*`` for messages. Without the skip, every xhigh request
+        produced a noisy ``unhandled event types`` warning that drowned out
+        genuinely-unknown events.
+        """
+        events = [
+            {"type": "response.created", "response": {}},
+            {
+                "type": "response.reasoning_summary_part.added",
+                "item_id": "rs-1",
+                "summary_index": 0,
+                "part": {"type": "summary_text", "text": ""},
+            },
+            {
+                "type": "response.reasoning_summary_text.delta",
+                "item_id": "rs-1",
+                "delta": "thinking...",
+            },
+            {
+                "type": "response.reasoning_summary_text.done",
+                "item_id": "rs-1",
+                "text": "thinking...",
+            },
+            {
+                "type": "response.reasoning_summary_part.done",
+                "item_id": "rs-1",
+                "summary_index": 0,
+                "part": {"type": "summary_text", "text": "thinking..."},
+            },
+            {"type": "response.completed", "response": {"status": "completed"}},
+        ]
+        provider = _make_provider_with_stream(_sse_lines(events))
+
+        with caplog.at_level(logging.WARNING, logger="providers.copilot"):
+            await _collect(provider)
+
+        warnings = [r for r in caplog.records if "unhandled event types" in r.getMessage()]
+        assert warnings == [], (
+            "reasoning_summary_part envelopes leaked into the unknown-event warning: "
+            f"{[w.getMessage() for w in warnings]}"
+        )
+
+
+class TestThinkingSignatureSource:
+    """The reasoning ``thinking_signature`` must be the upstream encrypted blob.
+
+    Codex round-trips it back to Copilot as ``encrypted_content``; if we emit
+    the local ``item_id`` (a short identifier, not a verifiable blob), Copilot
+    400s the next turn with ``Encrypted content could not be decrypted``.
+    """
+
+    @pytest.mark.asyncio
+    async def test_signature_is_encrypted_blob_not_item_id(self):
+        encrypted_blob = "ENC_BLOB_" + "X" * 200  # stand-in for the real ~2KB blob
+        events = [
+            {"type": "response.created", "response": {}},
+            {
+                "type": "response.reasoning_summary_text.delta",
+                "item_id": "rs-upstream-1",
+                "delta": "thinking...",
+            },
+            {
+                "type": "response.reasoning_summary_text.done",
+                "item_id": "rs-upstream-1",
+                "text": "thinking...",
+            },
+            {
+                "type": "response.output_item.done",
+                "output_index": 0,
+                "item": {
+                    "type": "reasoning",
+                    "id": "rs-upstream-1",
+                    "encrypted_content": encrypted_blob,
+                    "summary": [{"type": "summary_text", "text": "thinking..."}],
+                },
+            },
+            {"type": "response.completed", "response": {"status": "completed"}},
+        ]
+        provider = _make_provider_with_stream(_sse_lines(events))
+
+        chunks = await _collect(provider)
+
+        sigs = [c.thinking_signature for c in chunks if c.thinking_signature]
+        # Exactly one signature must be emitted, and it must be the encrypted
+        # blob — not the local ``item_id``. The previous behavior emitted
+        # ``rs-upstream-1`` first (from summary_text.done), which the route
+        # latched as the final encrypted_content and the encrypted blob
+        # arriving later was silently dropped.
+        assert sigs == [encrypted_blob], (
+            f"expected exactly one signature == encrypted blob, got {sigs!r}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_upstream_reasoning_id_threaded_through_chunks(self):
+        # The upstream reasoning item id (e.g. ``rs_…``) must surface as
+        # ``thinking_id`` so the route can use it as the reasoning item's
+        # id. Copilot signs ``encrypted_content`` against this id; pairing
+        # the blob with a locally-generated id 400s the next turn with
+        # ``Encrypted content could not be decrypted``.
+        encrypted_blob = "ENC_BLOB_" + "Y" * 200
+        events = [
+            {"type": "response.created", "response": {}},
+            {
+                "type": "response.reasoning_summary_text.delta",
+                "item_id": "rs_upstream_xyz",
+                "delta": "planning...",
+            },
+            {
+                "type": "response.output_item.done",
+                "output_index": 0,
+                "item": {
+                    "type": "reasoning",
+                    "id": "rs_upstream_xyz",
+                    "encrypted_content": encrypted_blob,
+                    "summary": [{"type": "summary_text", "text": "planning..."}],
+                },
+            },
+            {"type": "response.completed", "response": {"status": "completed"}},
+        ]
+        provider = _make_provider_with_stream(_sse_lines(events))
+
+        chunks = await _collect(provider)
+
+        thinking_ids = [c.thinking_id for c in chunks if c.thinking_id]
+        # The upstream id surfaces on the first delta and again on the
+        # output_item.done chunk — both must equal the upstream id (never
+        # a locally-generated ``rs-…``).
+        assert thinking_ids, "expected at least one chunk with thinking_id set"
+        assert all(tid == "rs_upstream_xyz" for tid in thinking_ids), (
+            f"expected all thinking_ids to be the upstream id, got {thinking_ids!r}"
+        )
+
+        # The signature chunk must carry the upstream id AND the blob
+        # together so the route can pair them on the reasoning output item.
+        sig_chunks = [c for c in chunks if c.thinking_signature]
+        assert len(sig_chunks) == 1
+        assert sig_chunks[0].thinking_signature == encrypted_blob
+        assert sig_chunks[0].thinking_id == "rs_upstream_xyz"
+
+    @pytest.mark.asyncio
+    async def test_no_signature_when_upstream_omits_encrypted_content(self):
+        # Defensive: if Copilot ever ships a reasoning item without
+        # ``encrypted_content``, we MUST NOT fall back to ``item.id`` (a
+        # short opaque string) — the codex path would treat it as a blob,
+        # round-trip it, and earn a 400.
+        events = [
+            {"type": "response.created", "response": {}},
+            {
+                "type": "response.output_item.done",
+                "output_index": 0,
+                "item": {
+                    "type": "reasoning",
+                    "id": "rs_no_blob",
+                    "summary": [{"type": "summary_text", "text": "thinking..."}],
+                },
+            },
+            {"type": "response.completed", "response": {"status": "completed"}},
+        ]
+        provider = _make_provider_with_stream(_sse_lines(events))
+
+        chunks = await _collect(provider)
+
+        sigs = [c.thinking_signature for c in chunks if c.thinking_signature]
+        assert sigs == [], (
+            f"expected no signatures when upstream omits encrypted_content, got {sigs!r}"
+        )
