@@ -4,6 +4,21 @@ All notable changes to Router-Maestro are documented here.
 
 ---
 
+## v0.3.13 (2026-05-21)
+
+### Fixes
+
+- **GitHub Copilot token usage now reaches clients across the affected response paths.**
+  Copilot chat streaming now requests upstream usage chunks with
+  `stream_options: {"include_usage": true}`, and the OpenAI Chat streaming route emits
+  usage-only chunks instead of dropping them. OpenAI Chat usage now preserves
+  `prompt_tokens_details` and `completion_tokens_details`, and non-streaming Responses API
+  responses preserve `input_tokens_details` and `output_tokens_details`.
+- Ignore the local `.codex/` project config directory so generated Codex settings do not show
+  up as untracked repository files.
+
+---
+
 ## v0.3.11 (2026-05-13)
 
 ### Fixes
