@@ -24,6 +24,10 @@ class OAuthCredential(BaseModel):
     refresh: str = Field(..., description="Refresh token")
     access: str = Field(..., description="Access token")
     expires: int = Field(default=0, description="Expiration timestamp (0 = never)")
+    api_endpoint: str | None = Field(
+        default=None,
+        description="Provider API endpoint returned with the OAuth token",
+    )
 
 
 class ApiKeyCredential(BaseModel):

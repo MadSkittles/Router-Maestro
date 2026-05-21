@@ -10,7 +10,7 @@ from integration_tests.conftest import (
     assert_responses_usage,
     assert_text_response,
     is_responses_eligible_model,
-    openai_chat_payload,
+    model_matrix_chat_payload,
     openai_responses_payload,
 )
 
@@ -36,7 +36,7 @@ def test_copilot_model_matrix_openai_chat(
             else:
                 response = client.post(
                     "/api/openai/v1/chat/completions",
-                    json=openai_chat_payload(model),
+                    json=model_matrix_chat_payload(model),
                 )
                 assert_http_success(response)
                 data = response.json()

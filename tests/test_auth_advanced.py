@@ -2,8 +2,18 @@
 
 import tempfile
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, Mock, patch
 
+import httpx
+import pytest
+
+from router_maestro.auth.github_oauth import (
+    AccessTokenResponse,
+    CopilotTokenResponse,
+    DeviceCodeResponse,
+    get_copilot_token,
+)
+from router_maestro.auth.manager import AuthManager
 from router_maestro.auth.storage import (
     ApiKeyCredential,
     AuthStorage,
@@ -46,6 +56,140 @@ class TestOAuthCredential:
             access="access-token",
         )
         assert cred.expires == 0
+
+    def test_copilot_api_endpoint_metadata(self):
+        """OAuth credentials can persist the Copilot API endpoint returned with the token."""
+        cred = OAuthCredential(
+            refresh="refresh-token",
+            access="access-token",
+            expires=1234567890,
+            api_endpoint="https://api.enterprise.githubcopilot.com",
+        )
+
+        assert cred.api_endpoint == "https://api.enterprise.githubcopilot.com"
+
+
+class TestGitHubOAuth:
+    """Tests for GitHub Copilot OAuth token exchange."""
+
+    @pytest.mark.asyncio
+    async def test_get_copilot_token_includes_endpoint_metadata(self):
+        """Copilot token exchange keeps endpoint metadata for model calls."""
+        response = httpx.Response(
+            200,
+            json={
+                "token": "copilot-token",
+                "expires_at": 1234567890,
+                "refresh_in": 1000,
+                "endpoints": {"api": "https://api.enterprise.githubcopilot.com"},
+            },
+            request=httpx.Request("GET", "https://api.github.com/copilot_internal/v2/token"),
+        )
+        client = AsyncMock()
+        client.get.return_value = response
+
+        token = await get_copilot_token(client, "github-token")
+
+        assert token.token == "copilot-token"
+        assert token.api_endpoint == "https://api.enterprise.githubcopilot.com"
+
+    @pytest.mark.asyncio
+    async def test_get_copilot_token_retries_transient_errors(self):
+        """Transient refresh failures should be retried before surfacing to callers."""
+        ok = httpx.Response(
+            200,
+            json={
+                "token": "copilot-token",
+                "expires_at": 1234567890,
+                "refresh_in": 1000,
+            },
+            request=httpx.Request("GET", "https://api.github.com/copilot_internal/v2/token"),
+        )
+        client = AsyncMock()
+        client.get.side_effect = [
+            httpx.ConnectError("temporary"),
+            ok,
+        ]
+
+        with patch("router_maestro.auth.github_oauth._async_sleep", new=AsyncMock()):
+            token = await get_copilot_token(client, "github-token")
+
+        assert token.token == "copilot-token"
+        assert client.get.call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_get_copilot_token_does_not_retry_auth_errors(self):
+        """Permanent auth failures should surface immediately instead of being retried."""
+        response = httpx.Response(
+            401,
+            json={"message": "bad credentials"},
+            request=httpx.Request("GET", "https://api.github.com/copilot_internal/v2/token"),
+        )
+        client = AsyncMock()
+        client.get.return_value = response
+        sleep = AsyncMock()
+
+        with (
+            patch("router_maestro.auth.github_oauth._async_sleep", new=sleep),
+            pytest.raises(httpx.HTTPStatusError),
+        ):
+            await get_copilot_token(client, "github-token")
+
+        assert client.get.call_count == 1
+        sleep.assert_not_called()
+
+
+class TestAuthManager:
+    """Tests for provider auth flows."""
+
+    @pytest.mark.asyncio
+    async def test_login_copilot_persists_endpoint_metadata(self):
+        """Initial Copilot login should persist the API endpoint returned with the token."""
+        manager = AuthManager.__new__(AuthManager)
+        manager.storage = AuthStorage()
+        manager.save = Mock()  # type: ignore[method-assign]
+
+        with (
+            patch(
+                "router_maestro.auth.manager.request_device_code",
+                new=AsyncMock(
+                    return_value=DeviceCodeResponse(
+                        device_code="device-code",
+                        user_code="user-code",
+                        verification_uri="https://github.com/login/device",
+                        expires_in=900,
+                        interval=1,
+                    )
+                ),
+            ),
+            patch(
+                "router_maestro.auth.manager.poll_access_token",
+                new=AsyncMock(
+                    return_value=AccessTokenResponse(
+                        access_token="github-token",
+                        token_type="bearer",
+                        scope="read:user",
+                    )
+                ),
+            ),
+            patch(
+                "router_maestro.auth.manager.get_copilot_token",
+                new=AsyncMock(
+                    return_value=CopilotTokenResponse(
+                        token="copilot-token",
+                        expires_at=1234567890,
+                        refresh_in=1000,
+                        api_endpoint="https://api.enterprise.githubcopilot.com",
+                    )
+                ),
+            ),
+        ):
+            assert await manager.login_copilot()
+
+        cred = manager.storage.get("github-copilot")
+        assert isinstance(cred, OAuthCredential)
+        assert cred.api_endpoint == "https://api.enterprise.githubcopilot.com"
+        manager.save.assert_called_once()
 
 
 class TestApiKeyCredential:
@@ -121,6 +265,7 @@ class TestAuthStorage:
                     refresh="refresh",
                     access="access",
                     expires=12345,
+                    api_endpoint="https://api.enterprise.githubcopilot.com",
                 ),
             )
             storage.save(path)
@@ -135,6 +280,7 @@ class TestAuthStorage:
             copilot_cred = loaded.get("github-copilot")
             assert copilot_cred is not None
             assert copilot_cred.type == AuthType.OAUTH
+            assert copilot_cred.api_endpoint == "https://api.enterprise.githubcopilot.com"
         finally:
             path.unlink(missing_ok=True)
 

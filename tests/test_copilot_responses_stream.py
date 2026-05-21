@@ -43,7 +43,7 @@ def _make_provider_with_stream(body: bytes) -> CopilotProvider:
     provider._client = httpx.AsyncClient(transport=transport)
     # Skip token refresh entirely — tests run offline.
     provider.ensure_token = _noop  # type: ignore[method-assign]
-    provider._get_headers = lambda: {"authorization": "Bearer test"}  # type: ignore[method-assign]
+    provider._get_headers = lambda *args, **kwargs: {"authorization": "Bearer test"}  # type: ignore[method-assign]
     return provider
 
 

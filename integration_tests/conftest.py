@@ -25,15 +25,11 @@ from router_maestro.utils.responses_bridge import RESPONSES_ELIGIBLE_MODELS
 STARTUP_TIMEOUT_SECONDS = 45.0
 REQUEST_TIMEOUT_SECONDS = 120.0
 STREAM_TIMEOUT_SECONDS = 180.0
-DEFAULT_MAX_MODEL_MATRIX = 8
+DEFAULT_MAX_MODEL_MATRIX = 0
 DEFAULT_API_KEY = "router-maestro-integration-test"
 COPILOT_PROVIDER = "github-copilot"
-TEXT_PROMPT = (
-    "Reply with exactly the word pong. Do not add punctuation or any other words."
-)
-TOOL_PROMPT = (
-    "Use the provided get_weather tool for Shanghai. Do not answer directly."
-)
+TEXT_PROMPT = "Reply with exactly the word pong. Do not add punctuation or any other words."
+TOOL_PROMPT = "Use the provided get_weather tool for Shanghai. Do not answer directly."
 
 
 @dataclass(frozen=True)
@@ -197,9 +193,7 @@ def responses_model(copilot_models: list[str]) -> str:
             f"RM_INTEGRATION_RESPONSES_MODEL={requested!r} is not in available Copilot models"
         )
 
-    eligible = {
-        f"{COPILOT_PROVIDER}/{model_id}" for model_id in RESPONSES_ELIGIBLE_MODELS
-    }
+    eligible = {f"{COPILOT_PROVIDER}/{model_id}" for model_id in RESPONSES_ELIGIBLE_MODELS}
     preferred = (
         "github-copilot/gpt-5.4-mini",
         "github-copilot/gpt-5.4",
@@ -224,6 +218,20 @@ def openai_chat_payload(model: str, *, stream: bool = False) -> dict[str, Any]:
         "max_tokens": 16,
         "stream": stream,
     }
+
+
+def model_matrix_chat_payload(model: str) -> dict[str, Any]:
+    """OpenAI Chat payload for the full live model matrix.
+
+    Reasoning-heavy models such as Gemini can spend the first dozens of output
+    tokens on hidden reasoning. Keep the matrix prompt small but give enough
+    output budget for visible text so the test validates model invocation
+    rather than failing on a too-small local cap.
+    """
+    payload = openai_chat_payload(model)
+    payload["max_tokens"] = 512
+    payload["reasoning_effort"] = "low"
+    return payload
 
 
 def openai_responses_payload(model: str, *, stream: bool = False) -> dict[str, Any]:

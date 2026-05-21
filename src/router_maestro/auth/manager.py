@@ -106,6 +106,7 @@ class AuthManager:
                     refresh=access_token.access_token,  # GitHub token for refresh
                     access=copilot_token.token,  # Copilot token for API calls
                     expires=copilot_token.expires_at,
+                    api_endpoint=copilot_token.api_endpoint,
                 ),
             )
             self.save()

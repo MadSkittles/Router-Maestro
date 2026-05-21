@@ -1,5 +1,6 @@
 """Tests for the local-only integration test harness."""
 
+import importlib
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -20,6 +21,23 @@ def test_makefile_exposes_explicit_integration_test_target():
 
     assert "integration-test:" in makefile
     assert "uv run pytest integration_tests/ -v" in makefile
+
+
+def test_integration_model_matrix_defaults_to_full():
+    """The default integration suite should cover the full Copilot model matrix."""
+    conftest = (ROOT / "integration_tests" / "conftest.py").read_text(encoding="utf-8")
+
+    assert "DEFAULT_MAX_MODEL_MATRIX = 0" in conftest
+
+
+def test_model_matrix_payload_has_reasoning_safe_output_budget():
+    """The full matrix should give reasoning-heavy models enough output budget."""
+    conftest = importlib.import_module("integration_tests.conftest")
+
+    payload = conftest.model_matrix_chat_payload("github-copilot/gemini-2.5-pro")
+
+    assert payload["max_tokens"] >= 512
+    assert payload["reasoning_effort"] == "low"
 
 
 def test_integration_harness_documents_existing_config_usage():

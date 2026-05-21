@@ -72,10 +72,10 @@ Run the local live-backend integration tests:
 make integration-test
 ```
 
-Run the full local integration test model matrix:
+Run a bounded local integration test model matrix:
 
 ```bash
-RM_INTEGRATION_MAX_MODELS=0 make integration-test
+RM_INTEGRATION_MAX_MODELS=8 make integration-test
 ```
 
 The integration tests start a local Router-Maestro server, reuse the existing
@@ -232,9 +232,9 @@ uv run router-maestro auth login github-copilot
 - For route behavior, use the existing FastAPI test patterns in `tests/`.
 - For provider behavior, mock upstream HTTP calls rather than calling real
   provider APIs.
-- For local live-backend validation, use `make integration-test`. To run the
-  complete Copilot model matrix instead of the default bounded subset, use
-  `RM_INTEGRATION_MAX_MODELS=0 make integration-test`.
+- For local live-backend validation, use `make integration-test`; it runs the
+  complete Copilot model matrix by default. To intentionally run a bounded
+  subset, use `RM_INTEGRATION_MAX_MODELS=<N> make integration-test`.
 - Run the narrowest relevant pytest target first, then broaden to the full
   suite when the change has wider risk.
 

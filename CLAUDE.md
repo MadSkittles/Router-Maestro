@@ -20,8 +20,8 @@ uv run pytest tests/ -v
 # Run local live-backend integration tests
 make integration-test
 
-# Run the full local integration test model matrix
-RM_INTEGRATION_MAX_MODELS=0 make integration-test
+# Run a bounded local integration test model matrix
+RM_INTEGRATION_MAX_MODELS=8 make integration-test
 
 # Run a single test file
 uv run pytest tests/test_auth.py -v
@@ -54,11 +54,12 @@ require GitHub Copilot auth:
 uv run router-maestro auth login github-copilot
 ```
 
-Use `make integration-test` for the default live suite. Use
-`RM_INTEGRATION_MAX_MODELS=0 make integration-test` for the full Copilot model
-matrix. The suite covers model invocation paths such as OpenAI Chat/Responses,
-Anthropic Messages/count_tokens, Gemini generateContent/stream/countTokens,
-streaming, tool calls, and usage accounting.
+Use `make integration-test` for the default live suite, which includes the full
+Copilot model matrix. Use `RM_INTEGRATION_MAX_MODELS=<N> make integration-test`
+only when you intentionally want a bounded model subset. The suite covers model
+invocation paths such as OpenAI Chat/Responses, Anthropic Messages/count_tokens,
+Gemini generateContent/stream/countTokens, streaming, tool calls, and usage
+accounting.
 
 ### Docker Deployment
 

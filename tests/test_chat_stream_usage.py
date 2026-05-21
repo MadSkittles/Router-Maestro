@@ -99,7 +99,7 @@ async def test_copilot_chat_stream_requests_usage_from_upstream():
     provider = CopilotProvider()
     provider._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     provider.ensure_token = _noop  # type: ignore[method-assign]
-    provider._get_headers = lambda vision_request=False: {"authorization": "Bearer test"}  # type: ignore[method-assign]
+    provider._get_headers = lambda *args, **kwargs: {"authorization": "Bearer test"}  # type: ignore[method-assign]
 
     request = ChatRequest(
         model="gpt-4o",
@@ -132,7 +132,7 @@ async def test_copilot_chat_stream_tool_calls_force_tool_calls_finish_reason():
     provider = CopilotProvider()
     provider._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     provider.ensure_token = _noop  # type: ignore[method-assign]
-    provider._get_headers = lambda vision_request=False: {"authorization": "Bearer test"}  # type: ignore[method-assign]
+    provider._get_headers = lambda *args, **kwargs: {"authorization": "Bearer test"}  # type: ignore[method-assign]
 
     request = ChatRequest(
         model="gpt-4o",

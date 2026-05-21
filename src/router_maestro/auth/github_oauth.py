@@ -41,12 +41,20 @@ class CopilotTokenResponse:
     token: str
     expires_at: int
     refresh_in: int
+    api_endpoint: str | None = None
 
 
 class GitHubOAuthError(Exception):
     """Error during GitHub OAuth flow."""
 
     pass
+
+
+def _is_retryable_token_error(error: httpx.HTTPError) -> bool:
+    """Whether a Copilot token refresh error is likely transient."""
+    if isinstance(error, httpx.HTTPStatusError):
+        return error.response.status_code == 429 or error.response.status_code >= 500
+    return True
 
 
 async def request_device_code(client: httpx.AsyncClient) -> DeviceCodeResponse:
@@ -160,17 +168,35 @@ async def get_copilot_token(
         "X-Vscode-User-Agent-Library-Version": "electron-fetch",
     }
 
-    response = await client.get(
-        COPILOT_TOKEN_URL,
-        headers=headers,
-    )
-    response.raise_for_status()
+    response: httpx.Response | None = None
+    max_attempts = 3
+    for attempt in range(max_attempts):
+        try:
+            response = await client.get(
+                COPILOT_TOKEN_URL,
+                headers=headers,
+            )
+            response.raise_for_status()
+            break
+        except httpx.HTTPError as e:
+            if attempt == max_attempts - 1 or not _is_retryable_token_error(e):
+                raise
+            await _async_sleep(0.2 * (attempt + 1))
+
+    if response is None:
+        raise GitHubOAuthError("Failed to exchange GitHub token for Copilot token")
+
     data = response.json()
+    endpoints = data.get("endpoints")
+    api_endpoint = None
+    if isinstance(endpoints, dict) and isinstance(endpoints.get("api"), str):
+        api_endpoint = endpoints["api"]
 
     return CopilotTokenResponse(
         token=data["token"],
         expires_at=data["expires_at"],
         refresh_in=data.get("refresh_in", 1800000),  # Default 30 minutes in ms
+        api_endpoint=api_endpoint,
     )
 
 

@@ -4,6 +4,8 @@ import contextlib
 import json
 import time
 from collections.abc import AsyncIterator
+from typing import Any
+from uuid import uuid4
 
 import httpx
 
@@ -16,6 +18,7 @@ from router_maestro.providers.base import (
     ChatRequest,
     ChatResponse,
     ChatStreamChunk,
+    Message,
     ModelInfo,
     ProviderError,
     ResponsesRequest,
@@ -31,9 +34,9 @@ from router_maestro.utils.reasoning import budget_to_effort, downgrade_for_upstr
 logger = get_logger("providers.copilot")
 
 COPILOT_BASE_URL = "https://api.githubcopilot.com"
-COPILOT_CHAT_URL = f"{COPILOT_BASE_URL}/chat/completions"
-COPILOT_MODELS_URL = f"{COPILOT_BASE_URL}/models"
-COPILOT_RESPONSES_URL = f"{COPILOT_BASE_URL}/responses"
+COPILOT_CHAT_PATH = "/chat/completions"
+COPILOT_MODELS_PATH = "/models"
+COPILOT_RESPONSES_PATH = "/responses"
 
 # Upstream /responses events we intentionally don't consume because the route
 # (server/routes/responses.py) synthesizes its own equivalents from the deltas
@@ -254,6 +257,7 @@ class CopilotProvider(BaseProvider):
         self.auth_manager = AuthManager()
         self._cached_token: str | None = None
         self._token_expires: int = 0
+        self._api_base = COPILOT_BASE_URL
         # Model cache
         self._models_ttl_cache: TTLCache[list[ModelInfo]] = TTLCache(MODELS_CACHE_TTL)
         # Reusable HTTP client
@@ -270,6 +274,9 @@ class CopilotProvider(BaseProvider):
         if not cred or not isinstance(cred, OAuthCredential):
             logger.error("Not authenticated with GitHub Copilot")
             raise ProviderError("Not authenticated with GitHub Copilot", status_code=401)
+
+        if cred.api_endpoint:
+            self._api_base = cred.api_endpoint
 
         current_time = int(time.time())
 
@@ -289,18 +296,53 @@ class CopilotProvider(BaseProvider):
 
         self._cached_token = copilot_token.token
         self._token_expires = copilot_token.expires_at
+        self._api_base = copilot_token.api_endpoint or self._api_base or COPILOT_BASE_URL
 
         # Update stored credential with new access token (immutable pattern)
         updated_cred = OAuthCredential(
             refresh=cred.refresh,
             access=copilot_token.token,
             expires=copilot_token.expires_at,
+            api_endpoint=copilot_token.api_endpoint or cred.api_endpoint,
         )
         self.auth_manager.storage.set("github-copilot", updated_cred)
         self.auth_manager.save()
         logger.debug("Copilot token refreshed, expires at %d", copilot_token.expires_at)
 
-    def _get_headers(self, vision_request: bool = False) -> dict[str, str]:
+    def _url(self, path: str) -> str:
+        """Build a Copilot API URL from the token-advertised API base."""
+        return f"{self._api_base.rstrip('/')}/{path.lstrip('/')}"
+
+    @staticmethod
+    def _chat_initiator(messages: list[Message] | None) -> str:
+        """Infer Copilot X-Initiator for chat-completions payloads."""
+        if not messages:
+            return "user"
+        for message in messages:
+            if message.role in ("assistant", "tool"):
+                return "agent"
+        return "user"
+
+    @staticmethod
+    def _responses_initiator(response_input: str | list[dict[str, Any]] | None) -> str:
+        """Infer Copilot X-Initiator for Responses API payloads."""
+        if isinstance(response_input, str) or not response_input:
+            return "user"
+        for item in response_input:
+            if not isinstance(item, dict):
+                continue
+            role = item.get("role")
+            if not role or (isinstance(role, str) and role.lower() == "assistant"):
+                return "agent"
+        return "user"
+
+    def _get_headers(
+        self,
+        vision_request: bool = False,
+        *,
+        messages: list[Message] | None = None,
+        response_input: str | list[dict[str, Any]] | None = None,
+    ) -> dict[str, str]:
         """Get headers for Copilot API requests.
 
         Args:
@@ -312,10 +354,19 @@ class CopilotProvider(BaseProvider):
         headers = {
             "Authorization": f"Bearer {self._cached_token}",
             "Content-Type": "application/json",
-            "Editor-Version": "vscode/1.85.0",
-            "Editor-Plugin-Version": "copilot/1.0.0",
+            "Editor-Version": "vscode/1.95.0",
+            "Editor-Plugin-Version": "copilot-chat/0.26.7",
             "Copilot-Integration-Id": "vscode-chat",
+            "User-Agent": "GitHubCopilotChat/0.26.7",
+            "OpenAI-Intent": "conversation-panel",
+            "X-GitHub-Api-Version": "2025-04-01",
+            "X-Request-Id": str(uuid4()),
+            "X-Vscode-User-Agent-Library-Version": "electron-fetch",
         }
+        if response_input is not None:
+            headers["X-Initiator"] = self._responses_initiator(response_input)
+        elif messages is not None:
+            headers["X-Initiator"] = self._chat_initiator(messages)
 
         if vision_request:
             headers["Copilot-Vision-Request"] = "true"
@@ -411,6 +462,24 @@ class CopilotProvider(BaseProvider):
 
         return messages, has_images
 
+    def _responses_input_has_vision(self, value: Any, depth: int = 0) -> bool:
+        """Whether a Responses API input contains an image block."""
+        if depth > 32 or value is None:
+            return False
+        if isinstance(value, list):
+            return any(self._responses_input_has_vision(item, depth + 1) for item in value)
+        if not isinstance(value, dict):
+            return False
+        item_type = value.get("type")
+        if isinstance(item_type, str) and item_type.lower() in ("input_image", "image_url"):
+            return True
+        if "image_url" in value:
+            return True
+        content = value.get("content")
+        if isinstance(content, list):
+            return any(self._responses_input_has_vision(item, depth + 1) for item in content)
+        return False
+
     async def chat_completion(self, request: ChatRequest) -> ChatResponse:
         """Generate a chat completion via Copilot."""
         # Experimental: route GPT-5.x ChatRequests through /responses when the
@@ -467,9 +536,9 @@ class CopilotProvider(BaseProvider):
         client = self._get_client()
         try:
             response = await client.post(
-                COPILOT_CHAT_URL,
+                self._url(COPILOT_CHAT_PATH),
                 json=payload,
-                headers=self._get_headers(vision_request=has_images),
+                headers=self._get_headers(vision_request=has_images, messages=request.messages),
                 timeout=TIMEOUT_NON_STREAMING,
             )
             response.raise_for_status()
@@ -633,9 +702,9 @@ class CopilotProvider(BaseProvider):
         try:
             async with client.stream(
                 "POST",
-                COPILOT_CHAT_URL,
+                self._url(COPILOT_CHAT_PATH),
                 json=payload,
-                headers=self._get_headers(vision_request=has_images),
+                headers=self._get_headers(vision_request=has_images, messages=request.messages),
             ) as response:
                 # Streamed responses defer body reads; if the upstream returns
                 # an error status, pull the body *inside* the stream context
@@ -727,7 +796,7 @@ class CopilotProvider(BaseProvider):
                 type(e).__name__,
                 e,
                 json.dumps(payload, default=str)[:2000],
-                COPILOT_CHAT_URL,
+                self._url(COPILOT_CHAT_PATH),
                 headers,
                 resp_text,
             )
@@ -757,7 +826,7 @@ class CopilotProvider(BaseProvider):
         try:
             async with httpx.AsyncClient(timeout=TIMEOUT_NON_STREAMING) as client:
                 response = await client.get(
-                    COPILOT_MODELS_URL,
+                    self._url(COPILOT_MODELS_PATH),
                     headers=self._get_headers(),
                 )
                 response.raise_for_status()
@@ -768,6 +837,12 @@ class CopilotProvider(BaseProvider):
                 # Only include models that are enabled in model picker
                 if model.get("model_picker_enabled", True):
                     caps = model.get("capabilities", {})
+                    if caps.get("type") == "completion":
+                        logger.debug(
+                            "Skipping Copilot completion-only model without RM route: %s",
+                            model.get("id"),
+                        )
+                        continue
                     limits = caps.get("limits", {})
                     supports = caps.get("supports", {})
                     reasoning_values = supports.get("reasoning_effort")
@@ -994,9 +1069,14 @@ class CopilotProvider(BaseProvider):
         client = self._get_client()
         try:
             response = await client.post(
-                COPILOT_RESPONSES_URL,
+                self._url(COPILOT_RESPONSES_PATH),
                 json=payload,
-                headers=self._get_headers(),
+                headers=self._get_headers(
+                    vision_request=self._responses_input_has_vision(request.input),
+                    response_input=(
+                        request.input if isinstance(request.input, (str, list)) else None
+                    ),
+                ),
                 timeout=TIMEOUT_NON_STREAMING,
             )
             response.raise_for_status()
@@ -1063,9 +1143,14 @@ class CopilotProvider(BaseProvider):
         try:
             async with client.stream(
                 "POST",
-                COPILOT_RESPONSES_URL,
+                self._url(COPILOT_RESPONSES_PATH),
                 json=payload,
-                headers=self._get_headers(),
+                headers=self._get_headers(
+                    vision_request=self._responses_input_has_vision(request.input),
+                    response_input=(
+                        request.input if isinstance(request.input, (str, list)) else None
+                    ),
+                ),
             ) as response:
                 # Check for errors before processing stream
                 if response.status_code >= 400:
