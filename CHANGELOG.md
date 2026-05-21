@@ -4,6 +4,24 @@ All notable changes to Router-Maestro are documented here.
 
 ---
 
+## v0.3.15 (2026-05-21)
+
+### Fixes
+
+- **GitHub Copilot requests now honor endpoint metadata from the token response.**
+  Router-Maestro persists Copilot's advertised API endpoint during login and token
+  refresh, then uses that endpoint for chat, model listing, and Responses API calls.
+  Copilot requests also carry the expanded compatibility headers, `X-Initiator`,
+  recursive Responses vision detection, and a narrower retry/backoff path for
+  transient token-refresh failures.
+- **Local integration tests now run the full Copilot model matrix by default.**
+  `make integration-test` covers the full available Copilot matrix unless
+  `RM_INTEGRATION_MAX_MODELS=<N>` is set intentionally. The matrix now gives
+  reasoning-heavy Gemini models enough output budget and avoids exposing
+  completion-only Copilot catalog entries as Router-Maestro chat models.
+
+---
+
 ## v0.3.14 (2026-05-21)
 
 ### Fixes
