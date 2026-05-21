@@ -4,6 +4,28 @@ All notable changes to Router-Maestro are documented here.
 
 ---
 
+## v0.3.14 (2026-05-21)
+
+### Fixes
+
+- **Provider routing and compatibility paths are covered by live local validation.**
+  Added a local-only integration suite that starts Router-Maestro, reuses existing
+  local config/auth, and calls the real GitHub Copilot backend across OpenAI Chat,
+  OpenAI Responses, Anthropic Messages/count_tokens, Gemini generateContent/stream/countTokens,
+  streaming, tool calls, usage accounting, and a configurable Copilot model matrix.
+  These tests run only via `make integration-test`; use
+  `RM_INTEGRATION_MAX_MODELS=0 make integration-test` for the full model matrix.
+- **GitHub Copilot tool-call responses now report the correct finish reason.**
+  Copilot can return `tool_calls` while still marking the choice as `stop`; Router-Maestro
+  now normalizes those non-streaming and streaming responses to `tool_calls` so OpenAI,
+  Anthropic, and Gemini compatibility layers preserve tool-use semantics.
+- Hardened review findings around provider-scoped fuzzy routing, streaming fallback,
+  authenticated route configuration errors, owner-only config/auth file writes, OpenAI
+  request option passthrough, Anthropic tool conversion, and model-list routing through
+  the singleton router.
+
+---
+
 ## v0.3.13 (2026-05-21)
 
 ### Fixes
