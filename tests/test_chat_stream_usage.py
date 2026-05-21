@@ -110,3 +110,47 @@ async def test_copilot_chat_stream_requests_usage_from_upstream():
 
     assert chunks[-1].finish_reason == "stop"
     assert captured_payloads[0]["stream_options"] == {"include_usage": True}
+
+
+@pytest.mark.asyncio
+async def test_copilot_chat_stream_tool_calls_force_tool_calls_finish_reason():
+    """Copilot can stream tool_calls with finish_reason=stop; normalize it."""
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        body = (
+            b'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1",'
+            b'"type":"function","function":{"name":"test_tool","arguments":"{}"}}]},'
+            b'"finish_reason":null}]}\n\n'
+            b'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\n'
+        )
+        return httpx.Response(
+            status_code=200,
+            content=body,
+            headers={"content-type": "text/event-stream"},
+        )
+
+    provider = CopilotProvider()
+    provider._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    provider.ensure_token = _noop  # type: ignore[method-assign]
+    provider._get_headers = lambda vision_request=False: {"authorization": "Bearer test"}  # type: ignore[method-assign]
+
+    request = ChatRequest(
+        model="gpt-4o",
+        messages=[Message(role="user", content="Use the test tool")],
+        tools=[
+            {
+                "type": "function",
+                "function": {
+                    "name": "test_tool",
+                    "description": "A test tool",
+                    "parameters": {"type": "object"},
+                },
+            }
+        ],
+        tool_choice={"type": "function", "function": {"name": "test_tool"}},
+        stream=True,
+    )
+    chunks = [chunk async for chunk in provider.chat_completion_stream(request)]
+
+    assert any(chunk.tool_calls for chunk in chunks)
+    assert chunks[-1].finish_reason == "tool_calls"

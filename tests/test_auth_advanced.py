@@ -2,6 +2,7 @@
 
 import tempfile
 from pathlib import Path
+from unittest.mock import patch
 
 from router_maestro.auth.storage import (
     ApiKeyCredential,
@@ -136,6 +137,17 @@ class TestAuthStorage:
             assert copilot_cred.type == AuthType.OAUTH
         finally:
             path.unlink(missing_ok=True)
+
+    def test_save_writes_owner_only_permissions(self, tmp_path):
+        """auth.json contains tokens and API keys, so it must not be group/world-readable."""
+        path = tmp_path / "auth.json"
+        storage = AuthStorage()
+        storage.set("openai", ApiKeyCredential(key="test-key"))
+
+        with patch("os.umask", return_value=0):
+            storage.save(path)
+
+        assert path.stat().st_mode & 0o777 == 0o600
 
     def test_load_nonexistent_returns_empty(self):
         """Test loading from nonexistent file returns empty storage."""

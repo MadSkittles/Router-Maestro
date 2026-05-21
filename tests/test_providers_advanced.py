@@ -407,3 +407,26 @@ class TestOpenAIChatProviderBuildPayload:
         tool_msg = payload["messages"][2]
         assert tool_msg["tool_call_id"] == "call_1"
         assert tool_msg["role"] == "tool"
+
+    def test_payload_includes_supported_extra_fields(self):
+        """OpenAI-compatible chat providers should forward route-level OpenAI options."""
+        provider = self._make_provider()
+        request = ChatRequest(
+            model="gpt-4o",
+            messages=[Message(role="user", content="hi")],
+            extra={
+                "top_p": 0.25,
+                "frequency_penalty": 0.1,
+                "presence_penalty": 0.2,
+                "stop": ["END"],
+                "user": "user-123",
+            },
+        )
+
+        payload = provider._build_payload(request, stream=False)
+
+        assert payload["top_p"] == 0.25
+        assert payload["frequency_penalty"] == 0.1
+        assert payload["presence_penalty"] == 0.2
+        assert payload["stop"] == ["END"]
+        assert payload["user"] == "user-123"

@@ -17,6 +17,12 @@ ROUTER_MAESTRO_API_KEY="sk-rm-..." uv run router-maestro server start --port 808
 # Run all tests
 uv run pytest tests/ -v
 
+# Run local live-backend integration tests
+make integration-test
+
+# Run the full local integration test model matrix
+RM_INTEGRATION_MAX_MODELS=0 make integration-test
+
 # Run a single test file
 uv run pytest tests/test_auth.py -v
 
@@ -36,6 +42,23 @@ make build-multiarch
 ### Local Server Startup
 
 The API key is configured via `ROUTER_MAESTRO_API_KEY` env var. For VS Code debugging, see `.vscode/launch.json` which has the key pre-configured. The server runs on uvicorn and requires authenticated GitHub Copilot (via `router-maestro auth login copilot`) for most models.
+
+### Local Integration Tests
+
+The integration tests are local-only and are not part of GitHub Actions. They
+start a local Router-Maestro server, reuse the existing local config/auth
+files, and send model-call requests to the real GitHub Copilot backend. They
+require GitHub Copilot auth:
+
+```bash
+uv run router-maestro auth login github-copilot
+```
+
+Use `make integration-test` for the default live suite. Use
+`RM_INTEGRATION_MAX_MODELS=0 make integration-test` for the full Copilot model
+matrix. The suite covers model invocation paths such as OpenAI Chat/Responses,
+Anthropic Messages/count_tokens, Gemini generateContent/stream/countTokens,
+streaming, tool calls, and usage accounting.
 
 ### Docker Deployment
 

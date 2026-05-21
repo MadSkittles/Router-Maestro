@@ -3,6 +3,7 @@
 import tempfile
 import tomllib
 from pathlib import Path
+from unittest.mock import patch
 
 import tomlkit
 
@@ -84,6 +85,19 @@ class TestConfigIO:
             # Load and verify
             loaded = load_config(path, ProvidersConfig, ProvidersConfig.get_default)
             assert loaded.providers.keys() == original.providers.keys()
+
+    def test_save_config_writes_owner_only_permissions(self, tmp_path):
+        """Config files may contain API keys and should be owner-readable only."""
+        path = tmp_path / "contexts.json"
+        config = ContextsConfig(
+            current="local",
+            contexts={"local": ContextConfig(endpoint="http://localhost:8080", api_key="sk-test")},
+        )
+
+        with patch("os.umask", return_value=0):
+            save_config(path, config)
+
+        assert path.stat().st_mode & 0o777 == 0o600
 
     def test_load_creates_default(self):
         """Test that loading non-existent file creates default."""

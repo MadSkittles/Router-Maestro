@@ -69,6 +69,18 @@ async def chat_completions(request: ChatCompletionRequest):
             )
         )
 
+    extra = {
+        key: value
+        for key, value in {
+            "top_p": request.top_p,
+            "frequency_penalty": request.frequency_penalty,
+            "presence_penalty": request.presence_penalty,
+            "stop": request.stop,
+            "user": request.user,
+        }.items()
+        if value is not None
+    }
+
     chat_request = ChatRequest(
         model=request.model,
         messages=messages,
@@ -77,6 +89,7 @@ async def chat_completions(request: ChatCompletionRequest):
         stream=request.stream,
         tools=request.tools,
         tool_choice=request.tool_choice,
+        extra=extra,
     )
 
     # Reasoning / thinking passthrough.

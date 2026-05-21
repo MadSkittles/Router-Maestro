@@ -66,6 +66,27 @@ Run all tests:
 uv run pytest tests/ -v
 ```
 
+Run the local live-backend integration tests:
+
+```bash
+make integration-test
+```
+
+Run the full local integration test model matrix:
+
+```bash
+RM_INTEGRATION_MAX_MODELS=0 make integration-test
+```
+
+The integration tests start a local Router-Maestro server, reuse the existing
+local config/auth files, and send model-call requests to the real GitHub
+Copilot backend. They require GitHub Copilot auth and are intentionally
+local-only, not part of GitHub Actions:
+
+```bash
+uv run router-maestro auth login github-copilot
+```
+
 Run a single test file:
 
 ```bash
@@ -211,6 +232,9 @@ uv run router-maestro auth login github-copilot
 - For route behavior, use the existing FastAPI test patterns in `tests/`.
 - For provider behavior, mock upstream HTTP calls rather than calling real
   provider APIs.
+- For local live-backend validation, use `make integration-test`. To run the
+  complete Copilot model matrix instead of the default bounded subset, use
+  `RM_INTEGRATION_MAX_MODELS=0 make integration-test`.
 - Run the narrowest relevant pytest target first, then broaden to the full
   suite when the change has wider risk.
 

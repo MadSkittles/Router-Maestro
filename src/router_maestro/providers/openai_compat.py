@@ -2,7 +2,7 @@
 
 import httpx
 
-from router_maestro.providers.base import ChatRequest, ModelInfo
+from router_maestro.providers.base import ModelInfo
 from router_maestro.providers.openai_base import OpenAIChatProvider
 from router_maestro.utils import get_logger
 
@@ -42,9 +42,6 @@ class OpenAICompatibleProvider(OpenAIChatProvider):
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
         }
-
-    def _get_payload_extra(self, request: ChatRequest) -> dict:
-        return request.extra
 
     def _error_label(self) -> str:
         return self.name

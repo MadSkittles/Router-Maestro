@@ -235,6 +235,69 @@ class TestCopilotNonstreamingTools:
         assert "tool_choice" in captured_payload
         assert captured_payload["tool_choice"] == "auto"
 
+    @pytest.mark.asyncio
+    async def test_copilot_tool_calls_force_tool_calls_finish_reason(self):
+        """Copilot can return tool_calls with finish_reason=stop; normalize it."""
+        from router_maestro.providers.copilot import CopilotProvider
+
+        provider = CopilotProvider()
+        provider._cached_token = "test-token"
+        provider._token_expires = 9999999999
+
+        request = ChatRequest(
+            model="gpt-4o",
+            messages=[Message(role="user", content="Use the test tool")],
+            tools=[
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "test_tool",
+                        "description": "A test tool",
+                        "parameters": {"type": "object"},
+                    },
+                }
+            ],
+            tool_choice={"type": "function", "function": {"name": "test_tool"}},
+        )
+
+        async def mock_post(url, json=None, headers=None, timeout=None):
+            mock_response = AsyncMock()
+            mock_response.status_code = 200
+            mock_response.raise_for_status = lambda: None
+            mock_response.json = lambda: {
+                "choices": [
+                    {
+                        "message": {
+                            "content": None,
+                            "tool_calls": [
+                                {
+                                    "id": "call_1",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "test_tool",
+                                        "arguments": "{}",
+                                    },
+                                }
+                            ],
+                        },
+                        "finish_reason": "stop",
+                    }
+                ],
+                "model": "gpt-4o",
+            }
+            return mock_response
+
+        mock_client = AsyncMock()
+        mock_client.post = mock_post
+        mock_client.is_closed = False
+        provider._client = mock_client
+
+        with patch.object(provider, "ensure_token", new_callable=AsyncMock):
+            response = await provider.chat_completion(request)
+
+        assert response.tool_calls is not None
+        assert response.finish_reason == "tool_calls"
+
 
 class TestRouterPreservesThinkingFields:
     """Tests for thinking fields preserved through router model-swap."""
@@ -358,3 +421,33 @@ class TestAnthropicProviderThinking:
                 await provider.chat_completion(request)
 
         assert "thinking" not in captured_payload
+
+    @pytest.mark.asyncio
+    async def test_anthropic_streaming_forwards_tools_and_tool_choice(self):
+        """Streaming Anthropic requests should preserve tool declarations."""
+        from router_maestro.providers.anthropic import AnthropicProvider
+
+        provider = AnthropicProvider()
+        tools = [
+            {
+                "name": "get_weather",
+                "description": "Get weather",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {"location": {"type": "string"}},
+                },
+            }
+        ]
+
+        request = ChatRequest(
+            model="claude-sonnet-4-20250514",
+            messages=[Message(role="user", content="Hello")],
+            tools=tools,
+            tool_choice={"type": "tool", "name": "get_weather"},
+        )
+
+        payload = provider._build_payload(request, stream=True)
+
+        assert payload["stream"] is True
+        assert payload["tools"] == tools
+        assert payload["tool_choice"] == {"type": "tool", "name": "get_weather"}

@@ -65,13 +65,46 @@ class AnthropicProvider(BaseProvider):
         for msg in messages:
             if msg.role == "system":
                 system_prompt = msg.content
+            elif msg.role == "tool":
+                converted.append(
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "tool_result",
+                                "tool_use_id": msg.tool_call_id or "",
+                                "content": msg.content,
+                            }
+                        ],
+                    }
+                )
+            elif msg.role == "assistant" and msg.tool_calls:
+                content = []
+                if msg.content:
+                    content.append({"type": "text", "text": msg.content})
+                for tool_call in msg.tool_calls:
+                    function = tool_call.get("function", {})
+                    arguments = function.get("arguments", "{}")
+                    try:
+                        tool_input = json.loads(arguments) if arguments else {}
+                    except json.JSONDecodeError:
+                        tool_input = {}
+                    content.append(
+                        {
+                            "type": "tool_use",
+                            "id": tool_call.get("id", ""),
+                            "name": function.get("name", ""),
+                            "input": tool_input,
+                        }
+                    )
+                converted.append({"role": "assistant", "content": content})
             else:
                 converted.append({"role": msg.role, "content": msg.content})
 
         return system_prompt, converted
 
-    async def chat_completion(self, request: ChatRequest) -> ChatResponse:
-        """Generate a chat completion via Anthropic."""
+    def _build_payload(self, request: ChatRequest, *, stream: bool = False) -> dict:
+        """Build an Anthropic messages payload."""
         system_prompt, messages = self._convert_messages(request.messages)
 
         payload = {
@@ -79,6 +112,8 @@ class AnthropicProvider(BaseProvider):
             "messages": messages,
             "max_tokens": request.max_tokens or 4096,
         }
+        if stream:
+            payload["stream"] = True
         if system_prompt:
             payload["system"] = system_prompt
         if request.temperature != 1.0:
@@ -92,6 +127,11 @@ class AnthropicProvider(BaseProvider):
             payload["tools"] = request.tools
         if request.tool_choice:
             payload["tool_choice"] = request.tool_choice
+        return payload
+
+    async def chat_completion(self, request: ChatRequest) -> ChatResponse:
+        """Generate a chat completion via Anthropic."""
+        payload = self._build_payload(request)
 
         logger.debug("Anthropic chat completion: model=%s", request.model)
         async with httpx.AsyncClient() as client:
@@ -154,23 +194,7 @@ class AnthropicProvider(BaseProvider):
 
     async def chat_completion_stream(self, request: ChatRequest) -> AsyncIterator[ChatStreamChunk]:
         """Generate a streaming chat completion via Anthropic."""
-        system_prompt, messages = self._convert_messages(request.messages)
-
-        payload = {
-            "model": request.model,
-            "messages": messages,
-            "max_tokens": request.max_tokens or 4096,
-            "stream": True,
-        }
-        if system_prompt:
-            payload["system"] = system_prompt
-        if request.temperature != 1.0:
-            payload["temperature"] = request.temperature
-        if request.thinking_type and request.thinking_type != "disabled":
-            thinking_config: dict = {"type": request.thinking_type}
-            if request.thinking_budget:
-                thinking_config["budget_tokens"] = request.thinking_budget
-            payload["thinking"] = thinking_config
+        payload = self._build_payload(request, stream=True)
 
         logger.debug("Anthropic streaming chat: model=%s", request.model)
         async with httpx.AsyncClient() as client:

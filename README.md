@@ -273,6 +273,38 @@ router-maestro model list
 | `config codex`       | Generate Codex config (CLI/Extension/App) |
 | `config gemini`      | Generate Gemini CLI .env      |
 
+## Local Integration Tests
+
+The live-backend integration tests are local-only and are not part of GitHub
+Actions. They start a local Router-Maestro server, reuse your existing
+Router-Maestro config/auth files, and send requests to the real GitHub Copilot
+backend. The suite covers model invocation paths only: OpenAI Chat, OpenAI
+Responses, Anthropic Messages/count_tokens, Gemini generateContent/stream/countTokens,
+tool calls, streaming, usage accounting, and a configurable Copilot model
+matrix. Admin endpoints are intentionally not covered by these tests.
+
+Prerequisites:
+
+```bash
+uv run router-maestro auth login github-copilot
+```
+
+Run them explicitly:
+
+```bash
+make integration-test
+```
+
+Optional overrides:
+
+```bash
+RM_INTEGRATION_MODEL=github-copilot/gpt-4o make integration-test
+RM_INTEGRATION_TOOL_MODEL=github-copilot/gpt-4o make integration-test
+RM_INTEGRATION_RESPONSES_MODEL=github-copilot/gpt-5.4-mini make integration-test
+RM_INTEGRATION_MODELS=github-copilot/gpt-4o,github-copilot/claude-sonnet-4.5 make integration-test
+RM_INTEGRATION_MAX_MODELS=0 make integration-test
+```
+
 ## API Reference
 
 ### OpenAI-Compatible
