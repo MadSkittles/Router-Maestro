@@ -33,7 +33,7 @@ class OpenAIChatProvider(BaseProvider, ABC):
 
     def _get_payload_extra(self, request: ChatRequest) -> dict:
         """Return extra payload fields for the request."""
-        return {}
+        return request.extra
 
     def _error_label(self) -> str:
         return self.name

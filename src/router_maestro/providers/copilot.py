@@ -558,6 +558,8 @@ class CopilotProvider(BaseProvider):
             content, tool_calls = recover_tool_calls_from_content(
                 content, tool_calls, finish_reason
             )
+            if tool_calls and finish_reason in (None, "stop"):
+                finish_reason = "tool_calls"
 
             return ChatResponse(
                 content=content,
@@ -647,6 +649,7 @@ class CopilotProvider(BaseProvider):
                 response.raise_for_status()
 
                 stream_finished = False
+                emitted_tool_call = False
                 async for line in response.aiter_lines():
                     if stream_finished:
                         break
@@ -668,6 +671,10 @@ class CopilotProvider(BaseProvider):
                         content = delta.get("content", "")
                         finish_reason = data["choices"][0].get("finish_reason")
                         tool_calls = delta.get("tool_calls")
+                        if tool_calls:
+                            emitted_tool_call = True
+                        if finish_reason == "stop" and emitted_tool_call:
+                            finish_reason = "tool_calls"
                         if _thinking_requested(request):
                             thinking_text, thinking_sig = _extract_reasoning_from_chunk(delta)
                         else:

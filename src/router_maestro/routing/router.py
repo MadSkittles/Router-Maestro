@@ -464,7 +464,7 @@ class Router:
                 provider = self.providers.get(provider_name)
                 if provider and provider.is_authenticated():
                     logger.debug("Fuzzy cache hit: '%s' -> '%s'", model_id, matched_key)
-                    return provider_name, matched_key, provider
+                    return provider_name, self._parse_model_key(matched_key)[1], provider
 
         # Fuzzy matching fallback
         matched_key = fuzzy_match_model(model_id, self._models_cache)
@@ -479,7 +479,7 @@ class Router:
                     matched_key,
                     provider_name,
                 )
-                return provider_name, matched_key, provider
+                return provider_name, self._parse_model_key(matched_key)[1], provider
 
         return None
 
@@ -677,10 +677,26 @@ class Router:
 
         actual_request = build_request(request, actual_model_id)
 
+        if is_stream and fallback:
+            priorities_config = self._get_priorities_config()
+            fallback_config = priorities_config.fallback
+            if fallback_config.strategy != FallbackStrategy.NONE:
+                candidates = self._get_fallback_candidates(
+                    provider_name, actual_model_id, fallback_config.strategy
+                )[: fallback_config.maxRetries]
+                return await self._open_stream_with_fallback(
+                    candidates=[(provider_name, actual_model_id, provider), *candidates],
+                    request=request,
+                    build_request=build_request,
+                    call_stream=call_stream,
+                    log_prefix=log_prefix,
+                )
+
         try:
             await provider.ensure_token()
             if is_stream:
                 stream = call_stream(provider, actual_request)
+                stream = self._wrap_stream_errors(stream, provider_name, _with_prefix)
                 logger.info(_with_prefix("stream request routed to %s"), provider_name)
                 return stream, provider_name
             response = await call_nonstream(provider, actual_request)
@@ -712,6 +728,7 @@ class Router:
                     await other_provider.ensure_token()
                     if is_stream:
                         stream = call_stream(other_provider, fallback_request)
+                        stream = self._wrap_stream_errors(stream, other_name, _with_prefix)
                         logger.info(_with_prefix("stream fallback succeeded via %s"), other_name)
                         return stream, other_name
                     response = await call_nonstream(other_provider, fallback_request)
@@ -722,6 +739,74 @@ class Router:
                         _with_prefix("fallback %s failed: %s"), other_name, fallback_error
                     )
                     continue
+            raise
+
+    async def _open_stream_with_fallback(
+        self,
+        candidates: list[tuple[str, str, BaseProvider]],
+        request: RequestT,
+        build_request: Callable[[RequestT, str], RequestT],
+        call_stream: Callable[[BaseProvider, RequestT], AsyncIterator[ChunkT]],
+        log_prefix: str,
+    ) -> tuple[AsyncIterator[ChunkT], str]:
+        """Open a stream and retry fallback providers before the first chunk."""
+
+        def _with_prefix(message: str) -> str:
+            return f"{log_prefix} {message}".strip()
+
+        last_error: ProviderError | None = None
+
+        for index, (candidate_name, candidate_model, candidate_provider) in enumerate(candidates):
+            if index > 0:
+                logger.info(_with_prefix("trying fallback: %s/%s"), candidate_name, candidate_model)
+
+            candidate_request = build_request(request, candidate_model)
+            try:
+                await candidate_provider.ensure_token()
+                stream = call_stream(candidate_provider, candidate_request)
+                first_chunk = await anext(stream, None)
+            except ProviderError as error:
+                logger.warning(_with_prefix("provider %s failed: %s"), candidate_name, error)
+                if not error.retryable:
+                    raise
+                last_error = error
+                continue
+
+            if index > 0:
+                logger.info(_with_prefix("stream fallback succeeded via %s"), candidate_name)
+            else:
+                logger.info(_with_prefix("stream request routed to %s"), candidate_name)
+
+            return self._chain_first_chunk(
+                first_chunk,
+                self._wrap_stream_errors(stream, candidate_name, _with_prefix),
+            ), candidate_name
+
+        if last_error is not None:
+            raise last_error
+        raise ProviderError("No stream fallback candidates available", status_code=503)
+
+    async def _chain_first_chunk(
+        self, first_chunk: ChunkT | None, stream: AsyncIterator[ChunkT]
+    ) -> AsyncIterator[ChunkT]:
+        """Yield a primed first chunk followed by the rest of the stream."""
+        if first_chunk is not None:
+            yield first_chunk
+        async for chunk in stream:
+            yield chunk
+
+    async def _wrap_stream_errors(
+        self,
+        stream: AsyncIterator[ChunkT],
+        provider_name: str,
+        format_message: Callable[[str], str],
+    ) -> AsyncIterator[ChunkT]:
+        """Log provider errors that occur after stream delivery has started."""
+        try:
+            async for chunk in stream:
+                yield chunk
+        except ProviderError as error:
+            logger.warning(format_message("stream provider %s failed: %s"), provider_name, error)
             raise
 
     async def responses_completion(

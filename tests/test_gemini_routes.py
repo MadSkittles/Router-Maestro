@@ -1062,3 +1062,10 @@ class TestGoogApiKeyAuth:
         """x-api-key header should still work."""
         response = auth_client.get("/test", headers={"x-api-key": "test-key-123"})
         assert response.status_code == 200
+
+    @patch.dict("os.environ", {}, clear=True)
+    def test_missing_server_api_key_rejects_protected_routes(self, auth_client):
+        """Protected routes must not become public when server API key is unset."""
+        response = auth_client.get("/test", headers={"Authorization": "Bearer any-key"})
+        assert response.status_code == 500
+        assert "not configured" in response.json()["detail"]

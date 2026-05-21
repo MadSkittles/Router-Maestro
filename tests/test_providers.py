@@ -111,3 +111,64 @@ class TestAnthropicMessageConversion:
 
         assert system is None
         assert len(converted) == 2
+
+    def test_assistant_tool_calls_convert_to_tool_use_blocks(self):
+        """Assistant tool calls must be sent in Anthropic content block format."""
+        provider = AnthropicProvider()
+
+        messages = [
+            Message(role="user", content="Check the weather"),
+            Message(
+                role="assistant",
+                content="I'll check.",
+                tool_calls=[
+                    {
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {
+                            "name": "get_weather",
+                            "arguments": '{"location":"Shanghai"}',
+                        },
+                    }
+                ],
+            ),
+        ]
+
+        system, converted = provider._convert_messages(messages)
+
+        assert system is None
+        assert converted[1] == {
+            "role": "assistant",
+            "content": [
+                {"type": "text", "text": "I'll check."},
+                {
+                    "type": "tool_use",
+                    "id": "call_1",
+                    "name": "get_weather",
+                    "input": {"location": "Shanghai"},
+                },
+            ],
+        }
+
+    def test_tool_messages_convert_to_user_tool_result_blocks(self):
+        """Internal tool-role messages must become Anthropic user tool_result blocks."""
+        provider = AnthropicProvider()
+
+        messages = [
+            Message(role="tool", content='{"temperature":22}', tool_call_id="call_1"),
+        ]
+
+        _system, converted = provider._convert_messages(messages)
+
+        assert converted == [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "call_1",
+                        "content": '{"temperature":22}',
+                    }
+                ],
+            }
+        ]

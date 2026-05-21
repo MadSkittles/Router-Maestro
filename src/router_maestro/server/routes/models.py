@@ -4,15 +4,10 @@ import time
 
 from fastapi import APIRouter
 
-from router_maestro.routing import Router
+from router_maestro.routing import get_router
 from router_maestro.server.schemas import ModelList, ModelObject
 
 router = APIRouter()
-
-
-def get_router() -> Router:
-    """Get the router instance."""
-    return Router()
 
 
 @router.get("/api/openai/v1/models")

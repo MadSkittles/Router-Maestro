@@ -25,13 +25,15 @@ async def verify_api_key(
     """
     server_api_key = get_server_api_key()
 
-    if server_api_key is None:
-        # No API key configured, allow all requests
-        return
-
     # Skip auth for health and root endpoints
     if request.url.path in ("/", "/health", "/docs", "/openapi.json", "/redoc"):
         return
+
+    if server_api_key is None:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Server API key is not configured",
+        )
 
     # Get API key from header
     api_key: str | None = None

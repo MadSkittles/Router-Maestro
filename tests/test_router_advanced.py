@@ -244,6 +244,36 @@ class TestRouterModelResolutionAsync:
         assert result is None
 
     @pytest.mark.asyncio
+    async def test_provider_scoped_fuzzy_match_uses_bare_upstream_model(self):
+        """Provider-scoped fuzzy matches must not pass provider/model upstream."""
+        router = Router.__new__(Router)
+        anthropic = MockProvider(
+            name="anthropic",
+            models=[
+                ModelInfo(
+                    id="claude-sonnet-4-5-20250929",
+                    name="Claude Sonnet 4.5",
+                    provider="anthropic",
+                )
+            ],
+        )
+        router.providers = {"anthropic": anthropic}
+        _init_router_empty(router)
+        router._models_cache = {
+            "claude-sonnet-4-5-20250929": ("anthropic", anthropic._models[0]),
+            "anthropic/claude-sonnet-4-5-20250929": ("anthropic", anthropic._models[0]),
+        }
+        _mark_models_cached(router)
+        _mark_providers_fresh(router)
+
+        result = await router._find_model_in_cache("anthropic/sonnet-4-5")
+
+        assert result is not None
+        provider_name, model_id, _provider = result
+        assert provider_name == "anthropic"
+        assert model_id == "claude-sonnet-4-5-20250929"
+
+    @pytest.mark.asyncio
     async def test_resolve_auto_route_model(self, router_with_providers):
         """Test resolving auto-route model."""
         _set_priorities(
@@ -432,6 +462,42 @@ class TestRouterFallback:
         candidates = router._get_fallback_candidates("primary", "model-1", FallbackStrategy.NONE)
 
         assert len(candidates) == 0
+
+    @pytest.mark.asyncio
+    async def test_chat_stream_falls_back_when_primary_fails_before_first_chunk(
+        self, router_with_fallback
+    ):
+        """Streaming fallback should handle retryable errors raised when iteration starts."""
+        router, primary, secondary = router_with_fallback
+        request = ChatRequest(
+            model="model-1",
+            messages=[Message(role="user", content="Hello")],
+            stream=True,
+        )
+
+        stream, provider_name = await router.chat_completion_stream(request)
+        chunks = [chunk async for chunk in stream]
+
+        assert provider_name == "secondary"
+        assert primary._request_count == 1
+        assert secondary._request_count == 1
+        assert chunks[0].content == "Hello "
+
+    @pytest.mark.asyncio
+    async def test_responses_stream_falls_back_when_primary_fails_before_first_chunk(
+        self, router_with_fallback
+    ):
+        """Responses streams should use the same initial-error fallback behavior."""
+        router, primary, secondary = router_with_fallback
+        request = ResponsesRequest(model="model-1", input="Hello", stream=True)
+
+        stream, provider_name = await router.responses_completion_stream(request)
+        chunks = [chunk async for chunk in stream]
+
+        assert provider_name == "secondary"
+        assert primary._request_count == 1
+        assert secondary._request_count == 1
+        assert chunks[0].content == "Hello "
 
 
 class TestRouterListModels:

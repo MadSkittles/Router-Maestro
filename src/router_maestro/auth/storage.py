@@ -7,6 +7,7 @@ from pathlib import Path
 from pydantic import BaseModel, Field
 
 from router_maestro.config.paths import AUTH_FILE
+from router_maestro.config.settings import write_json_owner_only
 
 
 class AuthType(StrEnum):
@@ -61,15 +62,12 @@ class AuthStorage(BaseModel):
 
     def save(self, path: Path = AUTH_FILE) -> None:
         """Save credentials to file."""
-        path.parent.mkdir(parents=True, exist_ok=True)
-
         # Convert to dict format matching the spec
         data = {}
         for name, cred in self.credentials.items():
             data[name] = cred.model_dump(mode="json")
 
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2, ensure_ascii=False)
+        write_json_owner_only(path, data)
 
     def get(self, provider: str) -> Credential | None:
         """Get credential for a provider."""

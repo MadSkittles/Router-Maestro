@@ -1,4 +1,4 @@
-.PHONY: help install dev test lint format clean build push run stop logs shell docker-up docker-down docker-logs buildx-setup build-multiarch dist publish publish-test dev-up dev-down dev-logs dev-build
+.PHONY: help install dev test integration-test lint format clean build push run stop logs shell docker-up docker-down docker-logs buildx-setup build-multiarch dist publish publish-test dev-up dev-down dev-logs dev-build
 
 # Variables
 VERSION := $(shell grep '^version' pyproject.toml | head -1 | cut -d'"' -f2)
@@ -14,6 +14,7 @@ help:
 	@echo "  make install     Install dependencies"
 	@echo "  make dev         Install with dev dependencies"
 	@echo "  make test        Run tests"
+	@echo "  make integration-test  Run local live-backend integration tests"
 	@echo "  make lint        Run linter (ruff check)"
 	@echo "  make format      Format code (ruff format)"
 	@echo "  make clean       Clean build artifacts"
@@ -57,6 +58,9 @@ dev:
 
 test:
 	uv run pytest tests/ -v
+
+integration-test:
+	uv run pytest integration_tests/ -v
 
 lint:
 	uv run ruff check src/ tests/

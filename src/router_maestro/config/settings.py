@@ -1,8 +1,10 @@
 """Global settings and configuration management."""
 
 import json
+import os
+from contextlib import suppress
 from pathlib import Path
-from typing import TypeVar
+from typing import Any, TypeVar
 
 from pydantic import BaseModel
 
@@ -12,6 +14,25 @@ from router_maestro.config.priorities import PrioritiesConfig
 from router_maestro.config.providers import ProvidersConfig
 
 T = TypeVar("T", bound=BaseModel)
+
+
+def write_json_owner_only(path: Path, data: Any) -> None:
+    """Write JSON with owner-only permissions."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.exists():
+        path.chmod(0o600)
+
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2, ensure_ascii=False)
+            f.write("\n")
+    except Exception:
+        with suppress(OSError):
+            os.close(fd)
+        raise
+
+    path.chmod(0o600)
 
 
 def load_config(path: Path, model: type[T], default_factory: callable) -> T:
@@ -41,9 +62,7 @@ def save_config(path: Path, config: BaseModel) -> None:
         path: Path to configuration file
         config: Configuration object to save
     """
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(config.model_dump(mode="json"), f, indent=2, ensure_ascii=False)
+    write_json_owner_only(path, config.model_dump(mode="json"))
 
 
 def load_providers_config() -> ProvidersConfig:
