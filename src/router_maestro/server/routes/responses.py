@@ -312,6 +312,8 @@ async def create_response(request: ResponsesRequest):
                 input_tokens=response.usage.get("input_tokens", 0),
                 output_tokens=response.usage.get("output_tokens", 0),
                 total_tokens=response.usage.get("total_tokens", 0),
+                input_tokens_details=response.usage.get("input_tokens_details"),
+                output_tokens_details=response.usage.get("output_tokens_details"),
             )
 
         response_id = generate_id("resp")

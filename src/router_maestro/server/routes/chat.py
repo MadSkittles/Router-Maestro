@@ -30,6 +30,20 @@ logger = get_logger("server.routes.chat")
 router = APIRouter()
 
 
+def make_chat_usage(raw_usage: dict | None) -> ChatCompletionUsage | None:
+    """Create OpenAI chat usage while preserving upstream detail fields."""
+    if not raw_usage:
+        return None
+
+    return ChatCompletionUsage(
+        prompt_tokens=raw_usage.get("prompt_tokens", 0),
+        completion_tokens=raw_usage.get("completion_tokens", 0),
+        total_tokens=raw_usage.get("total_tokens", 0),
+        prompt_tokens_details=raw_usage.get("prompt_tokens_details"),
+        completion_tokens_details=raw_usage.get("completion_tokens_details"),
+    )
+
+
 @router.post("/api/openai/v1/chat/completions")
 async def chat_completions(request: ChatCompletionRequest):
     """Handle chat completion requests."""
@@ -89,13 +103,7 @@ async def chat_completions(request: ChatCompletionRequest):
     try:
         response, provider_name = await model_router.chat_completion(chat_request)
 
-        usage = None
-        if response.usage:
-            usage = ChatCompletionUsage(
-                prompt_tokens=response.usage.get("prompt_tokens", 0),
-                completion_tokens=response.usage.get("completion_tokens", 0),
-                total_tokens=response.usage.get("total_tokens", 0),
-            )
+        usage = make_chat_usage(response.usage)
 
         # Build response message with optional tool_calls
         response_tool_calls = None
@@ -147,6 +155,7 @@ async def stream_response(model_router: Router, request: ChatRequest) -> AsyncGe
         yield f"data: {initial_chunk.model_dump_json()}\n\n"
 
         async for chunk in stream:
+            usage = make_chat_usage(chunk.usage)
             if chunk.content or chunk.tool_calls:
                 chunk_response = ChatCompletionChunk(
                     id=response_id,
@@ -162,8 +171,18 @@ async def stream_response(model_router: Router, request: ChatRequest) -> AsyncGe
                             finish_reason=None,
                         )
                     ],
+                    usage=usage,
                 )
                 yield f"data: {chunk_response.model_dump_json()}\n\n"
+            elif usage:
+                usage_chunk = ChatCompletionChunk(
+                    id=response_id,
+                    created=created,
+                    model=request.model,
+                    choices=[],
+                    usage=usage,
+                )
+                yield f"data: {usage_chunk.model_dump_json()}\n\n"
 
             if chunk.finish_reason:
                 final_chunk = ChatCompletionChunk(
@@ -177,6 +196,7 @@ async def stream_response(model_router: Router, request: ChatRequest) -> AsyncGe
                             finish_reason=chunk.finish_reason,
                         )
                     ],
+                    usage=usage,
                 )
                 yield f"data: {final_chunk.model_dump_json()}\n\n"
 

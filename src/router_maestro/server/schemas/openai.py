@@ -65,6 +65,8 @@ class ChatCompletionUsage(BaseModel):
     prompt_tokens: int
     completion_tokens: int
     total_tokens: int
+    prompt_tokens_details: dict[str, Any] | None = None
+    completion_tokens_details: dict[str, Any] | None = None
 
 
 class ChatCompletionResponse(BaseModel):
@@ -102,6 +104,7 @@ class ChatCompletionChunk(BaseModel):
     created: int
     model: str
     choices: list[ChatCompletionChunkChoice]
+    usage: ChatCompletionUsage | None = None
 
 
 class ModelObject(BaseModel):
