@@ -56,10 +56,14 @@ uv run router-maestro auth login github-copilot
 
 Use `make integration-test` for the default live suite, which includes the full
 Copilot model matrix. Use `RM_INTEGRATION_MAX_MODELS=<N> make integration-test`
-only when you intentionally want a bounded model subset. The suite covers model
+only when you intentionally want a bounded model subset. The reasoning/thinking
+matrix defaults to one representative model per family to keep the local suite
+practical; use `RM_INTEGRATION_MAX_REASONING_MODELS=0 make integration-test`
+when you intentionally want the full reasoning sweep. The suite covers model
 invocation paths such as OpenAI Chat/Responses, Anthropic Messages/count_tokens,
-Gemini generateContent/stream/countTokens, streaming, tool calls, and usage
-accounting.
+Gemini generateContent/stream/countTokens, streaming, tool calls, usage
+accounting, Anthropic thinking budgets, OpenAI reasoning_effort, and
+Gemini-family model coverage.
 
 ### Docker Deployment
 

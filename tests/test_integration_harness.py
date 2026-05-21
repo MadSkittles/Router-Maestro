@@ -40,6 +40,42 @@ def test_model_matrix_payload_has_reasoning_safe_output_budget():
     assert payload["reasoning_effort"] == "low"
 
 
+def test_reasoning_matrix_payloads_cover_budget_and_effort_controls():
+    """Live matrix helpers should exercise thinking budgets and reasoning effort."""
+    conftest = importlib.import_module("integration_tests.conftest")
+
+    anthropic = conftest.anthropic_reasoning_payload(
+        "github-copilot/claude-sonnet-4.6",
+        budget=4096,
+        stream=True,
+    )
+    openai = conftest.openai_reasoning_payload(
+        "github-copilot/gpt-5.4",
+        effort="high",
+        stream=True,
+    )
+
+    assert anthropic["thinking"] == {"type": "enabled", "budget_tokens": 4096}
+    assert anthropic["max_tokens"] > 4096
+    assert openai["reasoning_effort"] == "high"
+    assert openai["stream_options"] == {"include_usage": True}
+
+
+def test_integration_tests_include_reasoning_and_gemini_family_matrices():
+    """Local live tests should cover the e2e reasoning and Gemini family gaps."""
+    integration_dir = ROOT / "integration_tests"
+
+    reasoning = (integration_dir / "test_live_reasoning_matrix.py").read_text(
+        encoding="utf-8"
+    )
+    gemini = (integration_dir / "test_live_gemini_matrix.py").read_text(encoding="utf-8")
+
+    assert "test_anthropic_claude_thinking_budget_matrix" in reasoning
+    assert "test_anthropic_gpt5_responses_bridge_thinking_budget_matrix" in reasoning
+    assert "test_openai_chat_reasoning_effort_matrix" in reasoning
+    assert "test_gemini_family_generate_content_matrix" in gemini
+
+
 def test_integration_harness_documents_existing_config_usage():
     """The harness should say it reuses the user's existing RM configuration."""
     conftest = (ROOT / "integration_tests" / "conftest.py").read_text(encoding="utf-8")

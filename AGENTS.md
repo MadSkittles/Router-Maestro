@@ -234,7 +234,10 @@ uv run router-maestro auth login github-copilot
   provider APIs.
 - For local live-backend validation, use `make integration-test`; it runs the
   complete Copilot model matrix by default. To intentionally run a bounded
-  subset, use `RM_INTEGRATION_MAX_MODELS=<N> make integration-test`.
+  model subset, use `RM_INTEGRATION_MAX_MODELS=<N> make integration-test`. The
+  reasoning/thinking sweep defaults to one representative model per family; to
+  intentionally run that sweep across every available reasoning model, use
+  `RM_INTEGRATION_MAX_REASONING_MODELS=0 make integration-test`.
 - Run the narrowest relevant pytest target first, then broaden to the full
   suite when the change has wider risk.
 

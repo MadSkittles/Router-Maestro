@@ -280,7 +280,8 @@ Actions. They start a local Router-Maestro server, reuse your existing
 Router-Maestro config/auth files, and send requests to the real GitHub Copilot
 backend. The suite covers model invocation paths only: OpenAI Chat, OpenAI
 Responses, Anthropic Messages/count_tokens, Gemini generateContent/stream/countTokens,
-tool calls, streaming, usage accounting, and the full Copilot model matrix by
+tool calls, streaming, usage accounting, Anthropic thinking budgets, OpenAI
+reasoning_effort, Gemini-family API calls, and the full Copilot model matrix by
 default. Admin endpoints are intentionally not covered by these tests.
 
 Prerequisites:
@@ -303,6 +304,8 @@ RM_INTEGRATION_TOOL_MODEL=github-copilot/gpt-4o make integration-test
 RM_INTEGRATION_RESPONSES_MODEL=github-copilot/gpt-5.4-mini make integration-test
 RM_INTEGRATION_MODELS=github-copilot/gpt-4o,github-copilot/claude-sonnet-4.5 make integration-test
 RM_INTEGRATION_MAX_MODELS=8 make integration-test
+RM_INTEGRATION_MAX_REASONING_MODELS=3 make integration-test
+RM_INTEGRATION_MAX_REASONING_MODELS=0 make integration-test  # full reasoning sweep
 ```
 
 ## API Reference

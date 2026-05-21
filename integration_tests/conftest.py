@@ -26,10 +26,25 @@ STARTUP_TIMEOUT_SECONDS = 45.0
 REQUEST_TIMEOUT_SECONDS = 120.0
 STREAM_TIMEOUT_SECONDS = 180.0
 DEFAULT_MAX_MODEL_MATRIX = 0
+DEFAULT_MAX_REASONING_MATRIX = 1
 DEFAULT_API_KEY = "router-maestro-integration-test"
 COPILOT_PROVIDER = "github-copilot"
 TEXT_PROMPT = "Reply with exactly the word pong. Do not add punctuation or any other words."
 TOOL_PROMPT = "Use the provided get_weather tool for Shanghai. Do not answer directly."
+REASONING_PROMPT = (
+    "Three friends Alice, Bob, and Carol have ages summing to 60. "
+    "Alice is twice as old as Bob was when Alice was as old as Bob is now. "
+    "Carol is 4 years younger than Alice. Find each age, showing reasoning."
+)
+ANTHROPIC_THINKING_BUDGETS: tuple[int | None, ...] = (None, 1024, 4096, 16000)
+OPENAI_REASONING_EFFORTS: tuple[str | None, ...] = (None, "low", "medium", "high")
+STREAM_MODES: tuple[bool, ...] = (False, True)
+RESPONSES_ONLY_CHAT_MODELS = {
+    "gpt-5.2-codex",
+    "gpt-5.3-codex",
+    "gpt-5.4-mini",
+    "gpt-5.5",
+}
 
 
 @dataclass(frozen=True)
@@ -146,6 +161,50 @@ def model_matrix(copilot_models: list[str]) -> list[str]:
 
 
 @pytest.fixture(scope="session")
+def anthropic_thinking_models(copilot_models: list[str]) -> list[str]:
+    """Claude-family models for Anthropic thinking budget coverage."""
+    return _required_reasoning_subset(
+        copilot_models,
+        predicate=_is_anthropic_thinking_model,
+        description="Claude-family Copilot models",
+    )
+
+
+@pytest.fixture(scope="session")
+def anthropic_gpt5_bridge_models(copilot_models: list[str]) -> list[str]:
+    """Responses-eligible GPT-5 models for Anthropic bridge coverage."""
+    eligible = {f"{COPILOT_PROVIDER}/{model_id}" for model_id in RESPONSES_ELIGIBLE_MODELS}
+    return _required_reasoning_subset(
+        copilot_models,
+        predicate=lambda model: model in eligible,
+        description="Responses-eligible GPT-5 Copilot models",
+    )
+
+
+@pytest.fixture(scope="session")
+def openai_reasoning_models(copilot_models: list[str]) -> list[str]:
+    """OpenAI Chat models that accept reasoning_effort."""
+    return _required_reasoning_subset(
+        copilot_models,
+        predicate=_is_openai_chat_reasoning_model,
+        description="OpenAI Chat reasoning Copilot models",
+    )
+
+
+@pytest.fixture(scope="session")
+def gemini_family_models(copilot_models: list[str]) -> list[str]:
+    """Gemini-family models for explicit Gemini API surface coverage."""
+    selected = [
+        model
+        for model in _prioritize_models(copilot_models)
+        if bare_model(model).startswith("gemini-")
+    ]
+    if not selected:
+        pytest.skip("No Gemini-family Copilot models are available from GitHub Copilot")
+    return selected
+
+
+@pytest.fixture(scope="session")
 def chat_model(copilot_models: list[str]) -> str:
     """Model for OpenAI Chat, Anthropic, and Gemini compatibility paths."""
     requested = os.environ.get("RM_INTEGRATION_MODEL")
@@ -231,6 +290,26 @@ def model_matrix_chat_payload(model: str) -> dict[str, Any]:
     payload = openai_chat_payload(model)
     payload["max_tokens"] = 512
     payload["reasoning_effort"] = "low"
+    return payload
+
+
+def openai_reasoning_payload(
+    model: str,
+    *,
+    effort: str | None,
+    stream: bool = False,
+) -> dict[str, Any]:
+    """OpenAI Chat request for reasoning_effort matrix coverage."""
+    payload = {
+        "model": model,
+        "messages": [{"role": "user", "content": REASONING_PROMPT}],
+        "max_tokens": 4096,
+        "stream": stream,
+    }
+    if stream:
+        payload["stream_options"] = {"include_usage": True}
+    if effort is not None:
+        payload["reasoning_effort"] = effort
     return payload
 
 
@@ -330,6 +409,24 @@ def openai_responses_tool_payload(model: str, *, stream: bool = False) -> dict[s
     return payload
 
 
+def anthropic_reasoning_payload(
+    model: str,
+    *,
+    budget: int | None,
+    stream: bool = False,
+) -> dict[str, Any]:
+    """Anthropic Messages request for thinking budget matrix coverage."""
+    payload = {
+        "model": model,
+        "messages": [{"role": "user", "content": REASONING_PROMPT}],
+        "max_tokens": max(2048, min(16384, (budget or 0) + 1024)),
+        "stream": stream,
+    }
+    if budget is not None:
+        payload["thinking"] = {"type": "enabled", "budget_tokens": budget}
+    return payload
+
+
 def anthropic_tool_payload(model: str, *, stream: bool = False) -> dict[str, Any]:
     """Anthropic payload that forces a tool_use block."""
     payload = anthropic_payload(model, stream=stream)
@@ -361,6 +458,14 @@ def gemini_tool_payload(*, max_output_tokens: int = 16) -> dict[str, Any]:
     ]
     payload["toolConfig"] = {"functionCallingConfig": {"mode": "ANY"}}
     return payload
+
+
+def gemini_reasoning_payload() -> dict[str, Any]:
+    """Gemini request used for explicit Gemini-family model coverage."""
+    return {
+        "contents": [{"role": "user", "parts": [{"text": TEXT_PROMPT}]}],
+        "generationConfig": {"temperature": 0, "maxOutputTokens": 512},
+    }
 
 
 def anthropic_count_tokens_payload(model: str) -> dict[str, Any]:
@@ -572,6 +677,44 @@ def _prioritize_models(models: list[str]) -> list[str]:
         )
     selected.extend(model for model in models if model not in selected)
     return selected
+
+
+def _required_reasoning_subset(
+    models: list[str],
+    *,
+    predicate,
+    description: str,
+) -> list[str]:
+    selected = [model for model in _prioritize_models(models) if predicate(model)]
+    if not selected:
+        pytest.skip(f"No {description} are available from GitHub Copilot")
+
+    max_models = _int_env("RM_INTEGRATION_MAX_REASONING_MODELS", DEFAULT_MAX_REASONING_MATRIX)
+    if max_models > 0:
+        selected = selected[:max_models]
+    return selected
+
+
+def _is_anthropic_thinking_model(model: str) -> bool:
+    bare = bare_model(model).lower()
+    if not bare.startswith("claude-"):
+        return False
+    return not bare.endswith(("-high", "-xhigh", "-1m-internal"))
+
+
+def _is_openai_chat_reasoning_model(model: str) -> bool:
+    bare = bare_model(model).lower()
+    if bare in RESPONSES_ONLY_CHAT_MODELS:
+        return False
+    return (
+        bare.startswith("gpt-5")
+        or bare.startswith("o1")
+        or bare.startswith("o3")
+        or bare.startswith("o4")
+        or bare.startswith("claude-opus-4.7")
+        or bare.startswith("claude-opus-4.6")
+        or bare.startswith("claude-sonnet-4.6")
+    )
 
 
 def _int_env(name: str, default: int) -> int:
