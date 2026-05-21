@@ -168,6 +168,38 @@ class TestToolSearchCallWireShape:
         assert done["item"]["arguments"] == {}
 
 
+class TestResponsesStreamUsageWireShape:
+    """Responses streaming should preserve upstream usage detail fields."""
+
+    @pytest.mark.asyncio
+    async def test_completed_event_includes_usage_details(self):
+        events = await _drive(
+            [
+                ResponsesStreamChunk(content="hello"),
+                ResponsesStreamChunk(
+                    content="",
+                    finish_reason="stop",
+                    usage={
+                        "input_tokens": 100,
+                        "output_tokens": 20,
+                        "total_tokens": 120,
+                        "input_tokens_details": {"cached_tokens": 60},
+                        "output_tokens_details": {"reasoning_tokens": 9},
+                    },
+                ),
+            ]
+        )
+
+        completed = next(e for e in events if e.get("type") == "response.completed")
+        assert completed["response"]["usage"] == {
+            "input_tokens": 100,
+            "input_tokens_details": {"cached_tokens": 60},
+            "output_tokens": 20,
+            "output_tokens_details": {"reasoning_tokens": 9},
+            "total_tokens": 120,
+        }
+
+
 class TestFunctionCallWireShape:
     """Regular function calls must still emit the legacy function_call shape."""
 

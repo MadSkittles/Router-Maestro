@@ -602,6 +602,7 @@ class CopilotProvider(BaseProvider):
             "messages": messages,
             "temperature": request.temperature,
             "stream": True,
+            "stream_options": {"include_usage": True},
         }
         if request.max_tokens:
             payload["max_tokens"] = request.max_tokens

@@ -268,6 +268,18 @@ class TestMakeUsage:
         assert result["input_tokens_details"]["cached_tokens"] == 0
         assert result["output_tokens_details"]["reasoning_tokens"] == 0
 
+    def test_make_usage_preserves_details(self):
+        """Usage detail fields from upstream should be preserved."""
+        raw = {
+            "input_tokens": 10,
+            "output_tokens": 20,
+            "input_tokens_details": {"cached_tokens": 7},
+            "output_tokens_details": {"reasoning_tokens": 13},
+        }
+        result = make_usage(raw)
+        assert result["input_tokens_details"] == {"cached_tokens": 7}
+        assert result["output_tokens_details"] == {"reasoning_tokens": 13}
+
 
 class TestMakeMessageItem:
     """Tests for message item creation."""
