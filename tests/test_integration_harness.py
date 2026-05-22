@@ -65,9 +65,7 @@ def test_integration_tests_include_reasoning_and_gemini_family_matrices():
     """Local live tests should cover the e2e reasoning and Gemini family gaps."""
     integration_dir = ROOT / "integration_tests"
 
-    reasoning = (integration_dir / "test_live_reasoning_matrix.py").read_text(
-        encoding="utf-8"
-    )
+    reasoning = (integration_dir / "test_live_reasoning_matrix.py").read_text(encoding="utf-8")
     gemini = (integration_dir / "test_live_gemini_matrix.py").read_text(encoding="utf-8")
 
     assert "test_anthropic_claude_thinking_budget_matrix" in reasoning
