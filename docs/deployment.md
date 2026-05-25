@@ -181,15 +181,19 @@ TRAEFIK_DASHBOARD_AUTH=admin:$$2y$$05$$your_hash_here
 |----------|-------------|----------|
 | `DOMAIN` | Your domain (e.g., `api.example.com`) | Yes |
 | `ACME_EMAIL` | Email for Let's Encrypt notifications | Yes |
-| `ROUTER_MAESTRO_API_KEY` | API key for Router-Maestro | Yes |
+| `ROUTER_MAESTRO_API_KEY` | Optional fixed Router-Maestro server API key. Leave blank, and do not set it in the shell running Docker Compose, to auto-generate on first start. | No |
 | `CF_DNS_API_TOKEN` | Cloudflare API token (if using Cloudflare) | Conditional |
 | `TRAEFIK_DASHBOARD_AUTH` | Basic auth for Traefik dashboard | No |
 
-### Generating a Secure API Key
+### Router-Maestro API Key
+
+Router-Maestro protects API routes with one server API key. If `ROUTER_MAESTRO_API_KEY` is blank or unset in both `.env` and the shell running Docker Compose, the server generates a `sk-rm-...` key on first start and stores it in the mounted Router-Maestro config. Read it from inside the container:
 
 ```bash
-openssl rand -hex 32
+docker compose exec router-maestro router-maestro server show-key
 ```
+
+Use that same key in remote client contexts and raw API calls. If deployment automation needs a stable pre-provisioned value, set `ROUTER_MAESTRO_API_KEY` in `.env` before starting the service.
 
 ### Complete .env Example
 
@@ -199,7 +203,7 @@ DOMAIN=api.example.com
 ACME_EMAIL=admin@example.com
 
 # Router-Maestro
-ROUTER_MAESTRO_API_KEY=your_secure_random_key
+ROUTER_MAESTRO_API_KEY=
 
 # Cloudflare (default DNS provider)
 CF_DNS_API_TOKEN=your_cloudflare_api_token
