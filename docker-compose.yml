@@ -48,7 +48,7 @@ services:
     container_name: router-maestro
     restart: unless-stopped
     environment:
-      - ROUTER_MAESTRO_API_KEY=${ROUTER_MAESTRO_API_KEY}
+      - ROUTER_MAESTRO_API_KEY=${ROUTER_MAESTRO_API_KEY:-}
       - ROUTER_MAESTRO_LOG_LEVEL=${ROUTER_MAESTRO_LOG_LEVEL:-INFO}
     volumes:
       # Persist auth and config (bind mounts)
