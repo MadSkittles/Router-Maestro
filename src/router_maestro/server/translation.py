@@ -470,11 +470,22 @@ def translate_openai_to_anthropic(
         openai_reason = openai_response["choices"][0].get("finish_reason")
         finish_reason = map_openai_stop_reason_to_anthropic(openai_reason)
 
-    # Extract usage
-    openai_usage = openai_response.get("usage", {})
+    # Extract usage.
+    #
+    # OpenAI-wire usage reports cache hits under ``prompt_tokens_details.cached_tokens``.
+    # Map that onto Anthropic's ``cache_read_input_tokens`` so clients (e.g. Claude
+    # Code, which reads these fields to compute context-window pressure for
+    # auto-compact) see real cache numbers instead of nulls. OpenAI wire has no
+    # equivalent of cache *creation* tokens, so report 0 rather than null — the
+    # Anthropic spec treats this as an int.
+    openai_usage = openai_response.get("usage") or {}
+    prompt_details = openai_usage.get("prompt_tokens_details") or {}
+    cached_tokens = prompt_details.get("cached_tokens") or 0
     usage = AnthropicUsage(
         input_tokens=openai_usage.get("prompt_tokens", 0),
         output_tokens=openai_usage.get("completion_tokens", 0),
+        cache_creation_input_tokens=0,
+        cache_read_input_tokens=cached_tokens,
     )
 
     return AnthropicMessagesResponse(
@@ -502,8 +513,11 @@ def build_message_start_event(
         return None
 
     input_tokens = 0
+    cached_tokens = 0
     if state.last_usage:
         input_tokens = state.last_usage.get("prompt_tokens", 0)
+        details = state.last_usage.get("prompt_tokens_details") or {}
+        cached_tokens = details.get("cached_tokens") or 0
     elif state.estimated_input_tokens:
         input_tokens = state.estimated_input_tokens
 
@@ -521,8 +535,8 @@ def build_message_start_event(
             "usage": {
                 "input_tokens": input_tokens,
                 "output_tokens": 1,
-                "cache_creation_input_tokens": None,
-                "cache_read_input_tokens": None,
+                "cache_creation_input_tokens": 0,
+                "cache_read_input_tokens": cached_tokens,
                 "server_tool_use": None,
                 "service_tier": "standard",
             },
@@ -767,6 +781,12 @@ def translate_openai_chunk_to_anthropic_events(
             prompt_tokens if prompt_tokens > 0 else state.estimated_input_tokens
         )
 
+        # Pass through Copilot/OpenAI cached_tokens as Anthropic cache_read_input_tokens
+        # so Claude Code's HUD and auto-compact heuristic see real cache hits.
+        last_usage = chunk.get("usage") or state.last_usage or {}
+        details = last_usage.get("prompt_tokens_details") or {}
+        cached_tokens = details.get("cached_tokens") or 0
+
         events.append(
             {
                 "type": "message_delta",
@@ -778,7 +798,7 @@ def translate_openai_chunk_to_anthropic_events(
                     "input_tokens": input_tokens_for_display,
                     "output_tokens": completion_tokens,
                     "cache_creation_input_tokens": 0,
-                    "cache_read_input_tokens": 0,
+                    "cache_read_input_tokens": cached_tokens,
                     "server_tool_use": None,
                 },
             }

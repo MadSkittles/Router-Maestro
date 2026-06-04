@@ -607,6 +607,42 @@ class TestTranslateOpenAIToAnthropic:
         assert tool_blocks[0].name == "exec"
         assert tool_blocks[0].input == {"command": "hostname"}
 
+    def test_cache_token_fields_are_integers_not_null(self):
+        """Anthropic spec requires cache_*_input_tokens to be int — never null.
+
+        Claude Code reads these to compute context-window pressure for
+        auto-compact; passing null breaks the heuristic and auto-compact
+        never fires.
+        """
+        openai_response = {
+            "choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 2},
+        }
+        result = translate_openai_to_anthropic(openai_response, "claude-3", "r1")
+
+        assert result.usage.cache_creation_input_tokens == 0
+        assert result.usage.cache_read_input_tokens == 0
+
+    def test_cached_tokens_mapped_to_cache_read_input_tokens(self):
+        """Copilot/OpenAI returns prompt_tokens_details.cached_tokens on cache hits.
+
+        Map it onto Anthropic's cache_read_input_tokens so Claude Code's HUD
+        shows real cache reuse instead of 0.
+        """
+        openai_response = {
+            "choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}],
+            "usage": {
+                "prompt_tokens": 3633,
+                "completion_tokens": 16,
+                "prompt_tokens_details": {"cached_tokens": 3613},
+            },
+        }
+        result = translate_openai_to_anthropic(openai_response, "claude-3", "r2")
+
+        assert result.usage.input_tokens == 3633
+        assert result.usage.cache_read_input_tokens == 3613
+        assert result.usage.cache_creation_input_tokens == 0
+
 
 class TestTranslateOpenAIChunkToAnthropicEvents:
     """Tests for streaming chunk translation."""
@@ -653,6 +689,64 @@ class TestTranslateOpenAIChunkToAnthropicEvents:
         assert any(e["type"] == "message_delta" for e in events)
         assert any(e["type"] == "message_stop" for e in events)
         assert state.message_complete is True
+
+    def test_message_start_emits_integer_cache_tokens(self):
+        """message_start.usage cache_*_input_tokens must be ints, never null.
+
+        Claude Code's auto-compact heuristic short-circuits on null cache
+        fields and never fires.
+        """
+        state = AnthropicStreamState()
+        chunk = {"id": "chunk-1", "choices": [{"delta": {"content": "Hi"}, "finish_reason": None}]}
+
+        events = translate_openai_chunk_to_anthropic_events(chunk, state, "claude-3")
+        start = next(e for e in events if e["type"] == "message_start")
+
+        usage = start["message"]["usage"]
+        assert usage["cache_creation_input_tokens"] == 0
+        assert usage["cache_read_input_tokens"] == 0
+
+    def test_message_start_passes_through_cached_tokens(self):
+        """When last_usage carries cached_tokens, surface it as cache_read_input_tokens."""
+        state = AnthropicStreamState()
+        state.last_usage = {
+            "prompt_tokens": 3633,
+            "completion_tokens": 0,
+            "prompt_tokens_details": {"cached_tokens": 3613},
+        }
+        chunk = {"id": "chunk-1", "choices": [{"delta": {"content": "Hi"}, "finish_reason": None}]}
+
+        events = translate_openai_chunk_to_anthropic_events(chunk, state, "claude-3")
+        start = next(e for e in events if e["type"] == "message_start")
+
+        usage = start["message"]["usage"]
+        assert usage["input_tokens"] == 3633
+        assert usage["cache_read_input_tokens"] == 3613
+        assert usage["cache_creation_input_tokens"] == 0
+
+    def test_finish_message_delta_passes_through_cached_tokens(self):
+        """Final message_delta usage must surface cached_tokens from the same chunk."""
+        state = AnthropicStreamState()
+        state.message_start_sent = True
+        state.content_block_open = True
+
+        chunk = {
+            "id": "chunk-1",
+            "choices": [{"delta": {}, "finish_reason": "stop"}],
+            "usage": {
+                "prompt_tokens": 3633,
+                "completion_tokens": 16,
+                "prompt_tokens_details": {"cached_tokens": 3613},
+            },
+        }
+
+        events = translate_openai_chunk_to_anthropic_events(chunk, state, "claude-3")
+        delta = next(e for e in events if e["type"] == "message_delta")
+
+        assert delta["usage"]["input_tokens"] == 3633
+        assert delta["usage"]["output_tokens"] == 16
+        assert delta["usage"]["cache_read_input_tokens"] == 3613
+        assert delta["usage"]["cache_creation_input_tokens"] == 0
 
     def test_tool_call_events(self):
         """Test tool call event generation."""
