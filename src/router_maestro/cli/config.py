@@ -234,7 +234,8 @@ def _prompt_auto_compact_window(model: dict | None) -> int | None:
     Returns the chosen token count to write, or ``None`` to skip the env var.
 
     The prompt has three options:
-      * ``y`` — use the upstream ``max_prompt_tokens`` (if known)
+      * ``y`` — use the upstream context window (``max_prompt_tokens`` +
+        ``max_output_tokens``, matching what Copilot's own model picker shows)
       * ``n`` — skip; do not set the env var
       * ``d`` — set the default 200K (recommended for non-Claude models)
 
@@ -247,12 +248,12 @@ def _prompt_auto_compact_window(model: dict | None) -> int | None:
     if model_key in _CLAUDE_CODE_NATIVE_1M_KEYS:
         return None
 
-    upstream = model.get("max_prompt_tokens")
+    upstream = _upstream_context_window(model)
     default_value = _CLAUDE_CODE_DEFAULT_AUTO_COMPACT_WINDOW
     upstream_line = (
-        f"  Upstream max_prompt_tokens: {upstream}"
-        if isinstance(upstream, int) and upstream > 0
-        else "  Upstream max_prompt_tokens: (unknown)"
+        f"  Upstream context window: {upstream}"
+        if upstream is not None
+        else "  Upstream context window: (unknown)"
     )
 
     console.print()
@@ -266,7 +267,7 @@ def _prompt_auto_compact_window(model: dict | None) -> int | None:
     )
 
     choices = ["y", "n", "d"]
-    can_use_upstream = isinstance(upstream, int) and upstream > 0
+    can_use_upstream = upstream is not None
     if can_use_upstream:
         prompt_text = f"y = upstream: {upstream} / n = skip / d = default: {default_value}"
     else:
@@ -281,6 +282,24 @@ def _prompt_auto_compact_window(model: dict | None) -> int | None:
     if choice == "y" and can_use_upstream:
         return int(upstream)
     return default_value
+
+
+def _upstream_context_window(model: dict) -> int | None:
+    """Compute the displayed upstream context window for a Copilot model.
+
+    Mirrors what VS Code's Copilot model picker shows: prompt + output, which
+    matches the catalog's advertised window in most cases. Falls back to the
+    server-reported ``max_context_window_tokens`` if either component is
+    missing.
+    """
+    prompt = model.get("max_prompt_tokens")
+    output = model.get("max_output_tokens")
+    if isinstance(prompt, int) and prompt > 0 and isinstance(output, int) and output > 0:
+        return prompt + output
+    ctx = model.get("max_context_window_tokens")
+    if isinstance(ctx, int) and ctx > 0:
+        return ctx
+    return None
 
 
 @app.callback(invoke_without_command=True)
