@@ -218,7 +218,8 @@ def _model_key(model: dict) -> str:
 
 
 # Claude Code recognizes 1M context windows natively for these model keys (the
-# ones we inject via `_maybe_inject_opus_1m`) — no env var override needed.
+# ones we inject via `_maybe_inject_opus_1m`) — the prompt offers a 1M default
+# for them instead of the upstream-value option.
 _CLAUDE_CODE_NATIVE_1M_KEYS: frozenset[str] = frozenset(
     {_OPUS_1M_NATIVE_KEY, _OPUS_47_1M_NATIVE_KEY}
 )
@@ -233,53 +234,70 @@ def _prompt_auto_compact_window(model: dict | None) -> int | None:
 
     Returns the chosen token count to write, or ``None`` to skip the env var.
 
-    The prompt has three options:
+    In Claude Code 2.1.162+, auto-compact's threshold check is short-circuited
+    in interactive mode when the window source is "auto" — only ``env`` or
+    ``settings`` source actually arms the trigger. So setting this env var is
+    what turns the feature on at all; the exact value is secondary.
+
+    For Claude Code-native 1M model keys (e.g. ``claude-opus-4-7[1m]``), the
+    default offered is 1M and the upstream-value option is dropped — Copilot's
+    real prompt cap on the 1M variant is below 1M but matching Claude Code's
+    own view of the window is the more useful default here.
+
+    For everything else, the prompt offers:
       * ``y`` — use the upstream context window (``max_prompt_tokens`` +
         ``max_output_tokens``, matching what Copilot's own model picker shows)
       * ``n`` — skip; do not set the env var
-      * ``d`` — set the default 200K (recommended for non-Claude models)
-
-    For Claude Code-native 1M model keys (e.g. ``claude-opus-4-7[1m]``), this
-    is skipped entirely because Claude Code already knows the window.
+      * ``d`` — set the default 200K (matches Claude Opus/Sonnet's window)
     """
     if model is None:
         return None
     model_key = _model_key(model)
-    if model_key in _CLAUDE_CODE_NATIVE_1M_KEYS:
-        return None
+    is_native_1m = model_key in _CLAUDE_CODE_NATIVE_1M_KEYS
 
     upstream = _upstream_context_window(model)
-    default_value = _CLAUDE_CODE_DEFAULT_AUTO_COMPACT_WINDOW
-    upstream_line = (
-        f"  Upstream context window: {upstream}"
-        if upstream is not None
-        else "  Upstream context window: (unknown)"
-    )
+    default_value = 1_000_000 if is_native_1m else _CLAUDE_CODE_DEFAULT_AUTO_COMPACT_WINDOW
 
     console.print()
-    console.print(
-        "[bold]Set CLAUDE_CODE_AUTO_COMPACT_WINDOW?[/bold]\n"
-        f"  Selected: {model_key}\n"
-        f"{upstream_line}\n"
-        f"  [dim]Claude Code only natively recognizes its own models' windows.\n"
-        f"  For everything else, this env var tells it when to auto-compact.\n"
-        f"  Default ({default_value}) matches Claude Opus/Sonnet's 200K window.[/dim]"
-    )
-
-    choices = ["y", "n", "d"]
-    can_use_upstream = upstream is not None
-    if can_use_upstream:
-        prompt_text = f"y = upstream: {upstream} / n = skip / d = default: {default_value}"
-    else:
-        # No upstream value to offer — drop the y option, default stays d.
+    if is_native_1m:
+        console.print(
+            "[bold]Set CLAUDE_CODE_AUTO_COMPACT_WINDOW?[/bold]\n"
+            f"  Selected: {model_key}\n"
+            f"  [dim]Claude Code's interactive auto-compact only arms when this env var\n"
+            f"  (or settings.autoCompactWindow) is set. Without it, the trigger is\n"
+            f"  short-circuited regardless of model. Default ({default_value}) matches\n"
+            f"  Claude Code's native 1M window for this model.[/dim]"
+        )
         choices = ["n", "d"]
         prompt_text = f"n = skip / d = default: {default_value}"
+    else:
+        upstream_line = (
+            f"  Upstream context window: {upstream}"
+            if upstream is not None
+            else "  Upstream context window: (unknown)"
+        )
+        console.print(
+            "[bold]Set CLAUDE_CODE_AUTO_COMPACT_WINDOW?[/bold]\n"
+            f"  Selected: {model_key}\n"
+            f"{upstream_line}\n"
+            f"  [dim]Claude Code's interactive auto-compact only arms when this env var\n"
+            f"  (or settings.autoCompactWindow) is set. Without it, the trigger is\n"
+            f"  short-circuited regardless of model. Default ({default_value}) matches\n"
+            f"  Claude Opus/Sonnet's 200K window.[/dim]"
+        )
+        can_use_upstream = upstream is not None
+        if can_use_upstream:
+            choices = ["y", "n", "d"]
+            prompt_text = f"y = upstream: {upstream} / n = skip / d = default: {default_value}"
+        else:
+            choices = ["n", "d"]
+            prompt_text = f"n = skip / d = default: {default_value}"
 
     choice = Prompt.ask(prompt_text, choices=choices, default="d").lower()
 
     if choice == "n":
         return None
-    if choice == "y" and can_use_upstream:
+    if choice == "y" and not is_native_1m and upstream is not None:
         return int(upstream)
     return default_value
 
