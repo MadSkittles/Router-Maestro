@@ -1,8 +1,8 @@
 """Anthropic API-compatible schemas."""
 
-from typing import Literal
+from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 # Request types
 
@@ -147,6 +147,11 @@ class AnthropicMessagesRequest(BaseModel):
     thinking: AnthropicThinkingConfig | None = None
     service_tier: Literal["auto", "standard_only"] | None = None
 
+    @model_validator(mode="before")
+    @classmethod
+    def _hoist_inline_system_messages(cls, data: Any) -> Any:
+        return _hoist_inline_system_messages(data)
+
 
 class AnthropicCountTokensRequest(BaseModel):
     """Anthropic count_tokens API request (max_tokens not required)."""
@@ -155,6 +160,103 @@ class AnthropicCountTokensRequest(BaseModel):
     messages: list[AnthropicMessage]
     system: str | list[AnthropicTextBlock] | None = None
     tools: list[AnthropicTool] | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _hoist_inline_system_messages(cls, data: Any) -> Any:
+        return _hoist_inline_system_messages(data)
+
+
+def _hoist_inline_system_messages(data: Any) -> Any:
+    """Move any ``role="system"`` entries out of ``messages`` and into ``system``.
+
+    The Anthropic Messages API only allows ``user`` and ``assistant`` roles in
+    the ``messages`` array — system prompts must be passed via the top-level
+    ``system`` field. Some clients (Cline, Aider, generic OpenAI-shaped tools
+    that get pointed at the Anthropic endpoint) still inline system messages
+    into the array, which would otherwise be rejected by Pydantic with a 422
+    before our routing code ever sees the request.
+
+    This is the **fallback** path of the dual-path mid-conversation-system
+    strategy: the Anthropic route also detects Claude Code's
+    ``mid-conversation-system-2026-04-07`` beta header and short-circuits
+    those requests with a 400 so Claude Code falls back to its own
+    ``<system-reminder>`` rewrite (which preserves prompt-cache locality).
+    Generic clients without that beta land here, where silent hoisting is
+    the most useful behavior because they don't know how to retry.
+
+    This validator runs in ``before`` mode and rewrites the payload so the
+    rest of the schema can validate normally. System content is concatenated
+    in original order and appended to any existing top-level ``system`` value.
+    """
+    if not isinstance(data, dict):
+        return data
+
+    messages = data.get("messages")
+    if not isinstance(messages, list):
+        return data
+
+    kept: list = []
+    extracted: list[str] = []
+    found = False
+    for msg in messages:
+        role = msg.get("role") if isinstance(msg, dict) else getattr(msg, "role", None)
+        if role == "system":
+            found = True
+            content = msg.get("content") if isinstance(msg, dict) else getattr(msg, "content", None)
+            text = _coerce_system_content_to_text(content)
+            if text:
+                extracted.append(text)
+            continue
+        kept.append(msg)
+
+    if not found:
+        return data
+
+    data = dict(data)
+    data["messages"] = kept
+
+    if extracted:
+        merged = "\n\n".join(extracted)
+        existing = data.get("system")
+        if existing is None or (isinstance(existing, str) and not existing.strip()):
+            data["system"] = merged
+        elif isinstance(existing, str):
+            data["system"] = f"{existing}\n\n{merged}"
+        elif isinstance(existing, list):
+            data["system"] = list(existing) + [{"type": "text", "text": merged}]
+
+    return data
+
+
+def _coerce_system_content_to_text(content: Any) -> str:
+    """Flatten a system-message content payload to plain text.
+
+    Accepts a string or a list of text-shaped blocks (``{"type": "text",
+    "text": ...}``). Unknown block types are silently dropped — they would
+    not survive the strict ``AnthropicMessage`` union anyway, and we'd
+    rather hoist whatever text we can than fail the whole request.
+    """
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for block in content:
+            if isinstance(block, str):
+                parts.append(block)
+                continue
+            if isinstance(block, dict) and block.get("type") == "text":
+                text = block.get("text")
+                if isinstance(text, str):
+                    parts.append(text)
+                continue
+            text = getattr(block, "text", None)
+            if isinstance(text, str):
+                parts.append(text)
+        return "\n\n".join(p for p in parts if p)
+    return ""
 
 
 # Response types
