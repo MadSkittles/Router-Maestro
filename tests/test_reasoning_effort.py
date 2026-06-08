@@ -46,7 +46,9 @@ class TestEffortMapping:
             ("medium", 4096),
             ("high", 8192),
             ("xhigh", 16384),
+            ("max", 32768),
             ("HIGH", 8192),
+            ("MAX", 32768),
             (None, None),
             ("bogus", None),
         ],
@@ -63,11 +65,14 @@ class TestEffortMapping:
         assert budget_to_effort(8192) == "high"
         assert budget_to_effort(16000) == "high"
         assert budget_to_effort(EFFORT_TO_BUDGET["xhigh"]) == "xhigh"
+        assert budget_to_effort(EFFORT_TO_BUDGET["max"]) == "max"
+        assert budget_to_effort(64000) == "max"
 
     def test_downgrade_for_upstream(self):
         assert downgrade_for_upstream(None) is None
         assert downgrade_for_upstream("low") == "low"
         assert downgrade_for_upstream("xhigh") == "high"
+        assert downgrade_for_upstream("max") == "high"
         assert downgrade_for_upstream("garbage") is None
 
 

@@ -5,8 +5,9 @@ Anthropic-style ``thinking.budget_tokens`` (integer) are normalised through
 this module so that every entry-route and every provider speaks the same
 language.
 
-``"xhigh"`` is a Router-Maestro extension above OpenAI's spec — when sent to
-an upstream that does not accept it, providers should downgrade to ``"high"``.
+``"xhigh"`` and ``"max"`` are Router-Maestro extensions above OpenAI's spec —
+when sent to an upstream that does not accept them, providers downgrade to
+the highest tier the upstream supports.
 """
 
 from __future__ import annotations
@@ -16,13 +17,14 @@ EFFORT_TO_BUDGET: dict[str, int] = {
     "medium": 4096,
     "high": 8192,
     "xhigh": 16384,
+    "max": 32768,
 }
 
-VALID_EFFORTS: tuple[str, ...] = ("low", "medium", "high", "xhigh")
+VALID_EFFORTS: tuple[str, ...] = ("low", "medium", "high", "xhigh", "max")
 
 # Effort tiers eligible for transparent variant rewriting (e.g. claude-opus-4.7
 # → claude-opus-4.7-high). low/medium are passed through as reasoning_effort.
-VARIANT_EFFORTS: tuple[str, ...] = ("high", "xhigh")
+VARIANT_EFFORTS: tuple[str, ...] = ("high", "xhigh", "max")
 
 # Effort levels that vanilla OpenAI / Copilot upstreams accept directly.
 UPSTREAM_NATIVE_EFFORTS: tuple[str, ...] = ("low", "medium", "high")
@@ -51,11 +53,11 @@ def budget_to_effort(budget: int | None) -> str | None:
 
 
 def downgrade_for_upstream(effort: str | None) -> str | None:
-    """Map ``xhigh`` → ``high`` for upstreams that reject the extension."""
+    """Map ``xhigh``/``max`` → ``high`` for upstreams that reject extensions."""
     if effort is None:
         return None
     if effort in UPSTREAM_NATIVE_EFFORTS:
         return effort
-    if effort == "xhigh":
+    if effort in ("xhigh", "max"):
         return "high"
     return None

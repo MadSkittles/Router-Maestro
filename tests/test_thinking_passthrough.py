@@ -128,8 +128,9 @@ class TestCopilotPayloadThinking:
             await provider.chat_completion(request)
 
         assert "thinking_budget" not in captured_payload
-        # opus-4.7's gateway only accepts "medium" — anything else clamps.
-        assert captured_payload.get("reasoning_effort") == "medium"
+        # opus-4.7 now accepts high (Copilot opened the upper tiers via the
+        # model catalog). budget=16000 → desired "high" → passed through.
+        assert captured_payload.get("reasoning_effort") == "high"
 
     @pytest.mark.asyncio
     async def test_copilot_payload_omits_thinking_when_none(self):

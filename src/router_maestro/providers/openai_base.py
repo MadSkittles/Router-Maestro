@@ -64,15 +64,17 @@ class OpenAIChatProvider(BaseProvider, ABC):
             payload["tool_choice"] = request.tool_choice
 
         # Forward OpenAI-style reasoning_effort. Fall back to deriving it from
-        # thinking_budget when only the Anthropic-style budget is set. xhigh is
-        # downgraded to "high" since vanilla OpenAI/Copilot reject it.
+        # thinking_budget when only the Anthropic-style budget is set. xhigh /
+        # max are Router-Maestro extensions and get downgraded to "high" since
+        # vanilla OpenAI/Copilot reject them.
         effort = request.reasoning_effort or budget_to_effort(request.thinking_budget)
         upstream_effort = downgrade_for_upstream(effort)
         if upstream_effort is not None:
-            if effort == "xhigh":
+            if effort in ("xhigh", "max"):
                 self._logger.warning(
-                    "%s does not accept reasoning_effort=xhigh; downgrading to high",
+                    "%s does not accept reasoning_effort=%s; downgrading to high",
                     self._error_label(),
+                    effort,
                 )
             payload["reasoning_effort"] = upstream_effort
 

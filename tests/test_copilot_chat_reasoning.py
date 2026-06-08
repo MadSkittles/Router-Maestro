@@ -10,16 +10,26 @@ def _base_payload(extra: dict | None = None) -> dict:
     return payload
 
 
-def test_claude_47_clamped_to_medium():
-    """opus-4.7 gateway only accepts 'medium' — anything else gets clamped."""
-    for input_effort in ("low", "high", None):
+def test_claude_47_cold_start_uses_requested_effort():
+    """opus-4.7 cold-start (no catalog yet): pass through low/medium/high as-is.
+
+    Earlier the gateway clamped to ``medium``, but Copilot now advertises
+    low/medium/high/xhigh/max for opus-4.7 — we no longer artificially clamp.
+    """
+    for input_effort, expected in (("low", "low"), ("medium", "medium"), ("high", "high")):
         for budget in (1024, 16000, None):
-            if input_effort is None and budget is None:
-                continue
             p = _base_payload()
             apply_copilot_chat_reasoning(p, "claude-opus-4.7", budget, input_effort)
-            assert p.get("reasoning_effort") == "medium", (input_effort, budget)
+            assert p.get("reasoning_effort") == expected, (input_effort, budget)
             assert "thinking_budget" not in p
+
+
+def test_claude_47_cold_start_clamps_xhigh_and_max_to_high():
+    """Without the catalog we don't know xhigh/max are accepted — downgrade."""
+    for input_effort in ("xhigh", "max"):
+        p = _base_payload()
+        apply_copilot_chat_reasoning(p, "claude-opus-4.7", None, input_effort)
+        assert p.get("reasoning_effort") == "high", input_effort
 
 
 def test_claude_46_uses_reasoning_effort_not_thinking_budget():
@@ -78,8 +88,7 @@ def test_claude_47_dated_alias_still_supports_reasoning():
     support — it is *not* one of the tier-encoded variants."""
     p = _base_payload()
     apply_copilot_chat_reasoning(p, "claude-opus-4.7-20260101", 16000, "high")
-    # Subject to the existing 4.7 medium clamp, but reasoning_effort still set.
-    assert p.get("reasoning_effort") == "medium"
+    assert p.get("reasoning_effort") == "high"
 
 
 def test_claude_with_provider_prefix():
@@ -230,3 +239,71 @@ def test_catalog_thinking_budget_maps_through_normal_table():
     )
     # 8192 → "high" per EFFORT_TO_BUDGET threshold
     assert p.get("reasoning_effort") == "high"
+
+
+def test_catalog_passes_max_through_when_advertised():
+    """If the catalog advertises 'max', desired='max' should be sent as-is."""
+    p = _base_payload()
+    apply_copilot_chat_reasoning(
+        p,
+        "claude-opus-4.7",
+        None,
+        "max",
+        catalog_effort_values=["low", "medium", "high", "xhigh", "max"],
+    )
+    assert p.get("reasoning_effort") == "max"
+
+
+def test_catalog_promotes_xhigh_to_max_when_only_max_higher():
+    """opus-4.6 catalog is ['low','medium','high','max'] (no xhigh).
+    A request for 'xhigh' should promote up to 'max', not down to 'high'.
+    """
+    p = _base_payload()
+    apply_copilot_chat_reasoning(
+        p,
+        "claude-opus-4.6",
+        None,
+        "xhigh",
+        catalog_effort_values=["low", "medium", "high", "max"],
+    )
+    assert p.get("reasoning_effort") == "max"
+
+
+def test_catalog_thinking_only_aims_at_catalog_top_tier():
+    """When the client sends thinking_budget without an explicit effort, the
+    catalog-driven path should aim at the catalog's top tier (not hardcoded 'high').
+    """
+    p = _base_payload()
+    apply_copilot_chat_reasoning(
+        p,
+        "claude-opus-4.6",
+        4096,  # below "high" threshold but client opted into thinking
+        None,
+        catalog_effort_values=["low", "medium", "high", "max"],
+    )
+    # budget=4096 → desired derives to "medium", picked exactly: medium
+    assert p.get("reasoning_effort") == "medium"
+
+    p = _base_payload()
+    apply_copilot_chat_reasoning(
+        p,
+        "claude-opus-4.6",
+        None,
+        None,
+        catalog_effort_values=["low", "medium", "high", "max"],
+    )
+    # no budget, no effort → emit nothing
+    assert "reasoning_effort" not in p
+
+
+def test_catalog_thinking_budget_zero_picks_top_tier():
+    """budget=1 → no effort derived → catalog-top selected (max)."""
+    p = _base_payload()
+    apply_copilot_chat_reasoning(
+        p,
+        "claude-opus-4.8",
+        1,  # too small to map but client opted into thinking
+        None,
+        catalog_effort_values=["low", "medium", "high", "xhigh", "max"],
+    )
+    assert p.get("reasoning_effort") == "max"

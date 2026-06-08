@@ -80,11 +80,11 @@ def _claude_supports_reasoning(bare_lower: str) -> bool:
     )
 
 
-_EFFORT_ORDER = ("low", "medium", "high", "xhigh")
+_EFFORT_ORDER = ("low", "medium", "high", "xhigh", "max")
 
 
 def _pick_closest_effort(desired: str, allowed: list[str]) -> str | None:
-    """Pick the value from ``allowed`` closest to ``desired`` on the L/M/H/XH ladder.
+    """Pick the value from ``allowed`` closest to ``desired`` on the L/M/H/XH/MAX ladder.
 
     Strategy when an exact match is unavailable: prefer the next *higher* tier
     (the user asked for thinking — give them more, not less), and fall back to
@@ -109,6 +109,14 @@ def _pick_closest_effort(desired: str, allowed: list[str]) -> str | None:
     return allowed[0]
 
 
+def _catalog_top_effort(allowed: list[str]) -> str | None:
+    """Return the highest tier from ``allowed`` per the L/M/H/XH/MAX ladder."""
+    ranked = [v for v in allowed if v in _EFFORT_ORDER]
+    if not ranked:
+        return allowed[0] if allowed else None
+    return max(ranked, key=lambda v: _EFFORT_ORDER.index(v))
+
+
 def apply_copilot_chat_reasoning(
     payload: dict,
     model: str,
@@ -127,10 +135,11 @@ def apply_copilot_chat_reasoning(
     When the catalog says nothing (``None``), we fall back to the hardcoded
     per-family heuristic:
 
-    * ``claude-opus-4.6*`` / ``claude-sonnet-4.6`` accept ``low``/``medium``/``high``.
-    * ``claude-opus-4.7`` only accepts ``medium`` (clamp).
+    * ``claude-opus-4.6+`` / ``claude-sonnet-4.6`` accept ``low``/``medium``/``high``
+      (and tolerate ``max`` being downgraded into the same set).
     * Older Claudes (4.5 / sonnet-4 / haiku) take no reasoning field.
-    * ``gpt-5*`` / ``o1`` / ``o3`` / ``o4`` accept ``low``/``medium``/``high``/``xhigh``.
+    * ``gpt-5*`` / ``o1`` / ``o3`` / ``o4`` accept ``low``/``medium``/``high``/``xhigh``
+      (``max`` is downgraded to ``xhigh``).
     * ``gpt-4*``, ``gemini-*`` take no reasoning field.
 
     For ``gpt-5.4*`` the gateway also requires ``max_completion_tokens`` instead
@@ -155,9 +164,10 @@ def apply_copilot_chat_reasoning(
         else:
             desired = reasoning_effort or budget_to_effort(thinking_budget)
             if desired is None and thinking_budget is not None:
-                # Client asked for thinking without a clear effort — be
-                # aggressive and aim for the top of the catalog.
-                desired = "high"
+                # Client asked for thinking without a clear effort — aim for
+                # the top tier the catalog actually advertises (e.g. "max" on
+                # opus-4.6+, "xhigh" on gpt-5.x).
+                desired = _catalog_top_effort(catalog_effort_values)
             if desired is not None:
                 picked = _pick_closest_effort(desired, catalog_effort_values)
                 if picked is not None:
@@ -174,24 +184,22 @@ def apply_copilot_chat_reasoning(
             pass
         else:
             effort = reasoning_effort or budget_to_effort(thinking_budget)
-            if effort == "xhigh":
-                effort = "high"  # Claude effort enum tops out at high
+            # Claude on Copilot tops out at "high" on the cold-start path
+            # (xhigh/max only kick in via catalog advertisement). Don't block
+            # the request — downgrade so it still goes through.
+            if effort in ("xhigh", "max"):
+                effort = "high"
             if effort is None and thinking_budget is not None:
                 effort = "high"
-            # opus-4.7's gateway only accepts "medium" today. Clamp anything
-            # else to medium so the request doesn't fail.
-            if bare_lower.startswith("claude-opus-4.7") and effort in (
-                "low",
-                "medium",
-                "high",
-            ):
-                effort = "medium"
             if effort in ("low", "medium", "high"):
                 payload["reasoning_effort"] = effort
     elif is_openai_reasoning:
         effort = reasoning_effort or budget_to_effort(thinking_budget)
         # Copilot's gpt-5* line natively accepts xhigh (verified against the
-        # gateway's supported_values list), so don't downgrade here.
+        # gateway's supported_values list). "max" is a Router-Maestro
+        # extension — clamp it to xhigh on the cold-start path.
+        if effort == "max":
+            effort = "xhigh"
         if effort in ("low", "medium", "high", "xhigh"):
             payload["reasoning_effort"] = effort
 
@@ -977,11 +985,12 @@ class CopilotProvider(BaseProvider):
                     upstream_effort = _pick_closest_effort(desired, catalog)
         else:
             upstream_effort = downgrade_for_upstream(request.reasoning_effort)
-            if request.reasoning_effort == "xhigh" and upstream_effort == "high":
+            if request.reasoning_effort in ("xhigh", "max") and upstream_effort == "high":
                 logger.warning(
                     "Copilot Responses catalog cold for %s; "
-                    "downgrading reasoning_effort=xhigh to high as a precaution",
+                    "downgrading reasoning_effort=%s to high as a precaution",
                     request.model,
+                    request.reasoning_effort,
                 )
         if upstream_effort is not None:
             # ``summary: auto`` opts in to reasoning_summary_text events so we
