@@ -417,8 +417,10 @@ def translate_openai_chunk_to_gemini(
     delta = choice.get("delta", {})
     finish_reason = choice.get("finish_reason")
 
-    # Text delta
-    if delta.get("content"):
+    # Text delta. Only emit a standalone text event when there is no
+    # finish_reason in the same chunk; otherwise the text is folded into the
+    # final candidate below so the finish event is never dropped.
+    if delta.get("content") and not finish_reason:
         text = delta["content"]
         state.accumulated_text += text
         state.has_sent_content = True
@@ -459,6 +461,13 @@ def translate_openai_chunk_to_gemini(
 
         # Emit final tool calls with accumulated arguments if any
         final_parts: list[GeminiPart] = []
+        # If this same chunk also carried text content, fold it in so it is
+        # not lost (we skipped the standalone text event above).
+        trailing_text = delta.get("content")
+        if trailing_text:
+            state.accumulated_text += trailing_text
+            state.has_sent_content = True
+            final_parts.append(GeminiPart(text=trailing_text))
         for tc_buf in state.tool_calls_buffer:
             try:
                 args = json.loads(tc_buf["arguments"]) if tc_buf["arguments"] else {}

@@ -218,6 +218,7 @@ async def stream_response(model_router: Router, request: ChatRequest) -> AsyncGe
     except ProviderError as e:
         error_data = {"error": {"message": str(e), "type": "provider_error"}}
         yield f"data: {json.dumps(error_data)}\n\n"
+        yield "data: [DONE]\n\n"
     except asyncio.CancelledError:
         logger.info("Chat stream cancelled by client")
         raise
@@ -225,3 +226,4 @@ async def stream_response(model_router: Router, request: ChatRequest) -> AsyncGe
         logger.error("Unexpected error in chat stream", exc_info=True)
         error_data = {"error": {"message": "Internal server error", "type": "server_error"}}
         yield f"data: {json.dumps(error_data)}\n\n"
+        yield "data: [DONE]\n\n"

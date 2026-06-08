@@ -224,21 +224,34 @@ def chat_model(copilot_models: list[str]) -> str:
 
 @pytest.fixture(scope="session")
 def tool_model(copilot_models: list[str]) -> str:
-    """Model selected for forced tool-call scenarios."""
+    """Model selected for forced tool-call scenarios.
+
+    Used against ``/chat/completions`` and ``/anthropic/v1/messages``, so it must
+    be a true chat model. Responses-only models (e.g. ``gpt-5.4-mini``) reject
+    those endpoints, so they are excluded from the candidate pool.
+    """
     requested = os.environ.get("RM_INTEGRATION_TOOL_MODEL")
     if requested:
         if requested in copilot_models:
             return requested
         pytest.fail(f"RM_INTEGRATION_TOOL_MODEL={requested!r} is not in available Copilot models")
 
+    chat_capable = [
+        model for model in copilot_models if bare_model(model) not in RESPONSES_ONLY_CHAT_MODELS
+    ]
     preferred = (
         "github-copilot/gpt-4o",
         "github-copilot/gpt-4o-mini",
-        "github-copilot/gpt-5.4-mini",
-        "github-copilot/gpt-5.4",
         "github-copilot/claude-sonnet-4.5",
+        "github-copilot/claude-haiku-4.5",
+        "github-copilot/gpt-4.1",
     )
-    return _first_available(copilot_models, preferred) or copilot_models[0]
+    selected = _first_available(chat_capable, preferred)
+    if selected:
+        return selected
+    if chat_capable:
+        return chat_capable[0]
+    pytest.skip("No chat-capable Copilot model available for forced tool-call tests")
 
 
 @pytest.fixture(scope="session")
@@ -399,6 +412,20 @@ def openai_chat_tool_payload(model: str, *, stream: bool = False) -> dict[str, A
     return payload
 
 
+def openai_chat_tool_required_payload(model: str, *, stream: bool = False) -> dict[str, Any]:
+    """OpenAI Chat payload that forces *some* tool via ``tool_choice="required"``.
+
+    Regression guard for the Anthropic→OpenAI ``tool_choice`` translation:
+    ``{"type": "any"}`` must become ``"required"`` and actually force a call.
+    """
+    payload = openai_chat_payload(model, stream=stream)
+    payload["messages"] = [{"role": "user", "content": TOOL_PROMPT}]
+    payload["max_tokens"] = 128
+    payload["tools"] = [openai_weather_tool()]
+    payload["tool_choice"] = "required"
+    return payload
+
+
 def openai_responses_tool_payload(model: str, *, stream: bool = False) -> dict[str, Any]:
     """OpenAI Responses payload that forces a function tool call."""
     payload = openai_responses_payload(model, stream=stream)
@@ -435,6 +462,51 @@ def anthropic_tool_payload(model: str, *, stream: bool = False) -> dict[str, Any
     payload["tools"] = [anthropic_weather_tool()]
     payload["tool_choice"] = {"type": "tool", "name": "get_weather"}
     return payload
+
+
+def anthropic_tool_choice_any_payload(model: str, *, stream: bool = False) -> dict[str, Any]:
+    """Anthropic payload using ``tool_choice={"type":"any"}`` (force *some* tool).
+
+    Regression guard: ``_translate_tool_choice`` must map a Pydantic
+    ``AnthropicToolChoice(type="any")`` to OpenAI ``"required"`` — previously it
+    fell through to ``None`` and the model was free to answer without a tool.
+    """
+    payload = anthropic_payload(model, stream=stream)
+    payload["messages"] = [{"role": "user", "content": TOOL_PROMPT}]
+    payload["max_tokens"] = 128
+    payload["tools"] = [anthropic_weather_tool()]
+    payload["tool_choice"] = {"type": "any"}
+    return payload
+
+
+def anthropic_thinking_replay_payload(model: str, *, stream: bool = False) -> dict[str, Any]:
+    """Multi-turn Anthropic payload whose history includes a prior thinking block.
+
+    Regression guard for the thinking-leak fix: a replayed assistant turn that
+    carries a ``thinking`` block must not poison the next turn's history. The
+    request must still succeed and return fresh assistant text.
+    """
+    return {
+        "model": model,
+        "max_tokens": 64,
+        "temperature": 0,
+        "stream": stream,
+        "messages": [
+            {"role": "user", "content": "What is 2 + 2? Reply with just the number."},
+            {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "thinking",
+                        "thinking": "INTERNAL_SCRATCHPAD_SHOULD_NOT_LEAK: 2+2=4.",
+                        "signature": "sig-test",
+                    },
+                    {"type": "text", "text": "4"},
+                ],
+            },
+            {"role": "user", "content": "Now reply with exactly the word pong."},
+        ],
+    }
 
 
 def gemini_tool_payload(*, max_output_tokens: int = 16) -> dict[str, Any]:

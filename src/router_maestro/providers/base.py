@@ -80,6 +80,11 @@ class ChatResponse:
     # Reasoning trace (Anthropic "thinking" / OpenAI "reasoning_text" / Copilot "cot_summary")
     thinking: str | None = None
     thinking_signature: str | None = None
+    # Upstream reasoning item id (e.g. ``rs_…``). The encrypted ``thinking_signature``
+    # is signed against this id, so the pair must travel together — Copilot's
+    # /responses rejects a blob paired with a mismatched id. Carried here so the
+    # Responses→Chat bridge doesn't drop it (see responses_response_to_chat_response).
+    thinking_id: str | None = None
 
 
 @dataclass
@@ -91,7 +96,8 @@ class ChatStreamChunk:
     usage: dict | None = None  # Token usage info (typically in final chunk)
     tool_calls: list[dict] | None = None  # Tool call deltas for streaming
     thinking: str | None = None  # Incremental reasoning text delta
-    thinking_signature: str | None = None  # Opaque/encrypted reasoning id, if provided
+    thinking_signature: str | None = None  # Opaque/encrypted reasoning blob, if provided
+    thinking_id: str | None = None  # Upstream reasoning item id the blob is signed against
 
 
 @dataclass

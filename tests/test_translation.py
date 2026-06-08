@@ -3,6 +3,7 @@
 from router_maestro.server.schemas.anthropic import (
     AnthropicMessagesRequest,
     AnthropicTextBlock,
+    AnthropicToolChoice,
     AnthropicUserMessage,
 )
 from router_maestro.server.translation import (
@@ -85,6 +86,31 @@ class TestToolChoiceTranslation:
         """Test translating specific tool choice."""
         result = _translate_tool_choice({"type": "tool", "name": "get_weather"})
         assert result == {"type": "function", "function": {"name": "get_weather"}}
+
+    def test_translate_pydantic_object(self):
+        """Regression: tool_choice as a Pydantic object must translate, not None.
+
+        After schema parsing, request.tool_choice is an AnthropicToolChoice
+        instance (never a dict), so the translator must handle Pydantic objects.
+        """
+        assert _translate_tool_choice(AnthropicToolChoice(type="auto")) == "auto"
+        assert _translate_tool_choice(AnthropicToolChoice(type="any")) == "required"
+        assert _translate_tool_choice(AnthropicToolChoice(type="none")) == "none"
+        assert _translate_tool_choice(AnthropicToolChoice(type="tool", name="get_weather")) == {
+            "type": "function",
+            "function": {"name": "get_weather"},
+        }
+
+    def test_translate_via_full_request(self):
+        """End-to-end: tool_choice survives translate_anthropic_to_openai."""
+        request = AnthropicMessagesRequest(
+            model="claude-sonnet-4-5",
+            max_tokens=100,
+            messages=[AnthropicUserMessage(role="user", content="hi")],
+            tool_choice=AnthropicToolChoice(type="any"),
+        )
+        result = translate_anthropic_to_openai(request)
+        assert result.tool_choice == "required"
 
 
 class TestStopReasonMapping:

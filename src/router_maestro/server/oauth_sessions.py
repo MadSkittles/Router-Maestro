@@ -1,9 +1,9 @@
 """OAuth session management for remote OAuth flows."""
 
+import asyncio
 import secrets
 import time
 from dataclasses import dataclass
-from threading import Lock
 
 
 @dataclass
@@ -34,10 +34,10 @@ class OAuthSessionManager:
             session_timeout: Default session timeout in seconds (default: 15 minutes)
         """
         self._sessions: dict[str, OAuthSession] = {}
-        self._lock = Lock()
+        self._lock = asyncio.Lock()
         self._session_timeout = session_timeout
 
-    def create_session(
+    async def create_session(
         self,
         provider: str,
         device_code: str,
@@ -70,13 +70,13 @@ class OAuthSessionManager:
             interval=interval,
         )
 
-        with self._lock:
+        async with self._lock:
             self._sessions[session_id] = session
             self._cleanup_expired()
 
         return session
 
-    def get_session(self, session_id: str) -> OAuthSession | None:
+    async def get_session(self, session_id: str) -> OAuthSession | None:
         """Get a session by ID.
 
         Args:
@@ -85,7 +85,7 @@ class OAuthSessionManager:
         Returns:
             The session if found and not expired, None otherwise
         """
-        with self._lock:
+        async with self._lock:
             session = self._sessions.get(session_id)
             if session is None:
                 return None
@@ -96,7 +96,7 @@ class OAuthSessionManager:
 
             return session
 
-    def update_session_status(
+    async def update_session_status(
         self,
         session_id: str,
         status: str,
@@ -116,7 +116,7 @@ class OAuthSessionManager:
         Returns:
             True if session was updated, False if not found
         """
-        with self._lock:
+        async with self._lock:
             session = self._sessions.get(session_id)
             if session is None:
                 return False
@@ -127,7 +127,7 @@ class OAuthSessionManager:
             session.refresh_token = refresh_token
             return True
 
-    def remove_session(self, session_id: str) -> bool:
+    async def remove_session(self, session_id: str) -> bool:
         """Remove a session.
 
         Args:
@@ -136,7 +136,7 @@ class OAuthSessionManager:
         Returns:
             True if session was removed, False if not found
         """
-        with self._lock:
+        async with self._lock:
             if session_id in self._sessions:
                 del self._sessions[session_id]
                 return True

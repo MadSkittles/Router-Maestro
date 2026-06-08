@@ -64,9 +64,13 @@ def normalize_thinking_budget(
     """
     if budget is None:
         return None
-    if max_output_tokens <= 1:
-        return min_budget
-    return max(min_budget, min(budget, min(max_budget, max_output_tokens - 1)))
+    # Anthropic/Copilot require budget_tokens < max_tokens. If there isn't
+    # enough output headroom for the minimum budget, disable thinking rather
+    # than emit an invalid budget that the upstream would reject.
+    upper = min(max_budget, max_output_tokens - 1)
+    if upper < min_budget:
+        return None
+    return max(min_budget, min(budget, upper))
 
 
 def resolve_thinking_budget(

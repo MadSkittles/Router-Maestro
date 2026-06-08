@@ -383,6 +383,7 @@ def responses_response_to_chat_response(
         tool_calls=tool_calls,
         thinking=getattr(resp, "thinking", None),
         thinking_signature=getattr(resp, "thinking_signature", None),
+        thinking_id=getattr(resp, "thinking_id", None),
     )
 
 
@@ -418,4 +419,5 @@ def responses_chunk_to_chat_chunk(chunk: ResponsesStreamChunk) -> ChatStreamChun
         tool_calls=tool_calls,
         thinking=getattr(chunk, "thinking", None),
         thinking_signature=getattr(chunk, "thinking_signature", None),
+        thinking_id=getattr(chunk, "thinking_id", None),
     )

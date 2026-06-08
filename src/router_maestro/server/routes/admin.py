@@ -1,5 +1,7 @@
 """Admin API routes for remote management."""
 
+import logging
+
 import httpx
 from fastapi import APIRouter, BackgroundTasks, HTTPException
 
@@ -30,6 +32,8 @@ from router_maestro.server.schemas.admin import (
 )
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
+
+logger = logging.getLogger("router_maestro.server.routes.admin")
 
 
 # ============================================================================
@@ -87,7 +91,7 @@ async def login(
                 raise HTTPException(status_code=502, detail=f"Failed to get device code: {e}")
 
         # Create session for polling
-        session = oauth_sessions.create_session(
+        session = await oauth_sessions.create_session(
             provider=request.provider,
             device_code=device_code.device_code,
             user_code=device_code.user_code,
@@ -158,7 +162,7 @@ async def _poll_oauth_completion(
             manager.save()
 
             # Update session status
-            oauth_sessions.update_session_status(
+            await oauth_sessions.update_session_status(
                 session_id,
                 status="complete",
                 access_token=copilot_token.token,
@@ -169,13 +173,13 @@ async def _poll_oauth_completion(
             reset_router()
 
         except GitHubOAuthError as e:
-            oauth_sessions.update_session_status(
+            await oauth_sessions.update_session_status(
                 session_id,
                 status="error",
                 error=str(e),
             )
         except Exception as e:
-            oauth_sessions.update_session_status(
+            await oauth_sessions.update_session_status(
                 session_id,
                 status="error",
                 error=f"Unexpected error: {e}",
@@ -185,7 +189,7 @@ async def _poll_oauth_completion(
 @router.get("/auth/oauth/status/{session_id}", response_model=OAuthStatusResponse)
 async def get_oauth_status(session_id: str) -> OAuthStatusResponse:
     """Get OAuth session status for polling."""
-    session = oauth_sessions.get_session(session_id)
+    session = await oauth_sessions.get_session(session_id)
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
 
@@ -220,8 +224,9 @@ async def list_models() -> ModelsResponse:
 
     try:
         models = await router_instance.list_models()
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to list models: {e}")
+    except Exception:
+        logger.error("Failed to list models", exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to list models")
 
     model_list = [
         ModelInfo(
@@ -247,8 +252,9 @@ async def refresh_models() -> dict:
     try:
         models = await router_instance.list_models()
         return {"success": True, "models_count": len(models)}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to refresh models: {e}")
+    except Exception:
+        logger.error("Failed to refresh models", exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to refresh models")
 
 
 # ============================================================================

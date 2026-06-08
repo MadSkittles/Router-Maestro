@@ -173,15 +173,18 @@ def _translate_tool_choice(tool_choice) -> str | dict | None:
     - "required" - must use a tool
     - {"type": "function", "function": {"name": "..."}} - specific tool
     """
-    if isinstance(tool_choice, dict):
-        choice_type = tool_choice.get("type")
-        if choice_type == "auto":
-            return "auto"
-        elif choice_type == "any":
-            return "required"
-        elif choice_type == "tool":
-            tool_name = tool_choice.get("name", "")
-            return {"type": "function", "function": {"name": tool_name}}
+    # tool_choice may arrive as a dict or as an AnthropicToolChoice Pydantic
+    # object (the typed request path); _get_block_field handles both.
+    choice_type = _get_block_field(tool_choice, "type")
+    if choice_type == "auto":
+        return "auto"
+    elif choice_type == "none":
+        return "none"
+    elif choice_type == "any":
+        return "required"
+    elif choice_type == "tool":
+        tool_name = _get_block_field(tool_choice, "name", "")
+        return {"type": "function", "function": {"name": tool_name}}
     return None
 
 
@@ -349,8 +352,8 @@ def _extract_text_content(blocks: list) -> str:
         block_type = _get_block_type(block)
         if block_type == "text":
             texts.append(_get_block_field(block, "text", ""))
-        elif block_type == "thinking":
-            texts.append(_get_block_field(block, "thinking", ""))
+        # thinking blocks are intentionally dropped: they have no place in the
+        # OpenAI assistant `content` field and replaying them poisons history.
     return "\n\n".join(texts)
 
 
@@ -367,8 +370,6 @@ def _extract_multimodal_content(blocks: list) -> str | list:
         block_type = _get_block_type(block)
         if block_type == "text":
             text_parts.append(_get_block_field(block, "text", ""))
-        elif block_type == "thinking":
-            text_parts.append(_get_block_field(block, "thinking", ""))
         elif block_type == "image":
             source = _get_block_field(block, "source", {})
             # Handle both dict and object sources

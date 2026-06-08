@@ -1,12 +1,14 @@
 """Global settings and configuration management."""
 
 import json
+import logging
 import os
+import tempfile
 from contextlib import suppress
 from pathlib import Path
 from typing import Any, TypeVar
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 from router_maestro.config.contexts import ContextsConfig
 from router_maestro.config.paths import CONTEXTS_FILE, PRIORITIES_FILE, PROVIDERS_FILE
@@ -15,24 +17,38 @@ from router_maestro.config.providers import ProvidersConfig
 
 T = TypeVar("T", bound=BaseModel)
 
+logger = logging.getLogger("router_maestro.config.settings")
+
 
 def write_json_owner_only(path: Path, data: Any) -> None:
-    """Write JSON with owner-only permissions."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    if path.exists():
-        path.chmod(0o600)
+    """Write JSON with owner-only permissions, atomically.
 
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    Writes to a temporary file in the same directory and renames it into place,
+    so a crash mid-write cannot truncate or corrupt the destination file.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+    tmp_path = Path(tmp_name)
+    fdopen_took_fd = False
     try:
+        # fchmod before fdopen takes ownership of fd; if it raises, fd is still
+        # ours to close (the except below handles it).
+        os.fchmod(fd, 0o600)
         with os.fdopen(fd, "w", encoding="utf-8") as f:
+            fdopen_took_fd = True
             json.dump(data, f, indent=2, ensure_ascii=False)
             f.write("\n")
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, path)
     except Exception:
+        if not fdopen_took_fd:
+            with suppress(OSError):
+                os.close(fd)
         with suppress(OSError):
-            os.close(fd)
+            tmp_path.unlink()
         raise
-
-    path.chmod(0o600)
 
 
 def load_config(path: Path, model: type[T], default_factory: callable) -> T:
@@ -50,9 +66,13 @@ def load_config(path: Path, model: type[T], default_factory: callable) -> T:
         config = default_factory()
         save_config(path, config)
         return config
-    with open(path, encoding="utf-8") as f:
-        data = json.load(f)
-    return model.model_validate(data)
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+        return model.model_validate(data)
+    except (json.JSONDecodeError, ValidationError, OSError) as e:
+        logger.error("Failed to load config from %s (%s); falling back to defaults", path, e)
+        return default_factory()
 
 
 def save_config(path: Path, config: BaseModel) -> None:

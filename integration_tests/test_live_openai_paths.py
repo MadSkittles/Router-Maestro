@@ -163,15 +163,14 @@ def test_openai_responses_streaming_returns_lifecycle_events(
     assert "response.created" in event_names
     assert "response.in_progress" in event_names
     assert "response.completed" in event_names
-    completed = next(
-        payload for name, payload in events if name == "response.completed"
-    )
+    completed = next(payload for name, payload in events if name == "response.completed")
     assert completed["response"]["status"] == "completed"
     usage = completed["response"].get("usage")
     if usage:
         assert_responses_usage(usage)
     assert any(
-        payload.get("type") in {
+        payload.get("type")
+        in {
             "response.output_text.delta",
             "response.reasoning_summary_text.delta",
         }
@@ -216,9 +215,7 @@ def test_openai_responses_forced_tool_call_streaming(
     ]
     assert function_items, payloads
     assert any(item.get("name") == "get_weather" for item in function_items)
-    completed = next(
-        payload for name, payload in events if name == "response.completed"
-    )
+    completed = next(payload for name, payload in events if name == "response.completed")
     usage = completed["response"].get("usage")
     if usage:
         assert_responses_usage(usage)
@@ -226,6 +223,4 @@ def test_openai_responses_forced_tool_call_streaming(
 
 def _response_output_text(message_item: dict[str, Any]) -> str:
     content = message_item.get("content", [])
-    return "".join(
-        item.get("text", "") for item in content if item.get("type") == "output_text"
-    )
+    return "".join(item.get("text", "") for item in content if item.get("type") == "output_text")

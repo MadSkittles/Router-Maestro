@@ -197,6 +197,18 @@ class AnthropicProvider(BaseProvider):
         payload = self._build_payload(request, stream=True)
 
         logger.debug("Anthropic streaming chat: model=%s", request.model)
+        # Anthropic native stop_reason -> internal OpenAI-style finish_reason.
+        stop_reason_map = {
+            "end_turn": "stop",
+            "stop_sequence": "stop",
+            "max_tokens": "length",
+            "tool_use": "tool_calls",
+        }
+        # Map an Anthropic content-block index to a sequential tool-call index so
+        # downstream consumers receive OpenAI-style tool_call deltas.
+        block_to_tool_index: dict[int, int] = {}
+        next_tool_index = 0
+        prompt_tokens = 0
         async with httpx.AsyncClient() as client:
             try:
                 async with client.stream(
@@ -219,17 +231,82 @@ class AnthropicProvider(BaseProvider):
                         data = json.loads(data_str)
                         event_type = data.get("type")
 
-                        if event_type == "content_block_delta":
+                        if event_type == "message_start":
+                            usage = data.get("message", {}).get("usage", {})
+                            prompt_tokens = usage.get("input_tokens", 0)
+                        elif event_type == "content_block_start":
+                            index = data.get("index", 0)
+                            block = data.get("content_block", {})
+                            if block.get("type") == "tool_use":
+                                tool_index = next_tool_index
+                                next_tool_index += 1
+                                block_to_tool_index[index] = tool_index
+                                yield ChatStreamChunk(
+                                    content="",
+                                    finish_reason=None,
+                                    tool_calls=[
+                                        {
+                                            "index": tool_index,
+                                            "id": block.get("id", ""),
+                                            "type": "function",
+                                            "function": {
+                                                "name": block.get("name", ""),
+                                                "arguments": "",
+                                            },
+                                        }
+                                    ],
+                                )
+                        elif event_type == "content_block_delta":
+                            index = data.get("index", 0)
                             delta = data.get("delta", {})
-                            if delta.get("type") == "text_delta":
+                            delta_type = delta.get("type")
+                            if delta_type == "text_delta":
                                 yield ChatStreamChunk(
                                     content=delta.get("text", ""),
                                     finish_reason=None,
                                 )
-                        elif event_type == "message_stop":
+                            elif delta_type == "thinking_delta":
+                                yield ChatStreamChunk(
+                                    content="",
+                                    finish_reason=None,
+                                    thinking=delta.get("thinking", "") or None,
+                                )
+                            elif delta_type == "signature_delta":
+                                yield ChatStreamChunk(
+                                    content="",
+                                    finish_reason=None,
+                                    thinking_signature=delta.get("signature") or None,
+                                )
+                            elif delta_type == "input_json_delta":
+                                tool_index = block_to_tool_index.get(index)
+                                if tool_index is not None:
+                                    yield ChatStreamChunk(
+                                        content="",
+                                        finish_reason=None,
+                                        tool_calls=[
+                                            {
+                                                "index": tool_index,
+                                                "function": {
+                                                    "arguments": delta.get("partial_json", ""),
+                                                },
+                                            }
+                                        ],
+                                    )
+                        elif event_type == "message_delta":
+                            delta = data.get("delta", {})
+                            stop_reason = delta.get("stop_reason")
+                            finish_reason = (
+                                stop_reason_map.get(stop_reason, "stop") if stop_reason else None
+                            )
+                            output_tokens = data.get("usage", {}).get("output_tokens", 0)
                             yield ChatStreamChunk(
                                 content="",
-                                finish_reason="stop",
+                                finish_reason=finish_reason,
+                                usage={
+                                    "prompt_tokens": prompt_tokens,
+                                    "completion_tokens": output_tokens,
+                                    "total_tokens": prompt_tokens + output_tokens,
+                                },
                             )
             except httpx.HTTPStatusError as e:
                 retryable = e.response.status_code in (429, 500, 502, 503, 504, 529)

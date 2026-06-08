@@ -31,11 +31,7 @@ def test_gemini_generate_content(client: httpx.Client, chat_model: str):
     assert data["candidates"], data
     candidate = data["candidates"][0]
     assert candidate["finishReason"] in {"STOP", "MAX_TOKENS", "SAFETY", "OTHER"}
-    text = "".join(
-        part.get("text", "")
-        for part in candidate["content"]["parts"]
-        if "text" in part
-    )
+    text = "".join(part.get("text", "") for part in candidate["content"]["parts"] if "text" in part)
     assert_text_response(text)
     assert_gemini_usage(data["usageMetadata"])
 

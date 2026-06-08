@@ -1,13 +1,16 @@
 """Auth storage for credentials."""
 
 import json
+import logging
 from enum import StrEnum
 from pathlib import Path
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 
 from router_maestro.config.paths import AUTH_FILE
 from router_maestro.config.settings import write_json_owner_only
+
+logger = logging.getLogger("router_maestro.auth.storage")
 
 
 class AuthType(StrEnum):
@@ -51,16 +54,40 @@ class AuthStorage(BaseModel):
         if not path.exists():
             return cls()
 
-        with open(path, encoding="utf-8") as f:
-            data = json.load(f)
+        try:
+            with open(path, encoding="utf-8") as f:
+                data = json.load(f)
+        except (json.JSONDecodeError, OSError) as e:
+            logger.error("Failed to read auth file %s (%s); starting with no credentials", path, e)
+            return cls()
+
+        # A valid JSON file whose top level is not an object (e.g. `[]`, `null`,
+        # a bare string) would otherwise crash on `.items()`.
+        if not isinstance(data, dict):
+            logger.error(
+                "Auth file %s top-level is %s, expected an object; starting with no credentials",
+                path,
+                type(data).__name__,
+            )
+            return cls()
 
         # Parse credentials based on type
         credentials = {}
         for name, cred_data in data.items():
-            if cred_data.get("type") == "oauth":
-                credentials[name] = OAuthCredential.model_validate(cred_data)
-            elif cred_data.get("type") == "api":
-                credentials[name] = ApiKeyCredential.model_validate(cred_data)
+            cred_type = cred_data.get("type") if isinstance(cred_data, dict) else None
+            try:
+                if cred_type == "oauth":
+                    credentials[name] = OAuthCredential.model_validate(cred_data)
+                elif cred_type == "api":
+                    credentials[name] = ApiKeyCredential.model_validate(cred_data)
+                else:
+                    logger.warning(
+                        "Unknown credential type %r for provider %r; skipping", cred_type, name
+                    )
+            except ValidationError:
+                # Do NOT log the ValidationError — it echoes the offending field's
+                # input value, which may be a token/key. Log only the provider name.
+                logger.warning("Invalid credential for provider %r; skipping", name)
 
         return cls(credentials=credentials)
 

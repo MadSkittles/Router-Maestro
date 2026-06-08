@@ -88,9 +88,7 @@ def test_anthropic_messages_streaming_api_prefix(
         for payload in payloads
         if isinstance(payload, dict)
     )
-    message_delta = next(
-        payload for name, payload in events if name == "message_delta"
-    )
+    message_delta = next(payload for name, payload in events if name == "message_delta")
     assert_anthropic_usage(message_delta["usage"])
 
 
@@ -175,8 +173,6 @@ def test_anthropic_forced_tool_call_streaming(
         for payload in payloads
         if isinstance(payload, dict)
     )
-    message_delta = next(
-        payload for name, payload in events if name == "message_delta"
-    )
+    message_delta = next(payload for name, payload in events if name == "message_delta")
     assert message_delta["delta"]["stop_reason"] == "tool_use"
     assert_anthropic_usage(message_delta["usage"])

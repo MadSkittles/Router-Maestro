@@ -139,13 +139,10 @@ def _post_anthropic_stream(
         for payload in payloads
         if payload.get("delta", {}).get("type") == "thinking_delta"
     )
-    message_delta = next(
-        payload for name, payload in events if name == "message_delta"
-    )
+    message_delta = next(payload for name, payload in events if name == "message_delta")
     return {
         "content": [
-            {"type": block.get("type"), "text": text, "thinking": thinking}
-            for block in blocks
+            {"type": block.get("type"), "text": text, "thinking": thinking} for block in blocks
         ],
         "usage": message_delta["usage"],
         "stop_reason": message_delta["delta"].get("stop_reason"),
@@ -207,11 +204,7 @@ def _post_openai_stream(
             }
         ],
         "usage": next(
-            (
-                payload["usage"]
-                for payload in reversed(payloads)
-                if payload.get("usage")
-            ),
+            (payload["usage"] for payload in reversed(payloads) if payload.get("usage")),
             None,
         ),
     }

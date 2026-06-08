@@ -158,20 +158,20 @@ class TestExtractToolCalls:
 class TestExtractTextContent:
     """Tests for text content extraction."""
 
-    def test_extract_thinking_block(self):
-        """Test extracting text from thinking blocks."""
+    def test_extract_thinking_block_dropped(self):
+        """Thinking blocks are dropped — they don't belong in OpenAI content."""
         blocks = [{"type": "thinking", "thinking": "Let me think..."}]
         result = _extract_text_content(blocks)
-        assert result == "Let me think..."
+        assert result == ""
 
-    def test_extract_anthropic_thinking_block(self):
-        """Test extracting from AnthropicThinkingBlock."""
+    def test_extract_anthropic_thinking_block_dropped(self):
+        """AnthropicThinkingBlock is dropped from extracted text content."""
         blocks = [AnthropicThinkingBlock(type="thinking", thinking="Deep thought")]
         result = _extract_text_content(blocks)
-        assert result == "Deep thought"
+        assert result == ""
 
     def test_extract_mixed_blocks(self):
-        """Test extracting from mixed block types."""
+        """Test extracting from mixed block types — thinking is excluded."""
         blocks = [
             {"type": "text", "text": "Hello"},
             {"type": "thinking", "thinking": "Hmm"},
@@ -179,7 +179,7 @@ class TestExtractTextContent:
         ]
         result = _extract_text_content(blocks)
         assert "Hello" in result
-        assert "Hmm" in result
+        assert "Hmm" not in result
         assert "World" in result
 
 

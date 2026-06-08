@@ -1,5 +1,6 @@
 """Authentication middleware for API key validation."""
 
+import hmac
 import os
 
 from fastapi import Depends, HTTPException, Request, status
@@ -64,7 +65,9 @@ async def verify_api_key(
             headers={"WWW-Authenticate": "Bearer"},
         )
 
-    if api_key != server_api_key:
+    # Compare on UTF-8 bytes: hmac.compare_digest raises TypeError on non-ASCII
+    # str inputs, so a non-ASCII bearer token would otherwise 500 instead of 401.
+    if not hmac.compare_digest(api_key.encode("utf-8"), server_api_key.encode("utf-8")):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid API key",

@@ -1,5 +1,6 @@
 """GitHub Copilot provider implementation."""
 
+import asyncio
 import contextlib
 import json
 import time
@@ -270,6 +271,9 @@ class CopilotProvider(BaseProvider):
         self._models_ttl_cache: TTLCache[list[ModelInfo]] = TTLCache(MODELS_CACHE_TTL)
         # Reusable HTTP client
         self._client: httpx.AsyncClient | None = None
+        # Serializes token refresh so concurrent requests don't all refresh at
+        # once (avoids redundant GitHub calls and overlapping auth.json writes).
+        self._token_refresh_lock = asyncio.Lock()
 
     def is_authenticated(self) -> bool:
         """Check if authenticated with GitHub Copilot."""
@@ -292,30 +296,36 @@ class CopilotProvider(BaseProvider):
         if self._cached_token and self._token_expires > current_time + 60:
             return  # Token still valid
 
-        logger.debug("Refreshing Copilot token")
-        # Use a fresh short-lived client for token refresh to avoid blocking
-        # on the shared streaming HTTP/2 connection pool
-        try:
-            async with httpx.AsyncClient(timeout=TIMEOUT_NON_STREAMING) as client:
-                copilot_token = await get_copilot_token(client, cred.refresh)
-        except httpx.HTTPError as e:
-            logger.error("Failed to refresh Copilot token: %s", e)
-            raise ProviderError(f"Failed to refresh Copilot token: {e}", retryable=True)
+        async with self._token_refresh_lock:
+            # Double-checked: another coroutine may have refreshed while we waited.
+            current_time = int(time.time())
+            if self._cached_token and self._token_expires > current_time + 60:
+                return
 
-        self._cached_token = copilot_token.token
-        self._token_expires = copilot_token.expires_at
-        self._api_base = copilot_token.api_endpoint or self._api_base or COPILOT_BASE_URL
+            logger.debug("Refreshing Copilot token")
+            # Use a fresh short-lived client for token refresh to avoid blocking
+            # on the shared streaming HTTP/2 connection pool
+            try:
+                async with httpx.AsyncClient(timeout=TIMEOUT_NON_STREAMING) as client:
+                    copilot_token = await get_copilot_token(client, cred.refresh)
+            except httpx.HTTPError as e:
+                logger.error("Failed to refresh Copilot token: %s", e)
+                raise ProviderError(f"Failed to refresh Copilot token: {e}", retryable=True)
 
-        # Update stored credential with new access token (immutable pattern)
-        updated_cred = OAuthCredential(
-            refresh=cred.refresh,
-            access=copilot_token.token,
-            expires=copilot_token.expires_at,
-            api_endpoint=copilot_token.api_endpoint or cred.api_endpoint,
-        )
-        self.auth_manager.storage.set("github-copilot", updated_cred)
-        self.auth_manager.save()
-        logger.debug("Copilot token refreshed, expires at %d", copilot_token.expires_at)
+            self._cached_token = copilot_token.token
+            self._token_expires = copilot_token.expires_at
+            self._api_base = copilot_token.api_endpoint or self._api_base or COPILOT_BASE_URL
+
+            # Update stored credential with new access token (immutable pattern)
+            updated_cred = OAuthCredential(
+                refresh=cred.refresh,
+                access=copilot_token.token,
+                expires=copilot_token.expires_at,
+                api_endpoint=copilot_token.api_endpoint or cred.api_endpoint,
+            )
+            self.auth_manager.storage.set("github-copilot", updated_cred)
+            await asyncio.to_thread(self.auth_manager.save)
+            logger.debug("Copilot token refreshed, expires at %d", copilot_token.expires_at)
 
     def _url(self, path: str) -> str:
         """Build a Copilot API URL from the token-advertised API base."""

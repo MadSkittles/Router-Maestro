@@ -486,10 +486,12 @@ async def stream_response(
     start_time: float,
 ) -> AsyncGenerator[str, None]:
     """Stream Responses API response."""
+    # Generate these before the try so the except handlers can always reference
+    # them even if responses_completion_stream() raises before returning.
+    response_id = generate_id("resp")
+    created_at = int(time.time())
     try:
         stream, provider_name = await model_router.responses_completion_stream(request)
-        response_id = generate_id("resp")
-        created_at = int(time.time())
 
         logger.debug(
             "Stream started: req_id=%s, resp_id=%s, provider=%s",
@@ -920,15 +922,16 @@ async def stream_response(
             elapsed_ms,
             exc_info=True,
         )
-        fallback_id = generate_id("resp")
+        # Reuse the stream's response_id/created_at (hoisted above the try) so
+        # clients correlating events by id see a consistent response object.
         yield sse_event(
             {
                 "type": "response.failed",
                 "response": {
-                    "id": fallback_id,
+                    "id": response_id,
                     "object": "response",
                     "status": "failed",
-                    "created_at": int(time.time()),
+                    "created_at": created_at,
                     "model": request.model,
                     "output": [],
                     "error": {

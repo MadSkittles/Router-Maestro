@@ -1,5 +1,6 @@
 """Tests for configuration module."""
 
+import json
 import tempfile
 import tomllib
 from pathlib import Path
@@ -112,6 +113,42 @@ class TestConfigIO:
 
             assert config.current == "local"
             assert path.exists()  # Should have created the file
+
+    def test_load_corrupt_json_falls_back_to_default(self, tmp_path):
+        """A truncated/corrupt config file must not crash startup."""
+        path = tmp_path / "contexts.json"
+        path.write_text("{ this is not valid json", encoding="utf-8")
+
+        config = load_config(path, ContextsConfig, ContextsConfig.get_default)
+        assert config.current == "local"  # default
+
+    def test_load_empty_file_falls_back_to_default(self, tmp_path):
+        """An empty file (e.g. from an interrupted write) loads defaults."""
+        path = tmp_path / "contexts.json"
+        path.write_text("", encoding="utf-8")
+
+        config = load_config(path, ContextsConfig, ContextsConfig.get_default)
+        assert config.current == "local"
+
+    def test_write_is_atomic_no_partial_file_on_crash(self, tmp_path):
+        """If json.dump raises mid-write, the existing file is left intact."""
+        import pytest
+
+        from router_maestro.config.settings import write_json_owner_only
+
+        path = tmp_path / "data.json"
+        write_json_owner_only(path, {"good": True})
+
+        class _Unserializable:
+            pass
+
+        # Serialization must fail, and the original file must survive unchanged.
+        with pytest.raises(TypeError):
+            write_json_owner_only(path, {"bad": _Unserializable()})
+
+        assert json.loads(path.read_text()) == {"good": True}
+        # No leftover temp files in the directory.
+        assert list(tmp_path.glob("*.tmp")) == []
 
 
 class TestSelectModel:

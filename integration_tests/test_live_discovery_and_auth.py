@@ -33,9 +33,7 @@ def test_openai_models_include_github_copilot_models(client: httpx.Client):
     data = response.json()
 
     assert data["object"] == "list"
-    copilot_models = [
-        model for model in data["data"] if model.get("owned_by") == "github-copilot"
-    ]
+    copilot_models = [model for model in data["data"] if model.get("owned_by") == "github-copilot"]
     assert copilot_models, data
     assert all(model["object"] == "model" for model in copilot_models)
     assert all(model["id"] for model in copilot_models)

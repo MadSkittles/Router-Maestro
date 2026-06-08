@@ -160,11 +160,11 @@ class TestNormalizeThinkingBudget:
         assert result == 500
 
     def test_zero_max_output_tokens(self):
-        """max_output_tokens of 0 returns min_budget."""
+        """max_output_tokens of 0 leaves no headroom; thinking is disabled."""
         result = normalize_thinking_budget(budget=8000, max_output_tokens=0)
-        assert result == 1024
+        assert result is None
 
     def test_one_max_output_tokens(self):
-        """max_output_tokens of 1 returns min_budget."""
+        """max_output_tokens of 1 leaves no headroom; thinking is disabled."""
         result = normalize_thinking_budget(budget=8000, max_output_tokens=1)
-        assert result == 1024
+        assert result is None
