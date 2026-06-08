@@ -3,12 +3,17 @@
 import os
 from contextlib import asynccontextmanager
 
-from fastapi import Depends, FastAPI
+from fastapi import Depends, FastAPI, Response
 from fastapi.middleware.cors import CORSMiddleware
 
 from router_maestro import __version__
 from router_maestro.routing import get_router
 from router_maestro.server.middleware import verify_api_key
+from router_maestro.server.observability import (
+    CONTENT_TYPE_LATEST,
+    create_http_metrics,
+    render_metrics,
+)
 from router_maestro.server.routes import (
     admin_router,
     anthropic_router,
@@ -58,6 +63,7 @@ def create_app() -> FastAPI:
         version=__version__,
         lifespan=lifespan,
     )
+    app.state.http_metrics = create_http_metrics()
 
     # Add CORS middleware
     app.add_middleware(
@@ -89,6 +95,14 @@ def create_app() -> FastAPI:
     async def health():
         """Health check endpoint."""
         return {"status": "healthy"}
+
+    @app.get("/metrics")
+    async def metrics():
+        """Prometheus metrics endpoint."""
+        return Response(
+            content=render_metrics(app.state.http_metrics.registry),
+            media_type=CONTENT_TYPE_LATEST,
+        )
 
     return app
 
