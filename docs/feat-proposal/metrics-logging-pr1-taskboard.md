@@ -50,11 +50,11 @@ PR1 must not change routing/provider behavior.
 | PR1-07 | Done | Preserve exception-path metrics | Ensure HTTP duration/count metrics are recorded when route handlers raise. | Test route raising an exception still records a 5xx duration/count metric; exception behavior is unchanged. |
 | PR1-08 | Done | Handle unmatched routes safely | Use FastAPI route templates for labels; use `path_template="unmatched"` for 404 routes. | A random 404 path does not appear as a Prometheus label; `unmatched` does. |
 | PR1-09 | Done | Test `/metrics` endpoint | Add focused tests for endpoint availability and key metric presence. | Tests assert text format response and expected `router_maestro_` metric names. |
-| PR1-10 | Todo | Test HTTP middleware metrics | Add tests for counter increments, duration output, status labels, request ID response header, and 401 metric/header behavior. | Tests pass without calling real providers or external networks. |
-| PR1-11 | Todo | Isolate Prometheus tests | Use independent `CollectorRegistry()` or equivalent reset mechanism for tests. | Tests are order-independent and do not fail when run repeatedly. |
-| PR1-12 | Todo | Update docs | Add a short `README.md` "Metrics & Observability" section that links to a new `docs/observability.md`; put scrape examples, token behavior, key HTTP metrics, labels, and troubleshooting guidance in `docs/observability.md`. | README links to `docs/observability.md`; the docs include local scrape instructions and explain metric labels. |
-| PR1-13 | Todo | Update changelog | Add a `CHANGELOG.md` entry for the new HTTP observability foundation. | Changelog mentions `/metrics`, HTTP metrics, and request ID header. |
-| PR1-14 | Todo | Run validation | Run focused pytest targets and lint for touched code. | Focused tests pass; `uv run ruff check src/ tests/` passes; any skip/xfail is explained in the PR description. |
+| PR1-10 | Done | Test HTTP middleware metrics | Add tests for counter increments, duration output, status labels, request ID response header, and 401 metric/header behavior. | Tests pass without calling real providers or external networks. |
+| PR1-11 | Done | Isolate Prometheus tests | Use independent `CollectorRegistry()` or equivalent reset mechanism for tests. | Tests are order-independent and do not fail when run repeatedly. |
+| PR1-12 | Done | Update docs | Add a short `README.md` "Metrics & Observability" section that links to a new `docs/observability.md`; put scrape examples, token behavior, key HTTP metrics, labels, and troubleshooting guidance in `docs/observability.md`. | README links to `docs/observability.md`; the docs include local scrape instructions and explain metric labels. |
+| PR1-13 | Done | Update changelog | Add a `CHANGELOG.md` entry for the new HTTP observability foundation. | Changelog mentions `/metrics`, HTTP metrics, and request ID header. |
+| PR1-14 | Done | Run validation | Run focused pytest targets and lint for touched code. | Focused tests pass; `uv run ruff check src/ tests/` passes; any skip/xfail is explained in the PR description. |
 
 ## Suggested Implementation Order
 

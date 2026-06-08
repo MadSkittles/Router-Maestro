@@ -2,6 +2,7 @@
 
 import pytest
 from fastapi.testclient import TestClient
+from prometheus_client.parser import text_string_to_metric_families
 
 from router_maestro.server.app import METRICS_TOKEN_ENV, create_app
 from router_maestro.server.middleware import REQUEST_ID_HEADER
@@ -10,6 +11,14 @@ from router_maestro.server.observability import (
     HTTP_REQUEST_DURATION_SECONDS,
     HTTP_REQUESTS_TOTAL,
 )
+
+
+def metric_sample_value(metrics_text: str, metric_name: str, labels: dict[str, str]) -> float:
+    for family in text_string_to_metric_families(metrics_text):
+        for sample in family.samples:
+            if sample.name == metric_name and sample.labels == labels:
+                return float(sample.value)
+    raise AssertionError(f"metric sample not found: {metric_name}{labels}")
 
 
 def test_metrics_endpoint_is_public_when_token_is_not_configured(monkeypatch):
@@ -104,6 +113,38 @@ def test_http_middleware_records_successful_request_metrics(monkeypatch):
     )
 
 
+def test_http_middleware_metrics_counter_increments_and_duration_uses_labels(monkeypatch):
+    monkeypatch.delenv(METRICS_TOKEN_ENV, raising=False)
+    client = TestClient(create_app())
+
+    first_response = client.get("/health", headers={REQUEST_ID_HEADER: "req-first"})
+    first_metrics = client.get("/metrics")
+    second_response = client.get("/health", headers={REQUEST_ID_HEADER: "req-second"})
+    second_metrics = client.get("/metrics")
+
+    labels = {"method": "GET", "path_template": "/health", "status": "200"}
+    assert first_response.headers[REQUEST_ID_HEADER] == "req-first"
+    assert second_response.headers[REQUEST_ID_HEADER] == "req-second"
+    assert metric_sample_value(first_metrics.text, HTTP_REQUESTS_TOTAL, labels) == 1
+    assert metric_sample_value(second_metrics.text, HTTP_REQUESTS_TOTAL, labels) == 2
+    assert (
+        metric_sample_value(
+            second_metrics.text,
+            f"{HTTP_REQUEST_DURATION_SECONDS}_count",
+            labels,
+        )
+        == 2
+    )
+    assert (
+        metric_sample_value(
+            second_metrics.text,
+            f"{HTTP_REQUEST_DURATION_SECONDS}_bucket",
+            labels | {"le": "+Inf"},
+        )
+        == 2
+    )
+
+
 def test_http_middleware_records_unauthenticated_request_metrics(monkeypatch):
     monkeypatch.delenv(METRICS_TOKEN_ENV, raising=False)
     monkeypatch.setenv("ROUTER_MAESTRO_API_KEY", "server-secret")
@@ -163,3 +204,18 @@ def test_http_middleware_uses_unmatched_label_for_404(monkeypatch):
         'router_maestro_http_requests_total{method="GET",path_template="unmatched",status="404"}'
         in metrics_response.text
     )
+
+
+def test_metrics_registry_is_isolated_per_app(monkeypatch):
+    monkeypatch.delenv(METRICS_TOKEN_ENV, raising=False)
+    first_client = TestClient(create_app())
+    second_client = TestClient(create_app())
+
+    first_client.get("/health")
+    first_metrics = first_client.get("/metrics")
+    second_metrics = second_client.get("/metrics")
+
+    labels = {"method": "GET", "path_template": "/health", "status": "200"}
+    assert metric_sample_value(first_metrics.text, HTTP_REQUESTS_TOTAL, labels) == 1
+    with pytest.raises(AssertionError, match="metric sample not found"):
+        metric_sample_value(second_metrics.text, HTTP_REQUESTS_TOTAL, labels)
