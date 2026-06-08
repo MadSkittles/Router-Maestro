@@ -1,6 +1,8 @@
 """Prometheus metrics helpers for Router-Maestro server observability."""
 
+from collections.abc import Mapping
 from dataclasses import dataclass
+from typing import Any
 
 from prometheus_client import (
     CONTENT_TYPE_LATEST as PROMETHEUS_CONTENT_TYPE_LATEST,
@@ -15,11 +17,53 @@ from prometheus_client.exposition import generate_latest
 METRIC_PREFIX = "router_maestro"
 CONTENT_TYPE_LATEST = PROMETHEUS_CONTENT_TYPE_LATEST
 
+BOOL_LABEL_TRUE = "true"
+BOOL_LABEL_FALSE = "false"
+UNMATCHED_ROUTE_PATH_TEMPLATE = "unmatched"
+
+API_KIND_OPENAI_CHAT = "openai_chat"
+API_KIND_OPENAI_RESPONSES = "openai_responses"
+API_KIND_OPENAI_MODELS = "openai_models"
+API_KIND_ANTHROPIC_MESSAGES = "anthropic_messages"
+API_KIND_ANTHROPIC_COUNT_TOKENS = "anthropic_count_tokens"
+API_KIND_ANTHROPIC_MODELS = "anthropic_models"
+API_KIND_GEMINI_GENERATE = "gemini_generate"
+API_KIND_GEMINI_STREAM = "gemini_stream"
+API_KIND_GEMINI_COUNT_TOKENS = "gemini_count_tokens"
+API_KIND_ADMIN = "admin"
+
+API_KINDS = (
+    API_KIND_OPENAI_CHAT,
+    API_KIND_OPENAI_RESPONSES,
+    API_KIND_OPENAI_MODELS,
+    API_KIND_ANTHROPIC_MESSAGES,
+    API_KIND_ANTHROPIC_COUNT_TOKENS,
+    API_KIND_ANTHROPIC_MODELS,
+    API_KIND_GEMINI_GENERATE,
+    API_KIND_GEMINI_STREAM,
+    API_KIND_GEMINI_COUNT_TOKENS,
+    API_KIND_ADMIN,
+)
+
 HTTP_REQUESTS_TOTAL = f"{METRIC_PREFIX}_http_requests_total"
 HTTP_REQUEST_DURATION_SECONDS = f"{METRIC_PREFIX}_http_request_duration_seconds"
 
 HTTP_DURATION_BUCKETS = (0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10, 20, 60, 120)
 HTTP_LABELS = ("method", "path_template", "status")
+
+
+def bool_label(value: bool) -> str:
+    """Return the canonical Prometheus label string for boolean values."""
+    return BOOL_LABEL_TRUE if value else BOOL_LABEL_FALSE
+
+
+def path_template_from_scope(scope: Mapping[str, Any]) -> str:
+    """Return a low-cardinality route template for an ASGI request scope."""
+    route = scope.get("route")
+    path = getattr(route, "path", None)
+    if isinstance(path, str) and path:
+        return path
+    return UNMATCHED_ROUTE_PATH_TEMPLATE
 
 
 @dataclass(frozen=True)
