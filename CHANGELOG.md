@@ -4,6 +4,112 @@ All notable changes to Router-Maestro are documented here.
 
 ---
 
+## v0.3.23 (2026-06-08)
+
+### Fixes
+
+- **Codebase review batch — correctness, security, and streaming hardening (#97).**
+  - `tool_choice` translation now handles the typed `AnthropicToolChoice` object;
+    previously it always resolved to `None`, so forced/any/specific tool choice
+    was silently dropped on every Anthropic request.
+  - Responses streaming hoists the response id/timestamp so an early provider
+    error emits a clean `response.failed` event instead of a silent empty stream.
+  - Native Anthropic streaming now surfaces tool calls, usage, thinking, and the
+    real stop reason (previously only text deltas with a hardcoded `stop`).
+  - Replayed assistant `thinking` blocks are dropped from OpenAI-format content
+    so multi-turn history is no longer poisoned with raw reasoning text.
+  - Config and auth files are written atomically (temp file + `os.replace` +
+    `fsync`) and load behind JSON/validation error handling, so a corrupt or
+    non-object file can't crash startup or lose credentials.
+  - Copilot token refresh is serialized with a lock and saved off the event loop;
+    API-key comparison is constant-time over UTF-8 bytes (non-ASCII keys → 401,
+    not 500); streaming error paths emit `data: [DONE]`; thinking budgets that
+    exceed output headroom resolve to disabled instead of an invalid value;
+    OAuth session state uses an async lock; admin errors no longer leak raw
+    exception text.
+
+---
+
+## v0.3.22 (2026-06-08)
+
+### Fixes
+
+- **Claude Code 2.1 mid-conversation system blocks are accepted (#95).** Handle the
+  Claude Code 2.1 beta that interleaves `system` content mid-conversation.
+
+### Chores
+
+- Bump `softprops/action-gh-release` to v3 in the release workflow (#94).
+
+---
+
+## v0.3.21 (2026-06-08)
+
+### Features
+
+- **`reasoning_effort=max` and 1M-context keys for Opus 4.8 / Sonnet 4.6 (#92).**
+  Add `max` (and `xhigh` where advertised) to the shared reasoning ladder and
+  drive Copilot's catalog-advertised top tier instead of a hardcoded `high`, so
+  Opus 4.6/4.7/4.8 reasoning requests are no longer silently downgraded.
+
+---
+
+## v0.3.20 (2026-06-04)
+
+### Fixes
+
+- **Auto-compact prompt handles native 1M model keys (#90).** Adjust the CLI
+  auto-compact prompt so it behaves correctly for models exposed with native
+  1M-context keys.
+
+---
+
+## v0.3.19 (2026-06-04)
+
+### Fixes
+
+- **Auto-compact window aligns with Copilot's picker display (#88).** Use the
+  model's context window so the auto-compact upstream value matches what
+  Copilot's picker shows.
+
+---
+
+## v0.3.18 (2026-06-04)
+
+### Features
+
+- **Prompt for `CLAUDE_CODE_AUTO_COMPACT_WINDOW` after model selection (#86).**
+  The CLI now offers to configure the auto-compact window once a model is chosen.
+
+---
+
+## v0.3.17 (2026-06-04)
+
+### Fixes
+
+- **Revert integer cache-token fields on Anthropic responses (#84).** Reverts the
+  v0.3.16 change (#82), which caused a regression.
+
+---
+
+## v0.3.16 (2026-06-04)
+
+### Fixes
+
+- **Emit integer cache-token fields on Anthropic responses (#82).**
+  _(Reverted in v0.3.17.)_
+
+### Documentation
+
+- Simplify README onboarding and clarify the API-key concept (#81).
+- Clarify deployment API-key setup (#80).
+
+### Tests
+
+- Expand the live integration matrix.
+
+---
+
 ## v0.3.15 (2026-05-21)
 
 ### Fixes
