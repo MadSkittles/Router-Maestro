@@ -43,6 +43,15 @@ _OPUS_1M_NATIVE_KEY = "claude-opus-4-6[1m]"
 _OPUS_1M_SOURCE_MODEL = "github-copilot/claude-opus-4.6-1m"
 _OPUS_47_1M_NATIVE_KEY = "claude-opus-4-7[1m]"
 _OPUS_47_1M_SOURCE_MODEL = "github-copilot/claude-opus-4.7-1m-internal"
+# Opus 4.8 and Sonnet 4.6 don't ship a dedicated `-1m` variant — their base
+# catalog entry already advertises max_context_window_tokens=1000000, so the
+# native key maps straight to the base id. The `[1m]` suffix here only exists
+# so Claude Code raises its auto-compact threshold to ~1M instead of clamping
+# at the default 200K.
+_OPUS_48_1M_NATIVE_KEY = "claude-opus-4-8[1m]"
+_OPUS_48_1M_SOURCE_MODEL = "github-copilot/claude-opus-4.8"
+_SONNET_46_1M_NATIVE_KEY = "claude-sonnet-4-6[1m]"
+_SONNET_46_1M_SOURCE_MODEL = "github-copilot/claude-sonnet-4.6"
 
 _INJECTABLE_1M_VARIANTS: tuple[tuple[str, str, str, str], ...] = (
     # (source_model, native_key, bare_id, display_name)
@@ -57,6 +66,18 @@ _INJECTABLE_1M_VARIANTS: tuple[tuple[str, str, str, str], ...] = (
         _OPUS_47_1M_NATIVE_KEY,
         "claude-opus-4.7-1m-internal",
         "Opus 4.7 1M Internal (Auto-activated)",
+    ),
+    (
+        _OPUS_48_1M_SOURCE_MODEL,
+        _OPUS_48_1M_NATIVE_KEY,
+        "claude-opus-4.8",
+        "Opus 4.8 1M (Auto-activated)",
+    ),
+    (
+        _SONNET_46_1M_SOURCE_MODEL,
+        _SONNET_46_1M_NATIVE_KEY,
+        "claude-sonnet-4.6",
+        "Sonnet 4.6 1M (Auto-activated)",
     ),
 )
 
@@ -221,7 +242,12 @@ def _model_key(model: dict) -> str:
 # ones we inject via `_maybe_inject_opus_1m`) — the prompt offers a 1M default
 # for them instead of the upstream-value option.
 _CLAUDE_CODE_NATIVE_1M_KEYS: frozenset[str] = frozenset(
-    {_OPUS_1M_NATIVE_KEY, _OPUS_47_1M_NATIVE_KEY}
+    {
+        _OPUS_1M_NATIVE_KEY,
+        _OPUS_47_1M_NATIVE_KEY,
+        _OPUS_48_1M_NATIVE_KEY,
+        _SONNET_46_1M_NATIVE_KEY,
+    }
 )
 
 # Default CLAUDE_CODE_AUTO_COMPACT_WINDOW for non-Claude models. Matches

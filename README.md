@@ -27,8 +27,8 @@ Router-Maestro acts as a proxy that gives you access to models from multiple pro
 
 ### Advanced
 
-- **1M context support**: Activate Opus 4.6 *or* Opus 4.7 with a 1M context window via GitHub Copilot — just select `claude-opus-4-6[1m]` or `claude-opus-4-7[1m]` during `config claude-code` setup. Claude Code's `[1m]` beta header is auto-mapped to the right Copilot variant (`claude-opus-4.6-1m` / `claude-opus-4.7-1m-internal`).
-- **Transparent reasoning-tier routing**: Requests for `claude-opus-4.7` with `reasoning_effort: "high"` or `"xhigh"` (or an Anthropic-style `thinking.budget_tokens` ≥ 8192) are auto-rewritten to the dedicated Copilot variants `claude-opus-4.7-high` / `claude-opus-4.7-xhigh` — no client changes needed.
+- **1M context support**: Activate Opus 4.6, Opus 4.7, Opus 4.8, *or* Sonnet 4.6 with a 1M context window via GitHub Copilot — just select `claude-opus-4-6[1m]`, `claude-opus-4-7[1m]`, `claude-opus-4-8[1m]`, or `claude-sonnet-4-6[1m]` during `config claude-code` setup. For 4.6 / 4.7 the `[1m]` beta header is auto-mapped to a dedicated Copilot variant (`claude-opus-4.6-1m` / `claude-opus-4.7-1m-internal`); for 4.8 and Sonnet 4.6 the base catalog entry already advertises 1M, so the synthetic `[1m]` key just raises Claude Code's auto-compact threshold (`CLAUDE_CODE_AUTO_COMPACT_WINDOW`) to 1M.
+- **Transparent reasoning-tier routing**: Requests for `claude-opus-4.7` with `reasoning_effort: "high"` or `"xhigh"` (or an Anthropic-style `thinking.budget_tokens` ≥ 8192) are auto-rewritten to the dedicated Copilot variants `claude-opus-4.7-high` / `claude-opus-4.7-xhigh` — no client changes needed. The newly-opened `reasoning_effort: "max"` tier (Opus 4.6 / 4.7 / 4.8 on Copilot) is also passed through verbatim when the model catalog advertises it.
 
 ## Table of Contents
 

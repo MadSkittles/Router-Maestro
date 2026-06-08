@@ -11,7 +11,11 @@ from router_maestro.cli import config as cli_config
 from router_maestro.cli.config import (
     _OPUS_1M_NATIVE_KEY,
     _OPUS_1M_SOURCE_MODEL,
+    _OPUS_47_1M_NATIVE_KEY,
+    _OPUS_48_1M_NATIVE_KEY,
+    _SONNET_46_1M_NATIVE_KEY,
     _maybe_inject_opus_1m,
+    _prompt_auto_compact_window,
     _select_model,
 )
 from router_maestro.config.contexts import ContextConfig, ContextsConfig
@@ -214,6 +218,93 @@ class TestMaybeInjectOpus1M:
         """Guard against accidental changes to the source model constant."""
         assert _OPUS_1M_SOURCE_MODEL == "github-copilot/claude-opus-4.6-1m"
         assert _OPUS_1M_NATIVE_KEY == "claude-opus-4-6[1m]"
+
+    def test_injects_opus_48_and_sonnet_46_from_base_ids(self):
+        """4.8 and sonnet-4.6 have no dedicated -1m variant; the synthetic
+        entries map their [1m] native key straight to the base catalog id."""
+        models = [
+            {"provider": "github-copilot", "id": "claude-opus-4.8", "name": "Claude Opus 4.8"},
+            {
+                "provider": "github-copilot",
+                "id": "claude-sonnet-4.6",
+                "name": "Claude Sonnet 4.6",
+            },
+        ]
+
+        result = _maybe_inject_opus_1m(models)
+
+        # Two new synthetic entries appear before the originals.
+        assert len(result) == 4
+        custom_keys = {m.get("custom_key") for m in result if "custom_key" in m}
+        assert _OPUS_48_1M_NATIVE_KEY in custom_keys
+        assert _SONNET_46_1M_NATIVE_KEY in custom_keys
+        # The synthetic entries point at the base ids — there is no -1m suffix
+        # on the catalog side for these.
+        synthetic_by_key = {m["custom_key"]: m for m in result if "custom_key" in m}
+        assert synthetic_by_key[_OPUS_48_1M_NATIVE_KEY]["id"] == "claude-opus-4.8"
+        assert synthetic_by_key[_SONNET_46_1M_NATIVE_KEY]["id"] == "claude-sonnet-4.6"
+
+
+class TestPromptAutoCompactWindow:
+    """Tests for ``_prompt_auto_compact_window`` — the Claude Code auto-compact
+    env var selection. Native 1M model keys must offer 1M as the default; every
+    other model must fall back to the 200K default.
+    """
+
+    @staticmethod
+    def _synthetic(custom_key: str) -> dict:
+        """A model dict shaped like the synthetic entries _maybe_inject_opus_1m emits."""
+        return {
+            "provider": "github-copilot",
+            "id": "ignored-base-id",
+            "custom_key": custom_key,
+            "name": "test",
+        }
+
+    def test_returns_none_when_model_is_none(self):
+        assert _prompt_auto_compact_window(None) is None
+
+    def test_user_skip_returns_none(self, monkeypatch):
+        monkeypatch.setattr(cli_config.Prompt, "ask", lambda *a, **kw: "n")
+        assert _prompt_auto_compact_window(self._synthetic(_OPUS_1M_NATIVE_KEY)) is None
+
+    def test_opus_48_native_key_defaults_to_1m(self, monkeypatch):
+        """4.8 has no -1m catalog variant, but its [1m] native key must still
+        unlock the 1M default in the auto-compact prompt."""
+        monkeypatch.setattr(cli_config.Prompt, "ask", lambda *a, **kw: "d")
+        assert _prompt_auto_compact_window(self._synthetic(_OPUS_48_1M_NATIVE_KEY)) == 1_000_000
+
+    def test_sonnet_46_native_key_defaults_to_1m(self, monkeypatch):
+        """Same as 4.8 — sonnet-4.6 ships only the base id but [1m] gets 1M."""
+        monkeypatch.setattr(cli_config.Prompt, "ask", lambda *a, **kw: "d")
+        assert _prompt_auto_compact_window(self._synthetic(_SONNET_46_1M_NATIVE_KEY)) == 1_000_000
+
+    def test_opus_46_and_47_native_keys_defaults_to_1m(self, monkeypatch):
+        """Regression guard: the pre-existing 4.6 / 4.7 native keys keep their
+        1M default after adding 4.8 / sonnet-4.6 to the set."""
+        monkeypatch.setattr(cli_config.Prompt, "ask", lambda *a, **kw: "d")
+        assert _prompt_auto_compact_window(self._synthetic(_OPUS_1M_NATIVE_KEY)) == 1_000_000
+        assert _prompt_auto_compact_window(self._synthetic(_OPUS_47_1M_NATIVE_KEY)) == 1_000_000
+
+    def test_non_native_model_defaults_to_200k(self, monkeypatch):
+        """A plain catalog model (no [1m] native key) gets the 200K default."""
+        monkeypatch.setattr(cli_config.Prompt, "ask", lambda *a, **kw: "d")
+        plain = {"provider": "github-copilot", "id": "claude-opus-4.8", "name": "Claude Opus 4.8"}
+        assert _prompt_auto_compact_window(plain) == 200_000
+
+    def test_native_1m_prompt_omits_upstream_choice(self, monkeypatch):
+        """For native 1M keys we must not offer ``y = upstream``; the Copilot
+        catalog's prompt cap (~936K) is below Claude Code's own 1M view, and
+        using it would arm auto-compact earlier than the user expects."""
+        captured = {}
+
+        def fake_ask(prompt_text, choices=None, default=None):
+            captured["choices"] = choices
+            return "d"
+
+        monkeypatch.setattr(cli_config.Prompt, "ask", fake_ask)
+        _prompt_auto_compact_window(self._synthetic(_SONNET_46_1M_NATIVE_KEY))
+        assert "y" not in captured["choices"]
 
 
 class _StubAdminClient:
