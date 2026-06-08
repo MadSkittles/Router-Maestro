@@ -41,8 +41,8 @@ PR1 must not change routing/provider behavior.
 
 | ID | Status | Task | Scope | Verification |
 |---|---|---|---|---|
-| PR1-01 | Todo | Add Prometheus dependency | Add `prometheus-client>=0.20.0` to `pyproject.toml`; run `uv lock`. | `uv lock` succeeds; dependency is present in `uv.lock`. |
-| PR1-02 | Todo | Add metrics module | Create `src/router_maestro/server/observability/metrics.py` with low-level metric definitions and helper functions. | Module imports cleanly; no default test pollution; metrics use `router_maestro_` prefix. |
+| PR1-01 | Done | Add Prometheus dependency | Add `prometheus-client>=0.20.0` to `pyproject.toml`; run `uv lock`. | `uv lock` succeeds; dependency is present in `uv.lock`. |
+| PR1-02 | Done | Add metrics module | Create `src/router_maestro/server/observability/metrics.py` with low-level metric definitions and helper functions. | Module imports cleanly; no default test pollution; metrics use `router_maestro_` prefix. |
 | PR1-03 | Todo | Define metrics constants | Add constants/helpers for LLM buckets, bool labels (`"true"`/`"false"`), `path_template="unmatched"`, and the full 10-value `api_kind` enum for PR2 reuse. | Unit tests cover bool label conversion and unmatched route fallback; all 10 `api_kind` values are visible in constants. |
 | PR1-04 | Todo | Implement `/metrics` endpoint | Expose top-level `/metrics` from `server/app.py` or a dedicated route module. | `GET /metrics` returns Prometheus text format and includes `router_maestro_http_requests_total` plus `router_maestro_http_request_duration_seconds`. |
 | PR1-05 | Todo | Implement `/metrics` auth behavior | Support default public `/metrics`; if `ROUTER_MAESTRO_METRICS_TOKEN` is set, require that token. | Tests cover four branches: no token configured = 200; token configured + correct token = 200; token configured + missing token = 401; token configured + wrong token = 401. |
