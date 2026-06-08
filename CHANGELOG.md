@@ -4,6 +4,19 @@ All notable changes to Router-Maestro are documented here.
 
 ---
 
+## Unreleased
+
+### Features
+
+- **HTTP observability foundation.** Added a top-level Prometheus `/metrics`
+  endpoint with HTTP request counters, HTTP duration histograms, optional
+  `ROUTER_MAESTRO_METRICS_TOKEN` protection, and `X-Request-ID` response
+  headers so failed requests can be correlated with server logs. Streaming
+  durations are measured through final body send, and metrics labels are kept
+  low-cardinality.
+
+---
+
 ## v0.3.25 (2026-06-16)
 
 ### Maintenance
