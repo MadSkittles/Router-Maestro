@@ -6,6 +6,7 @@ from fastapi.testclient import TestClient
 from router_maestro.server.app import METRICS_TOKEN_ENV, create_app
 from router_maestro.server.middleware import REQUEST_ID_HEADER
 from router_maestro.server.observability import (
+    CONTENT_TYPE_LATEST,
     HTTP_REQUEST_DURATION_SECONDS,
     HTTP_REQUESTS_TOTAL,
 )
@@ -51,6 +52,18 @@ def test_metrics_endpoint_rejects_wrong_metrics_token(monkeypatch):
 
     assert response.status_code == 401
     assert response.json()["detail"] == "Invalid metrics token"
+
+
+def test_metrics_endpoint_returns_prometheus_text_format(monkeypatch):
+    monkeypatch.delenv(METRICS_TOKEN_ENV, raising=False)
+    client = TestClient(create_app())
+
+    response = client.get("/metrics")
+
+    assert response.status_code == 200
+    assert response.headers["content-type"] == CONTENT_TYPE_LATEST
+    assert f"# TYPE {HTTP_REQUESTS_TOTAL} counter" in response.text
+    assert f"# TYPE {HTTP_REQUEST_DURATION_SECONDS} histogram" in response.text
 
 
 def test_http_middleware_generates_request_id_header(monkeypatch):
