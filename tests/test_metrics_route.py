@@ -1,5 +1,6 @@
 """Tests for the Prometheus metrics route."""
 
+import pytest
 from fastapi.testclient import TestClient
 
 from router_maestro.server.app import METRICS_TOKEN_ENV, create_app
@@ -104,3 +105,31 @@ def test_http_middleware_records_unauthenticated_request_metrics(monkeypatch):
         'router_maestro_http_requests_total{method="GET",path_template="/api/openai/v1/models",'
         'status="401"}' in metrics_response.text
     )
+
+
+def test_http_middleware_records_exception_path_metrics(monkeypatch):
+    monkeypatch.delenv(METRICS_TOKEN_ENV, raising=False)
+    app = create_app()
+
+    @app.get("/boom")
+    async def boom():
+        raise RuntimeError("boom")
+
+    client = TestClient(app, raise_server_exceptions=False)
+
+    response = client.get("/boom", headers={REQUEST_ID_HEADER: "req-boom-123"})
+    metrics_response = client.get("/metrics")
+
+    assert response.status_code == 500
+    assert response.headers[REQUEST_ID_HEADER] == "req-boom-123"
+    assert (
+        'router_maestro_http_requests_total{method="GET",path_template="/boom",status="500"}'
+        in metrics_response.text
+    )
+    assert (
+        'router_maestro_http_request_duration_seconds_count{method="GET",'
+        'path_template="/boom",status="500"}' in metrics_response.text
+    )
+
+    with pytest.raises(RuntimeError, match="boom"):
+        TestClient(app).get("/boom")

@@ -8,7 +8,11 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from router_maestro import __version__
 from router_maestro.routing import get_router
-from router_maestro.server.middleware import observability_middleware, verify_api_key
+from router_maestro.server.middleware import (
+    REQUEST_ID_HEADER,
+    observability_middleware,
+    verify_api_key,
+)
 from router_maestro.server.observability import (
     CONTENT_TYPE_LATEST,
     create_http_metrics,
@@ -83,6 +87,18 @@ def verify_metrics_access(request: Request) -> None:
         )
 
 
+async def unhandled_exception_handler(request: Request, _exc: Exception) -> Response:
+    """Return the default 500 response with the existing request id header."""
+    request_id = getattr(request.state, "request_id", None)
+    headers = {REQUEST_ID_HEADER: request_id} if isinstance(request_id, str) else None
+    return Response(
+        content="Internal Server Error",
+        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        headers=headers,
+        media_type="text/plain",
+    )
+
+
 def create_app() -> FastAPI:
     """Create the FastAPI application."""
     app = FastAPI(
@@ -93,6 +109,7 @@ def create_app() -> FastAPI:
     )
     app.state.http_metrics = create_http_metrics()
     app.middleware("http")(observability_middleware)
+    app.add_exception_handler(Exception, unhandled_exception_handler)
 
     # Add CORS middleware
     app.add_middleware(
