@@ -8,6 +8,7 @@ from datetime import UTC, datetime
 
 from fastapi import APIRouter, HTTPException
 from fastapi import Request as FastAPIRequest
+from fastapi.responses import JSONResponse
 
 from router_maestro.providers import AnthropicProvider, ChatRequest, ProviderError
 from router_maestro.routing import Router, get_router
@@ -191,6 +192,84 @@ def _has_extended_context_beta(raw_request: FastAPIRequest) -> bool:
     return "context-1m" in header.lower()
 
 
+# Anthropic beta header that lets clients append ``{"role": "system", ...}``
+# entries directly into ``messages[]`` mid-conversation, preserving prompt
+# cache locality instead of rebuilding the top-level ``system`` field.
+# Claude Code 2.1.x defaults this beta to ON for ``claude-opus-4-8``.
+_MID_CONV_SYSTEM_BETA = "mid-conversation-system-2026-04-07"
+
+
+def _has_mid_conv_system_beta(raw_request: FastAPIRequest) -> bool:
+    """Check if the request opts into the mid-conversation-system beta."""
+    header = raw_request.headers.get("anthropic-beta", "")
+    return _MID_CONV_SYSTEM_BETA in header.lower()
+
+
+async def _raw_body_has_inline_system(raw_request: FastAPIRequest) -> bool:
+    """Return True iff the original request body had ``role="system"`` in messages.
+
+    The Pydantic ``before`` validator hoists inline system messages out of the
+    array so the rest of the schema can validate, which means by the time the
+    route runs we've lost the original shape. Re-reading the raw body lets us
+    tell whether Claude Code actually sent the mid-conversation-system payload
+    so we can return the 400 it expects, vs. a non-Claude-Code client where
+    the silent hoist is the right behavior.
+
+    Body bytes are cached by Starlette, so this is a no-op second read.
+    """
+    try:
+        body = await raw_request.body()
+        if not body:
+            return False
+        payload = json.loads(body)
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return False
+    if not isinstance(payload, dict):
+        return False
+    messages = payload.get("messages")
+    if not isinstance(messages, list):
+        return False
+    return any(isinstance(m, dict) and m.get("role") == "system" for m in messages)
+
+
+def _mid_conv_system_rejection_response() -> JSONResponse:
+    """Return a 400 that triggers Claude Code's mid-conv-system fallback.
+
+    Claude Code's ``Mk8`` error classifier (Claude Code 2.1.x) accepts this
+    request as a beta-not-supported signal when the response message
+    contains both the beta header string and ``"anthropic-beta"``. Hitting
+    that path makes Claude Code:
+
+    1. Strip the ``mid-conversation-system-2026-04-07`` header for the rest
+       of the session (sticky until ``/clear`` or ``/compact``).
+    2. Rewrite the inline system messages into ``<system-reminder>`` blocks
+       inside ``user`` messages, preserving mid-conversation position so the
+       prompt cache stays warm.
+    3. Retry transparently — the user sees no error.
+
+    Returning the hoisted payload with a 200 instead would silently work but
+    waste cache: Claude Code would keep sending the beta every turn, and we
+    would keep flattening it into a top-level ``system`` rewrite that
+    invalidates the cache prefix on every message.
+    """
+    message = (
+        f"This model does not support the `anthropic-beta: {_MID_CONV_SYSTEM_BETA}` "
+        'header through Router-Maestro. Inline `role: "system"` messages were '
+        "rejected; the client should drop the beta header and fall back to "
+        "rebuilding the top-level system prompt or to <system-reminder> blocks."
+    )
+    return JSONResponse(
+        status_code=400,
+        content={
+            "type": "error",
+            "error": {
+                "type": "invalid_request_error",
+                "message": message,
+            },
+        },
+    )
+
+
 @router.post("/v1/messages")
 @router.post("/api/anthropic/v1/messages")
 async def messages(request: AnthropicMessagesRequest, raw_request: FastAPIRequest):
@@ -209,6 +288,24 @@ async def messages(request: AnthropicMessagesRequest, raw_request: FastAPIReques
                 keepalive_frame=ANTHROPIC_PING_FRAME,
             )
         return _create_test_response()
+
+    # Claude Code 2.1.x enables `mid-conversation-system-2026-04-07` by
+    # default for opus-4-8 and sends `role:"system"` blocks inline in
+    # `messages`. The schema validator silently hoists them so generic
+    # OpenAI-shaped clients (Cline, Aider, …) still work, but Claude Code
+    # itself has a richer fallback path that preserves prompt-cache
+    # locality. When we see the beta header AND the original payload had
+    # inline system messages, return a 400 that matches Claude Code's
+    # `Mk8` detector so it strips the beta and retries with
+    # <system-reminder> blocks. See binary analysis in PR description.
+    if _has_mid_conv_system_beta(raw_request) and await _raw_body_has_inline_system(raw_request):
+        logger.info(
+            "Rejecting mid-conversation-system beta for model=%s so the "
+            "client falls back to <system-reminder> blocks (preserves "
+            "prompt cache)",
+            request.model,
+        )
+        return _mid_conv_system_rejection_response()
 
     model_router = get_router()
 
