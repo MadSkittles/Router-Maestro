@@ -133,3 +133,20 @@ def test_http_middleware_records_exception_path_metrics(monkeypatch):
 
     with pytest.raises(RuntimeError, match="boom"):
         TestClient(app).get("/boom")
+
+
+def test_http_middleware_uses_unmatched_label_for_404(monkeypatch):
+    monkeypatch.delenv(METRICS_TOKEN_ENV, raising=False)
+    client = TestClient(create_app())
+
+    response = client.get("/this/path/does/not/exist/abc123xyz")
+    metrics_response = client.get("/metrics")
+
+    assert response.status_code == 404
+    assert (
+        'path_template="/this/path/does/not/exist/abc123xyz"' not in metrics_response.text
+    )
+    assert (
+        'router_maestro_http_requests_total{method="GET",path_template="unmatched",status="404"}'
+        in metrics_response.text
+    )
