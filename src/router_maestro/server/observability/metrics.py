@@ -13,6 +13,7 @@ from prometheus_client import (
     Histogram,
 )
 from prometheus_client.exposition import generate_latest
+from starlette.routing import Match
 
 METRIC_PREFIX = "router_maestro"
 CONTENT_TYPE_LATEST = PROMETHEUS_CONTENT_TYPE_LATEST
@@ -63,6 +64,16 @@ def path_template_from_scope(scope: Mapping[str, Any]) -> str:
     path = getattr(route, "path", None)
     if isinstance(path, str) and path:
         return path
+
+    router = scope.get("router")
+    routes = getattr(router, "routes", ())
+    for candidate in routes:
+        match, _child_scope = candidate.matches(scope)
+        if match == Match.FULL:
+            candidate_path = getattr(candidate, "path", None)
+            if isinstance(candidate_path, str) and candidate_path:
+                return candidate_path
+
     return UNMATCHED_ROUTE_PATH_TEMPLATE
 
 

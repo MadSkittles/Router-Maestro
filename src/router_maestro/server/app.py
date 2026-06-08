@@ -8,7 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from router_maestro import __version__
 from router_maestro.routing import get_router
-from router_maestro.server.middleware import verify_api_key
+from router_maestro.server.middleware import observability_middleware, verify_api_key
 from router_maestro.server.observability import (
     CONTENT_TYPE_LATEST,
     create_http_metrics,
@@ -92,6 +92,7 @@ def create_app() -> FastAPI:
         lifespan=lifespan,
     )
     app.state.http_metrics = create_http_metrics()
+    app.middleware("http")(observability_middleware)
 
     # Add CORS middleware
     app.add_middleware(
