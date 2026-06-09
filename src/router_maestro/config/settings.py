@@ -33,8 +33,11 @@ def write_json_owner_only(path: Path, data: Any) -> None:
     fdopen_took_fd = False
     try:
         # fchmod before fdopen takes ownership of fd; if it raises, fd is still
-        # ours to close (the except below handles it).
-        os.fchmod(fd, 0o600)
+        # ours to close (the except below handles it). os.fchmod is POSIX-only
+        # and absent on Windows, where mkstemp already restricts the file to the
+        # creating user and the POSIX permission bits do not apply.
+        if hasattr(os, "fchmod"):
+            os.fchmod(fd, 0o600)
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             fdopen_took_fd = True
             json.dump(data, f, indent=2, ensure_ascii=False)

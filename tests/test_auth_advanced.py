@@ -1,5 +1,6 @@
 """Tests for auth storage module."""
 
+import os
 import tempfile
 from pathlib import Path
 from unittest.mock import AsyncMock, Mock, patch
@@ -284,6 +285,9 @@ class TestAuthStorage:
         finally:
             path.unlink(missing_ok=True)
 
+    @pytest.mark.skipif(
+        not hasattr(os, "fchmod"), reason="POSIX permission bits not applicable on this platform"
+    )
     def test_save_writes_owner_only_permissions(self, tmp_path):
         """auth.json contains tokens and API keys, so it must not be group/world-readable."""
         path = tmp_path / "auth.json"
