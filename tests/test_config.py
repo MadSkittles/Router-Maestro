@@ -1,11 +1,13 @@
 """Tests for configuration module."""
 
 import json
+import os
 import tempfile
 import tomllib
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
 import tomlkit
 
 from router_maestro.cli import config as cli_config
@@ -91,6 +93,9 @@ class TestConfigIO:
             loaded = load_config(path, ProvidersConfig, ProvidersConfig.get_default)
             assert loaded.providers.keys() == original.providers.keys()
 
+    @pytest.mark.skipif(
+        not hasattr(os, "fchmod"), reason="POSIX permission bits not applicable on this platform"
+    )
     def test_save_config_writes_owner_only_permissions(self, tmp_path):
         """Config files may contain API keys and should be owner-readable only."""
         path = tmp_path / "contexts.json"
