@@ -4,6 +4,20 @@ All notable changes to Router-Maestro are documented here.
 
 ---
 
+## v0.3.24 (2026-06-09)
+
+### Fixes
+
+- **Windows compatibility: guard `os.fchmod` in config/auth writes (#102).**
+  `os.fchmod` is POSIX-only, so the first config or auth write on Windows
+  (e.g. `router-maestro config`) crashed with
+  `module 'os' has no attribute 'fchmod'`. The owner-only write now skips the
+  chmod when `os.fchmod` is unavailable: POSIX still locks the file to `0o600`,
+  while on Windows the POSIX permission bits do not apply and `tempfile.mkstemp`
+  already restricts the file to the creating user via the parent directory ACL.
+
+---
+
 ## v0.3.23 (2026-06-08)
 
 ### Fixes
