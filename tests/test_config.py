@@ -212,27 +212,23 @@ class TestMaybeInjectOpus1M:
         """Synthetic entry is prepended when the source model exists."""
         models = [
             {"provider": "github-copilot", "id": "claude-opus-4.6", "name": "Claude Opus 4.6"},
-            {
-                "provider": "github-copilot",
-                "id": "claude-opus-4.6-1m",
-                "name": "Claude Opus 4.6 1M",
-            },
         ]
 
         result = _maybe_inject_opus_1m(models)
 
-        assert len(result) == 3
-        assert len(models) == 2  # original list not mutated
+        assert len(result) == 2
+        assert len(models) == 1  # original list not mutated
         synthetic = result[0]
         assert synthetic["custom_key"] == _OPUS_1M_NATIVE_KEY
         assert synthetic["display_key"] == _OPUS_1M_NATIVE_KEY
         assert synthetic["name"] == "Opus 4.6 1M (Auto-activated)"
         assert synthetic["provider"] == "github-copilot"
+        assert synthetic["id"] == "claude-opus-4.6"
 
     def test_no_injection_when_1m_model_absent(self):
         """No synthetic entry when the source model is not in the list."""
         models = [
-            {"provider": "github-copilot", "id": "claude-opus-4.6", "name": "Claude Opus 4.6"},
+            {"provider": "github-copilot", "id": "gpt-4.1", "name": "GPT-4.1"},
             {"provider": "github-copilot", "id": "gpt-4o", "name": "GPT-4o"},
         ]
 
@@ -246,8 +242,8 @@ class TestMaybeInjectOpus1M:
         models = [
             {
                 "provider": "github-copilot",
-                "id": "claude-opus-4.6-1m",
-                "name": "Claude Opus 4.6 1M",
+                "id": "claude-opus-4.6",
+                "name": "Claude Opus 4.6",
             },
         ]
         original_len = len(models)
@@ -257,8 +253,12 @@ class TestMaybeInjectOpus1M:
         assert len(models) == original_len
 
     def test_source_model_constant_matches_expected_value(self):
-        """Guard against accidental changes to the source model constant."""
-        assert _OPUS_1M_SOURCE_MODEL == "github-copilot/claude-opus-4.6-1m"
+        """Guard against accidental changes to the source model constant.
+
+        Copilot dropped the dedicated ``-1m`` Opus variants, so the 4.6 native
+        key now maps to the base catalog id like 4.8 / sonnet-4.6 do.
+        """
+        assert _OPUS_1M_SOURCE_MODEL == "github-copilot/claude-opus-4.6"
         assert _OPUS_1M_NATIVE_KEY == "claude-opus-4-6[1m]"
 
     def test_injects_opus_48_and_sonnet_46_from_base_ids(self):

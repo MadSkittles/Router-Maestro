@@ -286,18 +286,6 @@ async def create_response(request: ResponsesRequest):
         if effort and effort in VALID_EFFORTS:
             internal_request.reasoning_effort = effort
 
-    pre_rewrite_model = internal_request.model
-    pre_rewrite_effort = internal_request.reasoning_effort
-    internal_request = await model_router.rewrite_to_reasoning_variant(internal_request)
-    logger.info(
-        "Reasoning resolved: req_id=%s pre_model=%s pre_effort=%s post_model=%s post_effort=%s",
-        request_id,
-        pre_rewrite_model,
-        pre_rewrite_effort,
-        internal_request.model,
-        internal_request.reasoning_effort,
-    )
-
     if request.stream:
         return sse_streaming_response(
             stream_response(model_router, internal_request, request_id, start_time),

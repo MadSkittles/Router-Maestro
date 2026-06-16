@@ -37,17 +37,15 @@ CLI_TOOLS = {
 }
 
 # Claude Code native model IDs for 1M context variants.
-# When set as ANTHROPIC_MODEL, Claude Code sends the `anthropic-beta: context-1m-*`
-# header, which the router resolves to the actual provider model.
+# Copilot no longer ships dedicated `-1m` / `-1m-internal` Opus variants — the
+# base catalog entries for Opus 4.6/4.7/4.8 and Sonnet 4.6 already advertise
+# max_context_window_tokens=1000000, so every native key maps straight to the
+# base id. The `[1m]` suffix here only exists so Claude Code raises its
+# auto-compact threshold to ~1M instead of clamping at the default 200K.
 _OPUS_1M_NATIVE_KEY = "claude-opus-4-6[1m]"
-_OPUS_1M_SOURCE_MODEL = "github-copilot/claude-opus-4.6-1m"
+_OPUS_1M_SOURCE_MODEL = "github-copilot/claude-opus-4.6"
 _OPUS_47_1M_NATIVE_KEY = "claude-opus-4-7[1m]"
-_OPUS_47_1M_SOURCE_MODEL = "github-copilot/claude-opus-4.7-1m-internal"
-# Opus 4.8 and Sonnet 4.6 don't ship a dedicated `-1m` variant — their base
-# catalog entry already advertises max_context_window_tokens=1000000, so the
-# native key maps straight to the base id. The `[1m]` suffix here only exists
-# so Claude Code raises its auto-compact threshold to ~1M instead of clamping
-# at the default 200K.
+_OPUS_47_1M_SOURCE_MODEL = "github-copilot/claude-opus-4.7"
 _OPUS_48_1M_NATIVE_KEY = "claude-opus-4-8[1m]"
 _OPUS_48_1M_SOURCE_MODEL = "github-copilot/claude-opus-4.8"
 _SONNET_46_1M_NATIVE_KEY = "claude-sonnet-4-6[1m]"
@@ -58,14 +56,14 @@ _INJECTABLE_1M_VARIANTS: tuple[tuple[str, str, str, str], ...] = (
     (
         _OPUS_1M_SOURCE_MODEL,
         _OPUS_1M_NATIVE_KEY,
-        "claude-opus-4.6-1m",
+        "claude-opus-4.6",
         "Opus 4.6 1M (Auto-activated)",
     ),
     (
         _OPUS_47_1M_SOURCE_MODEL,
         _OPUS_47_1M_NATIVE_KEY,
-        "claude-opus-4.7-1m-internal",
-        "Opus 4.7 1M Internal (Auto-activated)",
+        "claude-opus-4.7",
+        "Opus 4.7 1M (Auto-activated)",
     ),
     (
         _OPUS_48_1M_SOURCE_MODEL,

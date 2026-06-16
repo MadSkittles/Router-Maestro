@@ -182,16 +182,6 @@ async def _stream_test_response() -> AsyncGenerator[str, None]:
     yield f"event: message_stop\ndata: {json.dumps({'type': 'message_stop'})}\n\n"
 
 
-def _has_extended_context_beta(raw_request: FastAPIRequest) -> bool:
-    """Check if the request includes an extended-context beta header.
-
-    Claude CLI sends ``anthropic-beta: … context-1m-YYYY-MM-DD …`` (comma-separated)
-    when the user selects a ``[1m]`` model variant.
-    """
-    header = raw_request.headers.get("anthropic-beta", "")
-    return "context-1m" in header.lower()
-
-
 # Anthropic beta header that lets clients append ``{"role": "system", ...}``
 # entries directly into ``messages[]`` mid-conversation, preserving prompt
 # cache locality instead of rebuilding the top-level ``system`` field.
@@ -309,44 +299,11 @@ async def messages(request: AnthropicMessagesRequest, raw_request: FastAPIReques
 
     model_router = get_router()
 
-    # If the client signals extended-context (e.g. Claude CLI [1m] suffix),
-    # try to resolve the -1m variant of the requested model.
-    effective_model = request.model
-    if _has_extended_context_beta(raw_request):
-        variant = await model_router.find_extended_context_model(request.model)
-        if variant is not None:
-            logger.info(
-                "Extended-context header detected, rewriting model %s -> %s",
-                request.model,
-                variant,
-            )
-            effective_model = variant
-
     # Translate Anthropic request to OpenAI format
     chat_request = translate_anthropic_to_openai(request)
-    if effective_model != request.model:
-        chat_request = ChatRequest(
-            model=effective_model,
-            messages=chat_request.messages,
-            temperature=chat_request.temperature,
-            max_tokens=chat_request.max_tokens,
-            stream=chat_request.stream,
-            tools=chat_request.tools,
-            tool_choice=chat_request.tool_choice,
-            thinking_budget=chat_request.thinking_budget,
-            thinking_type=chat_request.thinking_type,
-            reasoning_effort=chat_request.reasoning_effort,
-            use_responses_api=chat_request.use_responses_api,
-            extra=chat_request.extra,
-        )
 
-    # Resolve thinking budget from server config FIRST so that the
-    # reasoning-variant rewrite below sees the effective budget (otherwise a
-    # config-only thinking budget would never trigger a -high/-xhigh route).
-    chat_request = await _apply_thinking_budget(model_router, chat_request, effective_model)
-
-    chat_request = await model_router.rewrite_to_reasoning_variant(chat_request)
-    effective_model = chat_request.model
+    # Resolve thinking budget from server config.
+    chat_request = await _apply_thinking_budget(model_router, chat_request, request.model)
 
     # Experimental: opt this request into Copilot's /responses endpoint when
     # the flag is on. The Copilot provider gates on the resolved provider +

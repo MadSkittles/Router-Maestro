@@ -52,8 +52,6 @@ def mock_router_success():
     mock.chat_completion = AsyncMock(return_value=(response, "anthropic"))
     mock._resolve_provider = AsyncMock(return_value=("anthropic", "claude-opus-4-8", MagicMock()))
     mock.get_model_info = AsyncMock(return_value=None)
-    mock.find_extended_context_model = AsyncMock(return_value=None)
-    mock.rewrite_to_reasoning_variant = AsyncMock(side_effect=lambda r: r)
     return mock
 
 
