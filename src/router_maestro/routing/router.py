@@ -1,7 +1,6 @@
 """Model router with priority-based selection and fallback."""
 
 from collections.abc import AsyncIterator, Awaitable, Callable
-from dataclasses import replace
 from typing import TypeVar
 
 from router_maestro.auth import ApiKeyCredential, AuthManager
@@ -29,12 +28,9 @@ from router_maestro.providers import (
 from router_maestro.utils import get_logger
 from router_maestro.utils.cache import TTLCache
 from router_maestro.utils.model_match import (
-    find_extended_context_variant,
-    find_reasoning_variant,
     fuzzy_match_model,
 )
 from router_maestro.utils.model_sort import sort_models
-from router_maestro.utils.reasoning import VARIANT_EFFORTS, budget_to_effort
 
 logger = get_logger("routing")
 
@@ -264,77 +260,6 @@ class Router:
         await self._ensure_models_cache()
         entry = self._models_cache.get(model_id)
         return entry[1] if entry else None
-
-    async def find_extended_context_model(self, model_id: str) -> str | None:
-        """Find the extended-context (-1m) variant of a model in the cache.
-
-        Args:
-            model_id: Base model ID from the request.
-
-        Returns:
-            The cache key of the 1m variant, or None if not available.
-        """
-        await self._ensure_models_cache()
-        return find_extended_context_variant(model_id, self._models_cache)
-
-    async def find_reasoning_variant_model(self, model_id: str, effort: str | None) -> str | None:
-        """Find a `<model>-<effort>` variant in the cache.
-
-        For example, given ``claude-opus-4.7`` and ``effort="high"``, returns the
-        cache key of ``claude-opus-4.7-high`` if present. Used by entry routes to
-        transparently route requests with high/xhigh reasoning to dedicated
-        Copilot model variants whose name encodes the effort.
-
-        Resolves the request's provider first so the variant lookup stays
-        scoped to the same provider — otherwise a bare-key match could silently
-        cross providers (e.g. an ``anthropic/claude-opus-4.7`` request landing
-        on a ``github-copilot/claude-opus-4.7-high`` cache entry).
-        """
-        if effort not in VARIANT_EFFORTS:
-            return None
-        await self._ensure_models_cache()
-
-        # Lock the lookup to the provider that will actually serve this model —
-        # otherwise a bare-key match could silently cross providers.
-        scoped = model_id
-        if "/" not in model_id:
-            try:
-                provider_name, _actual, _provider = await self._resolve_provider(model_id)
-                scoped = f"{provider_name}/{model_id}"
-            except ProviderError:
-                pass
-
-        return find_reasoning_variant(scoped, effort, self._models_cache)
-
-    async def rewrite_to_reasoning_variant(self, request):
-        """Return ``request`` rewritten to a high/xhigh effort variant if one exists.
-
-        When the catalog publishes a dedicated effort-encoded variant (e.g.
-        ``claude-opus-4.7-high``), swap the request's model to it and clear the
-        explicit reasoning fields so downstream providers don't double-inject
-        them. No-op for low/medium efforts or when no variant is cached.
-
-        Accepts any dataclass with ``model``/``reasoning_effort`` (and
-        optionally ``thinking_budget``) — works for both ``ChatRequest`` and
-        ``ResponsesRequest``.
-        """
-        thinking_budget = getattr(request, "thinking_budget", None)
-        desired = request.reasoning_effort or budget_to_effort(thinking_budget)
-        if desired not in VARIANT_EFFORTS:
-            return request
-        variant = await self.find_reasoning_variant_model(request.model, desired)
-        if variant is None:
-            return request
-        logger.info(
-            "Reasoning effort=%s, rewriting model %s -> %s",
-            desired,
-            request.model,
-            variant,
-        )
-        clears: dict = {"model": variant, "reasoning_effort": None}
-        if hasattr(request, "thinking_budget"):
-            clears["thinking_budget"] = None
-        return replace(request, **clears)
 
     async def _resolve_provider(self, model_id: str) -> tuple[str, str, BaseProvider]:
         """Resolve model_id to provider.

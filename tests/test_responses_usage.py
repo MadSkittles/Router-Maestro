@@ -28,9 +28,6 @@ def test_responses_usage_schema_preserves_detail_fields():
 
 
 class _StubRouter:
-    async def rewrite_to_reasoning_variant(self, request):
-        return request
-
     async def responses_completion(self, request):
         return (
             InternalResponsesResponse(

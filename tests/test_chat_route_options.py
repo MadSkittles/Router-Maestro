@@ -11,9 +11,6 @@ class _CapturingRouter:
     def __init__(self):
         self.request = None
 
-    async def rewrite_to_reasoning_variant(self, request):
-        return request
-
     async def chat_completion(self, request):
         self.request = request
         return ChatResponse(content="ok", model=request.model), "test-provider"

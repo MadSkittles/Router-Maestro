@@ -33,8 +33,8 @@ def test_claude_47_cold_start_clamps_xhigh_and_max_to_high():
 
 
 def test_claude_46_uses_reasoning_effort_not_thinking_budget():
-    """opus-4.6 / sonnet-4.6 / opus-4.6-1m on Copilot expose effort, not budget."""
-    for model in ("claude-opus-4.6", "claude-opus-4.6-1m", "claude-sonnet-4.6"):
+    """opus-4.6 / sonnet-4.6 on Copilot expose effort, not budget."""
+    for model in ("claude-opus-4.6", "claude-sonnet-4.6"):
         p = _base_payload()
         apply_copilot_chat_reasoning(p, model, 16000, None)
         assert "thinking_budget" not in p, model
@@ -66,21 +66,6 @@ def test_claude_old_models_send_no_reasoning_field():
         apply_copilot_chat_reasoning(p, model, 16000, "high")
         assert "thinking_budget" not in p, model
         assert "reasoning_effort" not in p, model
-
-
-def test_claude_47_variants_send_no_reasoning_field():
-    """The -high / -xhigh / -1m-internal variants encode the tier in their
-    name; the provider must not also inject reasoning_effort.
-    """
-    for model in (
-        "claude-opus-4.7-high",
-        "claude-opus-4.7-xhigh",
-        "claude-opus-4.7-1m-internal",
-    ):
-        p = _base_payload()
-        apply_copilot_chat_reasoning(p, model, 16000, "high")
-        assert "reasoning_effort" not in p, model
-        assert "thinking_budget" not in p, model
 
 
 def test_claude_47_dated_alias_still_supports_reasoning():
