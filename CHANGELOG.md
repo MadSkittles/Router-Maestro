@@ -4,6 +4,26 @@ All notable changes to Router-Maestro are documented here.
 
 ---
 
+## v0.3.25 (2026-06-16)
+
+### Maintenance
+
+- **Remove dead 1M-context and reasoning effort-suffix adaptation logic (#103).**
+  GitHub Copilot dropped its dedicated Opus 4.6/4.7 suffix variants (`-1m`,
+  `-1m-internal`, `-high`, `-xhigh`), so the runtime rewrite chains that
+  targeted those model names were permanently no-ops and have been removed:
+  the `context-1m` beta-header rewrite path (`find_extended_context_model` /
+  `find_extended_context_variant`) and the reasoning effort-suffix variant path
+  (`find_reasoning_variant` / `rewrite_to_reasoning_variant` and its three route
+  call sites). The 4.6/4.7 `[1m]` CLI config keys now map straight to their base
+  catalog ids — matching the existing 4.8/sonnet-4.6 handling — since those base
+  entries already advertise a 1M context window, leaving the `[1m]` suffix to
+  only raise Claude Code's auto-compact threshold. Base-model `reasoning_effort`
+  injection for 4.6/4.7/sonnet-4.6 is unchanged. Net −525 lines; full unit suite
+  and the live integration matrix pass.
+
+---
+
 ## v0.3.24 (2026-06-09)
 
 ### Fixes
