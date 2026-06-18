@@ -274,6 +274,31 @@ class TestRouterModelResolutionAsync:
         assert model_id == "claude-sonnet-4-5-20250929"
 
     @pytest.mark.asyncio
+    async def test_get_model_info_uses_fuzzy_match_for_dash_dot_alias(self):
+        """Metadata lookup must match the same dash/dot aliases routing accepts."""
+        router = Router.__new__(Router)
+        opus = ModelInfo(
+            id="claude-opus-4.6",
+            name="Claude Opus 4.6",
+            provider="github-copilot",
+            max_output_tokens=64000,
+            supports_thinking=True,
+        )
+        router.providers = {"github-copilot": MockProvider(name="github-copilot", models=[opus])}
+        _init_router_empty(router)
+        router._models_cache = {
+            "claude-opus-4.6": ("github-copilot", opus),
+            "github-copilot/claude-opus-4.6": ("github-copilot", opus),
+        }
+        _mark_models_cached(router)
+        _mark_providers_fresh(router)
+
+        result = await router.get_model_info("claude-opus-4-6")
+
+        assert result is opus
+        assert result.max_output_tokens == 64000
+
+    @pytest.mark.asyncio
     async def test_resolve_auto_route_model(self, router_with_providers):
         """Test resolving auto-route model."""
         _set_priorities(

@@ -259,7 +259,26 @@ class Router:
         """Get ModelInfo for a model, or None if not found."""
         await self._ensure_models_cache()
         entry = self._models_cache.get(model_id)
-        return entry[1] if entry else None
+        if entry:
+            return entry[1]
+
+        if model_id in self._fuzzy_cache:
+            matched_key = self._fuzzy_cache[model_id]
+            if matched_key is None:
+                return None
+            entry = self._models_cache.get(matched_key)
+            return entry[1] if entry else None
+
+        matched_key = fuzzy_match_model(model_id, self._models_cache)
+        self._fuzzy_cache[model_id] = matched_key
+        if matched_key is None:
+            return None
+
+        entry = self._models_cache.get(matched_key)
+        if entry:
+            logger.debug("Fuzzy matched model info '%s' -> '%s'", model_id, matched_key)
+            return entry[1]
+        return None
 
     async def _resolve_provider(self, model_id: str) -> tuple[str, str, BaseProvider]:
         """Resolve model_id to provider.

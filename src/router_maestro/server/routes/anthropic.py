@@ -222,6 +222,21 @@ async def _raw_body_has_inline_system(raw_request: FastAPIRequest) -> bool:
     return any(isinstance(m, dict) and m.get("role") == "system" for m in messages)
 
 
+async def _raw_body_thinking(raw_request: FastAPIRequest) -> dict | None:
+    """Return the original request ``thinking`` object, if it was a JSON object."""
+    try:
+        body = await raw_request.body()
+        if not body:
+            return None
+        payload = json.loads(body)
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    thinking = payload.get("thinking")
+    return thinking if isinstance(thinking, dict) else None
+
+
 def _mid_conv_system_rejection_response() -> JSONResponse:
     """Return a 400 that triggers Claude Code's mid-conv-system fallback.
 
@@ -264,10 +279,16 @@ def _mid_conv_system_rejection_response() -> JSONResponse:
 @router.post("/api/anthropic/v1/messages")
 async def messages(request: AnthropicMessagesRequest, raw_request: FastAPIRequest):
     """Handle Anthropic Messages API requests."""
+    parsed_thinking = request.thinking.model_dump(exclude_none=True) if request.thinking else None
+    raw_thinking = await _raw_body_thinking(raw_request)
     logger.info(
-        "Received Anthropic messages request: model=%s, stream=%s",
+        "Received Anthropic messages request: model=%s, stream=%s, max_tokens=%s, "
+        "thinking=%s, raw_thinking=%s",
         request.model,
         request.stream,
+        request.max_tokens,
+        parsed_thinking,
+        raw_thinking,
     )
 
     # Handle test model

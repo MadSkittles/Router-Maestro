@@ -9,6 +9,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from router_maestro.utils.reasoning import EFFORT_TO_BUDGET
+
 if TYPE_CHECKING:
     from router_maestro.config.priorities import ThinkingBudgetConfig
 
@@ -56,7 +58,7 @@ def normalize_thinking_budget(
     budget: int | None,
     max_output_tokens: int,
     min_budget: int = 1024,
-    max_budget: int = 32000,
+    max_budget: int = EFFORT_TO_BUDGET["max"],
 ) -> int | None:
     """Clamp thinking budget per Copilot Chat constraints.
 

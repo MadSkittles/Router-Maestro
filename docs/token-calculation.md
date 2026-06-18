@@ -95,15 +95,18 @@ async countToolTokens(tools): Promise<number> {
 
 ## Thinking Budget Normalization
 
-Both clamp thinking budget to `[1024, min(32000, max_output_tokens - 1)]`.
+Router-Maestro clamps thinking budget to `[1024, min(32768, max_output_tokens - 1)]`.
+The 32768 ceiling lines up with Router-Maestro's extended `reasoning_effort="max"`
+tier; Copilot Chat's native client clamp has historically used 32000.
 
-### Router-Maestro (`utils/context_window.py:49-63`)
+### Router-Maestro (`utils/context_window.py`)
 
 ```python
-def normalize_thinking_budget(budget, max_output_tokens, min_budget=1024, max_budget=32000):
+def normalize_thinking_budget(budget, max_output_tokens, min_budget=1024, max_budget=32768):
     if budget is None: return None
-    if max_output_tokens <= 1: return min_budget
-    return max(min_budget, min(budget, min(max_budget, max_output_tokens - 1)))
+    upper = min(max_budget, max_output_tokens - 1)
+    if upper < min_budget: return None
+    return max(min_budget, min(budget, upper))
 ```
 
 ### Copilot Chat (`chatEndpoint.ts:207-215`)
@@ -117,7 +120,9 @@ _getThinkingBudget(): number | undefined {
 }
 ```
 
-**Same clamping logic.** Difference: Copilot Chat reads from experiment config; Router-Maestro accepts as function parameter.
+Both preserve the protocol rule that `budget_tokens < max_tokens`. Router-Maestro's
+default ceiling is slightly higher so high client budgets can map to the local
+`max` reasoning tier before provider-specific catalog clamping.
 
 ---
 
