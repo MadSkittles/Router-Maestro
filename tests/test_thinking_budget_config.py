@@ -1,8 +1,21 @@
 """Tests for configurable thinking budget (Feature 4)."""
 
+from unittest.mock import MagicMock
+
+import pytest
+
 from router_maestro.config.priorities import ThinkingBudgetConfig
-from router_maestro.providers.base import ChatRequest, Message
+from router_maestro.providers.base import ChatRequest, Message, ModelInfo
+from router_maestro.routing.router import CACHE_TTL_SECONDS, Router
+from router_maestro.server.routes import anthropic as anthropic_route
+from router_maestro.server.routes.anthropic import _apply_thinking_budget
+from router_maestro.server.schemas.anthropic import (
+    AnthropicMessagesRequest,
+    AnthropicThinkingConfig,
+)
+from router_maestro.utils.cache import TTLCache
 from router_maestro.utils.context_window import resolve_thinking_budget
+from router_maestro.utils.reasoning import EFFORT_TO_BUDGET
 
 
 class TestResolveThinkingBudget:
@@ -192,3 +205,84 @@ class TestChatRequestWithThinking:
         req.with_thinking(thinking_budget=8000, thinking_type="enabled")
         assert req.thinking_budget is None
         assert req.thinking_type is None
+
+
+class TestAnthropicRouteThinkingBudget:
+    """Tests for route-level thinking budget resolution."""
+
+    @pytest.mark.asyncio
+    async def test_dash_alias_uses_catalog_max_output_for_client_budget(self, monkeypatch):
+        """claude-opus-4-6 should use claude-opus-4.6 metadata, not 16k fallback."""
+
+        monkeypatch.setattr(
+            "router_maestro.config.load_priorities_config",
+            lambda: type(
+                "Config",
+                (),
+                {"thinking": ThinkingBudgetConfig(default_budget=16000, auto_enable=False)},
+            )(),
+        )
+        model_info = ModelInfo(
+            id="claude-opus-4.6",
+            name="Claude Opus 4.6",
+            provider="github-copilot",
+            max_output_tokens=64000,
+            supports_thinking=True,
+        )
+        router = Router.__new__(Router)
+        router.providers = {}
+        router._models_cache = {
+            "claude-opus-4.6": ("github-copilot", model_info),
+            "github-copilot/claude-opus-4.6": ("github-copilot", model_info),
+        }
+        router._models_cache_ttl = TTLCache(CACHE_TTL_SECONDS)
+        router._models_cache_ttl.set(True)
+        router._priorities_cache = TTLCache(CACHE_TTL_SECONDS)
+        router._fuzzy_cache = {}
+        router._providers_ttl = TTLCache(CACHE_TTL_SECONDS)
+        router._providers_ttl.set(True)
+        request = ChatRequest(
+            model="claude-opus-4-6",
+            messages=[Message(role="user", content="hi")],
+            max_tokens=64000,
+            thinking_budget=63999,
+            thinking_type="enabled",
+        )
+
+        result = await _apply_thinking_budget(router, request, "claude-opus-4-6")
+
+        assert result.thinking_budget == EFFORT_TO_BUDGET["max"]
+        assert result.thinking_type == "enabled"
+
+    @pytest.mark.asyncio
+    async def test_messages_logs_inbound_thinking_metadata(self, monkeypatch):
+        """Inbound logs include raw thinking metadata needed to debug client budgets."""
+
+        class RawRequest:
+            headers = {}
+
+            async def body(self) -> bytes:
+                return (
+                    b'{"model":"claude-opus-4-6","max_tokens":64000,'
+                    b'"thinking":{"type":"enabled","budget_tokens":63999},'
+                    b'"messages":[{"role":"user","content":"hi"}]}'
+                )
+
+        request = AnthropicMessagesRequest(
+            model="test",
+            max_tokens=64000,
+            messages=[{"role": "user", "content": "hi"}],
+            thinking=AnthropicThinkingConfig(type="enabled", budget_tokens=63999),
+        )
+        log = MagicMock()
+        monkeypatch.setattr(anthropic_route, "logger", log)
+
+        await anthropic_route.messages(request, RawRequest())
+
+        log.info.assert_called_once()
+        _message, model, stream, max_tokens, thinking, raw_thinking = log.info.call_args.args
+        assert model == "test"
+        assert stream is False
+        assert max_tokens == 64000
+        assert thinking == {"type": "enabled", "budget_tokens": 63999}
+        assert raw_thinking == {"type": "enabled", "budget_tokens": 63999}

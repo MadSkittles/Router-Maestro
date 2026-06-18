@@ -5,6 +5,7 @@ from router_maestro.utils.context_window import (
     calculate_context_budget,
     normalize_thinking_budget,
 )
+from router_maestro.utils.reasoning import EFFORT_TO_BUDGET
 
 
 class TestCalculateContextBudget:
@@ -142,12 +143,17 @@ class TestNormalizeThinkingBudget:
         assert result == 8000
 
     def test_budget_at_max_boundary(self):
-        """Budget at the max cap (32000) with high max_output."""
-        # budget=32000, max_output=100000
-        # cap = min(32000, 99999) = 32000
-        # result = max(1024, min(32000, 32000)) = 32000
-        result = normalize_thinking_budget(budget=32000, max_output_tokens=100000)
-        assert result == 32000
+        """Budget at the max cap with high max_output."""
+        result = normalize_thinking_budget(
+            budget=EFFORT_TO_BUDGET["max"],
+            max_output_tokens=100000,
+        )
+        assert result == EFFORT_TO_BUDGET["max"]
+
+    def test_default_max_budget_reaches_max_reasoning_tier(self):
+        """High client budgets should normalize to the configured max effort tier."""
+        result = normalize_thinking_budget(budget=63999, max_output_tokens=64000)
+        assert result == EFFORT_TO_BUDGET["max"]
 
     def test_custom_min_max(self):
         """Custom min/max budget boundaries."""
