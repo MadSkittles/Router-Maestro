@@ -42,6 +42,7 @@ Router-Maestro acts as a proxy that gives you access to models from multiple pro
 - [CLI Reference](#cli-reference)
 - [API Reference](#api-reference)
 - [Configuration](#configuration)
+  - [Metrics & Observability](#metrics--observability)
 - [Deployment](#deployment)
   - [Architecture](#architecture)
   - [Server and Client API Keys](#server-and-client-api-keys)
@@ -404,6 +405,28 @@ Force immediate reload:
 ```bash
 router-maestro model refresh
 ```
+
+### Metrics & Observability
+
+Router-Maestro exposes a top-level Prometheus endpoint at `/metrics` with
+HTTP request counters, request duration histograms, and request IDs on
+responses via `X-Request-ID`. Streaming request durations are recorded after
+the response body finishes.
+
+```bash
+curl http://localhost:8080/metrics
+```
+
+By default `/metrics` is public. Set `ROUTER_MAESTRO_METRICS_TOKEN` to require
+an independent metrics token:
+
+```bash
+ROUTER_MAESTRO_METRICS_TOKEN="metrics-secret" router-maestro server start
+curl http://localhost:8080/metrics -H "Authorization: Bearer metrics-secret"
+```
+
+See [docs/observability.md](docs/observability.md) for scrape examples, metric
+labels, and troubleshooting guidance.
 
 ## Deployment
 

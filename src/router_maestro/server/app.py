@@ -1,14 +1,24 @@
 """FastAPI application for router-maestro."""
 
+import hmac
 import os
 from contextlib import asynccontextmanager
 
-from fastapi import Depends, FastAPI
+from fastapi import Depends, FastAPI, HTTPException, Request, Response, status
 from fastapi.middleware.cors import CORSMiddleware
 
 from router_maestro import __version__
 from router_maestro.routing import get_router
-from router_maestro.server.middleware import verify_api_key
+from router_maestro.server.middleware import (
+    REQUEST_ID_HEADER,
+    ObservabilityMiddleware,
+    verify_api_key,
+)
+from router_maestro.server.observability import (
+    CONTENT_TYPE_LATEST,
+    create_http_metrics,
+    render_metrics,
+)
 from router_maestro.server.routes import (
     admin_router,
     anthropic_router,
@@ -20,6 +30,7 @@ from router_maestro.server.routes import (
 from router_maestro.utils import get_logger, setup_logging
 
 logger = get_logger("server")
+METRICS_TOKEN_ENV = "ROUTER_MAESTRO_METRICS_TOKEN"
 
 
 @asynccontextmanager
@@ -50,6 +61,47 @@ async def lifespan(app: FastAPI):
     logger.info("Router-Maestro server shutting down")
 
 
+def get_metrics_token() -> str | None:
+    """Get the optional metrics endpoint token from the environment."""
+    return os.environ.get(METRICS_TOKEN_ENV)
+
+
+def verify_metrics_access(request: Request) -> None:
+    """Verify access to the metrics endpoint when a metrics token is configured."""
+    metrics_token = get_metrics_token()
+    if not metrics_token:
+        return
+
+    auth_header = request.headers.get("Authorization")
+    provided_token = None
+    if auth_header:
+        if auth_header.startswith("Bearer "):
+            provided_token = auth_header[7:]
+        else:
+            provided_token = auth_header
+
+    provided_token_bytes = (provided_token or "").encode("utf-8")
+    metrics_token_bytes = metrics_token.encode("utf-8")
+    if not hmac.compare_digest(provided_token_bytes, metrics_token_bytes):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid metrics token",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+
+async def unhandled_exception_handler(request: Request, _exc: Exception) -> Response:
+    """Return the default 500 response with the existing request id header."""
+    request_id = getattr(request.state, "request_id", None)
+    headers = {REQUEST_ID_HEADER: request_id} if isinstance(request_id, str) else None
+    return Response(
+        content="Internal Server Error",
+        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        headers=headers,
+        media_type="text/plain",
+    )
+
+
 def create_app() -> FastAPI:
     """Create the FastAPI application."""
     app = FastAPI(
@@ -58,6 +110,8 @@ def create_app() -> FastAPI:
         version=__version__,
         lifespan=lifespan,
     )
+    app.state.http_metrics = create_http_metrics()
+    app.add_exception_handler(Exception, unhandled_exception_handler)
 
     # Add CORS middleware
     app.add_middleware(
@@ -67,6 +121,7 @@ def create_app() -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+    app.add_middleware(ObservabilityMiddleware)
 
     # Include routers with API key verification
     app.include_router(chat_router, dependencies=[Depends(verify_api_key)])
@@ -89,6 +144,15 @@ def create_app() -> FastAPI:
     async def health():
         """Health check endpoint."""
         return {"status": "healthy"}
+
+    @app.get("/metrics")
+    async def metrics(request: Request):
+        """Prometheus metrics endpoint."""
+        verify_metrics_access(request)
+        return Response(
+            content=render_metrics(app.state.http_metrics.registry),
+            media_type=CONTENT_TYPE_LATEST,
+        )
 
     return app
 
