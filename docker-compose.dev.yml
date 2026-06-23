@@ -6,7 +6,14 @@ services:
     container_name: router-maestro
     restart: unless-stopped
     ports:
-      - "${ROUTER_MAESTRO_PORT:-8080}:8080"
+      # Bind to IPv4 loopback only. A bare "8080:8080" publishes dual-stack
+      # (0.0.0.0 + [::]), which makes WSL2/Docker Desktop spin up an IPv6
+      # `wslrelay` on [::1]:8080. After a host sleep/restart that relay can be
+      # orphaned — it accepts connections but never responds, so clients that
+      # resolve `localhost` to ::1 first (e.g. Node) hang for ~6s. Pinning the
+      # host side to 127.0.0.1 means no IPv6 relay is ever created, and stray
+      # ::1 attempts get an instant connection-refused + IPv4 fallback.
+      - "127.0.0.1:${ROUTER_MAESTRO_PORT:-8080}:8080"
     environment:
       - ROUTER_MAESTRO_API_KEY=${ROUTER_MAESTRO_API_KEY:-}
       - ROUTER_MAESTRO_LOG_LEVEL=${ROUTER_MAESTRO_LOG_LEVEL:-INFO}
