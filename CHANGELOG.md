@@ -4,7 +4,7 @@ All notable changes to Router-Maestro are documented here.
 
 ---
 
-## Unreleased
+## v0.3.27 (2026-06-23)
 
 ### Features
 
