@@ -1049,7 +1049,7 @@ wheels = [
 
 [[package]]
 name = "router-maestro"
-version = "0.3.27"
+version = "0.3.28"
 source = { editable = "." }
 dependencies = [
     { name = "aiosqlite" },
