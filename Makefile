@@ -1,4 +1,4 @@
-.PHONY: help install dev test integration-test lint format clean build push run stop logs shell docker-up docker-down docker-logs buildx-setup build-multiarch dist publish publish-test dev-up dev-down dev-logs dev-build
+.PHONY: help install dev test integration-test lint format clean build push run stop logs shell docker-up docker-down docker-logs docker-rolling-restart docker-rolling-update buildx-setup build-multiarch dist publish publish-test dev-up dev-down dev-logs dev-build
 
 # Variables
 VERSION := $(shell grep '^version' pyproject.toml | head -1 | cut -d'"' -f2)
@@ -36,9 +36,11 @@ help:
 	@echo "  make shell            Open shell in container"
 	@echo ""
 	@echo "Docker Compose (Production):"
-	@echo "  make docker-up   Start services (Traefik + Router-Maestro)"
-	@echo "  make docker-down Stop services"
-	@echo "  make docker-logs View logs"
+	@echo "  make docker-up              Start services (Traefik + Router-Maestro x2)"
+	@echo "  make docker-down            Stop services"
+	@echo "  make docker-logs            View logs"
+	@echo "  make docker-rolling-restart Zero-downtime restart (one instance at a time)"
+	@echo "  make docker-rolling-update  Pull new image and rolling-replace instances"
 	@echo ""
 	@echo "Docker Compose (Dev - local build):"
 	@echo "  make dev-up      Build from source and start"
@@ -139,6 +141,37 @@ docker-logs:
 
 docker-restart:
 	docker compose restart router-maestro
+
+docker-rolling-restart:
+	@echo "Rolling restart: restarting instances one at a time..."
+	@containers=$$(docker compose ps -q router-maestro); \
+	for c in $$containers; do \
+		echo "Restarting $$c..."; \
+		docker restart $$c; \
+		echo "Waiting for $$c to become healthy..."; \
+		timeout=30; while [ $$timeout -gt 0 ]; do \
+			status=$$(docker inspect --format='{{.State.Health.Status}}' $$c 2>/dev/null); \
+			if [ "$$status" = "healthy" ]; then break; fi; \
+			sleep 2; timeout=$$((timeout - 2)); \
+		done; \
+		if [ $$timeout -le 0 ]; then echo "WARNING: $$c did not become healthy in 30s"; fi; \
+		echo "$$c is healthy, continuing..."; \
+	done
+	@echo "Rolling restart complete."
+
+docker-rolling-update:
+	@echo "Rolling update: pulling new image and replacing instances one at a time..."
+	docker compose pull router-maestro
+	docker compose up -d --no-recreate router-maestro
+	@containers=$$(docker compose ps -q router-maestro); \
+	for c in $$containers; do \
+		echo "Recreating $$c with new image..."; \
+		docker stop $$c && docker rm $$c; \
+		docker compose up -d --scale router-maestro=2 --no-recreate router-maestro; \
+		echo "Waiting for new instance to become healthy..."; \
+		sleep 10; \
+	done
+	@echo "Rolling update complete."
 
 docker-pull:
 	docker compose pull

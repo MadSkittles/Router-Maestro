@@ -45,8 +45,13 @@ services:
 
   router-maestro:
     image: likanwen/router-maestro:latest
-    container_name: router-maestro
     restart: unless-stopped
+    deploy:
+      replicas: 2
+      update_config:
+        parallelism: 1
+        delay: 10s
+        order: start-first
     environment:
       - ROUTER_MAESTRO_API_KEY=${ROUTER_MAESTRO_API_KEY:-}
       - ROUTER_MAESTRO_LOG_LEVEL=${ROUTER_MAESTRO_LOG_LEVEL:-INFO}
@@ -63,6 +68,10 @@ services:
       - "traefik.http.routers.router-maestro.entrypoints=websecure"
       - "traefik.http.routers.router-maestro.tls.certresolver=letsencrypt"
       - "traefik.http.services.router-maestro.loadbalancer.server.port=8080"
+      # Health check — Traefik only routes to healthy instances
+      - "traefik.http.services.router-maestro.loadbalancer.healthcheck.path=/health"
+      - "traefik.http.services.router-maestro.loadbalancer.healthcheck.interval=5s"
+      - "traefik.http.services.router-maestro.loadbalancer.healthcheck.timeout=3s"
 
 volumes:
   traefik-certificates:
