@@ -5,13 +5,16 @@ import contextlib
 import json
 import time
 from collections.abc import AsyncIterator
-from typing import Any
+from typing import Any, NoReturn
 from uuid import uuid4
 
 import httpx
 
 from router_maestro.auth import AuthManager, AuthType
-from router_maestro.auth.github_oauth import get_copilot_token
+from router_maestro.auth.github_oauth import (
+    GitHubOAuthError,
+    get_copilot_token,
+)
 from router_maestro.auth.storage import OAuthCredential
 from router_maestro.providers.base import (
     TIMEOUT_NON_STREAMING,
@@ -205,6 +208,9 @@ def apply_copilot_chat_reasoning(
 # Model cache TTL in seconds (5 minutes)
 MODELS_CACHE_TTL = 300
 
+# HTTP statuses that may indicate a stale/invalid Copilot token.
+_AUTH_RETRY_STATUSES = frozenset({401, 403})
+
 
 def _thinking_requested(request: ChatRequest) -> bool:
     """Whether the client opted into reasoning passthrough.
@@ -274,8 +280,14 @@ class CopilotProvider(BaseProvider):
         cred = self.auth_manager.get_credential("github-copilot")
         return cred is not None and cred.type == AuthType.OAUTH
 
-    async def ensure_token(self) -> None:
-        """Ensure we have a valid Copilot token, refreshing if needed."""
+    async def ensure_token(self, force: bool = False) -> None:
+        """Ensure we have a valid Copilot token, refreshing if needed.
+
+        Args:
+            force: Re-mint the Copilot token even if the locally-cached one
+                looks unexpired. Used by the 401/403 retry path when the
+                upstream rejects a token our clock still considers valid.
+        """
         cred = self.auth_manager.get_credential("github-copilot")
         if not cred or not isinstance(cred, OAuthCredential):
             logger.error("Not authenticated with GitHub Copilot")
@@ -287,14 +299,30 @@ class CopilotProvider(BaseProvider):
         current_time = int(time.time())
 
         # Check if we need to refresh (token expired or will expire soon)
-        if self._cached_token and self._token_expires > current_time + 60:
+        if not force and self._cached_token and self._token_expires > current_time + 60:
             return  # Token still valid
+
+        # Snapshot the token we're trying to replace so that, after we win the
+        # lock, we can tell whether another coroutine already re-minted it.
+        token_before_lock = self._cached_token
 
         async with self._token_refresh_lock:
             # Double-checked: another coroutine may have refreshed while we waited.
             current_time = int(time.time())
-            if self._cached_token and self._token_expires > current_time + 60:
+            if not force and self._cached_token and self._token_expires > current_time + 60:
                 return
+            # Force path: if another coroutine already swapped in a fresh token
+            # while we waited for the lock, reuse it instead of re-minting. This
+            # collapses an N-request 401 storm into a single mint.
+            if force and self._cached_token and self._cached_token != token_before_lock:
+                return
+
+            # Re-read the credential under the lock: another coroutine may have
+            # persisted a fresh Copilot token while we waited; use the latest.
+            cred = self.auth_manager.get_credential("github-copilot")
+            if not cred or not isinstance(cred, OAuthCredential):
+                logger.error("Not authenticated with GitHub Copilot")
+                raise ProviderError("Not authenticated with GitHub Copilot", status_code=401)
 
             logger.debug("Refreshing Copilot token")
             # Use a fresh short-lived client for token refresh to avoid blocking
@@ -302,7 +330,23 @@ class CopilotProvider(BaseProvider):
             try:
                 async with httpx.AsyncClient(timeout=TIMEOUT_NON_STREAMING) as client:
                     copilot_token = await get_copilot_token(client, cred.refresh)
-            except httpx.HTTPError as e:
+            except httpx.HTTPStatusError as e:
+                if e.response.status_code in (401, 403):
+                    logger.error(
+                        "GitHub Copilot authentication failed (%s)", e.response.status_code
+                    )
+                    # Keep retryable=True so the router can still fall back to
+                    # other configured providers; the message tells the user how
+                    # to recover if Copilot is their only provider.
+                    raise ProviderError(
+                        "GitHub Copilot authentication expired. If Copilot is your only "
+                        "provider, re-authenticate: `router-maestro auth login github-copilot`.",
+                        status_code=401,
+                        retryable=True,
+                    )
+                logger.error("Failed to refresh Copilot token: %s", e)
+                raise ProviderError(f"Failed to refresh Copilot token: {e}", retryable=True)
+            except (httpx.HTTPError, GitHubOAuthError) as e:
                 logger.error("Failed to refresh Copilot token: %s", e)
                 raise ProviderError(f"Failed to refresh Copilot token: {e}", retryable=True)
 
@@ -310,16 +354,139 @@ class CopilotProvider(BaseProvider):
             self._token_expires = copilot_token.expires_at
             self._api_base = copilot_token.api_endpoint or self._api_base or COPILOT_BASE_URL
 
-            # Update stored credential with new access token (immutable pattern)
-            updated_cred = OAuthCredential(
-                refresh=cred.refresh,
-                access=copilot_token.token,
-                expires=copilot_token.expires_at,
-                api_endpoint=copilot_token.api_endpoint or cred.api_endpoint,
+            # Update stored credential with the new access token (immutable pattern).
+            await self._persist_credential(
+                OAuthCredential(
+                    refresh=cred.refresh,
+                    access=copilot_token.token,
+                    expires=copilot_token.expires_at,
+                    api_endpoint=copilot_token.api_endpoint or cred.api_endpoint,
+                )
             )
-            self.auth_manager.storage.set("github-copilot", updated_cred)
-            await asyncio.to_thread(self.auth_manager.save)
             logger.debug("Copilot token refreshed, expires at %d", copilot_token.expires_at)
+
+    async def _persist_credential(self, cred: OAuthCredential) -> None:
+        """Store and flush a credential to auth.json off the event loop."""
+        self.auth_manager.storage.set("github-copilot", cred)
+        await asyncio.to_thread(self.auth_manager.save)
+
+    async def _refresh_for_auth_status(self, path: str, status_code: int) -> bool:
+        """Decide whether an auth-status response warrants a forced re-mint.
+
+        Shared by every Copilot call site (chat, responses, models — streaming
+        and not) so the retry policy lives in exactly one place. Only 401/403
+        trigger a refresh; 429/5xx pass through to the caller. A 403 we can't
+        heal (policy/entitlement/quota) just costs one wasted re-mint+retry,
+        which is cheaper than a token-age heuristic that would blind us to a
+        genuinely revoked token in its first seconds. Returns True iff a forced
+        refresh was performed and the caller should retry once.
+        """
+        if status_code not in _AUTH_RETRY_STATUSES:
+            return False
+        logger.info(
+            "Copilot %s returned %d; forcing token refresh and retrying",
+            path,
+            status_code,
+        )
+        await self.ensure_token(force=True)
+        return True
+
+    def _raise_auth_failure(self, path: str, status_code: int) -> NoReturn:
+        """Raise a retryable auth error for a 401/403 that survived the retry.
+
+        Centralizes the policy so every call site (chat, responses, models —
+        streaming and not) treats a post-retry auth rejection identically:
+        retryable so the router can fall back to other configured providers,
+        with a message that tells the user how to recover if Copilot is their
+        only provider.
+        """
+        logger.error("Copilot %s still returned %d after token refresh", path, status_code)
+        raise ProviderError(
+            f"Copilot authentication rejected ({status_code}) after refresh. If Copilot is "
+            "your only provider, re-authenticate: `router-maestro auth login github-copilot`.",
+            status_code=status_code,
+            retryable=True,
+        )
+
+    async def _send_with_auth_retry(
+        self,
+        method: str,
+        path: str,
+        *,
+        client: httpx.AsyncClient | None = None,
+        json: dict | None = None,
+        headers_kwargs: dict | None = None,
+        timeout: Any = TIMEOUT_NON_STREAMING,
+    ) -> httpx.Response:
+        """Send a non-streaming Copilot request, force-refreshing once on 401/403.
+
+        Shared by chat/responses (POST, shared pool) and models (GET, fresh
+        short-lived ``client``). Auth rejections on a token our clock still
+        considers valid self-heal by re-minting and retrying once; a 401/403
+        that survives the retry raises a retryable auth error so the router can
+        fall back. 429/5xx pass through unchanged for the caller to handle.
+        """
+        client = client or self._get_client()
+        headers_kwargs = headers_kwargs or {}
+        for attempt in range(2):
+            if method == "GET":
+                response = await client.get(
+                    self._url(path),
+                    headers=self._get_headers(**headers_kwargs),
+                    timeout=timeout,
+                )
+            else:
+                response = await client.post(
+                    self._url(path),
+                    json=json,
+                    headers=self._get_headers(**headers_kwargs),
+                    timeout=timeout,
+                )
+            if attempt == 0 and await self._refresh_for_auth_status(path, response.status_code):
+                continue
+            if response.status_code in _AUTH_RETRY_STATUSES:
+                self._raise_auth_failure(path, response.status_code)
+            return response
+        # Unreachable: attempt 1 always returns or raises above.
+        return response
+
+    @contextlib.asynccontextmanager
+    async def _stream_with_auth_retry(
+        self, path: str, *, json: dict, headers_kwargs: dict
+    ) -> "AsyncIterator[httpx.Response]":
+        """Open a Copilot stream, force-refreshing and retrying once on 401/403.
+
+        Mirrors ``_send_with_auth_retry`` for streaming. The 401/403 is detected
+        from the response status *before* any chunk is yielded, so the retry
+        never replays partial output. A 401/403 that survives the retry raises a
+        retryable auth error (consistent with the non-streaming path); other
+        statuses are yielded for the caller to pre-read and raise on.
+        """
+        client = self._get_client()
+        for attempt in range(2):
+            cm = client.stream(
+                "POST", self._url(path), json=json, headers=self._get_headers(**headers_kwargs)
+            )
+            response = await cm.__aenter__()
+            if attempt == 0 and response.status_code in _AUTH_RETRY_STATUSES:
+                with contextlib.suppress(Exception):
+                    await response.aread()
+                await cm.__aexit__(None, None, None)
+                if await self._refresh_for_auth_status(path, response.status_code):
+                    continue
+            # A 401/403 surviving the retry is an unrecoverable auth failure —
+            # raise the shared retryable error rather than yielding a dead
+            # response for the caller to re-read.
+            if response.status_code in _AUTH_RETRY_STATUSES:
+                with contextlib.suppress(Exception):
+                    await response.aread()
+                await cm.__aexit__(None, None, None)
+                self._raise_auth_failure(path, response.status_code)
+            try:
+                yield response
+            finally:
+                await cm.__aexit__(None, None, None)
+            return
 
     def _url(self, path: str) -> str:
         """Build a Copilot API URL from the token-advertised API base."""
@@ -545,13 +712,12 @@ class CopilotProvider(BaseProvider):
             payload.get("thinking_budget"),
             payload.get("reasoning_effort"),
         )
-        client = self._get_client()
         try:
-            response = await client.post(
-                self._url(COPILOT_CHAT_PATH),
+            response = await self._send_with_auth_retry(
+                "POST",
+                COPILOT_CHAT_PATH,
                 json=payload,
-                headers=self._get_headers(vision_request=has_images, messages=request.messages),
-                timeout=TIMEOUT_NON_STREAMING,
+                headers_kwargs={"vision_request": has_images, "messages": request.messages},
             )
             response.raise_for_status()
             data = response.json()
@@ -710,13 +876,11 @@ class CopilotProvider(BaseProvider):
             payload.get("thinking_budget"),
             payload.get("reasoning_effort"),
         )
-        client = self._get_client()
         try:
-            async with client.stream(
-                "POST",
-                self._url(COPILOT_CHAT_PATH),
+            async with self._stream_with_auth_retry(
+                COPILOT_CHAT_PATH,
                 json=payload,
-                headers=self._get_headers(vision_request=has_images, messages=request.messages),
+                headers_kwargs={"vision_request": has_images, "messages": request.messages},
             ) as response:
                 # Streamed responses defer body reads; if the upstream returns
                 # an error status, pull the body *inside* the stream context
@@ -830,16 +994,16 @@ class CopilotProvider(BaseProvider):
                 logger.debug("Using cached Copilot models (%d models)", len(cached))
                 return cached
 
-        await self.ensure_token()
-
         logger.debug("Fetching Copilot models from API")
         # Use a fresh short-lived client to avoid blocking on the shared
         # streaming HTTP/2 connection pool
         try:
+            # Mint inside the try so a dead-token failure degrades to the stale
+            # cache (below) instead of hard-failing the models endpoint.
+            await self.ensure_token()
             async with httpx.AsyncClient(timeout=TIMEOUT_NON_STREAMING) as client:
-                response = await client.get(
-                    self._url(COPILOT_MODELS_PATH),
-                    headers=self._get_headers(),
+                response = await self._send_with_auth_retry(
+                    "GET", COPILOT_MODELS_PATH, client=client
                 )
                 response.raise_for_status()
                 data = response.json()
@@ -883,13 +1047,18 @@ class CopilotProvider(BaseProvider):
 
             logger.info("Fetched %d Copilot models", len(models))
             return models
-        except httpx.HTTPError as e:
-            # If cache exists, return stale cache on error
+        except (httpx.HTTPError, ProviderError) as e:
+            # If cache exists, return stale cache on error — including the case
+            # where the in-loop forced refresh raised a ProviderError because the
+            # token is unrecoverable. Serving the last known catalog is better
+            # than hard-failing the models endpoint.
             stale = self._models_ttl_cache._value
             if stale is not None:
                 logger.warning("Failed to refresh Copilot models, using stale cache: %s", e)
                 return stale
             logger.error("Failed to list Copilot models: %s", e)
+            if isinstance(e, ProviderError):
+                raise
             raise ProviderError(f"Failed to list models: {e}", retryable=True)
 
     # Tools that are not supported by Copilot Responses API.
@@ -1079,18 +1248,17 @@ class CopilotProvider(BaseProvider):
         payload = self._build_responses_payload(request)
 
         logger.debug("Copilot responses completion: model=%s", request.model)
-        client = self._get_client()
         try:
-            response = await client.post(
-                self._url(COPILOT_RESPONSES_PATH),
+            response = await self._send_with_auth_retry(
+                "POST",
+                COPILOT_RESPONSES_PATH,
                 json=payload,
-                headers=self._get_headers(
-                    vision_request=self._responses_input_has_vision(request.input),
-                    response_input=(
+                headers_kwargs={
+                    "vision_request": self._responses_input_has_vision(request.input),
+                    "response_input": (
                         request.input if isinstance(request.input, (str, list)) else None
                     ),
-                ),
-                timeout=TIMEOUT_NON_STREAMING,
+                },
             )
             response.raise_for_status()
             data = response.json()
@@ -1152,18 +1320,16 @@ class CopilotProvider(BaseProvider):
 
         logger.debug("Copilot streaming responses: model=%s", request.model)
         logger.debug("Copilot responses payload: %s", payload)
-        client = self._get_client()
         try:
-            async with client.stream(
-                "POST",
-                self._url(COPILOT_RESPONSES_PATH),
+            async with self._stream_with_auth_retry(
+                COPILOT_RESPONSES_PATH,
                 json=payload,
-                headers=self._get_headers(
-                    vision_request=self._responses_input_has_vision(request.input),
-                    response_input=(
+                headers_kwargs={
+                    "vision_request": self._responses_input_has_vision(request.input),
+                    "response_input": (
                         request.input if isinstance(request.input, (str, list)) else None
                     ),
-                ),
+                },
             ) as response:
                 # Check for errors before processing stream
                 if response.status_code >= 400:
@@ -1175,6 +1341,9 @@ class CopilotProvider(BaseProvider):
                         response.status_code,
                         error_text,
                     )
+                    # 401/403 are handled by _stream_with_auth_retry (refresh +
+                    # retry, then a retryable auth error), so they never reach
+                    # here; only transient 429/5xx are retryable at this point.
                     retryable = response.status_code in (429, 500, 502, 503, 504)
                     raise ProviderError(
                         f"Copilot API error: {response.status_code} - {error_text}",

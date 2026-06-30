@@ -12,9 +12,12 @@ from router_maestro.providers import (
     ChatRequest,
     CopilotProvider,
     Message,
+    ModelInfo,
     OpenAICompatibleProvider,
     OpenAIProvider,
+    ResponsesRequest,
 )
+from router_maestro.providers.base import ProviderError
 
 
 class TestProviderBase:
@@ -327,3 +330,271 @@ class TestAnthropicMessageConversion:
                 ],
             }
         ]
+
+
+def _copilot_with_cred(**cred_kwargs):
+    """Build a CopilotProvider with an in-memory stored credential and saved-no-op."""
+    provider = CopilotProvider()
+    provider.auth_manager.storage = AuthStorage()
+    defaults = {"refresh": "ghu_user", "access": "copilot-token", "expires": 0}
+    defaults.update(cred_kwargs)
+    provider.auth_manager.storage.set("github-copilot", OAuthCredential(**defaults))
+    provider.auth_manager.save = Mock()  # type: ignore[method-assign]
+    return provider
+
+
+class TestCopilotTokenRefresh:
+    """Tests for automatic Copilot token refresh + 401/403 retry."""
+
+    @pytest.mark.asyncio
+    async def test_ensure_token_dead_token_raises_reauth_error(self):
+        """No refresh token + a 403 mint surfaces a clear re-auth error.
+
+        It stays retryable=True so the router can still fall back to other
+        configured providers; the message tells the user how to recover when
+        Copilot is their only provider.
+        """
+        provider = _copilot_with_cred()  # mint will be rejected
+
+        reject = httpx.HTTPStatusError(
+            "forbidden",
+            request=httpx.Request("GET", "https://api.github.com"),
+            response=httpx.Response(403),
+        )
+        with patch(
+            "router_maestro.providers.copilot.get_copilot_token",
+            new=AsyncMock(side_effect=reject),
+        ):
+            with pytest.raises(ProviderError) as exc:
+                await provider.ensure_token()
+
+        assert exc.value.status_code == 401
+        assert exc.value.retryable is True
+        assert "auth login github-copilot" in str(exc.value)
+
+    @pytest.mark.asyncio
+    async def test_chat_completion_retries_once_on_403(self):
+        """A 403 from the chat API forces a token refresh and retries the call once."""
+        provider = _copilot_with_cred()
+        provider._cached_token = "stale-token"
+        provider._token_expires = 2**31  # clock thinks it's valid
+
+        calls = {"n": 0}
+
+        def handler(_request: httpx.Request) -> httpx.Response:
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return httpx.Response(403, json={"detail": "forbidden"})
+            return httpx.Response(
+                200,
+                json={
+                    "model": "gpt-4o",
+                    "choices": [{"message": {"content": "hi"}, "finish_reason": "stop"}],
+                    "usage": {"completion_tokens": 1},
+                },
+            )
+
+        provider._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        with patch.object(provider, "ensure_token", new=AsyncMock()) as mock_ensure:
+            response = await provider.chat_completion(
+                ChatRequest(
+                    model="github-copilot/gpt-4o", messages=[Message(role="user", content="hey")]
+                )
+            )
+
+        assert calls["n"] == 2  # original + retry
+        # ensure_token called once at entry, once forced after the 403.
+        assert mock_ensure.await_count == 2
+        assert mock_ensure.await_args.kwargs.get("force") is True
+        assert response.content == "hi"
+
+    @pytest.mark.asyncio
+    async def test_chat_stream_retries_once_on_403(self):
+        """A 403 opening the chat stream forces a refresh and retries before yielding."""
+        provider = _copilot_with_cred()
+        provider._cached_token = "stale-token"
+        provider._token_expires = 2**31
+
+        calls = {"n": 0}
+
+        def handler(_request: httpx.Request) -> httpx.Response:
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return httpx.Response(403, json={"detail": "forbidden"})
+            body = (
+                'data: {"choices":[{"delta":{"content":"hi"},"finish_reason":"stop"}]}\n\n'
+                "data: [DONE]\n\n"
+            )
+            return httpx.Response(200, text=body)
+
+        provider._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        with patch.object(provider, "ensure_token", new=AsyncMock()) as mock_ensure:
+            chunks = [
+                c
+                async for c in provider.chat_completion_stream(
+                    ChatRequest(
+                        model="github-copilot/gpt-4o",
+                        messages=[Message(role="user", content="hey")],
+                    )
+                )
+            ]
+
+        assert calls["n"] == 2
+        assert mock_ensure.await_count == 2
+        assert "".join(c.content for c in chunks if c.content) == "hi"
+
+    @pytest.mark.asyncio
+    async def test_force_refresh_skips_when_token_changed_under_lock(self):
+        """force=True early-returns if another coro re-minted while we waited (#1/#3)."""
+        provider = _copilot_with_cred()
+        provider._cached_token = "token-A"
+        provider._token_expires = 0
+
+        # Acquire the refresh lock so our ensure_token(force=True) blocks on it,
+        # then swap the cached token (as a winning coroutine would) before release.
+        await provider._token_refresh_lock.acquire()
+
+        async def swap_then_release():
+            provider._cached_token = "token-B"  # another coro minted a fresh token
+            provider._token_refresh_lock.release()
+
+        mint = AsyncMock()
+        with patch("router_maestro.providers.copilot.get_copilot_token", new=mint):
+            import asyncio
+
+            waiter = asyncio.create_task(provider.ensure_token(force=True))
+            await asyncio.sleep(0)  # let the waiter block on the lock
+            await swap_then_release()
+            await waiter
+
+        # The waiter saw token-B (!= token-A snapshot) and skipped the mint.
+        mint.assert_not_awaited()
+        assert provider._cached_token == "token-B"
+
+    @pytest.mark.asyncio
+    async def test_concurrent_force_refresh_mints_once(self):
+        """N concurrent 401-driven force refreshes collapse to a single mint (#3)."""
+        import asyncio
+
+        provider = _copilot_with_cred()
+        provider._cached_token = "stale"
+        provider._token_expires = 0
+
+        mint_calls = {"n": 0}
+
+        async def slow_mint(_client, _gh_token):
+            mint_calls["n"] += 1
+            await asyncio.sleep(0.05)  # hold the lock so others queue behind us
+            return CopilotTokenResponse(
+                token=f"fresh-{mint_calls['n']}", expires_at=2**31, refresh_in=1000
+            )
+
+        with patch("router_maestro.providers.copilot.get_copilot_token", new=slow_mint):
+            await asyncio.gather(*(provider.ensure_token(force=True) for _ in range(5)))
+
+        # The first waiter mints; the rest see the freshly-swapped token and skip.
+        assert mint_calls["n"] == 1
+
+    @pytest.mark.asyncio
+    async def test_mint_persists_auth_json_once(self):
+        """A successful mint persists the new Copilot token exactly once."""
+        provider = _copilot_with_cred()
+
+        with patch(
+            "router_maestro.providers.copilot.get_copilot_token",
+            new=AsyncMock(
+                return_value=CopilotTokenResponse(
+                    token="new-copilot", expires_at=2**31, refresh_in=1000
+                )
+            ),
+        ):
+            await provider.ensure_token()
+
+        assert provider.auth_manager.save.call_count == 1
+        stored = provider.auth_manager.storage.get("github-copilot")
+        assert stored.access == "new-copilot"
+        assert provider._cached_token == "new-copilot"
+
+    @pytest.mark.asyncio
+    async def test_chat_403_retries_once_then_raises_retryable(self):
+        """A persistent 403 on chat refreshes once, retries once, then raises retryable.
+
+        retryable=True is load-bearing: it lets the router fall back to other
+        providers. This must match the /responses behavior (no stream-vs-chat
+        divergence).
+        """
+        provider = _copilot_with_cred()
+        provider._cached_token = "tok"
+        provider._token_expires = 2**31
+
+        calls = {"n": 0}
+
+        def handler(_request: httpx.Request) -> httpx.Response:
+            calls["n"] += 1
+            return httpx.Response(403, json={"detail": "policy"})
+
+        provider._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        with patch.object(provider, "ensure_token", new=AsyncMock()) as mock_ensure:
+            with pytest.raises(ProviderError) as exc:
+                await provider.chat_completion(
+                    ChatRequest(
+                        model="github-copilot/gpt-4o",
+                        messages=[Message(role="user", content="hey")],
+                    )
+                )
+
+        assert calls["n"] == 2  # exactly one retry, never an unbounded storm
+        assert mock_ensure.await_count == 2  # entry + one forced refresh
+        assert exc.value.status_code == 403
+        assert exc.value.retryable is True
+
+    @pytest.mark.asyncio
+    async def test_list_models_serves_stale_cache_on_dead_token(self):
+        """An unrecoverable token serves the stale model cache instead of hard-failing (#4)."""
+        provider = _copilot_with_cred()
+        provider._cached_token = "stale"
+        provider._token_expires = 2**31
+        # Seed a stale cache.
+        cached = [
+            ModelInfo(id="gpt-4o", name="GPT-4o", provider="github-copilot"),
+        ]
+        provider._models_ttl_cache.set(cached)
+
+        def handler(_request: httpx.Request) -> httpx.Response:
+            return httpx.Response(403, json={"detail": "forbidden"})
+
+        # Entry ensure_token() succeeds; the in-loop force=True refresh raises
+        # (token unrecoverable) — that ProviderError must degrade to stale cache.
+        async def maybe_dead(force: bool = False):
+            if force:
+                raise ProviderError("auth login github-copilot", status_code=401, retryable=True)
+
+        with patch(
+            "httpx.AsyncClient",
+            return_value=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+        ):
+            with patch.object(provider, "ensure_token", new=AsyncMock(side_effect=maybe_dead)):
+                models = await provider.list_models(force_refresh=True)
+
+        assert [m.id for m in models] == ["gpt-4o"]
+
+    @pytest.mark.asyncio
+    async def test_responses_stream_403_is_retryable_for_fallback(self):
+        """A surviving 403 on /responses stream is retryable so the router can fall back (#3)."""
+        provider = _copilot_with_cred()
+        provider._cached_token = "tok"
+        provider._token_expires = 2**31
+
+        def handler(_request: httpx.Request) -> httpx.Response:
+            return httpx.Response(403, json={"detail": "forbidden"})
+
+        provider._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        with patch.object(provider, "ensure_token", new=AsyncMock()):
+            with pytest.raises(ProviderError) as exc:
+                async for _ in provider.responses_completion_stream(
+                    ResponsesRequest(model="github-copilot/gpt-5", input="hi", stream=True)
+                ):
+                    pass
+
+        assert exc.value.status_code == 403
+        assert exc.value.retryable is True
