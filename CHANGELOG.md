@@ -4,6 +4,24 @@ All notable changes to Router-Maestro are documented here.
 
 ---
 
+## v0.3.28 (2026-06-30)
+
+### Fixes
+
+- **Copilot 401/403 retry-once.** Transient auth rejections (server-side token
+  invalidation, clock skew, upstream quota bursts) now trigger a forced Copilot
+  token re-mint and a single retry instead of hard-failing. If the retry also
+  fails, the error is marked `retryable` so the router can fall back to other
+  providers. `list_models` serves the stale model cache on unrecoverable token
+  errors instead of returning an empty list.
+
+- **Multi-header auth acceptance.** The API middleware now accepts the request
+  when *any* credential header matches (`Authorization`, `x-api-key`,
+  `x-goog-api-key`), fixing 401s from clients like Claude Code that send both
+  an OAuth bearer and the correct API key simultaneously.
+
+---
+
 ## v0.3.27 (2026-06-23)
 
 ### Features
