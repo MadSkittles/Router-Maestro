@@ -11,6 +11,7 @@ from fastapi import Request as FastAPIRequest
 from fastapi.responses import JSONResponse
 
 from router_maestro.providers import AnthropicProvider, ChatRequest, ProviderError
+from router_maestro.providers.tool_parsing import recover_invoke_tool_calls
 from router_maestro.routing import Router, get_router
 from router_maestro.server.schemas.anthropic import (
     AnthropicCountTokensRequest,
@@ -530,12 +531,47 @@ async def stream_response(
     try:
         stream, provider_name = await model_router.chat_completion_stream(request)
 
+        # Track state needed to recover tool calls that the upstream model
+        # leaked as <invoke> XML *text* instead of structured tool_calls (a
+        # github-copilot/claude-* quirk under long contexts). Without recovery
+        # the client (e.g. Claude Code) receives the raw XML in a text block
+        # with stop_reason=end_turn, shows it verbatim, and the agent stalls
+        # because the intended tool never runs.
+        allowed_tool_names: set[str] | None = None
+        if request.tools:
+            allowed_tool_names = {
+                (t.get("function") or {}).get("name", "")
+                for t in request.tools
+                if (t.get("function") or {}).get("name")
+            } or None
+        assistant_text = ""
+        saw_real_tool_call = False
+
         async for chunk in stream:
+            if chunk.content:
+                assistant_text += chunk.content
+            if chunk.tool_calls:
+                # A properly structured tool call streamed normally; never
+                # second-guess it with text recovery.
+                saw_real_tool_call = True
+
+            recovered_tool_calls = chunk.tool_calls
+            finish_reason = chunk.finish_reason
+            if finish_reason and not saw_real_tool_call:
+                leaked = recover_invoke_tool_calls(assistant_text, allowed_tool_names)
+                if leaked:
+                    # Append a real tool_use block to the (already-streamed)
+                    # text and promote the stop reason so the client executes
+                    # the call (or takes its malformed-tool retry path) instead
+                    # of treating the turn as a finished plain-text answer.
+                    recovered_tool_calls = leaked
+                    finish_reason = "tool_calls"
+
             # Build OpenAI-style chunk for translation. Forward reasoning
             # under both legacy field names so the translator can pick it up.
             delta: dict = {
                 "content": chunk.content if chunk.content else None,
-                "tool_calls": chunk.tool_calls,
+                "tool_calls": recovered_tool_calls,
             }
             if chunk.thinking:
                 delta["reasoning_text"] = chunk.thinking
@@ -546,7 +582,7 @@ async def stream_response(
                 "choices": [
                     {
                         "delta": delta,
-                        "finish_reason": chunk.finish_reason,
+                        "finish_reason": finish_reason,
                     }
                 ],
                 "usage": chunk.usage,  # Pass through usage info

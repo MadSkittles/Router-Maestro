@@ -2,7 +2,10 @@
 
 import json
 
-from router_maestro.providers.tool_parsing import recover_tool_calls_from_content
+from router_maestro.providers.tool_parsing import (
+    recover_invoke_tool_calls,
+    recover_tool_calls_from_content,
+)
 
 
 class TestRecoverToolCallsFromContent:
@@ -248,3 +251,102 @@ class TestRecoverToolCallsFromContent:
         assert tool_calls is not None
         assert len(tool_calls) == 1
         assert tool_calls[0]["function"]["name"] == "exec"
+
+
+class TestRecoverInvokeToolCalls:
+    """Tests for recover_invoke_tool_calls (antml/<invoke> dialect)."""
+
+    def test_single_invoke_recovered(self):
+        """A single <invoke> block becomes one OpenAI tool_call."""
+        text = (
+            "Let me check.\n\n"
+            '<invoke name="Bash">\n'
+            '<parameter name="command">ls -la</parameter>\n'
+            "</invoke>"
+        )
+        calls = recover_invoke_tool_calls(text, allowed_names={"Bash"})
+        assert calls is not None
+        assert len(calls) == 1
+        assert calls[0]["function"]["name"] == "Bash"
+        assert json.loads(calls[0]["function"]["arguments"]) == {"command": "ls -la"}
+        assert calls[0]["id"].startswith("toolu_")
+        assert calls[0]["index"] == 0
+
+    def test_multiple_invokes_get_distinct_indexes(self):
+        """Multiple leaked calls receive distinct, ascending indexes.
+
+        Regression for the index-collision (all index=0) hazard that would
+        overwrite tool_use blocks in the streaming translator.
+        """
+        text = (
+            '<invoke name="Read">\n'
+            '<parameter name="file_path">a.ts</parameter>\n'
+            "</invoke>\n"
+            '<invoke name="Grep">\n'
+            '<parameter name="pattern">foo</parameter>\n'
+            "</invoke>"
+        )
+        calls = recover_invoke_tool_calls(text, allowed_names={"Read", "Grep"})
+        assert calls is not None
+        assert [c["index"] for c in calls] == [0, 1]
+        assert [c["function"]["name"] for c in calls] == ["Read", "Grep"]
+        assert calls[0]["id"] != calls[1]["id"]
+
+    def test_invoke_inside_code_fence_ignored(self):
+        """A fenced code block discussing <invoke> is NOT a real call.
+
+        This is the meta-discussion false-positive guard: a model explaining
+        the tool-call syntax must not have its explanation executed.
+        """
+        text = (
+            "The syntax looks like this:\n"
+            "```\n"
+            '<invoke name="Bash">\n'
+            '<parameter name="command">rm -rf /</parameter>\n'
+            "</invoke>\n"
+            "```\n"
+            "as you can see above."
+        )
+        assert recover_invoke_tool_calls(text, allowed_names={"Bash"}) is None
+
+    def test_invoke_inside_inline_code_ignored(self):
+        """An inline-code mention of <invoke> is ignored."""
+        text = 'You can call `<invoke name="Bash"></invoke>` to run things.'
+        assert recover_invoke_tool_calls(text, allowed_names={"Bash"}) is None
+
+    def test_unclosed_invoke_ignored(self):
+        """A truncated <invoke> with no closing tag is left as plain text.
+
+        Regression for the straddling/connection-terminated case: a half
+        streamed XML fragment must not be silently dropped or half-parsed.
+        """
+        text = '<invoke name="Bash">\n<parameter name="command">ls'
+        assert recover_invoke_tool_calls(text, allowed_names={"Bash"}) is None
+
+    def test_unknown_tool_name_dropped(self):
+        """A call to a tool not offered by the request is dropped."""
+        text = '<invoke name="Nonexistent"><parameter name="x">1</parameter></invoke>'
+        assert recover_invoke_tool_calls(text, allowed_names={"Bash"}) is None
+
+    def test_allowed_names_none_skips_cross_check(self):
+        """When allowed_names is None the name cross-check is skipped."""
+        text = '<invoke name="Anything"><parameter name="x">1</parameter></invoke>'
+        calls = recover_invoke_tool_calls(text, allowed_names=None)
+        assert calls is not None
+        assert calls[0]["function"]["name"] == "Anything"
+
+    def test_plain_text_returns_none(self):
+        """Ordinary prose with no <invoke> returns None."""
+        assert recover_invoke_tool_calls("just a normal answer", allowed_names=None) is None
+
+    def test_empty_content_returns_none(self):
+        """Empty / None content returns None."""
+        assert recover_invoke_tool_calls("", allowed_names=None) is None
+        assert recover_invoke_tool_calls(None, allowed_names=None) is None
+
+    def test_invoke_without_parameters_recovered_with_empty_args(self):
+        """An <invoke> with no parameters yields empty-object arguments."""
+        text = '<invoke name="ListTools"></invoke>'
+        calls = recover_invoke_tool_calls(text, allowed_names={"ListTools"})
+        assert calls is not None
+        assert json.loads(calls[0]["function"]["arguments"]) == {}

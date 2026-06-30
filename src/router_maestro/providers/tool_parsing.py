@@ -29,6 +29,100 @@ _TOOL_RESULT_RE = re.compile(
     re.DOTALL,
 )
 
+# Matches the antml/"invoke" tool-call dialect that Claude models emit as TEXT
+# when they simulate a tool call instead of using the structured tool_calls
+# field (observed on github-copilot/claude-* under long contexts):
+#
+#   <invoke name="Bash">
+#     <parameter name="command">ls</parameter>
+#   </invoke>
+#
+# Requires a closing </invoke> so half-streamed / truncated fragments never
+# match (they pass through as plain text rather than being silently dropped).
+_INVOKE_RE = re.compile(
+    r'<invoke\s+name="([^"]+)"\s*>(.*?)</invoke>',
+    re.DOTALL,
+)
+_INVOKE_PARAM_RE = re.compile(
+    r'<parameter\s+name="([^"]+)"\s*>(.*?)</parameter>',
+    re.DOTALL,
+)
+# Fenced (``` ... ```) and inline (`...`) code spans. Stripped before scanning
+# for <invoke> so that prose *discussing* tool-call syntax inside code spans is
+# not misread as a real tool call.
+_CODE_FENCE_RE = re.compile(r"```.*?```", re.DOTALL)
+_INLINE_CODE_RE = re.compile(r"`[^`]*`", re.DOTALL)
+
+
+def recover_invoke_tool_calls(
+    content: str | None,
+    allowed_names: set[str] | None,
+) -> list[dict] | None:
+    """Recover antml/<invoke> tool calls leaked as text into assistant content.
+
+    Returns a list of OpenAI-format tool_call dicts (each with an explicit
+    ``index``), or ``None`` when nothing safely recoverable is found.
+
+    Three false-positive guards must ALL pass for a block to be recovered, so
+    that prose merely *mentioning* ``<invoke>`` (e.g. a model explaining the
+    bug, or a fenced code sample) is never converted into a real tool call:
+
+    1. Structural close: only ``<invoke ...>...</invoke>`` pairs match; a bare
+       or truncated ``<invoke ...>`` is ignored.
+    2. Code-span exclusion: fenced ```` ``` ```` and inline ``` ` ``` spans are
+       stripped before scanning, so tool-call syntax shown as code is skipped.
+    3. Tool-name cross-check: when ``allowed_names`` is provided, a recovered
+       call whose ``name`` is not in the request's tool list is dropped.
+
+    This is intentionally conservative: when in doubt it recovers nothing and
+    the caller forwards the original text unchanged.
+    """
+    if not content:
+        return None
+
+    # Guard 2: remove code spans before scanning so documented syntax is safe.
+    scan_text = _CODE_FENCE_RE.sub("", content)
+    scan_text = _INLINE_CODE_RE.sub("", scan_text)
+
+    matches = _INVOKE_RE.findall(scan_text)
+    if not matches:
+        return None
+
+    recovered: list[dict] = []
+    for name, body in matches:
+        name = name.strip()
+        if not name:
+            continue
+        # Guard 3: only honour calls to tools the client actually offered.
+        if allowed_names is not None and name not in allowed_names:
+            logger.warning(
+                "Skipping leaked <invoke> for unknown tool %r (not in request tools)",
+                name,
+            )
+            continue
+
+        params: dict[str, str] = {}
+        for param_name, param_value in _INVOKE_PARAM_RE.findall(body):
+            params[param_name.strip()] = param_value
+
+        recovered.append(
+            {
+                "id": f"toolu_{uuid4().hex[:24]}",
+                "type": "function",
+                "index": len(recovered),
+                "function": {
+                    "name": name,
+                    "arguments": json.dumps(params),
+                },
+            }
+        )
+
+    if not recovered:
+        return None
+
+    logger.info("Recovered %d leaked <invoke> tool call(s) from streamed content", len(recovered))
+    return recovered
+
 
 def recover_tool_calls_from_content(
     content: str | None,
