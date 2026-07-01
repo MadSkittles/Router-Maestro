@@ -99,7 +99,7 @@ def _post_anthropic_non_stream(
     response = client.post(
         "/api/anthropic/v1/messages",
         json=anthropic_reasoning_payload(model, budget=budget),
-        timeout=240.0,
+        timeout=480.0,
     )
     assert_http_success(response)
     return response.json()
@@ -114,7 +114,7 @@ def _post_anthropic_stream(
         "POST",
         "/api/anthropic/v1/messages",
         json=anthropic_reasoning_payload(model, budget=budget, stream=True),
-        timeout=240.0,
+        timeout=480.0,
     ) as response:
         assert_http_success(response)
         events = parse_sse_events(response)
@@ -157,7 +157,7 @@ def _post_openai_non_stream(
     response = client.post(
         "/api/openai/v1/chat/completions",
         json=openai_reasoning_payload(model, effort=effort),
-        timeout=240.0,
+        timeout=480.0,
     )
     assert_http_success(response)
     return response.json()
@@ -172,7 +172,7 @@ def _post_openai_stream(
         "POST",
         "/api/openai/v1/chat/completions",
         json=openai_reasoning_payload(model, effort=effort, stream=True),
-        timeout=240.0,
+        timeout=480.0,
     ) as response:
         assert_http_success(response)
         events = parse_sse_events(response)
