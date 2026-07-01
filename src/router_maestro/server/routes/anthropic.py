@@ -418,7 +418,12 @@ async def messages(request: AnthropicMessagesRequest, raw_request: FastAPIReques
             usage=usage,
         )
     except ProviderError as e:
-        logger.error("Anthropic messages request failed: %s", e)
+        logger.error(
+            "Anthropic messages request failed: model=%s, status=%s, error=%s",
+            request.model,
+            e.status_code,
+            e,
+        )
         raise HTTPException(status_code=e.status_code, detail=str(e))
 
 
@@ -431,7 +436,9 @@ async def count_tokens(request: AnthropicCountTokensRequest):
     token-counting configuration. For native Anthropic, attempts an upstream
     API call for an exact count before falling back to local estimation.
     """
+    logger.debug("count_tokens request: model=%s, provider=%s", request.model, None)
     provider_name = await _resolve_provider_name(request.model)
+    logger.debug("count_tokens resolved provider=%s for model=%s", provider_name, request.model)
     config = get_config_for_provider(provider_name)
 
     # For native Anthropic, try the upstream count_tokens API first
@@ -473,7 +480,9 @@ async def count_tokens(request: AnthropicCountTokensRequest):
                 return {"input_tokens": exact_tokens}
             except Exception:
                 logger.warning(
-                    "Anthropic upstream count_tokens failed, falling back to local estimation",
+                    "Anthropic upstream count_tokens failed for model=%s, "
+                    "falling back to local estimation",
+                    request.model,
                     exc_info=True,
                 )
 
@@ -483,6 +492,12 @@ async def count_tokens(request: AnthropicCountTokensRequest):
         tools=request.tools,
         model=request.model,
         config=config,
+    )
+    logger.debug(
+        "count_tokens result: model=%s, provider=%s, input_tokens=%d",
+        request.model,
+        provider_name,
+        input_tokens,
     )
     return {"input_tokens": input_tokens}
 

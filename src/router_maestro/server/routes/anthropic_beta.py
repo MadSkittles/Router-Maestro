@@ -97,8 +97,23 @@ def _apply_thinking_budget_native(body: dict, actual_model: str) -> dict:
     if budget != client_budget or thinking_type != client_type:
         if budget is not None and thinking_type in ("enabled", "adaptive"):
             body["thinking"] = {"type": thinking_type, "budget_tokens": budget}
+            logger.debug(
+                "Thinking budget adjusted: %s/%s -> %s/%s for model=%s",
+                client_type,
+                client_budget,
+                thinking_type,
+                budget,
+                actual_model,
+            )
         elif thinking_type == "disabled" or budget is None:
             body.pop("thinking", None)
+            logger.debug(
+                "Thinking removed: client had %s/%s, resolved to %s for model=%s",
+                client_type,
+                client_budget,
+                thinking_type,
+                actual_model,
+            )
 
     return body
 
@@ -133,6 +148,14 @@ async def beta_messages(raw_request: FastAPIRequest):
         raise HTTPException(status_code=400, detail="'model' field is required")
 
     stream = body.get("stream", False)
+    thinking = body.get("thinking")
+    logger.info(
+        "Received beta Anthropic request: model=%s, stream=%s, max_tokens=%s, thinking=%s",
+        model,
+        stream,
+        body.get("max_tokens"),
+        thinking,
+    )
 
     # Resolve provider and check native eligibility
     provider_name, actual_model, copilot_provider = await _resolve_model(model)
@@ -165,6 +188,7 @@ async def beta_messages(raw_request: FastAPIRequest):
     # Copilot's native endpoint rejects temperature + top_p together;
     # drop top_p when both are present (temperature takes priority).
     if "temperature" in body and "top_p" in body:
+        logger.debug("Stripping top_p (temperature also present)")
         del body["top_p"]
 
     # Ensure Copilot token is fresh
@@ -184,9 +208,16 @@ async def beta_messages(raw_request: FastAPIRequest):
             json=body,
         )
     except ProviderError as e:
+        logger.error("Beta passthrough request failed: %s", e)
         raise HTTPException(status_code=e.status_code or 502, detail=str(e))
 
     if response.status_code >= 400:
+        logger.warning(
+            "Upstream returned %d for model=%s: %s",
+            response.status_code,
+            actual_model,
+            response.text[:200],
+        )
         # Forward upstream error verbatim (already Anthropic format)
         try:
             error_body = response.json()
@@ -196,6 +227,19 @@ async def beta_messages(raw_request: FastAPIRequest):
 
     data = response.json()
     _strip_response(data)
+
+    usage = data.get("usage", {})
+    content = data.get("content", [])
+    logger.info(
+        "Beta passthrough response: model=%s, stop_reason=%s, "
+        "blocks=%d, input_tokens=%s, output_tokens=%s",
+        data.get("model"),
+        data.get("stop_reason"),
+        len(content),
+        usage.get("input_tokens"),
+        usage.get("output_tokens"),
+    )
+
     return JSONResponse(content=data)
 
 
@@ -215,6 +259,11 @@ async def beta_count_tokens(raw_request: FastAPIRequest):
     provider_name, actual_model, copilot_provider = await _resolve_model(model)
 
     if not _is_native_eligible(provider_name, actual_model) or copilot_provider is None:
+        logger.info(
+            "Beta count_tokens falling back to standard: model=%s, provider=%s",
+            model,
+            provider_name,
+        )
         # Fallback to standard count_tokens handler
         from router_maestro.server.routes.anthropic import count_tokens
         from router_maestro.server.schemas.anthropic import AnthropicCountTokensRequest
@@ -232,16 +281,28 @@ async def beta_count_tokens(raw_request: FastAPIRequest):
             json=body,
         )
     except ProviderError as e:
+        logger.error("Beta count_tokens failed: %s", e)
         raise HTTPException(status_code=e.status_code or 502, detail=str(e))
 
     if response.status_code >= 400:
+        logger.warning(
+            "Beta count_tokens upstream %d for model=%s",
+            response.status_code,
+            actual_model,
+        )
         try:
             error_body = response.json()
         except Exception:
             error_body = {"error": {"type": "api_error", "message": response.text}}
         return JSONResponse(content=error_body, status_code=response.status_code)
 
-    return JSONResponse(content=response.json())
+    result = response.json()
+    logger.debug(
+        "Beta count_tokens: model=%s, input_tokens=%s",
+        actual_model,
+        result.get("input_tokens"),
+    )
+    return JSONResponse(content=result)
 
 
 async def _stream_passthrough(
