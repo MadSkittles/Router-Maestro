@@ -253,6 +253,26 @@ _CLAUDE_CODE_NATIVE_1M_KEYS: frozenset[str] = frozenset(
 _CLAUDE_CODE_DEFAULT_AUTO_COMPACT_WINDOW = 200_000
 
 
+def _prompt_endpoint_mode(model: dict | None) -> bool:
+    """Prompt whether to use the beta native passthrough endpoint.
+
+    Only offered when the selected model is a Claude model on GitHub Copilot.
+    Returns True to use the beta endpoint, False for standard.
+    """
+    if model is None:
+        return False
+    provider = model.get("provider", "")
+    model_id = model.get("id", "")
+    if provider != "github-copilot" or not model_id.lower().startswith("claude-"):
+        return False
+
+    console.print("\n[bold]Endpoint mode[/bold]")
+    console.print("  1. Standard (translation-based, battle-tested)")
+    console.print("  2. Beta (native Copilot Anthropic passthrough — full thinking/cache fidelity)")
+    choice = Prompt.ask("Select", choices=["1", "2"], default="2")
+    return choice == "2"
+
+
 def _prompt_auto_compact_window(model: dict | None) -> int | None:
     """Prompt the user whether to set CLAUDE_CODE_AUTO_COMPACT_WINDOW.
 
@@ -411,13 +431,17 @@ def claude_code_config() -> None:
     # Step 4b: Optional auto-compact window override (Claude Code only)
     auto_compact_window = _prompt_auto_compact_window(main_model_dict)
 
+    # Step 4c: Endpoint mode — offer beta passthrough for Claude models on Copilot
+    use_beta_endpoint = _prompt_endpoint_mode(main_model_dict)
+
     # Step 5: Generate config
     auth_token = get_current_context_api_key() or "router-maestro"
     client = get_admin_client()
     base_url = (
         client.endpoint.rstrip("/") if hasattr(client, "endpoint") else "http://localhost:8080"
     )
-    anthropic_url = f"{base_url}/api/anthropic"
+    anthropic_path = "/api/anthropic/beta" if use_beta_endpoint else "/api/anthropic"
+    anthropic_url = f"{base_url}{anthropic_path}"
 
     env_config = {
         "ANTHROPIC_BASE_URL": anthropic_url,

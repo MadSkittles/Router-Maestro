@@ -2,6 +2,7 @@
 
 from router_maestro.server.routes.admin import router as admin_router
 from router_maestro.server.routes.anthropic import router as anthropic_router
+from router_maestro.server.routes.anthropic_beta import router as anthropic_beta_router
 from router_maestro.server.routes.chat import router as chat_router
 from router_maestro.server.routes.gemini import router as gemini_router
 from router_maestro.server.routes.models import router as models_router
@@ -9,6 +10,7 @@ from router_maestro.server.routes.responses import router as responses_router
 
 __all__ = [
     "admin_router",
+    "anthropic_beta_router",
     "anthropic_router",
     "chat_router",
     "gemini_router",
