@@ -13,6 +13,8 @@ from router_maestro.server.routes.anthropic_beta import (
     _apply_thinking_budget_native,
     _clean_stream_frame,
     _is_native_eligible,
+    _is_signature_error,
+    _strip_history_thinking_blocks,
     _strip_response,
     router,
 )
@@ -119,6 +121,83 @@ class TestCleanStreamFrame:
         data = '{"delta": {"type": "thinking_delta", "thinking": "hmm"}, "index": 0}'
         result = _clean_stream_frame("content_block_delta", data)
         assert result == data
+
+
+class TestIsSignatureError:
+    def test_detects_signature_in_thinking(self):
+        text = '{"message":"messages.3.content.0: Invalid `signature` in `thinking` block"}'
+        assert _is_signature_error(text) is True
+
+    def test_ignores_unrelated_400(self):
+        text = '{"message":"max_tokens: Field required"}'
+        assert _is_signature_error(text) is False
+
+    def test_ignores_signature_without_thinking(self):
+        text = '{"message":"Invalid signature format"}'
+        assert _is_signature_error(text) is False
+
+
+class TestStripHistoryThinkingBlocks:
+    def test_strips_thinking_from_assistant(self):
+        body = {
+            "messages": [
+                {"role": "user", "content": "Hi"},
+                {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "thinking", "thinking": "...", "signature": "sig"},
+                        {"type": "text", "text": "Hello"},
+                    ],
+                },
+                {"role": "user", "content": "Bye"},
+            ]
+        }
+        _strip_history_thinking_blocks(body)
+        assistant_content = body["messages"][1]["content"]
+        assert len(assistant_content) == 1
+        assert assistant_content[0]["type"] == "text"
+
+    def test_preserves_user_messages(self):
+        body = {
+            "messages": [
+                {"role": "user", "content": [{"type": "text", "text": "Hi"}]},
+            ]
+        }
+        _strip_history_thinking_blocks(body)
+        assert len(body["messages"][0]["content"]) == 1
+
+    def test_preserves_tool_use_blocks(self):
+        body = {
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "thinking", "thinking": "x", "signature": "s"},
+                        {"type": "tool_use", "id": "t1", "name": "fn", "input": {}},
+                        {"type": "text", "text": "done"},
+                    ],
+                },
+            ]
+        }
+        _strip_history_thinking_blocks(body)
+        content = body["messages"][0]["content"]
+        assert len(content) == 2
+        assert content[0]["type"] == "tool_use"
+        assert content[1]["type"] == "text"
+
+    def test_no_op_when_no_thinking(self):
+        body = {
+            "messages": [
+                {"role": "assistant", "content": [{"type": "text", "text": "Hi"}]},
+            ]
+        }
+        _strip_history_thinking_blocks(body)
+        assert len(body["messages"][0]["content"]) == 1
+
+    def test_handles_string_content(self):
+        body = {"messages": [{"role": "assistant", "content": "plain text"}]}
+        _strip_history_thinking_blocks(body)
+        assert body["messages"][0]["content"] == "plain text"
 
 
 class TestApplyThinkingBudgetNative:
@@ -284,6 +363,143 @@ class TestBetaMessagesEndpoint:
 
         assert resp.status_code == 400
         assert resp.json()["error"]["message"] == "bad model"
+
+    @patch("router_maestro.server.routes.anthropic_beta._resolve_model")
+    def test_signature_error_triggers_retry(self, mock_resolve, client):
+        """400 with signature error strips thinking and retries."""
+        mock_provider = MagicMock(spec=CopilotProvider)
+        mock_provider.ensure_token = AsyncMock()
+
+        # First call returns signature error, second succeeds
+        error_response = MagicMock()
+        error_response.status_code = 400
+        error_response.text = (
+            '{"message":"messages.3.content.0: Invalid `signature` in `thinking` block"}'
+        )
+
+        success_response = MagicMock()
+        success_response.status_code = 200
+        success_response.json.return_value = {
+            "id": "msg_bdrk_retry",
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "text", "text": "retried ok"}],
+            "model": "claude-sonnet-4.5",
+            "stop_reason": "end_turn",
+            "usage": {"input_tokens": 10, "output_tokens": 5},
+        }
+
+        mock_provider._send_with_auth_retry = AsyncMock(
+            side_effect=[error_response, success_response]
+        )
+        mock_resolve.return_value = ("github-copilot", "claude-sonnet-4.5", mock_provider)
+
+        with patch(
+            "router_maestro.server.routes.anthropic_beta._apply_thinking_budget_native",
+            side_effect=lambda body, _: body,
+        ):
+            resp = client.post(
+                "/api/anthropic/beta/v1/messages",
+                json={
+                    "model": "claude-sonnet-4.5",
+                    "max_tokens": 100,
+                    "messages": [
+                        {"role": "user", "content": "Hi"},
+                        {
+                            "role": "assistant",
+                            "content": [
+                                {"type": "thinking", "thinking": "x", "signature": "bad"},
+                                {"type": "text", "text": "Hello"},
+                            ],
+                        },
+                        {"role": "user", "content": "Bye"},
+                    ],
+                },
+            )
+
+        assert resp.status_code == 200
+        assert resp.json()["content"][0]["text"] == "retried ok"
+        # Should have been called twice (original + retry)
+        assert mock_provider._send_with_auth_retry.call_count == 2
+
+    @patch("router_maestro.server.routes.anthropic_beta._resolve_model")
+    def test_non_signature_400_not_retried(self, mock_resolve, client):
+        """Non-signature 400 errors are NOT retried."""
+        mock_provider = MagicMock(spec=CopilotProvider)
+        mock_provider.ensure_token = AsyncMock()
+
+        error_response = MagicMock()
+        error_response.status_code = 400
+        error_response.text = '{"message":"max_tokens: Field required"}'
+        error_response.json.return_value = {
+            "error": {"type": "invalid_request_error", "message": "max_tokens: Field required"}
+        }
+
+        mock_provider._send_with_auth_retry = AsyncMock(return_value=error_response)
+        mock_resolve.return_value = ("github-copilot", "claude-sonnet-4.5", mock_provider)
+
+        with patch(
+            "router_maestro.server.routes.anthropic_beta._apply_thinking_budget_native",
+            side_effect=lambda body, _: body,
+        ):
+            resp = client.post(
+                "/api/anthropic/beta/v1/messages",
+                json={
+                    "model": "claude-sonnet-4.5",
+                    "max_tokens": 100,
+                    "messages": [{"role": "user", "content": "Hi"}],
+                },
+            )
+
+        assert resp.status_code == 400
+        # Should only be called once — no retry
+        assert mock_provider._send_with_auth_retry.call_count == 1
+
+    @patch("router_maestro.server.routes.anthropic_beta._resolve_model")
+    def test_unknown_fields_stripped(self, mock_resolve, client):
+        """Fields not in the accepted whitelist are stripped before forwarding."""
+        mock_provider = MagicMock(spec=CopilotProvider)
+        mock_provider.ensure_token = AsyncMock()
+
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {
+            "id": "msg_123",
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "text", "text": "ok"}],
+            "model": "claude-sonnet-4.5",
+            "stop_reason": "end_turn",
+            "usage": {"input_tokens": 5, "output_tokens": 2},
+        }
+        mock_provider._send_with_auth_retry = AsyncMock(return_value=mock_response)
+        mock_resolve.return_value = ("github-copilot", "claude-sonnet-4.5", mock_provider)
+
+        with patch(
+            "router_maestro.server.routes.anthropic_beta._apply_thinking_budget_native",
+            side_effect=lambda body, _: body,
+        ):
+            resp = client.post(
+                "/api/anthropic/beta/v1/messages",
+                json={
+                    "model": "claude-sonnet-4.5",
+                    "max_tokens": 100,
+                    "messages": [{"role": "user", "content": "Hi"}],
+                    "context_management": {"enabled": True},
+                    "output_config": {"format": "json"},
+                    "service_tier": "standard",
+                },
+            )
+
+        assert resp.status_code == 200
+        # Verify the forwarded payload doesn't contain unknown fields
+        forwarded_body = mock_provider._send_with_auth_retry.call_args.kwargs["json"]
+        assert "context_management" not in forwarded_body
+        assert "output_config" not in forwarded_body
+        assert "service_tier" not in forwarded_body
+        # Known fields should be preserved
+        assert forwarded_body["model"] == "claude-sonnet-4.5"
+        assert forwarded_body["max_tokens"] == 100
 
     def test_missing_model_returns_400(self, client):
         """Request without model field returns 400."""

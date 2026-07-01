@@ -78,6 +78,20 @@ def test_beta_non_streaming_compat_fields(client: httpx.Client, chat_model: str)
     assert_anthropic_usage(data["usage"])
 
 
+def test_beta_strips_unknown_fields(client: httpx.Client, chat_model: str):
+    """Beta endpoint strips unknown fields (context_management, etc.) without error."""
+    payload = anthropic_payload(chat_model)
+    payload["context_management"] = {"enabled": True}
+    payload["output_config"] = {"format": "text"}
+    payload["service_tier"] = "standard"
+    response = client.post(BETA, json=payload)
+    assert_http_success(response)
+    data = response.json()
+
+    assert data["type"] == "message"
+    assert_anthropic_usage(data["usage"])
+
+
 def test_beta_streaming(client: httpx.Client, chat_model: str):
     """Beta streaming emits standard Anthropic SSE event sequence."""
     with client.stream(
@@ -276,20 +290,28 @@ def test_beta_thinking_budget_matrix(
 
 
 def test_beta_thinking_replay(client: httpx.Client, chat_model: str):
-    """Multi-turn with prior thinking block — the native endpoint validates signatures.
+    """Multi-turn with prior thinking block triggers try-forward retry.
 
-    Unlike the standard path (which strips thinking during translation), the
-    native passthrough forwards the signature literally. Copilot's native
-    endpoint rejects invalid signatures, so we test with a simpler multi-turn
-    that doesn't include a fake thinking block.
+    The beta route first attempts to forward with the thinking block intact.
+    When Copilot rejects the invalid signature, it strips thinking blocks
+    and retries automatically — the client should see a successful response.
     """
     payload = {
         "model": chat_model,
         "max_tokens": 64,
-        "temperature": 0,
         "messages": [
             {"role": "user", "content": "What is 2 + 2? Reply with just the number."},
-            {"role": "assistant", "content": [{"type": "text", "text": "4"}]},
+            {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "thinking",
+                        "thinking": "Let me calculate: 2+2=4",
+                        "signature": "invalid-sig-from-old-route",
+                    },
+                    {"type": "text", "text": "4"},
+                ],
+            },
             {"role": "user", "content": "Now reply with exactly the word pong."},
         ],
     }
@@ -302,15 +324,24 @@ def test_beta_thinking_replay(client: httpx.Client, chat_model: str):
 
 
 def test_beta_thinking_replay_streaming(client: httpx.Client, chat_model: str):
-    """Streaming multi-turn conversation (without fake thinking signature)."""
+    """Streaming with invalid signature triggers try-forward retry."""
     payload = {
         "model": chat_model,
         "max_tokens": 64,
-        "temperature": 0,
         "stream": True,
         "messages": [
             {"role": "user", "content": "What is 2 + 2? Reply with just the number."},
-            {"role": "assistant", "content": [{"type": "text", "text": "4"}]},
+            {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "thinking",
+                        "thinking": "2+2=4",
+                        "signature": "bad-sig",
+                    },
+                    {"type": "text", "text": "4"},
+                ],
+            },
             {"role": "user", "content": "Now reply with exactly the word pong."},
         ],
     }
