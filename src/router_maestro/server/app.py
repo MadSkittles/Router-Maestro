@@ -21,6 +21,7 @@ from router_maestro.server.observability import (
 )
 from router_maestro.server.routes import (
     admin_router,
+    anthropic_beta_router,
     anthropic_router,
     chat_router,
     gemini_router,
@@ -128,6 +129,7 @@ def create_app() -> FastAPI:
     app.include_router(models_router, dependencies=[Depends(verify_api_key)])
     app.include_router(responses_router, dependencies=[Depends(verify_api_key)])
     app.include_router(anthropic_router, dependencies=[Depends(verify_api_key)])
+    app.include_router(anthropic_beta_router, dependencies=[Depends(verify_api_key)])
     app.include_router(gemini_router, dependencies=[Depends(verify_api_key)])
     app.include_router(admin_router, dependencies=[Depends(verify_api_key)])
 
