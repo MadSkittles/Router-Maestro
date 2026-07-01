@@ -37,6 +37,26 @@ COPILOT_COUNT_TOKENS_PATH = "/v1/messages/count_tokens"
 _STRIP_RESPONSE_KEYS = frozenset({"copilot_usage", "stop_details"})
 _STRIP_STREAM_MESSAGE_STOP_KEYS = frozenset({"copilot_usage", "amazon-bedrock-invocationMetrics"})
 
+# Fields the Copilot native Anthropic endpoint accepts. Anything not in this
+# set is stripped before forwarding — Copilot returns 400 on unknown fields.
+_COPILOT_ACCEPTED_FIELDS = frozenset(
+    {
+        "model",
+        "messages",
+        "max_tokens",
+        "stream",
+        "system",
+        "thinking",
+        "tools",
+        "tool_choice",
+        "temperature",
+        "top_p",
+        "top_k",
+        "stop_sequences",
+        "metadata",
+    }
+)
+
 
 def _is_native_eligible(provider_name: str, actual_model: str) -> bool:
     """Whether this model can use the native Copilot Anthropic endpoint."""
@@ -44,6 +64,33 @@ def _is_native_eligible(provider_name: str, actual_model: str) -> bool:
         return False
     bare = actual_model.split("/", 1)[-1].lower()
     return bare.startswith("claude-")
+
+
+def _strip_history_thinking_blocks(body: dict) -> None:
+    """Remove thinking blocks from assistant messages in conversation history.
+
+    Called as a retry fallback when Copilot rejects a signature it didn't
+    produce.  Stripping is safe — the model doesn't need prior thinking
+    to generate a new response.
+    """
+    messages = body.get("messages")
+    if not isinstance(messages, list):
+        return
+    for msg in messages:
+        if not isinstance(msg, dict) or msg.get("role") != "assistant":
+            continue
+        content = msg.get("content")
+        if not isinstance(content, list):
+            continue
+        filtered = [b for b in content if not (isinstance(b, dict) and b.get("type") == "thinking")]
+        if len(filtered) != len(content):
+            msg["content"] = filtered
+
+
+def _is_signature_error(response_text: str) -> bool:
+    """Check if an upstream 400 is a thinking signature validation error."""
+    lower = response_text.lower()
+    return "signature" in lower and "thinking" in lower
 
 
 def _strip_response(data: dict) -> dict:
@@ -149,6 +196,9 @@ async def beta_messages(raw_request: FastAPIRequest):
 
     stream = body.get("stream", False)
     thinking = body.get("thinking")
+
+    # Debug: log all top-level keys to identify fields Copilot might reject
+    logger.debug("Beta request body keys: %s", sorted(body.keys()))
     logger.info(
         "Received beta Anthropic request: model=%s, stream=%s, max_tokens=%s, thinking=%s",
         model,
@@ -191,6 +241,13 @@ async def beta_messages(raw_request: FastAPIRequest):
         logger.debug("Stripping top_p (temperature also present)")
         del body["top_p"]
 
+    # Strip fields the Copilot native endpoint doesn't accept.
+    unknown = set(body.keys()) - _COPILOT_ACCEPTED_FIELDS
+    if unknown:
+        logger.debug("Stripping unknown fields before passthrough: %s", unknown)
+        for key in unknown:
+            del body[key]
+
     # Ensure Copilot token is fresh
     await copilot_provider.ensure_token()
 
@@ -200,7 +257,7 @@ async def beta_messages(raw_request: FastAPIRequest):
             keepalive_frame=ANTHROPIC_PING_FRAME,
         )
 
-    # Non-streaming passthrough
+    # Non-streaming passthrough — try-forward with signature retry
     try:
         response = await copilot_provider._send_with_auth_retry(
             "POST",
@@ -210,6 +267,21 @@ async def beta_messages(raw_request: FastAPIRequest):
     except ProviderError as e:
         logger.error("Beta passthrough request failed: %s", e)
         raise HTTPException(status_code=e.status_code or 502, detail=str(e))
+
+    # If Copilot rejects a thinking signature, strip history thinking blocks
+    # and retry once — this handles the standard→beta route transition case.
+    if response.status_code == 400 and _is_signature_error(response.text):
+        logger.info("Signature rejected by upstream, stripping thinking blocks and retrying")
+        _strip_history_thinking_blocks(body)
+        try:
+            response = await copilot_provider._send_with_auth_retry(
+                "POST",
+                COPILOT_MESSAGES_PATH,
+                json=body,
+            )
+        except ProviderError as e:
+            logger.error("Beta passthrough retry failed: %s", e)
+            raise HTTPException(status_code=e.status_code or 502, detail=str(e))
 
     if response.status_code >= 400:
         logger.warning(
@@ -313,8 +385,40 @@ async def _stream_passthrough(
 
     Filters out copilot-internal events and strips internal metadata from
     ``message_stop`` events before yielding to the client.
+
+    On a signature validation error (400), strips history thinking blocks
+    and retries once before surfacing the error.
     """
     try:
+        async with provider._stream_with_auth_retry(
+            COPILOT_MESSAGES_PATH,
+            json=payload,
+            headers_kwargs={},
+        ) as response:
+            if response.status_code == 400:
+                error_text = (await response.aread()).decode()
+                if _is_signature_error(error_text):
+                    logger.info(
+                        "Stream: signature rejected, stripping thinking blocks and retrying"
+                    )
+                    _strip_history_thinking_blocks(payload)
+                    # Fall through to retry below
+                else:
+                    msg = f"Upstream error ({response.status_code}): {error_text[:200]}"
+                    yield _sse_error_event(msg)
+                    return
+            elif response.status_code >= 400:
+                error_text = (await response.aread()).decode()
+                msg = f"Upstream error ({response.status_code}): {error_text[:200]}"
+                yield _sse_error_event(msg)
+                return
+            else:
+                # Success — stream events
+                async for frame in _iter_sse_frames(response):
+                    yield frame
+                return
+
+        # Retry after stripping thinking blocks (only reached on signature error)
         async with provider._stream_with_auth_retry(
             COPILOT_MESSAGES_PATH,
             json=payload,
@@ -326,25 +430,8 @@ async def _stream_passthrough(
                 yield _sse_error_event(msg)
                 return
 
-            current_event: str | None = None
-            data_buffer: str = ""
-
-            async for line in response.aiter_lines():
-                if line.startswith("event: "):
-                    current_event = line[7:]
-                    # Don't yield event line yet — wait for data to decide
-                elif line.startswith("data: "):
-                    data_buffer = line[6:]
-                elif line == "":
-                    # End of SSE frame — process and yield
-                    if current_event and data_buffer:
-                        cleaned = _clean_stream_frame(current_event, data_buffer)
-                        if cleaned is not None:
-                            yield f"event: {current_event}\ndata: {cleaned}\n\n"
-                    elif current_event and not data_buffer:
-                        yield f"event: {current_event}\ndata: \n\n"
-                    current_event = None
-                    data_buffer = ""
+            async for frame in _iter_sse_frames(response):
+                yield frame
 
     except ProviderError as e:
         yield _sse_error_event(str(e))
@@ -354,6 +441,27 @@ async def _stream_passthrough(
     except Exception:
         logger.error("Unexpected error in beta anthropic stream", exc_info=True)
         yield _sse_error_event("Internal server error")
+
+
+async def _iter_sse_frames(response) -> AsyncGenerator[str, None]:
+    """Iterate SSE frames from a response, filtering copilot-internal events."""
+    current_event: str | None = None
+    data_buffer: str = ""
+
+    async for line in response.aiter_lines():
+        if line.startswith("event: "):
+            current_event = line[7:]
+        elif line.startswith("data: "):
+            data_buffer = line[6:]
+        elif line == "":
+            if current_event and data_buffer:
+                cleaned = _clean_stream_frame(current_event, data_buffer)
+                if cleaned is not None:
+                    yield f"event: {current_event}\ndata: {cleaned}\n\n"
+            elif current_event and not data_buffer:
+                yield f"event: {current_event}\ndata: \n\n"
+            current_event = None
+            data_buffer = ""
 
 
 def _clean_stream_frame(event_type: str, data_str: str) -> str | None:
