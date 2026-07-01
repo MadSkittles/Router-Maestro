@@ -350,3 +350,66 @@ class TestRecoverInvokeToolCalls:
         calls = recover_invoke_tool_calls(text, allowed_names={"ListTools"})
         assert calls is not None
         assert json.loads(calls[0]["function"]["arguments"]) == {}
+
+    def test_backtick_in_param_value_preserved(self):
+        """A parameter value containing backticks must not be corrupted.
+
+        Regression for PR #110 review: code-span stripping used to run over the
+        whole text and erased backticked content inside real tool calls (Bash
+        commands routinely contain `` `date` ``).
+        """
+        text = (
+            "Let me check the date.\n"
+            '<invoke name="Bash">\n'
+            '<parameter name="command">echo `date` && ls</parameter>\n'
+            "</invoke>"
+        )
+        calls = recover_invoke_tool_calls(text, allowed_names={"Bash"})
+        assert calls is not None
+        assert json.loads(calls[0]["function"]["arguments"]) == {"command": "echo `date` && ls"}
+
+    def test_stray_prose_backtick_does_not_erase_invoke(self):
+        """A lone backtick in prose must not pair across the invoke boundary.
+
+        Regression for PR #110 review: an unpaired backtick before a well-formed
+        invoke used to pair with a backtick inside the invoke body, deleting the
+        whole block and returning None — reproducing the stall this code fixes.
+        """
+        text = (
+            "check the `git log output for the "
+            '<invoke name="Bash"><parameter name="command">ls `foo`</parameter></invoke>'
+        )
+        calls = recover_invoke_tool_calls(text, allowed_names={"Bash"})
+        assert calls is not None
+        assert json.loads(calls[0]["function"]["arguments"]) == {"command": "ls `foo`"}
+
+    def test_param_value_containing_fenced_code_preserved(self):
+        """A Write-style param whose value is itself a ``` fenced block is kept.
+
+        The inner fence must not be treated as a document-level code span that
+        would suppress the (real) tool call.
+        """
+        text = (
+            '<invoke name="Write">'
+            '<parameter name="content">```python\nprint(1)\n```</parameter>'
+            "</invoke>"
+        )
+        calls = recover_invoke_tool_calls(text, allowed_names={"Write"})
+        assert calls is not None
+        assert json.loads(calls[0]["function"]["arguments"]) == {
+            "content": "```python\nprint(1)\n```"
+        }
+
+    def test_fenced_meta_and_real_invoke_mixed(self):
+        """Only the real invoke is recovered; the fenced example is rejected."""
+        text = (
+            "Here is the syntax:\n"
+            "```\n"
+            '<invoke name="Bash"><parameter name="command">evil</parameter></invoke>\n'
+            "```\n"
+            'now really: <invoke name="Bash"><parameter name="command">real</parameter></invoke>'
+        )
+        calls = recover_invoke_tool_calls(text, allowed_names={"Bash"})
+        assert calls is not None
+        assert len(calls) == 1
+        assert json.loads(calls[0]["function"]["arguments"]) == {"command": "real"}

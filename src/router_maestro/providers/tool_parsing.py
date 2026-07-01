@@ -47,11 +47,29 @@ _INVOKE_PARAM_RE = re.compile(
     r'<parameter\s+name="([^"]+)"\s*>(.*?)</parameter>',
     re.DOTALL,
 )
-# Fenced (``` ... ```) and inline (`...`) code spans. Stripped before scanning
-# for <invoke> so that prose *discussing* tool-call syntax inside code spans is
-# not misread as a real tool call.
+# Fenced (``` ... ```) and inline (`...`) code spans. Used to detect whether a
+# leaked <invoke> block sits inside a code span (documentation / meta-discussion)
+# rather than being a real simulated tool call. These are matched against a copy
+# of the text with the invoke blocks masked out, so backticks *inside* an
+# invoke's parameters can never pair with backticks in the surrounding prose.
 _CODE_FENCE_RE = re.compile(r"```.*?```", re.DOTALL)
-_INLINE_CODE_RE = re.compile(r"`[^`]*`", re.DOTALL)
+_INLINE_CODE_RE = re.compile(r"`[^`]*`")
+
+
+def _code_span_ranges(masked: str) -> list[tuple[int, int]]:
+    """Return (start, end) offset ranges of code spans in ``masked`` text.
+
+    Fenced spans take precedence; inline spans wholly inside a fenced span are
+    ignored so an unbalanced backtick inside a fence cannot spawn phantom
+    inline ranges.
+    """
+    ranges: list[tuple[int, int]] = [(m.start(), m.end()) for m in _CODE_FENCE_RE.finditer(masked)]
+    for m in _INLINE_CODE_RE.finditer(masked):
+        start = m.start()
+        if any(rs <= start < re_ for rs, re_ in ranges):
+            continue
+        ranges.append((m.start(), m.end()))
+    return ranges
 
 
 def recover_invoke_tool_calls(
@@ -69,8 +87,12 @@ def recover_invoke_tool_calls(
 
     1. Structural close: only ``<invoke ...>...</invoke>`` pairs match; a bare
        or truncated ``<invoke ...>`` is ignored.
-    2. Code-span exclusion: fenced ```` ``` ```` and inline ``` ` ``` spans are
-       stripped before scanning, so tool-call syntax shown as code is skipped.
+    2. Code-span exclusion: a block whose opening ``<invoke`` sits inside a
+       fenced ```` ``` ```` or inline ``` ` ``` code span is treated as
+       documentation and skipped. This is decided on a copy of the text with
+       the invoke spans masked out, so backticks or fenced code *inside* a
+       real tool call's parameters (routine for Bash/Write) can never corrupt
+       the parameter value or mispair with surrounding prose.
     3. Tool-name cross-check: when ``allowed_names`` is provided, a recovered
        call whose ``name`` is not in the request's tool list is dropped.
 
@@ -80,18 +102,29 @@ def recover_invoke_tool_calls(
     if not content:
         return None
 
-    # Guard 2: remove code spans before scanning so documented syntax is safe.
-    scan_text = _CODE_FENCE_RE.sub("", content)
-    scan_text = _INLINE_CODE_RE.sub("", scan_text)
-
-    matches = _INVOKE_RE.findall(scan_text)
-    if not matches:
+    # Guard 1: locate complete <invoke>...</invoke> blocks in the RAW text,
+    # recording their offsets. Parameter values are read from the raw body
+    # below and are never mutated by code-span stripping.
+    invokes = [(m.start(), m.group(1), m.group(2)) for m in _INVOKE_RE.finditer(content)]
+    if not invokes:
         return None
 
+    # Guard 2 (prep): mask the invoke spans, then compute code-span ranges on
+    # the masked text so an invoke's internal backticks/fences cannot influence
+    # detection or pair across its boundary.
+    masked = list(content)
+    for m in _INVOKE_RE.finditer(content):
+        for i in range(m.start(), m.end()):
+            masked[i] = "\x00"
+    code_ranges = _code_span_ranges("".join(masked))
+
     recovered: list[dict] = []
-    for name, body in matches:
+    for start, name, body in invokes:
         name = name.strip()
         if not name:
+            continue
+        # Guard 2: skip blocks documented inside a code span.
+        if any(rs <= start < re_ for rs, re_ in code_ranges):
             continue
         # Guard 3: only honour calls to tools the client actually offered.
         if allowed_names is not None and name not in allowed_names:
