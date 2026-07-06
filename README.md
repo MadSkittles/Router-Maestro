@@ -65,6 +65,11 @@ Get a local server running in 3 steps. The server (started locally or via Docker
 - An active GitHub Copilot subscription
 - Port 8080 free, or adjust `-p 8080:8080` in the Docker command below
 
+> **Custom port:** If you use a different host port (e.g. `-p 8123:8080`), update the local context so the CLI connects to the correct port:
+> ```bash
+> router-maestro context update local --endpoint http://localhost:8123
+> ```
+
 > **About the Router-Maestro API key.** Router-Maestro has **one server key** (format `sk-rm-...`) that every client must send on every request. It is **not** an OpenAI / Anthropic / Gemini / GitHub token — it only authenticates clients to *your* Router-Maestro server. The server auto-generates and persists this key on first start (in `~/.config/router-maestro/contexts.json` or its Docker-mounted equivalent), so you usually never type it by hand: the CLI reads it from the active context and the `config claude-code/codex/gemini` wizards write it into each tool's settings for you. The two times you do touch it explicitly are (1) `router-maestro server show-key` to copy it into a raw `curl` or environment variable like `ROUTER_MAESTRO_API_KEY`, and (2) `router-maestro context add ... --api-key sk-rm-...` when pointing a client machine at a **remote** server (see [Deployment](#deployment)). If a client returns `401`, it almost always means the key it sent doesn't match what the server expects — re-run `server show-key` and compare.
 
 <https://github.com/user-attachments/assets/8f60ec7a-4fbe-4342-9408-084073a4d48d>
@@ -275,6 +280,7 @@ router-maestro model list
 | `context current`                                    | Show current context |
 | `context list` | List all contexts |
 | `context set <name>` | Switch context |
+| `context update <name> --endpoint <url> [--api-key <key>]` | Update context endpoint/key |
 | `context add <name> --endpoint <url> --api-key <key>` | Add remote context |
 | `context test` | Test connection |
 
