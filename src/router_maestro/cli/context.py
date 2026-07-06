@@ -80,6 +80,35 @@ def add(
 
 
 @app.command()
+def update(
+    name: str = typer.Argument(..., help="Context name to update"),
+    endpoint: str | None = typer.Option(None, "--endpoint", "-e", help="New endpoint URL"),
+    api_key: str | None = typer.Option(None, "--api-key", "-k", help="New API key"),
+) -> None:
+    """Update an existing context's endpoint or API key."""
+    config = load_contexts_config()
+
+    if name not in config.contexts:
+        console.print(f"[red]Context '{name}' not found[/red]")
+        console.print(f"[dim]Available: {', '.join(config.contexts.keys())}[/dim]")
+        raise typer.Exit(1)
+
+    if not endpoint and not api_key:
+        console.print("[yellow]Nothing to update. Use --endpoint or --api-key.[/yellow]")
+        raise typer.Exit(1)
+
+    ctx = config.contexts[name]
+    if endpoint:
+        ctx.endpoint = endpoint
+    if api_key:
+        ctx.api_key = api_key
+
+    save_contexts_config(config)
+    console.print(f"[green]Updated context: {name}[/green]")
+    console.print(f"  Endpoint: {ctx.endpoint}")
+
+
+@app.command()
 def remove(
     name: str = typer.Argument(..., help="Context name to remove"),
 ) -> None:
