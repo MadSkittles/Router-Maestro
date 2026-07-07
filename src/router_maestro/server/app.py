@@ -58,7 +58,14 @@ async def lifespan(app: FastAPI):
             logger.warning("Failed to pre-warm model cache: %s", e)
 
     yield
-    # Shutdown
+    # Shutdown — close provider HTTP clients
+    router = get_router()
+    for provider in router.providers.values():
+        if hasattr(provider, "close"):
+            try:
+                await provider.close()
+            except Exception:
+                pass
     logger.info("Router-Maestro server shutting down")
 
 

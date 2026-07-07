@@ -50,6 +50,45 @@ class ThinkingBudgetConfig(BaseModel):
     )
 
 
+class LeakGuardConfig(BaseModel):
+    """Leak guard configuration."""
+
+    enabled: bool = Field(default=True, description="Enable response leak detection")
+
+
+class RunawayGuardConfig(BaseModel):
+    """Runaway guard configuration."""
+
+    enabled: bool = Field(default=True, description="Enable runaway generation detection")
+    max_bytes: int = Field(
+        default=10_000_000,
+        ge=100_000,
+        description="Abort if total streamed bytes exceed this",
+    )
+    max_deltas: int = Field(
+        default=50_000,
+        ge=1000,
+        description="Delta count threshold for tiny-fragment detection",
+    )
+
+
+class GuardsConfig(BaseModel):
+    """Stream guards configuration."""
+
+    leak_guard: LeakGuardConfig = Field(default_factory=LeakGuardConfig)
+    runaway_guard: RunawayGuardConfig = Field(default_factory=RunawayGuardConfig)
+
+
+class AuditConfig(BaseModel):
+    """Per-request audit tracing configuration."""
+
+    enabled: bool = Field(default=False, description="Enable per-request audit tracing")
+    trace_dir: str | None = Field(
+        default=None,
+        description="Directory for trace files (default: ~/.local/share/router-maestro/traces/)",
+    )
+
+
 class PrioritiesConfig(BaseModel):
     """Configuration for model priorities and fallback."""
 
@@ -63,6 +102,12 @@ class PrioritiesConfig(BaseModel):
         description="Per-model token limit overrides keyed by 'provider/model' or 'model'",
     )
     thinking: ThinkingBudgetConfig = Field(default_factory=ThinkingBudgetConfig)
+    guards: GuardsConfig = Field(default_factory=GuardsConfig)
+    beta_strip: list[str] = Field(
+        default_factory=list,
+        description="anthropic-beta tokens to strip (supports trailing * wildcard)",
+    )
+    audit: AuditConfig = Field(default_factory=AuditConfig)
 
     @classmethod
     def get_default(cls) -> "PrioritiesConfig":

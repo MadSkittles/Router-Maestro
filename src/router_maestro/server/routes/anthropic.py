@@ -11,7 +11,6 @@ from fastapi import Request as FastAPIRequest
 from fastapi.responses import JSONResponse
 
 from router_maestro.providers import AnthropicProvider, ChatRequest, ProviderError
-from router_maestro.providers.tool_parsing import recover_invoke_tool_calls
 from router_maestro.routing import Router, get_router
 from router_maestro.server.schemas.anthropic import (
     AnthropicCountTokensRequest,
@@ -559,26 +558,34 @@ async def stream_response(
                 for t in request.tools
                 if (t.get("function") or {}).get("name")
             } or None
-        assistant_text = ""
         saw_real_tool_call = False
 
+        # Unified pipeline: guards + audit in one object
+        from router_maestro.pipeline import RequestPipeline
+
+        pipeline = RequestPipeline.create(
+            request_id=response_id,
+            model=request.model,
+            tool_names=allowed_tool_names,
+        )
+
         async for chunk in stream:
-            if chunk.content:
-                assistant_text += chunk.content
+            # Feed through guards (leak detection + runaway)
+            abort_reason = pipeline.feed_stream(chunk)
+            if abort_reason:
+                logger.warning("Stream aborted: %s", abort_reason)
+                yield _sse_error_event("Overloaded: please retry this request")
+                pipeline.finish(status=529, body_summary=abort_reason)
+                return
+
             if chunk.tool_calls:
-                # A properly structured tool call streamed normally; never
-                # second-guess it with text recovery.
                 saw_real_tool_call = True
 
             recovered_tool_calls = chunk.tool_calls
             finish_reason = chunk.finish_reason
             if finish_reason and not saw_real_tool_call:
-                leaked = recover_invoke_tool_calls(assistant_text, allowed_tool_names)
+                leaked = pipeline.check_invoke_at_finish()
                 if leaked:
-                    # Append a real tool_use block to the (already-streamed)
-                    # text and promote the stop reason so the client executes
-                    # the call (or takes its malformed-tool retry path) instead
-                    # of treating the turn as a finished plain-text answer.
                     recovered_tool_calls = leaked
                     finish_reason = "tool_calls"
 

@@ -274,9 +274,24 @@ async def _stream_response(
     try:
         stream, _provider_name = await model_router.chat_completion_stream(request)
 
+        # Unified pipeline: guards + audit
+        from router_maestro.pipeline import RequestPipeline
+
+        pipeline = RequestPipeline.create(
+            request_id=f"gemini-{original_model}",
+            model=request.model,
+        )
+
         state = GeminiStreamState(estimated_input_tokens=estimated_input_tokens)
 
         async for chunk in stream:
+            abort_reason = pipeline.feed_stream(chunk)
+            if abort_reason:
+                logger.warning("Gemini stream aborted: %s", abort_reason)
+                yield _sse_error_data("Overloaded: please retry this request")
+                pipeline.finish(status=529, body_summary=abort_reason)
+                return
+
             openai_chunk = {
                 "choices": [
                     {

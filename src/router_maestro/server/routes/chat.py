@@ -150,6 +150,22 @@ async def stream_response(model_router: Router, request: ChatRequest) -> AsyncGe
         response_id = f"chatcmpl-{uuid.uuid4().hex[:8]}"
         created = int(time.time())
 
+        # Unified pipeline: guards + audit
+        from router_maestro.pipeline import RequestPipeline
+
+        tool_names: set[str] | None = None
+        if request.tools:
+            tool_names = {
+                (t.get("function") or {}).get("name", "")
+                for t in request.tools
+                if (t.get("function") or {}).get("name")
+            } or None
+        pipeline = RequestPipeline.create(
+            request_id=response_id,
+            model=request.model,
+            tool_names=tool_names,
+        )
+
         # Send initial chunk with role
         initial_chunk = ChatCompletionChunk(
             id=response_id,
@@ -166,6 +182,16 @@ async def stream_response(model_router: Router, request: ChatRequest) -> AsyncGe
         yield f"data: {initial_chunk.model_dump_json()}\n\n"
 
         async for chunk in stream:
+            abort_reason = pipeline.feed_stream(chunk)
+            if abort_reason:
+                error_data = {
+                    "error": {"message": "Server overloaded, retry", "type": "overloaded"}
+                }
+                yield f"data: {json.dumps(error_data)}\n\n"
+                yield "data: [DONE]\n\n"
+                pipeline.finish(status=529, body_summary=abort_reason)
+                return
+
             usage = make_chat_usage(chunk.usage)
             if chunk.content or chunk.tool_calls:
                 chunk_response = ChatCompletionChunk(

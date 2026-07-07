@@ -671,6 +671,47 @@ For additional deployment options, see [docs/deployment.md](docs/deployment.md):
 - Traefik dashboard configuration and security
 - Complete environment variables reference
 
+### Stream Guards & Audit Tracing
+
+Router-Maestro includes runtime stream protection and optional per-request tracing.
+
+**Stream Guards** (enabled by default in `priorities.json`):
+
+- **Leak Guard** — detects when Copilot-served Claude models emit internal protocol markup (control envelopes, XML tool calls) as plain text. Control envelopes abort the stream (client retries); invoke leaks are recovered into structured tool_use.
+- **Runaway Guard** — aborts streams with degenerate generation patterns (infinite tiny fragments or excessive byte volume).
+
+Configure in `~/.config/router-maestro/priorities.json`:
+```json
+{
+  "guards": {
+    "leak_guard": { "enabled": true },
+    "runaway_guard": { "enabled": true, "max_bytes": 10000000 }
+  },
+  "beta_strip": ["output-128k-*"]
+}
+```
+
+**Audit Tracing** (opt-in, for debugging):
+
+```bash
+# Enable via env var
+ROUTER_MAESTRO_TRACE=1 router-maestro server start
+
+# Or in priorities.json
+{ "audit": { "enabled": true } }
+```
+
+Each request writes JSON trace files to `~/.local/share/router-maestro/traces/{request_id}/`:
+- `inbound.json` — what the client sent
+- `upstream.json` — what was forwarded to the provider
+- `upstream_resp.json` — provider response
+- `outbound.json` — what was returned to the client (with timing)
+
+For Docker, mount a volume to persist traces:
+```bash
+docker run ... -v ./traces:/home/maestro/.local/share/router-maestro/traces ...
+```
+
 ## License
 
 MIT License - see [LICENSE](LICENSE) file.

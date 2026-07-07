@@ -481,6 +481,14 @@ async def stream_response(
     try:
         stream, provider_name = await model_router.responses_completion_stream(request)
 
+        # Unified pipeline: guards + audit
+        from router_maestro.pipeline import RequestPipeline
+
+        pipeline = RequestPipeline.create(
+            request_id=request_id,
+            model=request.model,
+        )
+
         logger.debug(
             "Stream started: req_id=%s, resp_id=%s, provider=%s",
             request_id,
@@ -527,6 +535,27 @@ async def stream_response(
         )
 
         async for chunk in stream:
+            # Feed through guards
+            abort_reason = pipeline.feed_stream(chunk)
+            if abort_reason:
+                logger.warning("Responses stream aborted: %s", abort_reason)
+                yield sse_event(
+                    {
+                        "type": "response.failed",
+                        "response": {
+                            **base_response,
+                            "status": "failed",
+                            "output": [],
+                            "error": {
+                                "type": "server_error",
+                                "message": "Overloaded: please retry",
+                            },
+                        },
+                    }
+                )
+                pipeline.finish(status=529, body_summary=abort_reason)
+                return
+
             # Handle reasoning summary text deltas. gpt-5.x and other thinking
             # models stream chain-of-thought via these events; if we don't
             # forward them, Codex sees only the final user-visible message and
