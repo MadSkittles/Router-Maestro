@@ -2,9 +2,9 @@
 
 import pytest
 
+from router_maestro.pipeline.beta_strip import strip_beta_tokens
 from router_maestro.pipeline.leak_guard import LeakGuard, RawFrameLeakGuard
 from router_maestro.pipeline.runaway_guard import RunawayGuard
-from router_maestro.pipeline.beta_strip import strip_beta_tokens
 from router_maestro.providers.base import ChatStreamChunk
 
 
@@ -26,7 +26,9 @@ class TestLeakGuard:
     def test_invoke_recovery_at_finish(self):
         """Invoke leaks should be recoverable at stream finish."""
         guard = LeakGuard(allowed_tool_names={"Read"})
-        guard.feed_text('<invoke name="Read"><parameter name="file_path">/tmp/x</parameter></invoke>')
+        guard.feed_text(
+            '<invoke name="Read"><parameter name="file_path">/tmp/x</parameter></invoke>'
+        )
         recovered = guard.check_invoke_at_finish()
         assert recovered is not None
         assert len(recovered) == 1
@@ -35,14 +37,18 @@ class TestLeakGuard:
     def test_invoke_unknown_tool_no_recovery(self):
         """Invoke for unknown tool should not recover."""
         guard = LeakGuard(allowed_tool_names={"Bash"})
-        guard.feed_text('<invoke name="Read"><parameter name="file_path">/tmp/x</parameter></invoke>')
+        guard.feed_text(
+            '<invoke name="Read"><parameter name="file_path">/tmp/x</parameter></invoke>'
+        )
         recovered = guard.check_invoke_at_finish()
         assert recovered is None
 
     def test_control_envelope_task_notification_abort(self):
         """Task notification envelope should trigger abort."""
         guard = LeakGuard()
-        text = "<task-notification><task-id>123</task-id><summary>done</summary></task-notification>"
+        text = (
+            "<task-notification><task-id>123</task-id><summary>done</summary></task-notification>"
+        )
         result = guard.feed_text(text)
         assert result is not None
         assert "control_envelope:task-notification" in result
@@ -84,7 +90,10 @@ class TestLeakGuard:
     def test_control_envelope_in_code_fence_no_abort(self):
         """Control envelopes inside code fences should not trigger."""
         guard = LeakGuard()
-        text = '```\n<task-notification><task-id>123</task-id><summary>example</summary></task-notification>\n```'
+        text = (
+            "```\n<task-notification><task-id>123</task-id>"
+            "<summary>example</summary></task-notification>\n```"
+        )
         result = guard.feed_text(text)
         assert result is None
 
@@ -122,9 +131,7 @@ class TestRawFrameLeakGuard:
         import json
 
         guard = RawFrameLeakGuard()
-        data = json.dumps({
-            "delta": {"type": "text_delta", "text": "<tick>content</tick>"}
-        })
+        data = json.dumps({"delta": {"type": "text_delta", "text": "<tick>content</tick>"}})
         result = guard.feed_frame("content_block_delta", data)
         assert result is not None
         assert "tick" in result
@@ -138,12 +145,14 @@ class TestRawFrameLeakGuard:
         import json
 
         guard = RawFrameLeakGuard()
-        data = json.dumps({
-            "delta": {
-                "type": "thinking_delta",
-                "thinking": '<channel source="x">leak</channel>',
+        data = json.dumps(
+            {
+                "delta": {
+                    "type": "thinking_delta",
+                    "thinking": '<channel source="x">leak</channel>',
+                }
             }
-        })
+        )
         result = guard.feed_frame("content_block_delta", data)
         assert result is not None
 
@@ -202,11 +211,15 @@ class TestBetaStrip:
         assert strip_beta_tokens("", ["foo"]) is None
 
     def test_exact_match_strip(self):
-        result = strip_beta_tokens("output-128k-2025-02-19,context-1m-2025-08-07", ["output-128k-2025-02-19"])
+        result = strip_beta_tokens(
+            "output-128k-2025-02-19,context-1m-2025-08-07", ["output-128k-2025-02-19"]
+        )
         assert result == "context-1m-2025-08-07"
 
     def test_wildcard_strip(self):
-        result = strip_beta_tokens("output-128k-2025-02-19,context-1m-2025-08-07", ["output-128k-*"])
+        result = strip_beta_tokens(
+            "output-128k-2025-02-19,context-1m-2025-08-07", ["output-128k-*"]
+        )
         assert result == "context-1m-2025-08-07"
 
     def test_strip_all_returns_none(self):

@@ -1,8 +1,6 @@
 """Tests for per-request audit tracing."""
 
 import json
-import tempfile
-from pathlib import Path
 
 from router_maestro.utils.audit import AuditTrace, is_tracing_enabled
 
@@ -12,8 +10,15 @@ class TestAuditTrace:
 
     def test_full_lifecycle(self, tmp_path):
         trace = AuditTrace("req-123", tmp_path)
-        trace.record_inbound("POST", "/v1/messages", {"Authorization": "Bearer sk-xxx"}, {"model": "opus"})
-        trace.record_upstream("POST", "https://api.example.com/v1/messages", {"Authorization": "Bearer tok"}, {"model": "opus"})
+        trace.record_inbound(
+            "POST", "/v1/messages", {"Authorization": "Bearer sk-xxx"}, {"model": "opus"}
+        )
+        trace.record_upstream(
+            "POST",
+            "https://api.example.com/v1/messages",
+            {"Authorization": "Bearer tok"},
+            {"model": "opus"},
+        )
         trace.record_upstream_response(200, {"content-type": "application/json"}, {"id": "msg_1"})
         trace.record_outbound(200, body_summary="streamed 1500 bytes")
         trace.flush()
@@ -33,7 +38,8 @@ class TestAuditTrace:
     def test_sensitive_headers_redacted(self, tmp_path):
         trace = AuditTrace("req-456", tmp_path)
         trace.record_inbound(
-            "POST", "/v1/messages",
+            "POST",
+            "/v1/messages",
             {"Authorization": "Bearer secret", "x-api-key": "my-key", "X-Request-Id": "abc"},
             {},
         )
