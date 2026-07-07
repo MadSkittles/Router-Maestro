@@ -45,10 +45,7 @@ def get_trace_dir(config_trace_dir: str | None = None) -> Path:
 
 def _redact_headers(headers: dict[str, str]) -> dict[str, str]:
     """Redact sensitive header values."""
-    return {
-        k: ("***" if k.lower() in _SENSITIVE_HEADERS else v)
-        for k, v in headers.items()
-    }
+    return {k: ("***" if k.lower() in _SENSITIVE_HEADERS else v) for k, v in headers.items()}
 
 
 def _safe_json(obj: Any) -> Any:

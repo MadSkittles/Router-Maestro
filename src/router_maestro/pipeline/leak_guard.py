@@ -62,8 +62,14 @@ class _TagMatcher:
     """
 
     __slots__ = (
-        "_open", "_close", "_tag_name",
-        "_state", "_oi", "_ci", "_content_len", "_in_fence",
+        "_open",
+        "_close",
+        "_tag_name",
+        "_state",
+        "_oi",
+        "_ci",
+        "_content_len",
+        "_in_fence",
     )
 
     IDLE = 0
@@ -212,7 +218,7 @@ class LeakGuard:
         # Feed character-by-character to matchers
         for c in text:
             # Track code fences (``` toggles)
-            if c == '`':
+            if c == "`":
                 self._backtick_run += 1
             else:
                 if self._backtick_run >= 3:
@@ -226,9 +232,7 @@ class LeakGuard:
             for matcher in self._matchers:
                 if matcher.feed(c):
                     self._tripped = True
-                    self._trip_reason = (
-                        f"response_leak:control_envelope:{matcher.tag_name}"
-                    )
+                    self._trip_reason = f"response_leak:control_envelope:{matcher.tag_name}"
                     logger.warning(
                         "Control envelope leak detected: <%s>",
                         matcher.tag_name,

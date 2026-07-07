@@ -43,10 +43,7 @@ class RunawayGuard:
             self._delta_count += 1
 
         if self._total_bytes > self._max_bytes:
-            reason = (
-                f"runaway_guard:max_bytes_exceeded:"
-                f"{self._total_bytes}>{self._max_bytes}"
-            )
+            reason = f"runaway_guard:max_bytes_exceeded:{self._total_bytes}>{self._max_bytes}"
             logger.warning(
                 "Runaway guard tripped: total_bytes=%d > max=%d (deltas=%d)",
                 self._total_bytes,
@@ -61,10 +58,7 @@ class RunawayGuard:
             and (self._total_bytes / self._delta_count) < self._min_avg_bytes
         ):
             avg = self._total_bytes / self._delta_count
-            reason = (
-                f"runaway_guard:tiny_fragments:"
-                f"deltas={self._delta_count},avg_bytes={avg:.1f}"
-            )
+            reason = f"runaway_guard:tiny_fragments:deltas={self._delta_count},avg_bytes={avg:.1f}"
             logger.warning(
                 "Runaway guard tripped: %d deltas with avg %.1f bytes/delta",
                 self._delta_count,

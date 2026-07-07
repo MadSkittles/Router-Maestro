@@ -574,9 +574,7 @@ async def stream_response(
             abort_reason = pipeline.feed_stream(chunk)
             if abort_reason:
                 logger.warning("Stream aborted: %s", abort_reason)
-                yield _sse_error_event(
-                    "Overloaded: please retry this request"
-                )
+                yield _sse_error_event("Overloaded: please retry this request")
                 pipeline.finish(status=529, body_summary=abort_reason)
                 return
 
