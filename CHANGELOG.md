@@ -4,6 +4,56 @@ All notable changes to Router-Maestro are documented here.
 
 ---
 
+## v0.5.0 (2026-07-07)
+
+### Features
+
+- **Stream Pipeline & Guards.** Unified `RequestPipeline` wired into all 5
+  streaming routes (Anthropic, Anthropic-beta passthrough, OpenAI Chat,
+  Responses, Gemini). Guards and audit tracing share a single per-request
+  pipeline instance.
+
+- **Leak Guard.** Detects Claude Code control envelope leaks
+  (`<task-notification>`, `<teammate-message>`, `<channel>`,
+  `<cross-session-message>`, `<tick>`) using O(1)-state character-fed
+  matchers with code-fence awareness. Control envelopes abort the stream so
+  the client retries; `<invoke>` tool call leaks are recovered into
+  structured `tool_use` at stream end.
+
+- **Runaway Guard.** Volume circuit-breaker that aborts streams producing
+  excessive tiny fragments (degenerate generation) or exceeding an absolute
+  byte ceiling (default 10MB).
+
+- **Beta Header Auto-Strip.** Configurable removal of `anthropic-beta`
+  tokens before forwarding upstream. Supports trailing-wildcard patterns
+  (e.g. `"output-128k-*"`). Configured via `priorities.json` → `beta_strip`.
+
+- **Per-request Audit Tracing.** Optional per-request JSON capture of the
+  full request/response cycle. Activate with `ROUTER_MAESTRO_TRACE=1` or
+  `audit.enabled: true` in `priorities.json`. Writes 4 files per request
+  to `~/.local/share/router-maestro/traces/{request_id}/`.
+
+### Fixes
+
+- **Server hang under sustained load.** The integration test server (and
+  production under heavy use) would freeze after ~30 requests because the
+  subprocess stdout pipe buffer filled and blocked the event loop. Fixed by
+  using `DEVNULL` for the test harness and adding HTTP/2 client recycling
+  (5-minute max age) + connection error recovery with automatic client
+  recreation in production.
+
+- **HTTP/2 connection resilience.** `RemoteProtocolError`, `PoolTimeout`,
+  and `ConnectError` on the Copilot HTTP/2 client now trigger an automatic
+  client recycle + single retry instead of propagating as 500s.
+
+- **Token refresh timeout.** Shortened from 240s to 30s so a slow GitHub
+  token exchange doesn't block all requests behind the refresh lock.
+
+- **App shutdown cleanup.** Provider HTTP clients are now properly closed
+  during server shutdown (lifespan handler).
+
+---
+
 ## v0.3.28 (2026-06-30)
 
 ### Fixes
