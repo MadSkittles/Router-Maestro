@@ -25,6 +25,8 @@ from router_maestro.utils.responses_bridge import RESPONSES_ELIGIBLE_MODELS
 STARTUP_TIMEOUT_SECONDS = 45.0
 REQUEST_TIMEOUT_SECONDS = 120.0
 STREAM_TIMEOUT_SECONDS = 180.0
+RETRY_BACKOFF_SECONDS = 10.0
+MAX_RETRIES_ON_TIMEOUT = 2
 DEFAULT_MAX_MODEL_MATRIX = 0
 DEFAULT_MAX_REASONING_MATRIX = 1
 DEFAULT_API_KEY = "router-maestro-integration-test"
@@ -88,9 +90,8 @@ def live_server() -> Iterator[LiveServer]:
         ],
         cwd=_repo_root(),
         env=env,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
     )
 
     try:
@@ -100,14 +101,41 @@ def live_server() -> Iterator[LiveServer]:
         _terminate_process(process)
 
 
+class _RetryTransport(httpx.BaseTransport):
+    """Wraps an httpx transport with automatic retry on ReadTimeout.
+
+    Copilot rate-limits heavy usage within a single session; rather than
+    failing the test, back off and retry once.
+    """
+
+    def __init__(self, transport: httpx.BaseTransport):
+        self._inner = transport
+
+    def handle_request(self, request: httpx.Request) -> httpx.Response:
+        for attempt in range(MAX_RETRIES_ON_TIMEOUT + 1):
+            try:
+                return self._inner.handle_request(request)
+            except httpx.ReadTimeout:
+                if attempt >= MAX_RETRIES_ON_TIMEOUT:
+                    raise
+                time.sleep(RETRY_BACKOFF_SECONDS)
+
+    def close(self) -> None:
+        self._inner.close()
+
+
 @pytest.fixture(scope="session")
 def client(live_server: LiveServer) -> Iterator[httpx.Client]:
     """HTTP client authenticated against the local RM server."""
     headers = {"Authorization": f"Bearer {live_server.api_key}"}
+    transport = _RetryTransport(
+        httpx.HTTPTransport(proxy=os.environ.get("http_proxy") or os.environ.get("HTTP_PROXY"))
+    )
     with httpx.Client(
         base_url=live_server.base_url,
         headers=headers,
         timeout=REQUEST_TIMEOUT_SECONDS,
+        transport=transport,
     ) as http_client:
         yield http_client
 

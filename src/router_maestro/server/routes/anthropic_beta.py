@@ -389,6 +389,15 @@ async def _stream_passthrough(
     On a signature validation error (400), strips history thinking blocks
     and retries once before surfacing the error.
     """
+    # Build leak guard with tool names from the payload
+    from router_maestro.pipeline.leak_guard import RawFrameLeakGuard
+
+    tool_names: set[str] | None = None
+    tools = payload.get("tools")
+    if tools:
+        tool_names = {t.get("name", "") for t in tools if t.get("name")} or None
+    leak_guard = RawFrameLeakGuard(allowed_tool_names=tool_names)
+
     try:
         async with provider._stream_with_auth_retry(
             COPILOT_MESSAGES_PATH,
@@ -414,7 +423,7 @@ async def _stream_passthrough(
                 return
             else:
                 # Success — stream events
-                async for frame in _iter_sse_frames(response):
+                async for frame in _iter_sse_frames(response, leak_guard=leak_guard):
                     yield frame
                 return
 
@@ -430,7 +439,7 @@ async def _stream_passthrough(
                 yield _sse_error_event(msg)
                 return
 
-            async for frame in _iter_sse_frames(response):
+            async for frame in _iter_sse_frames(response, leak_guard=leak_guard):
                 yield frame
 
     except ProviderError as e:
@@ -443,7 +452,7 @@ async def _stream_passthrough(
         yield _sse_error_event("Internal server error")
 
 
-async def _iter_sse_frames(response) -> AsyncGenerator[str, None]:
+async def _iter_sse_frames(response, *, leak_guard=None) -> AsyncGenerator[str, None]:
     """Iterate SSE frames from a response, filtering copilot-internal events."""
     current_event: str | None = None
     data_buffer: str = ""
@@ -455,6 +464,20 @@ async def _iter_sse_frames(response) -> AsyncGenerator[str, None]:
             data_buffer = line[6:]
         elif line == "":
             if current_event and data_buffer:
+                # Check leak guard before yielding
+                if leak_guard:
+                    abort_reason = leak_guard.feed_frame(current_event, data_buffer)
+                    if abort_reason:
+                        error_event = {
+                            "type": "error",
+                            "error": {
+                                "type": "overloaded",
+                                "message": "Overloaded: please retry this request",
+                            },
+                        }
+                        yield f"event: error\ndata: {json.dumps(error_event)}\n\n"
+                        return
+
                 cleaned = _clean_stream_frame(current_event, data_buffer)
                 if cleaned is not None:
                     yield f"event: {current_event}\ndata: {cleaned}\n\n"

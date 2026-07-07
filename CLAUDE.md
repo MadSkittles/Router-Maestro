@@ -186,6 +186,55 @@ Runtime configuration follows XDG conventions:
 - **Data** (`~/.local/share/router-maestro/`):
   - `auth.json` — stored credentials (OAuth tokens, API keys)
   - `server.json` — server state
+  - `traces/` — per-request audit traces (when enabled)
+
+### Stream Pipeline & Guards
+
+All streaming routes pass through a unified `RequestPipeline` (`pipeline/request_pipeline.py`) that provides:
+- **Leak Guard** — detects Claude Code control envelopes (`<task-notification>`, `<teammate-message>`, etc.) leaked as text and aborts the stream; detects `<invoke>` tool call leaks and recovers them as structured tool_use at stream end.
+- **Runaway Guard** — volume circuit-breaker that aborts streams with excessive tiny fragments (degenerate generation) or absolute byte limits.
+- **Beta Strip** — configurable removal of `anthropic-beta` tokens before forwarding upstream (patterns in `priorities.json` → `beta_strip`).
+
+Guards are configured in `priorities.json`:
+```json
+{
+  "guards": {
+    "leak_guard": { "enabled": true },
+    "runaway_guard": { "enabled": true, "max_bytes": 10000000, "max_deltas": 50000 }
+  },
+  "beta_strip": ["output-128k-*"]
+}
+```
+
+### Audit Tracing
+
+Per-request capture of the full request/response cycle for debugging Copilot quirks.
+
+**Enable:**
+```bash
+# Via environment variable (recommended for one-off debugging)
+ROUTER_MAESTRO_TRACE=1 uv run router-maestro server start
+
+# Via priorities.json (persistent)
+# Add to ~/.config/router-maestro/priorities.json:
+{
+  "audit": { "enabled": true, "trace_dir": null }
+}
+```
+
+**Output:** When enabled, each request writes up to 4 JSON files to `~/.local/share/router-maestro/traces/{request_id}/`:
+- `inbound.json` — client request (method, path, headers, body)
+- `upstream.json` — request sent to provider
+- `upstream_resp.json` — provider response (status, headers, body)
+- `outbound.json` — response sent to client (status, duration)
+
+Sensitive headers (`Authorization`, `x-api-key`) are automatically redacted.
+
+**Docker:** Traces are written inside the container by default. To persist them, mount a volume:
+```yaml
+volumes:
+  - ./traces:/root/.local/share/router-maestro/traces
+```
 
 ### Model Identification
 

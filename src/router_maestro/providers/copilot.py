@@ -262,6 +262,9 @@ class CopilotProvider(BaseProvider):
 
     name = "github-copilot"
 
+    # Recycle the HTTP/2 client after this many seconds to avoid GOAWAY races
+    _CLIENT_MAX_AGE = 300  # 5 minutes
+
     def __init__(self) -> None:
         self.auth_manager = AuthManager()
         self._cached_token: str | None = None
@@ -271,6 +274,7 @@ class CopilotProvider(BaseProvider):
         self._models_ttl_cache: TTLCache[list[ModelInfo]] = TTLCache(MODELS_CACHE_TTL)
         # Reusable HTTP client
         self._client: httpx.AsyncClient | None = None
+        self._client_created_at: float = 0.0
         # Serializes token refresh so concurrent requests don't all refresh at
         # once (avoids redundant GitHub calls and overlapping auth.json writes).
         self._token_refresh_lock = asyncio.Lock()
@@ -325,10 +329,13 @@ class CopilotProvider(BaseProvider):
                 raise ProviderError("Not authenticated with GitHub Copilot", status_code=401)
 
             logger.debug("Refreshing Copilot token")
-            # Use a fresh short-lived client for token refresh to avoid blocking
-            # on the shared streaming HTTP/2 connection pool
+            # Use a fresh short-lived client with a SHORT timeout for token
+            # refresh — if GitHub is slow, fail fast rather than blocking all
+            # requests behind the lock for minutes.
             try:
-                async with httpx.AsyncClient(timeout=TIMEOUT_NON_STREAMING) as client:
+                async with httpx.AsyncClient(
+                    timeout=httpx.Timeout(connect=10.0, read=30.0, write=10.0, pool=10.0)
+                ) as client:
                     copilot_token = await get_copilot_token(client, cred.refresh)
             except httpx.HTTPStatusError as e:
                 if e.response.status_code in (401, 403):
@@ -425,23 +432,35 @@ class CopilotProvider(BaseProvider):
         considers valid self-heal by re-minting and retrying once; a 401/403
         that survives the retry raises a retryable auth error so the router can
         fall back. 429/5xx pass through unchanged for the caller to handle.
+
+        Also handles connection-level errors (HTTP/2 GOAWAY, pool timeouts) by
+        recycling the HTTP client and retrying once.
         """
         client = client or self._get_client()
         headers_kwargs = headers_kwargs or {}
         for attempt in range(2):
-            if method == "GET":
-                response = await client.get(
-                    self._url(path),
-                    headers=self._get_headers(**headers_kwargs),
-                    timeout=timeout,
-                )
-            else:
-                response = await client.post(
-                    self._url(path),
-                    json=json,
-                    headers=self._get_headers(**headers_kwargs),
-                    timeout=timeout,
-                )
+            try:
+                if method == "GET":
+                    response = await client.get(
+                        self._url(path),
+                        headers=self._get_headers(**headers_kwargs),
+                        timeout=timeout,
+                    )
+                else:
+                    response = await client.post(
+                        self._url(path),
+                        json=json,
+                        headers=self._get_headers(**headers_kwargs),
+                        timeout=timeout,
+                    )
+            except (httpx.RemoteProtocolError, httpx.PoolTimeout, httpx.ConnectError) as e:
+                if attempt == 0:
+                    logger.warning("Connection error on %s, recycling client: %s", path, e)
+                    await self._recycle_client()
+                    client = self._get_client()
+                    continue
+                raise ProviderError(f"Connection failed after retry: {e}", retryable=True)
+
             if attempt == 0 and await self._refresh_for_auth_status(path, response.status_code):
                 continue
             if response.status_code in _AUTH_RETRY_STATUSES:
@@ -449,6 +468,15 @@ class CopilotProvider(BaseProvider):
             return response
         # Unreachable: attempt 1 always returns or raises above.
         return response
+
+    async def _recycle_client(self) -> None:
+        """Close and discard the current HTTP client so the next call creates a fresh one."""
+        if self._client and not self._client.is_closed:
+            try:
+                await self._client.aclose()
+            except Exception:
+                pass
+        self._client = None
 
     @contextlib.asynccontextmanager
     async def _stream_with_auth_retry(
@@ -461,13 +489,24 @@ class CopilotProvider(BaseProvider):
         never replays partial output. A 401/403 that survives the retry raises a
         retryable auth error (consistent with the non-streaming path); other
         statuses are yielded for the caller to pre-read and raise on.
+
+        Also handles connection-level errors by recycling the HTTP client.
         """
         client = self._get_client()
         for attempt in range(2):
-            cm = client.stream(
-                "POST", self._url(path), json=json, headers=self._get_headers(**headers_kwargs)
-            )
-            response = await cm.__aenter__()
+            try:
+                cm = client.stream(
+                    "POST", self._url(path), json=json, headers=self._get_headers(**headers_kwargs)
+                )
+                response = await cm.__aenter__()
+            except (httpx.RemoteProtocolError, httpx.PoolTimeout, httpx.ConnectError) as e:
+                if attempt == 0:
+                    logger.warning("Stream connection error on %s, recycling client: %s", path, e)
+                    await self._recycle_client()
+                    client = self._get_client()
+                    continue
+                raise ProviderError(f"Stream connection failed after retry: {e}", retryable=True)
+
             if attempt == 0 and response.status_code in _AUTH_RETRY_STATUSES:
                 with contextlib.suppress(Exception):
                     await response.aread()
@@ -570,7 +609,22 @@ class CopilotProvider(BaseProvider):
         return None
 
     def _get_client(self) -> httpx.AsyncClient:
-        """Get or create a reusable HTTP client."""
+        """Get or create a reusable HTTP client.
+
+        Recycles the client after _CLIENT_MAX_AGE seconds to avoid HTTP/2
+        GOAWAY races from server-side connection lifetime enforcement.
+        """
+        now = time.time()
+        needs_recycle = (
+            self._client is not None
+            and not self._client.is_closed
+            and self._client_created_at > 0
+            and now - self._client_created_at >= self._CLIENT_MAX_AGE
+        )
+        if needs_recycle:
+            asyncio.ensure_future(self._client.aclose())
+            self._client = None
+
         if self._client is None or self._client.is_closed:
             self._client = httpx.AsyncClient(
                 timeout=httpx.Timeout(
@@ -586,7 +640,14 @@ class CopilotProvider(BaseProvider):
                     keepalive_expiry=30.0,
                 ),
             )
+            self._client_created_at = now
         return self._client
+
+    async def close(self) -> None:
+        """Close the HTTP client. Called during app shutdown."""
+        if self._client and not self._client.is_closed:
+            await self._client.aclose()
+            self._client = None
 
     @staticmethod
     def _sanitize_surrogates(text: str) -> str:
