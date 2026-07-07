@@ -54,6 +54,66 @@ All notable changes to Router-Maestro are documented here.
 
 ---
 
+## v0.4.3 (2026-07-06)
+
+### Features
+
+- **`context update` command.** New `router-maestro context update <name>
+  --endpoint <url> [--api-key <key>]` for partial updates to an existing
+  context. Fixes the workflow where users mapping Docker to a non-default
+  host port had no way to change the endpoint without deleting and
+  recreating the context.
+
+---
+
+## v0.4.2 (2026-07-05)
+
+### Fixes
+
+- **Anthropic-beta passthrough: strip unknown fields + signature retry.**
+  Unknown request fields (`context_management`, `output_config`, etc.) are
+  stripped via an accepted-fields whitelist before forwarding to Copilot's
+  native endpoint. On 400 + signature error, history thinking blocks are
+  stripped and the request is retried once (handles the standard→beta route
+  transition case where cached thinking signatures become invalid).
+
+---
+
+## v0.4.1 (2026-07-04)
+
+### Fixes
+
+- **Improved logging in Anthropic routes.** Better debug logging for request
+  routing decisions and thinking budget resolution.
+
+- **Integration test reliability.** Increased reasoning matrix timeout to
+  480s for slow Copilot thinking responses.
+
+---
+
+## v0.4.0 (2026-07-03)
+
+### Features
+
+- **Anthropic beta native passthrough.** New `/api/anthropic/beta/v1/messages`
+  endpoint that forwards Claude model requests directly to GitHub Copilot's
+  native Anthropic Messages API — no Anthropic→OpenAI→Anthropic translation.
+  Non-Claude models automatically fall back to the existing translation-based
+  handler. Supports thinking/reasoning, streaming, tool calls, and
+  count_tokens natively.
+
+### Fixes
+
+- **`<invoke>` tool call recovery in streaming.** When Copilot-served Claude
+  models leak tool calls as `<invoke>` XML text in streaming responses, they
+  are now recovered into structured `tool_use` blocks at stream end.
+
+- **Code-span safety for invoke recovery.** Fixed a bug where code-span
+  stripping could corrupt the parameter values inside `<invoke>` blocks by
+  masking invoke spans before computing code ranges.
+
+---
+
 ## v0.3.28 (2026-06-30)
 
 ### Fixes
