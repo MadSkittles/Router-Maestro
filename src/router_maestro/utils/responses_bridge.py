@@ -225,7 +225,9 @@ def _messages_to_responses_input(
             continue
 
         if role == "assistant":
-            content_blocks = _content_to_responses_blocks(msg.content, role="assistant") if msg.content else []
+            content_blocks = (
+                _content_to_responses_blocks(msg.content, role="assistant") if msg.content else []
+            )
             if content_blocks:
                 items.append(
                     {
