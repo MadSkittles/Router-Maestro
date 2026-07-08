@@ -60,39 +60,6 @@ def is_model_responses_eligible(model: str) -> bool:
     return _bare_model(model) in RESPONSES_ELIGIBLE_MODELS
 
 
-def _message_has_non_text_content(content) -> bool:
-    """True if a Message.content list contains any non-plain-text block.
-
-    The Responses bridge only forwards plain text (string content or
-    ``{"type": "text", ...}`` blocks). Anything else — image_url, image,
-    input_image, audio, file, **document** (Anthropic), and any future
-    structured block — must force fallback to /chat/completions so we
-    don't silently drop modalities the user actually sent.
-    """
-    if not isinstance(content, list):
-        return False
-    for block in content:
-        if isinstance(block, str):
-            continue
-        if not isinstance(block, dict):
-            # Unknown shape — treat as non-text to be safe.
-            return True
-        btype = block.get("type")
-        if btype == "text":
-            continue
-        # Anything other than a text block (or an undecorated dict that just
-        # carries text) is structured and unsafe to drop silently.
-        if btype is None and isinstance(block.get("text"), str):
-            continue
-        return True
-    return False
-
-
-def request_has_non_text_content(request: ChatRequest) -> bool:
-    """True if any message in the request carries non-text content blocks."""
-    return any(_message_has_non_text_content(m.content) for m in request.messages)
-
-
 def should_use_responses_for_chat(request: ChatRequest, provider_name: str) -> bool:
     """Decide whether a ChatRequest should be fulfilled via /responses.
 
@@ -102,8 +69,7 @@ def should_use_responses_for_chat(request: ChatRequest, provider_name: str) -> b
       gated by ops);
     - the per-request opt-in flag;
     - the Copilot provider (others have no /responses endpoint we target);
-    - an eligible model;
-    - text-only content (multimodal requests fall back to /chat/completions).
+    - an eligible model.
     """
     if not is_experimental_responses_enabled():
         return False
@@ -112,8 +78,6 @@ def should_use_responses_for_chat(request: ChatRequest, provider_name: str) -> b
     if provider_name != "github-copilot":
         return False
     if not is_model_responses_eligible(request.model):
-        return False
-    if request_has_non_text_content(request):
         return False
     return True
 
@@ -124,15 +88,7 @@ def should_use_responses_for_chat(request: ChatRequest, provider_name: str) -> b
 
 
 def _content_to_text(content: str | list) -> str:
-    """Flatten a Message.content (str or list of OpenAI-style blocks) to text.
-
-    Multi-block text content is joined with a blank line separator to match
-    other translators in this codebase and avoid silently merging block
-    boundaries (e.g., ``"foo"`` + ``"bar"`` becoming ``"foobar"``).
-    Multimodal blocks are ignored here — callers should have already
-    short-circuited via ``request_has_non_text_content`` before reaching
-    this point.
-    """
+    """Flatten a Message.content to plain text (for system/tool messages)."""
     if isinstance(content, str):
         return content
     parts: list[str] = []
@@ -145,6 +101,54 @@ def _content_to_text(content: str | list) -> str:
         elif isinstance(block, str):
             parts.append(block)
     return "\n\n".join(p for p in parts if p)
+
+
+def _content_to_responses_blocks(content: str | list, *, role: str = "user") -> list[dict]:
+    """Convert OpenAI Chat content to Responses API content blocks.
+
+    Handles:
+    - str → [{"type": "input_text"/"output_text", "text": ...}]
+    - {"type": "text", ...} → {"type": "input_text"/"output_text", "text": ...}
+    - {"type": "image_url", "image_url": {"url": ...}} → {"type": "input_image", "image_url": ...}
+    - {"type": "image_url", "image_url": "..."} (flat) → {"type": "input_image", "image_url": ...}
+    - Unknown blocks → passed through as-is
+
+    Assistant messages use "output_text"; user/other messages use "input_text".
+    """
+    text_type = "output_text" if role == "assistant" else "input_text"
+
+    if isinstance(content, str):
+        return [{"type": text_type, "text": content}] if content else []
+
+    blocks: list[dict] = []
+    for item in content:
+        if isinstance(item, str):
+            if item:
+                blocks.append({"type": text_type, "text": item})
+            continue
+        if not isinstance(item, dict):
+            blocks.append(item)
+            continue
+
+        btype = item.get("type")
+        if btype == "text":
+            text = item.get("text", "")
+            if text:
+                blocks.append({"type": text_type, "text": text})
+        elif btype == "image_url":
+            image_url = item.get("image_url")
+            if isinstance(image_url, dict):
+                url = image_url.get("url", "")
+            else:
+                url = image_url or ""
+            blocks.append({"type": "input_image", "image_url": url})
+        elif btype is None and isinstance(item.get("text"), str):
+            text = item["text"]
+            if text:
+                blocks.append({"type": text_type, "text": text})
+        else:
+            blocks.append(item)
+    return blocks
 
 
 def _chat_tools_to_responses_tools(tools: list[dict] | None) -> list[dict] | None:
@@ -195,7 +199,8 @@ def _messages_to_responses_input(
 
     System messages collapse into the ``instructions`` field. Assistant tool_calls
     become ``function_call`` items; tool messages become ``function_call_output``
-    items. Plain user/assistant text become ``message`` items.
+    items. User/assistant content (including multimodal) is converted to Responses
+    API content blocks via ``_content_to_responses_blocks``.
     """
     instructions_parts: list[str] = []
     items: list[dict] = []
@@ -220,16 +225,15 @@ def _messages_to_responses_input(
             continue
 
         if role == "assistant":
-            text = _content_to_text(msg.content) if msg.content else ""
-            if text:
+            content_blocks = (
+                _content_to_responses_blocks(msg.content, role="assistant") if msg.content else []
+            )
+            if content_blocks:
                 items.append(
                     {
                         "type": "message",
                         "role": "assistant",
-                        # Replayed assistant turns are *input* to the next call,
-                        # so use input_text (matches the project schema and what
-                        # Copilot's /responses accepts as request-history).
-                        "content": [{"type": "input_text", "text": text}],
+                        "content": content_blocks,
                     }
                 )
             for tc in msg.tool_calls or []:
@@ -248,12 +252,12 @@ def _messages_to_responses_input(
             continue
 
         # user (or unknown role treated as user)
-        text = _content_to_text(msg.content)
+        content_blocks = _content_to_responses_blocks(msg.content)
         items.append(
             {
                 "type": "message",
                 "role": "user",
-                "content": [{"type": "input_text", "text": text}],
+                "content": content_blocks,
             }
         )
 
