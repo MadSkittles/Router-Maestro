@@ -50,6 +50,7 @@ services:
     environment:
       - ROUTER_MAESTRO_API_KEY=${ROUTER_MAESTRO_API_KEY:-}
       - ROUTER_MAESTRO_LOG_LEVEL=${ROUTER_MAESTRO_LOG_LEVEL:-INFO}
+      - ROUTER_MAESTRO_EXPERIMENTAL_RESPONSES_API=${ROUTER_MAESTRO_EXPERIMENTAL_RESPONSES_API:-0}
     volumes:
       # Persist auth and config (bind mounts)
       - ~/.local/share/router-maestro:/home/maestro/.local/share/router-maestro
