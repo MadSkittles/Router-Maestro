@@ -65,6 +65,12 @@ Gemini generateContent/stream/countTokens, streaming, tool calls, usage
 accounting, Anthropic thinking budgets, OpenAI reasoning_effort, and
 Gemini-family model coverage.
 
+The integration server starts with `ROUTER_MAESTRO_EXPERIMENTAL_RESPONSES_API=1`
+by default, so GPT-5 family models are routed through the Responses API bridge
+(including when accessed via Anthropic/Gemini endpoints). Set
+`RM_INTEGRATION_RESPONSES_CHAT=1` to force all models through `/chat/completions`
+instead.
+
 ### Docker Deployment
 
 Production deployment uses `docker-compose.yml` with Traefik reverse proxy. Use `make build-multiarch` to build for both amd64 and arm64 (requires the `multiarch` buildx builder).

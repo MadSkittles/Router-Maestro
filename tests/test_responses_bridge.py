@@ -18,11 +18,11 @@ from router_maestro.providers.base import (
 )
 from router_maestro.utils.responses_bridge import (
     ENV_FLAG,
+    _content_to_responses_blocks,
     chat_request_to_responses_request,
     is_experimental_responses_enabled,
     is_model_responses_eligible,
     map_responses_status_to_chat,
-    request_has_non_text_content,
     responses_chunk_to_chat_chunk,
     responses_response_to_chat_response,
     should_use_responses_for_chat,
@@ -116,7 +116,8 @@ class TestShouldUseResponses:
         req = self._req("gpt-5.4", opt_in=True)
         assert should_use_responses_for_chat(req, "github-copilot") is False
 
-    def test_falls_back_when_image_block_present(self):
+    def test_multimodal_content_still_eligible(self):
+        """Multimodal content is now supported — should not trigger fallback."""
         req = ChatRequest(
             model="gpt-5.4",
             messages=[
@@ -130,51 +131,7 @@ class TestShouldUseResponses:
             ],
             use_responses_api=True,
         )
-        assert should_use_responses_for_chat(req, "github-copilot") is False
-
-    def test_falls_back_when_input_image_present(self):
-        req = ChatRequest(
-            model="gpt-5.4",
-            messages=[
-                Message(
-                    role="user",
-                    content=[{"type": "input_image", "image_url": "https://x/y.png"}],
-                )
-            ],
-            use_responses_api=True,
-        )
-        assert should_use_responses_for_chat(req, "github-copilot") is False
-
-    def test_falls_back_when_document_block_present(self):
-        """Anthropic document blocks must force /chat fallback (regression)."""
-        req = ChatRequest(
-            model="gpt-5.4",
-            messages=[
-                Message(
-                    role="user",
-                    content=[
-                        {"type": "text", "text": "summarise"},
-                        {"type": "document", "source": {"type": "base64", "data": "xxx"}},
-                    ],
-                )
-            ],
-            use_responses_api=True,
-        )
-        assert should_use_responses_for_chat(req, "github-copilot") is False
-
-    def test_falls_back_for_unknown_structured_block(self):
-        """Unknown structured types are conservatively rejected."""
-        req = ChatRequest(
-            model="gpt-5.4",
-            messages=[
-                Message(
-                    role="user",
-                    content=[{"type": "future_modality_xyz", "data": "x"}],
-                )
-            ],
-            use_responses_api=True,
-        )
-        assert should_use_responses_for_chat(req, "github-copilot") is False
+        assert should_use_responses_for_chat(req, "github-copilot") is True
 
     def test_text_only_list_content_still_eligible(self):
         req = ChatRequest(
@@ -187,55 +144,69 @@ class TestShouldUseResponses:
         assert should_use_responses_for_chat(req, "github-copilot") is True
 
 
-class TestRequestHasNonTextContent:
-    def test_pure_string_is_text(self):
-        req = ChatRequest(model="m", messages=[Message(role="user", content="hi")])
-        assert request_has_non_text_content(req) is False
+class TestContentToResponsesBlocks:
+    def test_plain_string(self):
+        assert _content_to_responses_blocks("hello") == [{"type": "input_text", "text": "hello"}]
 
-    def test_image_url_block_detected(self):
-        req = ChatRequest(
-            model="m",
-            messages=[
-                Message(
-                    role="user",
-                    content=[{"type": "image_url", "image_url": {"url": "x"}}],
-                )
-            ],
-        )
-        assert request_has_non_text_content(req) is True
+    def test_empty_string(self):
+        assert _content_to_responses_blocks("") == []
 
-    def test_audio_block_detected(self):
-        req = ChatRequest(
-            model="m",
-            messages=[Message(role="user", content=[{"type": "input_audio", "input_audio": {}}])],
-        )
-        assert request_has_non_text_content(req) is True
+    def test_text_block(self):
+        content = [{"type": "text", "text": "hi"}]
+        assert _content_to_responses_blocks(content) == [{"type": "input_text", "text": "hi"}]
 
-    def test_file_block_detected(self):
-        req = ChatRequest(
-            model="m",
-            messages=[Message(role="user", content=[{"type": "file", "file": {}}])],
-        )
-        assert request_has_non_text_content(req) is True
+    def test_image_url_nested(self):
+        content = [{"type": "image_url", "image_url": {"url": "data:image/png;base64,abc"}}]
+        assert _content_to_responses_blocks(content) == [
+            {"type": "input_image", "image_url": "data:image/png;base64,abc"}
+        ]
 
-    def test_document_block_detected(self):
-        req = ChatRequest(
-            model="m",
-            messages=[
-                Message(
-                    role="user",
-                    content=[{"type": "document", "source": {"type": "base64"}}],
-                )
-            ],
-        )
-        assert request_has_non_text_content(req) is True
+    def test_image_url_flat(self):
+        content = [{"type": "image_url", "image_url": "https://example.com/img.png"}]
+        assert _content_to_responses_blocks(content) == [
+            {"type": "input_image", "image_url": "https://example.com/img.png"}
+        ]
 
-    def test_text_block_only_is_text(self):
-        req = ChatRequest(
-            model="m",
-            messages=[Message(role="user", content=[{"type": "text", "text": "hi"}])],
-        )
-        assert request_has_non_text_content(req) is False
+    def test_mixed_text_and_image(self):
+        content = [
+            {"type": "text", "text": "describe this"},
+            {"type": "image_url", "image_url": {"url": "data:image/png;base64,xyz"}},
+        ]
+        assert _content_to_responses_blocks(content) == [
+            {"type": "input_text", "text": "describe this"},
+            {"type": "input_image", "image_url": "data:image/png;base64,xyz"},
+        ]
+
+    def test_multiple_images(self):
+        content = [
+            {"type": "image_url", "image_url": {"url": "https://a.png"}},
+            {"type": "image_url", "image_url": {"url": "https://b.png"}},
+        ]
+        assert _content_to_responses_blocks(content) == [
+            {"type": "input_image", "image_url": "https://a.png"},
+            {"type": "input_image", "image_url": "https://b.png"},
+        ]
+
+    def test_unknown_block_passed_through(self):
+        content = [{"type": "document", "source": {"type": "base64", "data": "xxx"}}]
+        assert _content_to_responses_blocks(content) == [
+            {"type": "document", "source": {"type": "base64", "data": "xxx"}}
+        ]
+
+    def test_bare_string_in_list(self):
+        content = ["hello", "world"]
+        assert _content_to_responses_blocks(content) == [
+            {"type": "input_text", "text": "hello"},
+            {"type": "input_text", "text": "world"},
+        ]
+
+    def test_untyped_dict_with_text(self):
+        content = [{"text": "legacy"}]
+        assert _content_to_responses_blocks(content) == [{"type": "input_text", "text": "legacy"}]
+
+    def test_empty_text_blocks_skipped(self):
+        content = [{"type": "text", "text": ""}, {"type": "text", "text": "real"}]
+        assert _content_to_responses_blocks(content) == [{"type": "input_text", "text": "real"}]
 
 
 class TestStatusMapping:
@@ -362,12 +333,8 @@ class TestChatToResponses:
         out = chat_request_to_responses_request(req)
         assert out.max_output_tokens == 1234
 
-    def test_multi_block_text_joined_with_blank_line(self):
-        """Multi-block user text must be joined with \\n\\n, not concatenated.
-
-        Regression: ``"".join`` would silently merge boundaries between blocks
-        (``"foo"`` + ``"bar"`` -> ``"foobar"``), changing prompt meaning.
-        """
+    def test_multi_block_text_produces_separate_blocks(self):
+        """Multi-block user text becomes separate input_text blocks."""
         req = ChatRequest(
             model="gpt-5.4",
             messages=[
@@ -381,14 +348,16 @@ class TestChatToResponses:
             ],
         )
         out = chat_request_to_responses_request(req)
-        assert out.input[0]["content"][0]["text"] == "foo\n\nbar"
+        assert out.input[0]["content"] == [
+            {"type": "input_text", "text": "foo"},
+            {"type": "input_text", "text": "bar"},
+        ]
 
-    def test_assistant_history_uses_input_text(self):
-        """Replayed assistant turns must be input_text, not output_text.
+    def test_assistant_history_uses_output_text(self):
+        """Replayed assistant turns must use output_text, not input_text.
 
-        OpenAI's request schema (mirrored in this project's
-        ResponsesInputTextContent) uses input_text for all input message
-        content; using output_text in request history is a contract mismatch.
+        Copilot's /responses endpoint rejects input_text in assistant messages;
+        assistant content blocks must be typed as output_text.
         """
         req = ChatRequest(
             model="gpt-5.4",
@@ -402,13 +371,38 @@ class TestChatToResponses:
         assert out.input[1] == {
             "type": "message",
             "role": "assistant",
-            "content": [{"type": "input_text", "text": "pong"}],
+            "content": [{"type": "output_text", "text": "pong"}],
         }
-        # Sanity: every message item content block uses input_text.
+        # User messages still use input_text.
         for item in out.input:
-            if item.get("type") == "message":
+            if item.get("type") == "message" and item.get("role") == "user":
                 for block in item["content"]:
-                    assert block["type"] == "input_text"
+                    if "text" in block:
+                        assert block["type"] == "input_text"
+
+    def test_image_content_converted_to_input_image(self):
+        """Image blocks in user messages must become input_image in Responses API."""
+        req = ChatRequest(
+            model="gpt-5.4",
+            messages=[
+                Message(
+                    role="user",
+                    content=[
+                        {"type": "text", "text": "What is this?"},
+                        {"type": "image_url", "image_url": {"url": "data:image/png;base64,abc123"}},
+                    ],
+                )
+            ],
+        )
+        out = chat_request_to_responses_request(req)
+        assert out.input[0] == {
+            "type": "message",
+            "role": "user",
+            "content": [
+                {"type": "input_text", "text": "What is this?"},
+                {"type": "input_image", "image_url": "data:image/png;base64,abc123"},
+            ],
+        }
 
 
 class TestResponsesToChat:

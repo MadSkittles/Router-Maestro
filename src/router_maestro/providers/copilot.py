@@ -1189,8 +1189,6 @@ class CopilotProvider(BaseProvider):
         }
         if request.instructions:
             payload["instructions"] = request.instructions
-        if request.temperature != 1.0:
-            payload["temperature"] = request.temperature
         if request.max_output_tokens:
             payload["max_output_tokens"] = request.max_output_tokens
         # Tool support - filter out unsupported tools
