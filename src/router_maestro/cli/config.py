@@ -38,7 +38,7 @@ CLI_TOOLS = {
 
 # Claude Code native model IDs for 1M context variants.
 # Copilot no longer ships dedicated `-1m` / `-1m-internal` Opus variants — the
-# base catalog entries for Opus 4.6/4.7/4.8 and Sonnet 4.6 already advertise
+# base catalog entries for Opus 4.6/4.7/4.8, Sonnet 4.6, and Sonnet 5 already advertise
 # max_context_window_tokens=1000000, so every native key maps straight to the
 # base id. The `[1m]` suffix here only exists so Claude Code raises its
 # auto-compact threshold to ~1M instead of clamping at the default 200K.
@@ -50,6 +50,8 @@ _OPUS_48_1M_NATIVE_KEY = "claude-opus-4-8[1m]"
 _OPUS_48_1M_SOURCE_MODEL = "github-copilot/claude-opus-4.8"
 _SONNET_46_1M_NATIVE_KEY = "claude-sonnet-4-6[1m]"
 _SONNET_46_1M_SOURCE_MODEL = "github-copilot/claude-sonnet-4.6"
+_SONNET_5_1M_NATIVE_KEY = "claude-sonnet-5[1m]"
+_SONNET_5_1M_SOURCE_MODEL = "github-copilot/claude-sonnet-5"
 
 _INJECTABLE_1M_VARIANTS: tuple[tuple[str, str, str, str], ...] = (
     # (source_model, native_key, bare_id, display_name)
@@ -76,6 +78,12 @@ _INJECTABLE_1M_VARIANTS: tuple[tuple[str, str, str, str], ...] = (
         _SONNET_46_1M_NATIVE_KEY,
         "claude-sonnet-4.6",
         "Sonnet 4.6 1M (Auto-activated)",
+    ),
+    (
+        _SONNET_5_1M_SOURCE_MODEL,
+        _SONNET_5_1M_NATIVE_KEY,
+        "claude-sonnet-5",
+        "Sonnet 5 1M (Auto-activated)",
     ),
 )
 
@@ -245,6 +253,7 @@ _CLAUDE_CODE_NATIVE_1M_KEYS: frozenset[str] = frozenset(
         _OPUS_47_1M_NATIVE_KEY,
         _OPUS_48_1M_NATIVE_KEY,
         _SONNET_46_1M_NATIVE_KEY,
+        _SONNET_5_1M_NATIVE_KEY,
     }
 )
 
