@@ -16,8 +16,10 @@ from typing import Any
 import pytest
 
 from router_maestro.providers import ResponsesRequest as InternalResponsesRequest
+from router_maestro.providers.base import ResponsesResponse as InternalResponsesResponse
 from router_maestro.providers.base import ResponsesStreamChunk, ResponsesToolCall
-from router_maestro.server.routes.responses import stream_response
+from router_maestro.server.routes.responses import create_response, stream_response
+from router_maestro.server.schemas.responses import ResponsesRequest
 
 
 class _StubRouter:
@@ -34,6 +36,18 @@ class _StubRouter:
                 yield c
 
         return _gen(), "github-copilot"
+
+
+class _NonStreamStubRouter:
+    """Minimal Router stub for non-streaming /responses route tests."""
+
+    def __init__(self, response: InternalResponsesResponse):
+        self._response = response
+
+    async def responses_completion(
+        self, request: InternalResponsesRequest, fallback: bool = True
+    ) -> tuple[InternalResponsesResponse, str]:
+        return self._response, "github-copilot"
 
 
 def _parse_sse(events: list[str]) -> list[dict[str, Any]]:
@@ -166,6 +180,73 @@ class TestToolSearchCallWireShape:
             and e.get("item", {}).get("type") == "tool_search_call"
         )
         assert done["item"]["arguments"] == {}
+
+
+class TestNonStreamingToolCallWireShape:
+    """Non-streaming output must use the same per-kind item types as streaming."""
+
+    @pytest.mark.asyncio
+    async def test_non_stream_response_maps_tool_call_kinds(self, monkeypatch):
+        monkeypatch.setattr(
+            "router_maestro.server.routes.responses.get_router",
+            lambda: _NonStreamStubRouter(
+                InternalResponsesResponse(
+                    content="",
+                    model="github-copilot/gpt-5",
+                    tool_calls=[
+                        ResponsesToolCall(
+                            call_id="call_fn",
+                            name="get_weather",
+                            arguments='{"location": "NYC"}',
+                            kind="function",
+                        ),
+                        ResponsesToolCall(
+                            call_id="call_custom",
+                            name="apply_patch",
+                            arguments="*** Begin Patch\n*** End Patch",
+                            kind="custom",
+                        ),
+                        ResponsesToolCall(
+                            call_id="call_search",
+                            name="tool_search",
+                            arguments='{"query": "routes", "limit": 3}',
+                            kind="tool_search",
+                        ),
+                    ],
+                )
+            ),
+        )
+
+        response = await create_response(
+            ResponsesRequest(
+                model="github-copilot/gpt-5",
+                input="hi",
+                stream=False,
+            )
+        )
+
+        output = [
+            item.model_dump(exclude_none=True) if hasattr(item, "model_dump") else item
+            for item in response.output
+        ]
+        by_call_id = {item["call_id"]: item for item in output if "call_id" in item}
+        assert by_call_id["call_fn"]["type"] == "function_call"
+        assert by_call_id["call_fn"]["arguments"] == '{"location": "NYC"}'
+        assert by_call_id["call_custom"] == {
+            "type": "custom_tool_call",
+            "id": by_call_id["call_custom"]["id"],
+            "call_id": "call_custom",
+            "name": "apply_patch",
+            "input": "*** Begin Patch\n*** End Patch",
+            "status": "completed",
+        }
+        assert by_call_id["call_search"] == {
+            "type": "tool_search_call",
+            "call_id": "call_search",
+            "execution": "client",
+            "status": "completed",
+            "arguments": {"query": "routes", "limit": 3},
+        }
 
 
 class TestResponsesStreamUsageWireShape:

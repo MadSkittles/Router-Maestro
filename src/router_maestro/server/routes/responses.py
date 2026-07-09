@@ -250,6 +250,44 @@ def make_function_call_item(
     return item
 
 
+def make_custom_tool_call_item(
+    ctc_id: str,
+    call_id: str,
+    name: str,
+    input_text: str,
+    status: str = "completed",
+) -> dict[str, Any]:
+    """Create custom_tool_call output item."""
+    return {
+        "type": "custom_tool_call",
+        "id": ctc_id,
+        "call_id": call_id,
+        "name": name,
+        "input": input_text,
+        "status": status,
+    }
+
+
+def parse_tool_search_arguments(arguments: str) -> dict[str, Any]:
+    """Parse tool_search arguments into the dict shape clients expect."""
+    try:
+        parsed = json.loads(arguments) if arguments else {}
+    except (TypeError, ValueError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def make_tool_search_call_item(call_id: str, arguments: str) -> dict[str, Any]:
+    """Create tool_search_call output item."""
+    return {
+        "type": "tool_search_call",
+        "call_id": call_id,
+        "execution": "client",
+        "status": "completed",
+        "arguments": parse_tool_search_arguments(arguments),
+    }
+
+
 @router.post("/api/openai/v1/responses")
 async def create_response(request: ResponsesRequest):
     """Handle Responses API requests (for Codex models)."""
@@ -331,23 +369,37 @@ async def create_response(request: ResponsesRequest):
 
         if response.tool_calls:
             for tc in response.tool_calls:
-                fc_id = generate_id("fc")
-                output.append(
-                    make_function_call_item(
-                        fc_id,
-                        tc.call_id,
-                        tc.name,
-                        tc.arguments,
-                        namespace=tc.namespace,
+                if tc.kind == "custom":
+                    output.append(
+                        make_custom_tool_call_item(
+                            generate_id("ctc"),
+                            tc.call_id,
+                            tc.name,
+                            tc.arguments,
+                        )
                     )
-                )
+                elif tc.kind == "tool_search":
+                    output.append(make_tool_search_call_item(tc.call_id, tc.arguments))
+                else:
+                    output.append(
+                        make_function_call_item(
+                            generate_id("fc"),
+                            tc.call_id,
+                            tc.name,
+                            tc.arguments,
+                            namespace=tc.namespace,
+                        )
+                    )
 
-        return ResponsesResponse(
+        return ResponsesResponse.model_construct(
             id=response_id,
+            object="response",
             model=response.model,
             status="completed",
             output=output,
             usage=usage,
+            error=None,
+            incomplete_details=None,
         )
     except ProviderError as e:
         elapsed_ms = (time.time() - start_time) * 1000
@@ -478,6 +530,7 @@ async def stream_response(
     # them even if responses_completion_stream() raises before returning.
     response_id = generate_id("resp")
     created_at = int(time.time())
+    pipeline = None
     try:
         stream, provider_name = await model_router.responses_completion_stream(request)
 
@@ -734,16 +787,12 @@ async def stream_response(
                     # — the model retries forever (v0.3.5/v0.3.6 bug).
                     # Codex only requires output_item.done with the full
                     # item; arguments must be a dict, not a JSON string.
-                    try:
-                        args_obj = json.loads(tc.arguments) if tc.arguments else {}
-                    except (TypeError, ValueError):
-                        args_obj = {}
                     tsc_item = {
                         "type": "tool_search_call",
                         "call_id": tc.call_id,
                         "execution": "client",
                         "status": "completed",
-                        "arguments": args_obj,
+                        "arguments": parse_tool_search_arguments(tc.arguments),
                     }
                     yield sse_event(
                         {
@@ -900,6 +949,7 @@ async def stream_response(
 
         # NOTE: Do NOT send "data: [DONE]\n\n" - agent-maestro doesn't send it
         # for Responses API
+        pipeline.finish(status=200)
 
     except ProviderError as e:
         elapsed_ms = (time.time() - start_time) * 1000
@@ -909,6 +959,8 @@ async def stream_response(
             elapsed_ms,
             e,
         )
+        if pipeline is not None:
+            pipeline.finish(status=e.status_code, body_summary=str(e))
         # Send response.failed event matching OpenAI spec
         yield sse_event(
             {

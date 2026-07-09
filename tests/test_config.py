@@ -135,6 +135,27 @@ class TestConfigIO:
         config = load_config(path, ContextsConfig, ContextsConfig.get_default)
         assert config.current == "local"
 
+    def test_load_validation_error_does_not_log_input_values(self, tmp_path, caplog):
+        """Validation errors can include secret values and must not log them."""
+        path = tmp_path / "contexts.json"
+        secret = "sk-secret-from-invalid-config"
+        path.write_text(
+            json.dumps(
+                {
+                    "current": "local",
+                    "contexts": {"local": {"endpoint": {"raw": secret}}},
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        config = load_config(path, ContextsConfig, ContextsConfig.get_default)
+
+        assert config.current == "local"
+        assert secret not in caplog.text
+        assert "input_value" not in caplog.text
+        assert "contexts.local.endpoint" not in caplog.text
+
     def test_write_is_atomic_no_partial_file_on_crash(self, tmp_path):
         """If json.dump raises mid-write, the existing file is left intact."""
         import pytest

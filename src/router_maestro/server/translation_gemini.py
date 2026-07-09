@@ -134,10 +134,15 @@ def translate_gemini_to_openai(request: GeminiGenerateContentRequest, model: str
 
     temperature = 1.0
     max_tokens: int | None = None
+    extra: dict[str, Any] = {}
     if request.generation_config:
         if request.generation_config.temperature is not None:
             temperature = request.generation_config.temperature
         max_tokens = request.generation_config.max_output_tokens
+        if request.generation_config.top_p is not None:
+            extra["top_p"] = request.generation_config.top_p
+        if request.generation_config.stop_sequences:
+            extra["stop"] = request.generation_config.stop_sequences
 
     return ChatRequest(
         model=model,
@@ -147,6 +152,7 @@ def translate_gemini_to_openai(request: GeminiGenerateContentRequest, model: str
         stream=False,
         tools=tools,
         tool_choice=tool_choice,
+        extra=extra,
     )
 
 

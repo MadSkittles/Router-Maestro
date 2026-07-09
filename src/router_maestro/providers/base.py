@@ -403,9 +403,13 @@ class BaseProvider(ABC):
             Responses completion response
 
         Raises:
-            NotImplementedError: If provider does not support Responses API
+            ProviderError: If provider does not support Responses API
         """
-        raise NotImplementedError("Provider does not support Responses API")
+        raise ProviderError(
+            "Provider does not support Responses API",
+            status_code=501,
+            retryable=False,
+        )
 
     async def responses_completion_stream(
         self, request: ResponsesRequest
@@ -419,9 +423,13 @@ class BaseProvider(ABC):
             Responses completion chunks
 
         Raises:
-            NotImplementedError: If provider does not support Responses API
+            ProviderError: If provider does not support Responses API
         """
-        raise NotImplementedError("Provider does not support Responses API")
+        raise ProviderError(
+            "Provider does not support Responses API",
+            status_code=501,
+            retryable=False,
+        )
         # Make this a generator (required for type checking)
         if False:
             yield ResponsesStreamChunk(content="")

@@ -973,39 +973,48 @@ class CopilotProvider(BaseProvider):
                     usage = data.get("usage")
 
                     if "choices" in data and data["choices"]:
-                        delta = data["choices"][0].get("delta", {})
-                        content = delta.get("content", "")
-                        finish_reason = data["choices"][0].get("finish_reason")
-                        tool_calls = delta.get("tool_calls")
-                        if tool_calls:
-                            emitted_tool_call = True
-                        if finish_reason == "stop" and emitted_tool_call:
-                            finish_reason = "tool_calls"
-                        if _thinking_requested(request):
-                            thinking_text, thinking_sig = _extract_reasoning_from_chunk(delta)
-                        else:
-                            thinking_text, thinking_sig = "", None
+                        terminal_chunks = []
+                        for choice in data["choices"]:
+                            delta = choice.get("delta", {})
+                            content = delta.get("content", "")
+                            finish_reason = choice.get("finish_reason")
+                            tool_calls = delta.get("tool_calls")
+                            if tool_calls:
+                                emitted_tool_call = True
+                            if finish_reason == "stop" and emitted_tool_call:
+                                finish_reason = "tool_calls"
+                            if _thinking_requested(request):
+                                thinking_text, thinking_sig = _extract_reasoning_from_chunk(delta)
+                            else:
+                                thinking_text, thinking_sig = "", None
 
-                        if (
-                            content
-                            or finish_reason
-                            or usage
-                            or tool_calls
-                            or thinking_text
-                            or thinking_sig
-                        ):
-                            yield ChatStreamChunk(
-                                content=content,
-                                finish_reason=finish_reason,
-                                usage=usage,
-                                tool_calls=tool_calls,
-                                thinking=thinking_text or None,
-                                thinking_signature=thinking_sig,
-                            )
+                            if (
+                                content
+                                or finish_reason
+                                or usage
+                                or tool_calls
+                                or thinking_text
+                                or thinking_sig
+                            ):
+                                chunk = ChatStreamChunk(
+                                    content=content,
+                                    finish_reason=finish_reason,
+                                    usage=usage,
+                                    tool_calls=tool_calls,
+                                    thinking=thinking_text or None,
+                                    thinking_signature=thinking_sig,
+                                )
+                                if finish_reason:
+                                    terminal_chunks.append(chunk)
+                                else:
+                                    yield chunk
 
-                        # Mark stream as finished after receiving finish_reason
-                        if finish_reason:
-                            stream_finished = True
+                            # Mark stream as finished after processing every
+                            # choice in this SSE event.
+                            if finish_reason:
+                                stream_finished = True
+                        for chunk in terminal_chunks:
+                            yield chunk
                     elif usage:
                         # Handle usage-only chunks (no choices)
                         yield ChatStreamChunk(
@@ -1296,6 +1305,31 @@ class CopilotProvider(BaseProvider):
                         name=output.get("name", ""),
                         arguments=output.get("arguments", "{}"),
                         namespace=output.get("namespace"),
+                    )
+                )
+            elif output.get("type") == "custom_tool_call":
+                tool_calls.append(
+                    ResponsesToolCall(
+                        call_id=output.get("call_id", ""),
+                        name=output.get("name", ""),
+                        arguments=output.get("input", ""),
+                        kind="custom",
+                    )
+                )
+            elif output.get("type") == "tool_search_call":
+                args = output.get("arguments")
+                if isinstance(args, str):
+                    args_str = args
+                elif args is None:
+                    args_str = "{}"
+                else:
+                    args_str = json.dumps(args)
+                tool_calls.append(
+                    ResponsesToolCall(
+                        call_id=output.get("call_id", ""),
+                        name="tool_search",
+                        arguments=args_str,
+                        kind="tool_search",
                     )
                 )
         return tool_calls

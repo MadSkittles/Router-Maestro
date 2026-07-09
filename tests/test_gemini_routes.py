@@ -245,6 +245,20 @@ class TestTranslateGeminiToOpenAI:
         assert result.temperature == 0.7
         assert result.max_tokens == 8192
 
+    def test_generation_config_preserves_supported_extra_options(self):
+        request = GeminiGenerateContentRequest(
+            contents=[GeminiContent(role="user", parts=[GeminiPart(text="Hi")])],
+            generation_config=GeminiGenerationConfig(
+                top_p=0.8,
+                stop_sequences=["END", "STOP"],
+            ),
+        )
+
+        result = translate_gemini_to_openai(request, "model")
+
+        assert result.extra["top_p"] == 0.8
+        assert result.extra["stop"] == ["END", "STOP"]
+
     def test_function_call_in_model_content(self):
         request = GeminiGenerateContentRequest(
             contents=[

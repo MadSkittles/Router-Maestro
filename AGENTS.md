@@ -87,6 +87,18 @@ local-only, not part of GitHub Actions:
 uv run router-maestro auth login github-copilot
 ```
 
+The default live integration suite includes the full Copilot model matrix and
+covers model invocation paths such as OpenAI Chat/Responses, Anthropic
+Messages/count_tokens, Gemini generateContent/stream/countTokens, streaming,
+tool calls, usage accounting, Anthropic thinking budgets, OpenAI
+reasoning_effort, and Gemini-family model coverage.
+
+The integration server starts with
+`ROUTER_MAESTRO_EXPERIMENTAL_RESPONSES_API=1` by default, so GPT-5 family
+models are routed through the Responses API bridge, including when accessed via
+Anthropic or Gemini endpoints. Set `RM_INTEGRATION_RESPONSES_CHAT=1` to force
+all models through `/chat/completions` instead.
+
 Run a single test file:
 
 ```bash
@@ -237,7 +249,11 @@ uv run router-maestro auth login github-copilot
   model subset, use `RM_INTEGRATION_MAX_MODELS=<N> make integration-test`. The
   reasoning/thinking sweep defaults to one representative model per family; to
   intentionally run that sweep across every available reasoning model, use
-  `RM_INTEGRATION_MAX_REASONING_MODELS=0 make integration-test`.
+  `RM_INTEGRATION_MAX_REASONING_MODELS=0 make integration-test`. The default
+  integration server enables the Responses API bridge, including for GPT-5
+  family models reached through Anthropic or Gemini endpoints; set
+  `RM_INTEGRATION_RESPONSES_CHAT=1` only when intentionally validating the chat
+  completions path.
 - Run the narrowest relevant pytest target first, then broaden to the full
   suite when the change has wider risk.
 

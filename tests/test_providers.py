@@ -1,5 +1,6 @@
 """Tests for providers module."""
 
+import json
 from unittest.mock import AsyncMock, Mock, patch
 
 import httpx
@@ -9,7 +10,10 @@ from router_maestro.auth.github_oauth import CopilotTokenResponse
 from router_maestro.auth.storage import AuthStorage, OAuthCredential
 from router_maestro.providers import (
     AnthropicProvider,
+    BaseProvider,
     ChatRequest,
+    ChatResponse,
+    ChatStreamChunk,
     CopilotProvider,
     Message,
     ModelInfo,
@@ -207,6 +211,61 @@ class TestProviderBase:
         assert provider.name == "custom"
         assert provider.is_authenticated() is True
 
+    @pytest.mark.asyncio
+    async def test_responses_completion_default_raises_provider_error_501(self):
+        """Providers without Responses API support should surface a protocol error."""
+
+        class MinimalProvider(BaseProvider):
+            async def chat_completion(self, request: ChatRequest) -> ChatResponse:
+                return ChatResponse(content="ok", model=request.model)
+
+            async def chat_completion_stream(self, request: ChatRequest):
+                yield ChatStreamChunk(content="ok")
+
+            async def list_models(self) -> list[ModelInfo]:
+                return []
+
+            def is_authenticated(self) -> bool:
+                return True
+
+        provider = MinimalProvider()
+
+        with pytest.raises(ProviderError) as exc:
+            await provider.responses_completion(ResponsesRequest(model="gpt-5", input="hi"))
+
+        assert exc.value.status_code == 501
+        assert exc.value.retryable is False
+        assert "Responses API" in str(exc.value)
+
+    @pytest.mark.asyncio
+    async def test_responses_completion_stream_default_raises_provider_error_501(self):
+        """Streaming defaults should raise ProviderError instead of NotImplementedError."""
+
+        class MinimalProvider(BaseProvider):
+            async def chat_completion(self, request: ChatRequest) -> ChatResponse:
+                return ChatResponse(content="ok", model=request.model)
+
+            async def chat_completion_stream(self, request: ChatRequest):
+                yield ChatStreamChunk(content="ok")
+
+            async def list_models(self) -> list[ModelInfo]:
+                return []
+
+            def is_authenticated(self) -> bool:
+                return True
+
+        provider = MinimalProvider()
+
+        with pytest.raises(ProviderError) as exc:
+            async for _chunk in provider.responses_completion_stream(
+                ResponsesRequest(model="gpt-5", input="hi", stream=True)
+            ):
+                pass
+
+        assert exc.value.status_code == 501
+        assert exc.value.retryable is False
+        assert "Responses API" in str(exc.value)
+
 
 class TestChatRequest:
     """Tests for ChatRequest."""
@@ -331,6 +390,69 @@ class TestAnthropicMessageConversion:
             }
         ]
 
+    def test_build_payload_converts_openai_tools_to_anthropic_tools(self):
+        """Anthropic payloads require native tool schema, not OpenAI wrappers."""
+        provider = AnthropicProvider()
+
+        payload = provider._build_payload(
+            ChatRequest(
+                model="claude-sonnet-4-5",
+                messages=[Message(role="user", content="weather?")],
+                tools=[
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "get_weather",
+                            "description": "Get current weather",
+                            "parameters": {
+                                "type": "object",
+                                "properties": {"city": {"type": "string"}},
+                                "required": ["city"],
+                            },
+                        },
+                    }
+                ],
+            )
+        )
+
+        assert payload["tools"] == [
+            {
+                "name": "get_weather",
+                "description": "Get current weather",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {"city": {"type": "string"}},
+                    "required": ["city"],
+                },
+            }
+        ]
+
+    @pytest.mark.parametrize(
+        ("tool_choice", "expected"),
+        [
+            ("auto", {"type": "auto"}),
+            ("none", {"type": "none"}),
+            ("required", {"type": "any"}),
+            (
+                {"type": "function", "function": {"name": "get_weather"}},
+                {"type": "tool", "name": "get_weather"},
+            ),
+        ],
+    )
+    def test_build_payload_converts_openai_tool_choice_to_anthropic(self, tool_choice, expected):
+        """OpenAI tool_choice values must be mapped to Anthropic equivalents."""
+        provider = AnthropicProvider()
+
+        payload = provider._build_payload(
+            ChatRequest(
+                model="claude-sonnet-4-5",
+                messages=[Message(role="user", content="weather?")],
+                tool_choice=tool_choice,
+            )
+        )
+
+        assert payload["tool_choice"] == expected
+
 
 def _copilot_with_cred(**cred_kwargs):
     """Build a CopilotProvider with an in-memory stored credential and saved-no-op."""
@@ -341,6 +463,50 @@ def _copilot_with_cred(**cred_kwargs):
     provider.auth_manager.storage.set("github-copilot", OAuthCredential(**defaults))
     provider.auth_manager.save = Mock()  # type: ignore[method-assign]
     return provider
+
+
+class TestCopilotResponsesNonStreaming:
+    """Tests for Copilot non-streaming /responses parsing."""
+
+    def test_extract_tool_calls_preserves_special_tool_call_kinds(self):
+        """custom_tool_call and tool_search_call must keep their Responses item kinds."""
+        provider = CopilotProvider()
+
+        tool_calls = provider._extract_tool_calls(
+            {
+                "output": [
+                    {
+                        "type": "function_call",
+                        "call_id": "call_fn",
+                        "name": "lookup",
+                        "arguments": '{"query":"x"}',
+                        "namespace": "mcp__search__",
+                    },
+                    {
+                        "type": "custom_tool_call",
+                        "call_id": "call_custom",
+                        "name": "apply_patch",
+                        "input": "*** Begin Patch\n*** End Patch",
+                    },
+                    {
+                        "type": "tool_search_call",
+                        "call_id": "call_search",
+                        "execution": "client",
+                        "arguments": {"query": "tools", "limit": 5},
+                    },
+                ]
+            }
+        )
+
+        assert [(tc.name, tc.kind) for tc in tool_calls] == [
+            ("lookup", "function"),
+            ("apply_patch", "custom"),
+            ("tool_search", "tool_search"),
+        ]
+        assert tool_calls[0].namespace == "mcp__search__"
+        assert tool_calls[1].arguments == "*** Begin Patch\n*** End Patch"
+        assert tool_calls[1].is_custom is True
+        assert json.loads(tool_calls[2].arguments) == {"query": "tools", "limit": 5}
 
 
 class TestCopilotTokenRefresh:

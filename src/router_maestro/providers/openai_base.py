@@ -152,11 +152,11 @@ class OpenAIChatProvider(BaseProvider, ABC):
 
                         data = json.loads(data_str)
 
+                        usage = data.get("usage")
                         if "choices" in data and data["choices"]:
                             delta = data["choices"][0].get("delta", {})
                             content = delta.get("content", "")
                             finish_reason = data["choices"][0].get("finish_reason")
-                            usage = data.get("usage")
                             tool_calls = delta.get("tool_calls")
 
                             if content or finish_reason or usage or tool_calls:
@@ -166,6 +166,12 @@ class OpenAIChatProvider(BaseProvider, ABC):
                                     usage=usage,
                                     tool_calls=tool_calls,
                                 )
+                        elif usage:
+                            yield ChatStreamChunk(
+                                content="",
+                                finish_reason=None,
+                                usage=usage,
+                            )
             except httpx.HTTPStatusError as e:
                 self._raise_http_status_error(
                     label, e, self._logger, stream=True, include_body=True

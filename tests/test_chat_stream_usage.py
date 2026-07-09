@@ -8,6 +8,7 @@ import httpx
 import pytest
 
 from router_maestro.providers import ChatRequest, ChatStreamChunk, CopilotProvider, Message
+from router_maestro.providers.openai_compat import OpenAICompatibleProvider
 from router_maestro.server.routes.chat import stream_response
 
 
@@ -36,6 +37,61 @@ def _parse_chat_stream_events(raw_events: list[str]) -> list[dict[str, Any]]:
             if line.startswith("data: "):
                 events.append(json.loads(line[len("data: ") :]))
     return events
+
+
+@pytest.mark.asyncio
+async def test_openai_compatible_chat_stream_emits_usage_only_chunk():
+    """OpenAI-compatible providers must surface usage chunks with empty choices."""
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        body = (
+            b'data: {"choices":[{"delta":{"content":"hi"},"finish_reason":null}]}\n\n'
+            b'data: {"choices":[],"usage":{"prompt_tokens":4,'
+            b'"completion_tokens":2,"total_tokens":6}}\n\n'
+            b'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\n'
+            b"data: [DONE]\n\n"
+        )
+        return httpx.Response(
+            status_code=200,
+            content=body,
+            headers={"content-type": "text/event-stream"},
+        )
+
+    provider = OpenAICompatibleProvider(
+        name="custom",
+        base_url="https://example.com/v1",
+        api_key="sk-test",
+    )
+
+    provider_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    try:
+        with pytest.MonkeyPatch.context() as monkeypatch:
+            monkeypatch.setattr(
+                "httpx.AsyncClient",
+                lambda *args, **kwargs: provider_client,
+            )
+            chunks = [
+                chunk
+                async for chunk in provider.chat_completion_stream(
+                    ChatRequest(
+                        model="gpt-4o",
+                        messages=[Message(role="user", content="hi")],
+                        stream=True,
+                    )
+                )
+            ]
+    finally:
+        await provider_client.aclose()
+
+    usage_chunks = [chunk for chunk in chunks if chunk.usage]
+    assert len(usage_chunks) == 1
+    assert usage_chunks[0].content == ""
+    assert usage_chunks[0].finish_reason is None
+    assert usage_chunks[0].usage == {
+        "prompt_tokens": 4,
+        "completion_tokens": 2,
+        "total_tokens": 6,
+    }
 
 
 @pytest.mark.asyncio
@@ -152,5 +208,59 @@ async def test_copilot_chat_stream_tool_calls_force_tool_calls_finish_reason():
     )
     chunks = [chunk async for chunk in provider.chat_completion_stream(request)]
 
+    assert any(chunk.tool_calls for chunk in chunks)
+    assert chunks[-1].finish_reason == "tool_calls"
+
+
+@pytest.mark.asyncio
+async def test_copilot_chat_stream_processes_all_choices():
+    """Copilot can split text/tool deltas across choices in the same SSE event."""
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        body = (
+            b'data: {"choices":['
+            b'{"delta":{"content":"hello"},"finish_reason":null},'
+            b'{"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function",'
+            b'"function":{"name":"test_tool","arguments":"{}"}}]},'
+            b'"finish_reason":null}'
+            b"]}\n\n"
+            b'data: {"choices":['
+            b'{"delta":{},"finish_reason":"stop"},'
+            b'{"delta":{"content":"ignored only if choice skipped"},"finish_reason":null}'
+            b"]}\n\n"
+        )
+        return httpx.Response(
+            status_code=200,
+            content=body,
+            headers={"content-type": "text/event-stream"},
+        )
+
+    provider = CopilotProvider()
+    provider._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    provider.ensure_token = _noop  # type: ignore[method-assign]
+    provider._get_headers = lambda *args, **kwargs: {"authorization": "Bearer test"}  # type: ignore[method-assign]
+
+    chunks = [
+        chunk
+        async for chunk in provider.chat_completion_stream(
+            ChatRequest(
+                model="gpt-4o",
+                messages=[Message(role="user", content="Use the test tool")],
+                tools=[
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "test_tool",
+                            "description": "A test tool",
+                            "parameters": {"type": "object"},
+                        },
+                    }
+                ],
+                stream=True,
+            )
+        )
+    ]
+
+    assert any(chunk.content == "hello" for chunk in chunks)
     assert any(chunk.tool_calls for chunk in chunks)
     assert chunks[-1].finish_reason == "tool_calls"
