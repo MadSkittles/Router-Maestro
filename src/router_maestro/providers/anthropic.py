@@ -103,6 +103,37 @@ class AnthropicProvider(BaseProvider):
 
         return system_prompt, converted
 
+    def _convert_tools(self, tools: list[dict]) -> list[dict]:
+        """Convert OpenAI-style function tools to Anthropic tool definitions."""
+        converted = []
+        for tool in tools:
+            function = tool.get("function") if tool.get("type") == "function" else None
+            if isinstance(function, dict):
+                anthropic_tool = {
+                    "name": function.get("name", ""),
+                    "input_schema": function.get("parameters") or {"type": "object"},
+                }
+                if function.get("description"):
+                    anthropic_tool["description"] = function["description"]
+                converted.append(anthropic_tool)
+            else:
+                converted.append(tool)
+        return converted
+
+    def _convert_tool_choice(self, tool_choice: str | dict) -> dict | str:
+        """Convert OpenAI-style tool_choice to Anthropic tool_choice."""
+        if tool_choice == "auto":
+            return {"type": "auto"}
+        if tool_choice == "none":
+            return {"type": "none"}
+        if tool_choice == "required":
+            return {"type": "any"}
+        if isinstance(tool_choice, dict) and tool_choice.get("type") == "function":
+            name = (tool_choice.get("function") or {}).get("name")
+            if name:
+                return {"type": "tool", "name": name}
+        return tool_choice
+
     def _build_payload(self, request: ChatRequest, *, stream: bool = False) -> dict:
         """Build an Anthropic messages payload."""
         system_prompt, messages = self._convert_messages(request.messages)
@@ -124,9 +155,9 @@ class AnthropicProvider(BaseProvider):
                 thinking_config["budget_tokens"] = request.thinking_budget
             payload["thinking"] = thinking_config
         if request.tools:
-            payload["tools"] = request.tools
+            payload["tools"] = self._convert_tools(request.tools)
         if request.tool_choice:
-            payload["tool_choice"] = request.tool_choice
+            payload["tool_choice"] = self._convert_tool_choice(request.tool_choice)
         return payload
 
     async def chat_completion(self, request: ChatRequest) -> ChatResponse:

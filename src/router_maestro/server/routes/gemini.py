@@ -271,6 +271,7 @@ async def _stream_response(
     estimated_input_tokens: int = 0,
 ) -> AsyncGenerator[str, None]:
     """Stream Gemini-format SSE response from the upstream provider."""
+    pipeline = None
     try:
         stream, _provider_name = await model_router.chat_completion_stream(request)
 
@@ -313,7 +314,11 @@ async def _stream_response(
                     "\r\n\r\n"
                 )
 
+        pipeline.finish(status=200)
+
     except ProviderError as e:
+        if pipeline is not None:
+            pipeline.finish(status=e.status_code, body_summary=str(e))
         yield _sse_error_data(str(e))
     except asyncio.CancelledError:
         logger.info("Gemini stream cancelled by client")

@@ -73,7 +73,14 @@ def load_config(path: Path, model: type[T], default_factory: callable) -> T:
         with open(path, encoding="utf-8") as f:
             data = json.load(f)
         return model.model_validate(data)
-    except (json.JSONDecodeError, ValidationError, OSError) as e:
+    except ValidationError:
+        logger.error(
+            "Failed to validate config from %s as %s; falling back to defaults",
+            path,
+            model.__name__,
+        )
+        return default_factory()
+    except (json.JSONDecodeError, OSError) as e:
         logger.error("Failed to load config from %s (%s); falling back to defaults", path, e)
         return default_factory()
 

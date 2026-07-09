@@ -542,6 +542,7 @@ async def stream_response(
         yield f"event: {start_event['type']}\ndata: {json.dumps(start_event)}\n\n"
     yield f"event: ping\ndata: {json.dumps({'type': 'ping'})}\n\n"
 
+    pipeline = None
     try:
         stream, provider_name = await model_router.chat_completion_stream(request)
 
@@ -615,7 +616,11 @@ async def stream_response(
             for event in events:
                 yield f"event: {event['type']}\ndata: {json.dumps(event)}\n\n"
 
+        pipeline.finish(status=200)
+
     except ProviderError as e:
+        if pipeline is not None:
+            pipeline.finish(status=e.status_code, body_summary=str(e))
         yield _sse_error_event(str(e))
     except asyncio.CancelledError:
         logger.info("Anthropic stream cancelled by client")

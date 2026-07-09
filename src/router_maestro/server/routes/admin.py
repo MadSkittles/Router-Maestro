@@ -157,6 +157,7 @@ async def _poll_oauth_completion(
                     refresh=access_token.access_token,
                     access=copilot_token.token,
                     expires=copilot_token.expires_at,
+                    api_endpoint=copilot_token.api_endpoint,
                 ),
             )
             manager.save()
@@ -288,6 +289,7 @@ async def update_priorities(request: PrioritiesUpdateRequest) -> PrioritiesRespo
         config.fallback = FallbackConfig.model_validate(request.fallback)
 
     save_priorities_config(config)
+    reset_router()
 
     return PrioritiesResponse(
         priorities=config.priorities,

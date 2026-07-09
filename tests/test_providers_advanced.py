@@ -317,9 +317,19 @@ class TestBaseProviderAbstract:
         # Test default ensure_token
         await provider.ensure_token()
 
-        # Test default responses methods raise NotImplementedError
-        with pytest.raises(NotImplementedError):
+        # Test default responses methods raise ProviderError so routes can map status codes.
+        with pytest.raises(ProviderError) as exc:
             await provider.responses_completion(ResponsesRequest(model="test", input="hi"))
+        assert exc.value.status_code == 501
+        assert exc.value.retryable is False
+
+        with pytest.raises(ProviderError) as stream_exc:
+            async for _ in provider.responses_completion_stream(
+                ResponsesRequest(model="test", input="hi", stream=True)
+            ):
+                pass
+        assert stream_exc.value.status_code == 501
+        assert stream_exc.value.retryable is False
 
 
 class TestOpenAIChatProviderBuildPayload:

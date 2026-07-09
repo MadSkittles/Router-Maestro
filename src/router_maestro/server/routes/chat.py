@@ -145,6 +145,7 @@ async def chat_completions(request: ChatCompletionRequest):
 
 async def stream_response(model_router: Router, request: ChatRequest) -> AsyncGenerator[str, None]:
     """Stream chat completion response."""
+    pipeline = None
     try:
         stream, provider_name = await model_router.chat_completion_stream(request)
         response_id = f"chatcmpl-{uuid.uuid4().hex[:8]}"
@@ -238,8 +239,11 @@ async def stream_response(model_router: Router, request: ChatRequest) -> AsyncGe
                 yield f"data: {final_chunk.model_dump_json()}\n\n"
 
         yield "data: [DONE]\n\n"
+        pipeline.finish(status=200)
 
     except ProviderError as e:
+        if pipeline is not None:
+            pipeline.finish(status=e.status_code, body_summary=str(e))
         error_data = {"error": {"message": str(e), "type": "provider_error"}}
         yield f"data: {json.dumps(error_data)}\n\n"
         yield "data: [DONE]\n\n"
