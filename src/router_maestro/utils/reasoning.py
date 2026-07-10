@@ -30,6 +30,32 @@ VARIANT_EFFORTS: tuple[str, ...] = ("high", "xhigh", "max")
 UPSTREAM_NATIVE_EFFORTS: tuple[str, ...] = ("low", "medium", "high")
 
 
+def pick_closest_effort(desired: str, allowed: list[str]) -> str | None:
+    """Pick the closest catalog-supported effort, preferring the next higher tier."""
+    if not allowed:
+        return None
+    if desired in allowed:
+        return desired
+    try:
+        target = VALID_EFFORTS.index(desired)
+    except ValueError:
+        return max(
+            allowed,
+            key=lambda value: VALID_EFFORTS.index(value) if value in VALID_EFFORTS else -1,
+        )
+    higher = [
+        value for value in allowed if value in VALID_EFFORTS and VALID_EFFORTS.index(value) > target
+    ]
+    if higher:
+        return min(higher, key=VALID_EFFORTS.index)
+    lower = [
+        value for value in allowed if value in VALID_EFFORTS and VALID_EFFORTS.index(value) < target
+    ]
+    if lower:
+        return max(lower, key=VALID_EFFORTS.index)
+    return allowed[0]
+
+
 def effort_to_budget(effort: str | None) -> int | None:
     if effort is None:
         return None

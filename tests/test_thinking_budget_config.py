@@ -1,6 +1,6 @@
 """Tests for configurable thinking budget (Feature 4)."""
 
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -157,8 +157,8 @@ class TestResolveThinkingBudget:
         )
         assert budget == 28000
 
-    def test_adaptive_thinking_type_preserved(self):
-        """Adaptive thinking type is preserved through resolution."""
+    def test_adaptive_thinking_budget_is_preserved_internally(self):
+        """Adaptive budget remains an internal signal for provider effort mapping."""
         budget, ttype = resolve_thinking_budget(
             client_budget=10000,
             client_thinking_type="adaptive",
@@ -167,6 +167,17 @@ class TestResolveThinkingBudget:
         )
         assert budget == 10000
         assert ttype == "adaptive"
+
+    def test_enabled_thinking_removed_without_budget_headroom(self):
+        """Enabled thinking is removed atomically when no valid budget can fit."""
+        budget, ttype = resolve_thinking_budget(
+            client_budget=16000,
+            client_thinking_type="enabled",
+            model_id="test-model",
+            max_output_tokens=1024,
+        )
+        assert budget is None
+        assert ttype is None
 
 
 class TestChatRequestWithThinking:
@@ -280,6 +291,183 @@ class TestAnthropicRouteThinkingBudget:
         assert result.reasoning_effort == "xhigh"
         router.get_model_info.assert_not_called()
         resolver.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_explicit_effort_preserves_required_enabled_budget(self, monkeypatch):
+        """Effort may coexist with the budget required by manual enabled thinking."""
+        router = MagicMock()
+        router.get_model_info = AsyncMock(return_value=None)
+        resolver = MagicMock()
+        resolver.return_value = (4096, "enabled")
+        monkeypatch.setattr(anthropic_route, "resolve_thinking_budget", resolver)
+        request = ChatRequest(
+            model="claude-opus-4.6",
+            messages=[Message(role="user", content="hi")],
+            max_tokens=64000,
+            thinking_budget=4096,
+            thinking_type="enabled",
+            reasoning_effort="xhigh",
+        )
+
+        result = await _apply_thinking_budget(router, request, "claude-opus-4-6")
+
+        assert result.thinking_budget == 4096
+        assert result.thinking_type == "enabled"
+        assert result.reasoning_effort == "xhigh"
+        resolver.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_explicit_effort_fills_missing_enabled_budget(self, monkeypatch):
+        """Manual enabled thinking remains valid when the client omits its budget."""
+        monkeypatch.setattr(
+            "router_maestro.config.load_priorities_config",
+            lambda: type(
+                "Config",
+                (),
+                {"thinking": ThinkingBudgetConfig(default_budget=16000, auto_enable=False)},
+            )(),
+        )
+        model_info = ModelInfo(
+            id="claude-opus-4.6",
+            name="Claude Opus 4.6",
+            provider="github-copilot",
+            max_output_tokens=64000,
+            supports_thinking=True,
+        )
+        router = Router.__new__(Router)
+        router.providers = {}
+        router._models_cache = {
+            "claude-opus-4.6": ("github-copilot", model_info),
+            "github-copilot/claude-opus-4.6": ("github-copilot", model_info),
+        }
+        router._models_cache_ttl = TTLCache(CACHE_TTL_SECONDS)
+        router._models_cache_ttl.set(True)
+        router._priorities_cache = TTLCache(CACHE_TTL_SECONDS)
+        router._fuzzy_cache = {}
+        router._providers_ttl = TTLCache(CACHE_TTL_SECONDS)
+        router._providers_ttl.set(True)
+        request = ChatRequest(
+            model="claude-opus-4.6",
+            messages=[Message(role="user", content="hi")],
+            max_tokens=64000,
+            thinking_type="enabled",
+            reasoning_effort="xhigh",
+        )
+
+        result = await _apply_thinking_budget(router, request, "claude-opus-4-6")
+
+        assert result.thinking_budget == 16000
+        assert result.thinking_type == "enabled"
+        assert result.reasoning_effort == "xhigh"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("client_budget", "expected_budget"),
+        [(500, 1024), (63999, EFFORT_TO_BUDGET["max"])],
+    )
+    async def test_explicit_effort_normalizes_enabled_budget(
+        self, monkeypatch, client_budget, expected_budget
+    ):
+        """Manual budgets remain within Anthropic's accepted token range."""
+        monkeypatch.setattr(
+            "router_maestro.config.load_priorities_config",
+            lambda: type(
+                "Config",
+                (),
+                {"thinking": ThinkingBudgetConfig(default_budget=16000, auto_enable=False)},
+            )(),
+        )
+        model_info = ModelInfo(
+            id="claude-opus-4.6",
+            name="Claude Opus 4.6",
+            provider="github-copilot",
+            max_output_tokens=64000,
+            supports_thinking=True,
+        )
+        router = MagicMock()
+        router.get_model_info = AsyncMock(return_value=model_info)
+        request = ChatRequest(
+            model="claude-opus-4.6",
+            messages=[Message(role="user", content="hi")],
+            max_tokens=64000,
+            thinking_budget=client_budget,
+            thinking_type="enabled",
+            reasoning_effort="xhigh",
+        )
+
+        result = await _apply_thinking_budget(router, request, "claude-opus-4-6")
+
+        assert result.thinking_budget == expected_budget
+        assert result.thinking_type == "enabled"
+        assert result.reasoning_effort == "xhigh"
+
+    @pytest.mark.asyncio
+    async def test_enabled_budget_is_capped_by_request_max_tokens(self, monkeypatch):
+        """Client max_tokens is the wire-level upper bound for manual thinking."""
+        monkeypatch.setattr(
+            "router_maestro.config.load_priorities_config",
+            lambda: type(
+                "Config",
+                (),
+                {"thinking": ThinkingBudgetConfig(default_budget=16000, auto_enable=False)},
+            )(),
+        )
+        model_info = ModelInfo(
+            id="claude-opus-4.6",
+            name="Claude Opus 4.6",
+            provider="github-copilot",
+            max_output_tokens=64000,
+            supports_thinking=True,
+        )
+        router = MagicMock()
+        router.get_model_info = AsyncMock(return_value=model_info)
+        request = ChatRequest(
+            model="claude-opus-4.6",
+            messages=[Message(role="user", content="hi")],
+            max_tokens=4096,
+            thinking_budget=16000,
+            thinking_type="enabled",
+            reasoning_effort="xhigh",
+        )
+
+        result = await _apply_thinking_budget(router, request, "claude-opus-4-6")
+
+        assert result.thinking_budget == 4095
+        assert result.thinking_type == "enabled"
+
+    @pytest.mark.asyncio
+    async def test_enabled_thinking_is_removed_without_budget_headroom(self, monkeypatch):
+        """Never emit enabled thinking when max_tokens cannot fit the minimum budget."""
+        monkeypatch.setattr(
+            "router_maestro.config.load_priorities_config",
+            lambda: type(
+                "Config",
+                (),
+                {"thinking": ThinkingBudgetConfig(default_budget=16000, auto_enable=False)},
+            )(),
+        )
+        model_info = ModelInfo(
+            id="claude-opus-4.6",
+            name="Claude Opus 4.6",
+            provider="github-copilot",
+            max_output_tokens=64000,
+            supports_thinking=True,
+        )
+        router = MagicMock()
+        router.get_model_info = AsyncMock(return_value=model_info)
+        request = ChatRequest(
+            model="claude-opus-4.6",
+            messages=[Message(role="user", content="hi")],
+            max_tokens=1024,
+            thinking_budget=16000,
+            thinking_type="enabled",
+            reasoning_effort="xhigh",
+        )
+
+        result = await _apply_thinking_budget(router, request, "claude-opus-4-6")
+
+        assert result.thinking_budget is None
+        assert result.thinking_type is None
 
     @pytest.mark.asyncio
     async def test_messages_logs_inbound_thinking_metadata(self, monkeypatch):

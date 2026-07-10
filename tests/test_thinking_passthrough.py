@@ -383,7 +383,7 @@ class TestAnthropicProviderThinking:
         request = ChatRequest(
             model="claude-sonnet-4-20250514",
             messages=[Message(role="user", content="Hello")],
-            max_tokens=4096,
+            max_tokens=64000,
             thinking_type="enabled",
             thinking_budget=16000,
         )
@@ -436,6 +436,79 @@ class TestAnthropicProviderThinking:
 
         assert payload["thinking"] == {"type": "adaptive"}
         assert payload["output_config"] == {"effort": "xhigh"}
+
+    def test_anthropic_provider_omits_adaptive_budget_without_effort(self):
+        """Adaptive thinking is a type-only wire union even without effort."""
+        from router_maestro.providers.anthropic import AnthropicProvider
+
+        provider = AnthropicProvider()
+        request = ChatRequest(
+            model="claude-opus-4.8",
+            messages=[Message(role="user", content="Hello")],
+            max_tokens=64000,
+            thinking_type="adaptive",
+            thinking_budget=16000,
+        )
+
+        payload = provider._build_payload(request)
+
+        assert payload["thinking"] == {"type": "adaptive"}
+
+    def test_anthropic_provider_preserves_enabled_budget_with_effort(self):
+        """Manual thinking remains a valid enabled union when effort is present."""
+        from router_maestro.providers.anthropic import AnthropicProvider
+
+        provider = AnthropicProvider()
+        request = ChatRequest(
+            model="claude-opus-4.6",
+            messages=[Message(role="user", content="Hello")],
+            max_tokens=64000,
+            thinking_type="enabled",
+            thinking_budget=16000,
+            reasoning_effort="xhigh",
+        )
+
+        payload = provider._build_payload(request)
+
+        assert payload["thinking"] == {"type": "enabled", "budget_tokens": 16000}
+        assert payload["output_config"] == {"effort": "xhigh"}
+
+    def test_anthropic_provider_omits_enabled_thinking_without_budget(self):
+        """Never emit the enabled union without its required budget."""
+        from router_maestro.providers.anthropic import AnthropicProvider
+
+        provider = AnthropicProvider()
+        request = ChatRequest(
+            model="claude-opus-4.6",
+            messages=[Message(role="user", content="Hello")],
+            max_tokens=1024,
+            thinking_type="enabled",
+            reasoning_effort="xhigh",
+        )
+
+        payload = provider._build_payload(request)
+
+        assert "thinking" not in payload
+        assert payload["output_config"] == {"effort": "xhigh"}
+
+    def test_anthropic_provider_caps_enabled_budget_to_payload_max_tokens(self):
+        """Provider normalization protects non-Anthropic entry routes too."""
+        from router_maestro.providers.anthropic import AnthropicProvider
+
+        provider = AnthropicProvider()
+        request = ChatRequest(
+            model="claude-opus-4.6",
+            messages=[Message(role="user", content="Hello")],
+            thinking_type="enabled",
+            thinking_budget=8192,
+            reasoning_effort="high",
+        )
+
+        payload = provider._build_payload(request)
+
+        assert payload["max_tokens"] == 4096
+        assert payload["thinking"] == {"type": "enabled", "budget_tokens": 4095}
+        assert payload["output_config"] == {"effort": "high"}
 
     @pytest.mark.asyncio
     async def test_anthropic_provider_omits_disabled_thinking(self):

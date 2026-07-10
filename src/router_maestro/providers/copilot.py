@@ -33,7 +33,11 @@ from router_maestro.providers.base import (
 from router_maestro.providers.tool_parsing import recover_tool_calls_from_content
 from router_maestro.utils import get_logger
 from router_maestro.utils.cache import TTLCache
-from router_maestro.utils.reasoning import budget_to_effort, downgrade_for_upstream
+from router_maestro.utils.reasoning import (
+    budget_to_effort,
+    downgrade_for_upstream,
+    pick_closest_effort,
+)
 
 logger = get_logger("providers.copilot")
 
@@ -77,43 +81,6 @@ def _claude_supports_reasoning(bare_lower: str) -> bool:
         or bare_lower.startswith("claude-opus-4.6")
         or bare_lower.startswith("claude-sonnet-4.6")
     )
-
-
-_EFFORT_ORDER = ("low", "medium", "high", "xhigh", "max")
-
-
-def _pick_closest_effort(desired: str, allowed: list[str]) -> str | None:
-    """Pick the value from ``allowed`` closest to ``desired`` on the L/M/H/XH/MAX ladder.
-
-    Strategy when an exact match is unavailable: prefer the next *higher* tier
-    (the user asked for thinking — give them more, not less), and fall back to
-    the next lower tier if no higher tier is offered. Returns ``None`` only if
-    ``allowed`` is empty.
-    """
-    if not allowed:
-        return None
-    if desired in allowed:
-        return desired
-    try:
-        target = _EFFORT_ORDER.index(desired)
-    except ValueError:
-        # Unknown tier — give them whatever the catalog ranks highest.
-        return max(allowed, key=lambda v: _EFFORT_ORDER.index(v) if v in _EFFORT_ORDER else -1)
-    higher = [v for v in allowed if v in _EFFORT_ORDER and _EFFORT_ORDER.index(v) > target]
-    if higher:
-        return min(higher, key=lambda v: _EFFORT_ORDER.index(v))
-    lower = [v for v in allowed if v in _EFFORT_ORDER and _EFFORT_ORDER.index(v) < target]
-    if lower:
-        return max(lower, key=lambda v: _EFFORT_ORDER.index(v))
-    return allowed[0]
-
-
-def _catalog_top_effort(allowed: list[str]) -> str | None:
-    """Return the highest tier from ``allowed`` per the L/M/H/XH/MAX ladder."""
-    ranked = [v for v in allowed if v in _EFFORT_ORDER]
-    if not ranked:
-        return allowed[0] if allowed else None
-    return max(ranked, key=lambda v: _EFFORT_ORDER.index(v))
 
 
 def apply_copilot_chat_reasoning(
@@ -166,9 +133,9 @@ def apply_copilot_chat_reasoning(
                 # Client asked for thinking without a clear effort — aim for
                 # the top tier the catalog actually advertises (e.g. "max" on
                 # opus-4.6+, "xhigh" on gpt-5.x).
-                desired = _catalog_top_effort(catalog_effort_values)
+                desired = pick_closest_effort("max", catalog_effort_values)
             if desired is not None:
-                picked = _pick_closest_effort(desired, catalog_effort_values)
+                picked = pick_closest_effort(desired, catalog_effort_values)
                 if picked is not None:
                     payload["reasoning_effort"] = picked
         if bare_lower.startswith("gpt-5.4") and "max_tokens" in payload:
@@ -1233,7 +1200,7 @@ class CopilotProvider(BaseProvider):
                 if desired is None:
                     upstream_effort = None
                 else:
-                    upstream_effort = _pick_closest_effort(desired, catalog)
+                    upstream_effort = pick_closest_effort(desired, catalog)
         else:
             upstream_effort = downgrade_for_upstream(request.reasoning_effort)
             if request.reasoning_effort in ("xhigh", "max") and upstream_effort == "high":
