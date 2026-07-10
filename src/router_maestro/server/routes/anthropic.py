@@ -85,13 +85,16 @@ async def _apply_thinking_budget(
     Falls back to original_model for config key matching.
 
     Returns the original request unchanged if no adjustment is needed. Explicit
-    reasoning effort takes priority over all client and server budgets.
+    reasoning effort replaces adaptive budgets. Manual enabled thinking retains
+    a normalized budget because the Anthropic wire format requires one.
     """
-    if chat_request.reasoning_effort is not None:
+    if chat_request.reasoning_effort is not None and chat_request.thinking_type == "adaptive":
         return chat_request.with_thinking(
             thinking_budget=None,
             thinking_type=chat_request.thinking_type,
         )
+    if chat_request.reasoning_effort is not None and chat_request.thinking_type != "enabled":
+        return chat_request
 
     from router_maestro.config import load_priorities_config
 
@@ -106,6 +109,8 @@ async def _apply_thinking_budget(
 
     supports_thinking = model_info.supports_thinking if model_info else False
     max_output = (model_info.max_output_tokens or 16384) if model_info else 16384
+    if chat_request.max_tokens is not None:
+        max_output = min(max_output, chat_request.max_tokens)
 
     # Use translated model for config lookup (matches cache keys)
     budget, thinking_type = resolve_thinking_budget(

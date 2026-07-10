@@ -97,7 +97,10 @@ def resolve_thinking_budget(
     """
     # 1. Client explicitly requested thinking with a budget
     if client_thinking_type in ("enabled", "adaptive") and client_budget is not None:
-        return normalize_thinking_budget(client_budget, max_output_tokens), client_thinking_type
+        budget = normalize_thinking_budget(client_budget, max_output_tokens)
+        if client_thinking_type == "enabled" and budget is None:
+            return None, None
+        return budget, client_thinking_type
 
     # 2. Client explicitly disabled thinking
     if client_thinking_type == "disabled":
@@ -107,15 +110,21 @@ def resolve_thinking_budget(
     if client_thinking_type in ("enabled", "adaptive"):
         budget = _resolve_server_budget(model_id, thinking_config)
         if budget is not None:
-            return normalize_thinking_budget(budget, max_output_tokens), client_thinking_type
+            budget = normalize_thinking_budget(budget, max_output_tokens)
+            if client_thinking_type == "enabled" and budget is None:
+                return None, None
+            return budget, client_thinking_type
         # No server default — pass through client's request without budget
+        if client_thinking_type == "enabled":
+            return None, None
         return None, client_thinking_type
 
     # 4. Client didn't specify thinking at all — check auto_enable
     if thinking_config is not None and thinking_config.auto_enable and supports_thinking:
         budget = _resolve_server_budget(model_id, thinking_config)
         if budget is not None:
-            return normalize_thinking_budget(budget, max_output_tokens), "enabled"
+            budget = normalize_thinking_budget(budget, max_output_tokens)
+            return (budget, "enabled") if budget is not None else (None, None)
 
     # 5. No thinking
     return None, None

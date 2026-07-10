@@ -26,7 +26,7 @@ from router_maestro.server.routes.anthropic import (
 from router_maestro.server.streaming import sse_streaming_response
 from router_maestro.utils import get_logger
 from router_maestro.utils.context_window import resolve_thinking_budget
-from router_maestro.utils.reasoning import VALID_EFFORTS
+from router_maestro.utils.reasoning import VALID_EFFORTS, pick_closest_effort
 
 logger = get_logger("server.routes.anthropic_beta")
 
@@ -125,42 +125,66 @@ def _strip_response(data: dict) -> dict:
 def _apply_thinking_budget_native(body: dict, actual_model: str) -> dict:
     """Apply effort precedence or the server budget fallback to a raw body.
 
-    Explicit ``output_config.effort`` removes a conflicting thinking budget.
-    Without effort, the existing client/server budget resolution is unchanged.
+    Explicit ``output_config.effort`` removes an adaptive thinking budget.
+    Manual enabled thinking retains a normalized budget, using the server fallback
+    when the client omits it. Without effort, budget resolution is unchanged.
     """
     effort = _sanitize_output_config(body)
+    client_thinking = body.get("thinking")
+
+    model_router = None
+    model_info = None
     if effort is not None:
-        client_thinking = body.get("thinking")
-        if isinstance(client_thinking, dict) and "budget_tokens" in client_thinking:
-            thinking = dict(client_thinking)
-            thinking.pop("budget_tokens")
-            if thinking:
-                body["thinking"] = thinking
+        model_router = get_router()
+        if hasattr(model_router, "_models_cache"):
+            cache_entry = model_router._models_cache.get(actual_model)
+            if cache_entry:
+                _, model_info = cache_entry
+        if model_info is not None and model_info.reasoning_effort_values is not None:
+            mapped_effort = pick_closest_effort(effort, model_info.reasoning_effort_values)
+            if mapped_effort is None:
+                body.pop("output_config", None)
+                effort = None
             else:
-                body.pop("thinking", None)
+                body["output_config"] = {"effort": mapped_effort}
+                effort = mapped_effort
+
+    if isinstance(client_thinking, dict) and client_thinking.get("type") == "adaptive":
+        thinking = dict(client_thinking)
+        thinking.pop("budget_tokens", None)
+        body["thinking"] = thinking
         return body
+
+    if effort is not None:
+        if not (
+            isinstance(client_thinking, dict)
+            and client_thinking.get("type") in ("enabled", "disabled")
+        ):
+            return body
 
     from router_maestro.config import load_priorities_config
 
     priorities = load_priorities_config()
     thinking_config = priorities.thinking
 
-    client_thinking = body.get("thinking")
     client_budget = None
     client_type = None
     if isinstance(client_thinking, dict):
         client_budget = client_thinking.get("budget_tokens")
         client_type = client_thinking.get("type")
 
-    model_router = get_router()
-    model_info = None
-    if hasattr(model_router, "_models_cache"):
+    if model_router is None:
+        model_router = get_router()
+    if model_info is None and hasattr(model_router, "_models_cache"):
         cache_entry = model_router._models_cache.get(actual_model)
         if cache_entry:
             _, model_info = cache_entry
 
     supports_thinking = model_info.supports_thinking if model_info else True
     max_output = (model_info.max_output_tokens or 16384) if model_info else 16384
+    request_max_output = body.get("max_tokens")
+    if isinstance(request_max_output, int):
+        max_output = min(max_output, request_max_output)
 
     budget, thinking_type = resolve_thinking_budget(
         client_budget=client_budget,
@@ -171,9 +195,12 @@ def _apply_thinking_budget_native(body: dict, actual_model: str) -> dict:
         supports_thinking=supports_thinking,
     )
 
-    if budget != client_budget or thinking_type != client_type:
-        if budget is not None and thinking_type in ("enabled", "adaptive"):
-            body["thinking"] = {"type": thinking_type, "budget_tokens": budget}
+    if thinking_type == "adaptive":
+        adaptive = dict(client_thinking) if isinstance(client_thinking, dict) else {}
+        adaptive["type"] = "adaptive"
+        adaptive.pop("budget_tokens", None)
+        body["thinking"] = adaptive
+        if budget != client_budget or thinking_type != client_type:
             logger.debug(
                 "Thinking budget adjusted: %s/%s -> %s/%s for model=%s",
                 client_type,
@@ -182,8 +209,23 @@ def _apply_thinking_budget_native(body: dict, actual_model: str) -> dict:
                 budget,
                 actual_model,
             )
-        elif thinking_type == "disabled" or budget is None:
-            body.pop("thinking", None)
+    elif thinking_type == "enabled" and budget is not None:
+        enabled = dict(client_thinking) if isinstance(client_thinking, dict) else {}
+        enabled["type"] = "enabled"
+        enabled["budget_tokens"] = budget
+        body["thinking"] = enabled
+        if budget != client_budget or thinking_type != client_type:
+            logger.debug(
+                "Thinking budget adjusted: %s/%s -> %s/%s for model=%s",
+                client_type,
+                client_budget,
+                thinking_type,
+                budget,
+                actual_model,
+            )
+    else:
+        body.pop("thinking", None)
+        if client_type is not None:
             logger.debug(
                 "Thinking removed: client had %s/%s, resolved to %s for model=%s",
                 client_type,

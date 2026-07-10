@@ -29,12 +29,16 @@ OpenAI Request ──────────────── (passthrough) �
 | `tool_choice` | `tool_choice` | `auto`→`"auto"`, `any`→`"required"`, `tool`→`{"type":"function",...}` |
 | `thinking.type` | `thinking_type` | Extracted directly |
 | `thinking.budget_tokens` | `thinking_budget` | Extracted directly |
-| `output_config.effort` | `reasoning_effort` | Extracted directly; takes precedence over thinking budgets |
+| `output_config.effort` | `reasoning_effort` | Extracted directly; replaces adaptive budgets only |
 
-When `output_config.effort` is present, Router-Maestro clears the internal
-`thinking_budget` before provider routing. Without effort, the existing budget
-fallback remains: client `budget_tokens`, per-model server budget, then the
-server default for an explicit thinking request.
+When `output_config.effort` is present with adaptive thinking, Router-Maestro
+clears the internal `thinking_budget` before provider routing. Manual
+`thinking.type="enabled"` retains its required `budget_tokens` alongside effort.
+Without effort, the existing budget fallback remains: client `budget_tokens`,
+per-model server budget, then the server default for an explicit thinking request.
+Adaptive budgets may be used internally for provider effort mapping, but
+Anthropic-native payloads always serialize adaptive thinking as
+`{"type":"adaptive"}` without `budget_tokens`.
 
 #### Message Translation Details
 
@@ -161,14 +165,18 @@ apply_copilot_chat_reasoning(
 - Converts OpenAI-format messages back to Anthropic format
 - Extracts system message → `system` parameter
 - Adds `thinking` config if `thinking_type` is enabled/adaptive
-- Sends `output_config.effort` when explicit effort is present and omits a
-  conflicting `thinking.budget_tokens`
+- Sends `output_config.effort` when explicit effort is present, omitting an
+  adaptive budget while retaining the budget required by manual enabled thinking
 - Otherwise uses the budget fallback format:
   `{"type":"enabled","budget_tokens":16000}`
 
 The beta native Copilot route preserves only a valid `output_config.effort`
 member and strips unsupported siblings such as `output_config.format`. Explicit
-effort also removes a conflicting `thinking.budget_tokens` before forwarding.
+effort removes only an adaptive `thinking.budget_tokens`; manual enabled thinking
+keeps its required budget before forwarding. When the Copilot model catalog
+advertises an effort allowlist, the requested value is mapped to the closest
+supported tier using the same higher-first policy as the Copilot chat and
+Responses paths.
 
 #### OpenAI / OpenAI-Compatible (`providers/openai_base.py`)
 - Direct passthrough of OpenAI format

@@ -8,6 +8,7 @@ from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 from fastapi.testclient import TestClient
 
+from router_maestro.providers.base import ModelInfo
 from router_maestro.providers.copilot import CopilotProvider
 from router_maestro.server.routes.anthropic import ANTHROPIC_PING_FRAME
 from router_maestro.server.routes.anthropic_beta import (
@@ -219,19 +220,187 @@ class TestApplyThinkingBudgetNative:
     @patch("router_maestro.server.routes.anthropic_beta.get_router")
     @patch("router_maestro.config.load_priorities_config")
     @patch("router_maestro.server.routes.anthropic_beta.resolve_thinking_budget")
-    def test_no_effort_uses_budget_fallback(self, mock_resolve_tb, mock_config, mock_router):
+    def test_effort_preserves_required_enabled_budget(
+        self, mock_resolve_tb, mock_config, mock_router
+    ):
         mock_config.return_value = MagicMock(
             thinking=MagicMock(default_budget=16000, auto_enable=False, model_budgets={})
         )
         mock_router.return_value = MagicMock(_models_cache={})
-        mock_resolve_tb.return_value = (16000, "adaptive")
+        mock_resolve_tb.return_value = (16000, "enabled")
+        body = {
+            "thinking": {"type": "enabled", "budget_tokens": 16000},
+            "output_config": {"effort": "xhigh"},
+        }
+
+        result = _apply_thinking_budget_native(body, "claude-opus-4.6")
+
+        assert result["thinking"] == {"type": "enabled", "budget_tokens": 16000}
+        assert result["output_config"] == {"effort": "xhigh"}
+        mock_resolve_tb.assert_called_once()
+
+    @patch("router_maestro.server.routes.anthropic_beta.get_router")
+    @patch("router_maestro.config.load_priorities_config")
+    @patch("router_maestro.server.routes.anthropic_beta.resolve_thinking_budget")
+    def test_effort_maps_to_catalog_supported_tier(self, mock_resolve_tb, mock_config, mock_router):
+        mock_config.return_value = MagicMock(
+            thinking=MagicMock(default_budget=16000, auto_enable=False, model_budgets={})
+        )
+        model_info = ModelInfo(
+            id="claude-opus-4.6",
+            name="Claude Opus 4.6",
+            provider="github-copilot",
+            max_output_tokens=64000,
+            supports_thinking=True,
+            reasoning_effort_values=["low", "medium", "high", "max"],
+        )
+        mock_router.return_value = MagicMock(
+            _models_cache={"claude-opus-4.6": ("github-copilot", model_info)}
+        )
+        mock_resolve_tb.return_value = (16000, "enabled")
 
         result = _apply_thinking_budget_native(
-            {"thinking": {"type": "adaptive"}},
+            {
+                "max_tokens": 64000,
+                "thinking": {"type": "enabled", "budget_tokens": 16000},
+                "output_config": {"effort": "xhigh"},
+            },
+            "claude-opus-4.6",
+        )
+
+        assert result["thinking"] == {"type": "enabled", "budget_tokens": 16000}
+        assert result["output_config"] == {"effort": "max"}
+
+    @patch("router_maestro.server.routes.anthropic_beta.get_router")
+    @patch("router_maestro.config.load_priorities_config")
+    @patch("router_maestro.server.routes.anthropic_beta.resolve_thinking_budget")
+    def test_enabled_budget_normalization_preserves_display(
+        self, mock_resolve_tb, mock_config, mock_router
+    ):
+        mock_config.return_value = MagicMock(
+            thinking=MagicMock(default_budget=16000, auto_enable=False, model_budgets={})
+        )
+        mock_router.return_value = MagicMock(_models_cache={})
+        mock_resolve_tb.return_value = (16000, "enabled")
+
+        result = _apply_thinking_budget_native(
+            {
+                "thinking": {
+                    "type": "enabled",
+                    "budget_tokens": 16000,
+                    "display": "summarized",
+                },
+                "output_config": {"effort": "xhigh"},
+            },
+            "claude-opus-4.6",
+        )
+
+        assert result["thinking"] == {
+            "type": "enabled",
+            "budget_tokens": 16000,
+            "display": "summarized",
+        }
+
+    @patch("router_maestro.server.routes.anthropic_beta.get_router")
+    @patch("router_maestro.config.load_priorities_config")
+    @patch("router_maestro.server.routes.anthropic_beta.resolve_thinking_budget")
+    def test_effort_fills_missing_enabled_budget(self, mock_resolve_tb, mock_config, mock_router):
+        mock_config.return_value = MagicMock(
+            thinking=MagicMock(default_budget=16000, auto_enable=False, model_budgets={})
+        )
+        mock_router.return_value = MagicMock(_models_cache={})
+        mock_resolve_tb.return_value = (16000, "enabled")
+
+        result = _apply_thinking_budget_native(
+            {
+                "thinking": {"type": "enabled"},
+                "output_config": {"effort": "xhigh"},
+            },
+            "claude-opus-4.6",
+        )
+
+        assert result["thinking"] == {"type": "enabled", "budget_tokens": 16000}
+        assert result["output_config"] == {"effort": "xhigh"}
+        mock_resolve_tb.assert_called_once()
+
+    @patch("router_maestro.server.routes.anthropic_beta.get_router")
+    @patch("router_maestro.config.load_priorities_config")
+    @patch("router_maestro.server.routes.anthropic_beta.resolve_thinking_budget")
+    def test_effort_normalizes_enabled_budget(self, mock_resolve_tb, mock_config, mock_router):
+        mock_config.return_value = MagicMock(
+            thinking=MagicMock(default_budget=16000, auto_enable=False, model_budgets={})
+        )
+        mock_router.return_value = MagicMock(_models_cache={})
+        mock_resolve_tb.return_value = (4095, "enabled")
+
+        result = _apply_thinking_budget_native(
+            {
+                "max_tokens": 4096,
+                "thinking": {"type": "enabled", "budget_tokens": 16000},
+                "output_config": {"effort": "xhigh"},
+            },
+            "claude-opus-4.6",
+        )
+
+        assert result["thinking"] == {"type": "enabled", "budget_tokens": 4095}
+        assert result["output_config"] == {"effort": "xhigh"}
+        mock_resolve_tb.assert_called_once()
+        assert mock_resolve_tb.call_args.kwargs["max_output_tokens"] == 4096
+
+    @patch("router_maestro.server.routes.anthropic_beta.get_router")
+    @patch("router_maestro.config.load_priorities_config")
+    @patch("router_maestro.server.routes.anthropic_beta.resolve_thinking_budget")
+    def test_effort_removes_disabled_thinking(self, mock_resolve_tb, mock_config, mock_router):
+        mock_config.return_value = MagicMock(
+            thinking=MagicMock(default_budget=16000, auto_enable=False, model_budgets={})
+        )
+        mock_router.return_value = MagicMock(_models_cache={})
+        mock_resolve_tb.return_value = (None, None)
+
+        result = _apply_thinking_budget_native(
+            {
+                "thinking": {"type": "disabled", "budget_tokens": 5000},
+                "output_config": {"effort": "xhigh"},
+            },
+            "claude-opus-4.6",
+        )
+
+        assert "thinking" not in result
+        assert result["output_config"] == {"effort": "xhigh"}
+        mock_resolve_tb.assert_called_once()
+
+    @patch("router_maestro.server.routes.anthropic_beta.resolve_thinking_budget")
+    def test_adaptive_without_effort_omits_budget(self, mock_resolve_tb):
+        result = _apply_thinking_budget_native(
+            {"thinking": {"type": "adaptive", "budget_tokens": 16000}},
             "claude-opus-4.8",
         )
 
-        assert result["thinking"] == {"type": "adaptive", "budget_tokens": 16000}
+        assert result["thinking"] == {"type": "adaptive"}
+        mock_resolve_tb.assert_not_called()
+
+    @patch("router_maestro.server.routes.anthropic_beta.get_router")
+    @patch("router_maestro.config.load_priorities_config")
+    @patch("router_maestro.server.routes.anthropic_beta.resolve_thinking_budget")
+    def test_enabled_without_budget_headroom_is_removed(
+        self, mock_resolve_tb, mock_config, mock_router
+    ):
+        mock_config.return_value = MagicMock(
+            thinking=MagicMock(default_budget=16000, auto_enable=False, model_budgets={})
+        )
+        mock_router.return_value = MagicMock(_models_cache={})
+        mock_resolve_tb.return_value = (None, None)
+
+        result = _apply_thinking_budget_native(
+            {
+                "max_tokens": 1024,
+                "thinking": {"type": "enabled", "budget_tokens": 16000},
+                "output_config": {"effort": "xhigh"},
+            },
+            "claude-opus-4.6",
+        )
+
+        assert "thinking" not in result
         mock_resolve_tb.assert_called_once()
 
     @patch("router_maestro.server.routes.anthropic_beta.get_router")
@@ -588,6 +757,40 @@ class TestBetaMessagesEndpoint:
         assert forwarded["thinking"] == {"type": "adaptive"}
         assert forwarded["output_config"] == {"effort": "xhigh"}
 
+    @patch("router_maestro.server.routes.anthropic_beta._resolve_model")
+    def test_enabled_effort_preserves_required_budget(self, mock_resolve, client):
+        mock_provider = MagicMock(spec=CopilotProvider)
+        mock_provider.ensure_token = AsyncMock()
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {
+            "id": "msg_123",
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "text", "text": "ok"}],
+            "model": "claude-opus-4.6",
+            "stop_reason": "end_turn",
+            "usage": {"input_tokens": 5, "output_tokens": 2},
+        }
+        mock_provider._send_with_auth_retry = AsyncMock(return_value=mock_response)
+        mock_resolve.return_value = ("github-copilot", "claude-opus-4.6", mock_provider)
+
+        resp = client.post(
+            "/api/anthropic/beta/v1/messages",
+            json={
+                "model": "claude-opus-4-6",
+                "max_tokens": 64000,
+                "messages": [{"role": "user", "content": "Hi"}],
+                "thinking": {"type": "enabled", "budget_tokens": 16000},
+                "output_config": {"effort": "xhigh", "format": "json"},
+            },
+        )
+
+        assert resp.status_code == 200
+        forwarded = mock_provider._send_with_auth_retry.call_args.kwargs["json"]
+        assert forwarded["thinking"] == {"type": "enabled", "budget_tokens": 16000}
+        assert forwarded["output_config"] == {"effort": "xhigh"}
+
     @patch("router_maestro.server.routes.anthropic_beta.sse_streaming_response")
     @patch("router_maestro.server.routes.anthropic_beta._stream_passthrough")
     @patch("router_maestro.server.routes.anthropic_beta._resolve_model")
@@ -621,6 +824,36 @@ class TestBetaMessagesEndpoint:
             stream_marker,
             keepalive_frame=ANTHROPIC_PING_FRAME,
         )
+
+    @patch("router_maestro.server.routes.anthropic_beta.sse_streaming_response")
+    @patch("router_maestro.server.routes.anthropic_beta._stream_passthrough")
+    @patch("router_maestro.server.routes.anthropic_beta._resolve_model")
+    def test_stream_enabled_effort_preserves_required_budget(
+        self, mock_resolve, mock_stream, mock_sse_response, client
+    ):
+        mock_provider = MagicMock(spec=CopilotProvider)
+        mock_provider.ensure_token = AsyncMock()
+        mock_resolve.return_value = ("github-copilot", "claude-opus-4.6", mock_provider)
+        stream_marker = object()
+        mock_stream.return_value = stream_marker
+        mock_sse_response.return_value = JSONResponse(content={"stream": "captured"})
+
+        resp = client.post(
+            "/api/anthropic/beta/v1/messages",
+            json={
+                "model": "claude-opus-4-6",
+                "max_tokens": 64000,
+                "stream": True,
+                "messages": [{"role": "user", "content": "Hi"}],
+                "thinking": {"type": "enabled", "budget_tokens": 16000},
+                "output_config": {"effort": "xhigh", "format": "json"},
+            },
+        )
+
+        assert resp.status_code == 200
+        forwarded = mock_stream.call_args.args[1]
+        assert forwarded["thinking"] == {"type": "enabled", "budget_tokens": 16000}
+        assert forwarded["output_config"] == {"effort": "xhigh"}
 
     def test_missing_model_returns_400(self, client):
         """Request without model field returns 400."""

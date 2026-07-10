@@ -17,6 +17,7 @@ from router_maestro.providers.base import (
     ProviderError,
 )
 from router_maestro.utils import get_logger
+from router_maestro.utils.context_window import normalize_thinking_budget
 
 logger = get_logger("providers.anthropic")
 
@@ -149,11 +150,15 @@ class AnthropicProvider(BaseProvider):
             payload["system"] = system_prompt
         if request.temperature != 1.0:
             payload["temperature"] = request.temperature
-        if request.thinking_type and request.thinking_type != "disabled":
-            thinking_config: dict = {"type": request.thinking_type}
-            if request.thinking_budget is not None and request.reasoning_effort is None:
-                thinking_config["budget_tokens"] = request.thinking_budget
-            payload["thinking"] = thinking_config
+        if request.thinking_type == "adaptive":
+            payload["thinking"] = {"type": "adaptive"}
+        elif request.thinking_type == "enabled" and request.thinking_budget is not None:
+            budget = normalize_thinking_budget(request.thinking_budget, payload["max_tokens"])
+            if budget is not None:
+                payload["thinking"] = {
+                    "type": "enabled",
+                    "budget_tokens": budget,
+                }
 
         if request.reasoning_effort is not None:
             payload["output_config"] = {"effort": request.reasoning_effort}

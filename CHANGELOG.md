@@ -14,12 +14,19 @@ All notable changes to Router-Maestro are documented here.
 
 ### Fixes
 
+- **Anthropic manual thinking with effort.** Preserve `thinking.budget_tokens`
+  when `thinking.type="enabled"` and `output_config.effort` are both present,
+  avoiding invalid enabled-thinking payloads in standard and beta-native routes.
+  The Copilot beta-native path also maps effort to the closest tier advertised
+  by the model catalog, preventing unsupported values such as Opus 4.6 `xhigh`.
+
 - **Anthropic adaptive effort passthrough (#120).** Preserve typed
   `output_config.effort` through standard and beta-native Anthropic routes and
-  prefer it over conflicting client or server thinking budgets. Requests
-  without effort retain the existing `budget_tokens` fallback. Copilot catalog
-  parsing now also accepts the structured reasoning-effort capability shape so
-  supported `xhigh`/`max` tiers are not unnecessarily downgraded.
+  prefer it over conflicting adaptive thinking budgets. Manual enabled thinking
+  retains its required normalized budget. Requests without effort retain the
+  existing `budget_tokens` fallback. Copilot catalog parsing now also accepts the
+  structured reasoning-effort capability shape so supported `xhigh`/`max` tiers
+  are not unnecessarily downgraded.
 
 - **Cross-provider request fidelity (#119).** Convert OpenAI-style tools and
   tool choices to Anthropic-native wire shapes, preserve Gemini `top_p` and
