@@ -3,6 +3,7 @@
 from unittest.mock import AsyncMock, patch
 
 import pytest
+from pydantic import ValidationError
 
 from router_maestro.providers.base import ChatRequest, Message
 from router_maestro.routing.router import Router
@@ -80,6 +81,38 @@ class TestTranslateThinkingConfig:
 
         assert result.thinking_type == "enabled"
         assert result.thinking_budget is None
+
+    @pytest.mark.parametrize("effort", ["low", "medium", "high", "xhigh", "max"])
+    def test_translate_output_config_effort(self, effort):
+        """Top-level Anthropic effort is preserved as internal reasoning effort."""
+        request = AnthropicMessagesRequest.model_validate(
+            {
+                "model": "claude-opus-4.8",
+                "max_tokens": 64000,
+                "messages": [{"role": "user", "content": "Hello"}],
+                "thinking": {"type": "adaptive"},
+                "output_config": {"effort": effort},
+            }
+        )
+
+        result = translate_anthropic_to_openai(request)
+
+        assert request.output_config is not None
+        assert request.output_config.effort == effort
+        assert result.thinking_type == "adaptive"
+        assert result.thinking_budget is None
+        assert result.reasoning_effort == effort
+
+    def test_output_config_rejects_invalid_effort(self):
+        with pytest.raises(ValidationError):
+            AnthropicMessagesRequest.model_validate(
+                {
+                    "model": "claude-opus-4.8",
+                    "max_tokens": 64000,
+                    "messages": [{"role": "user", "content": "Hello"}],
+                    "output_config": {"effort": "ultra"},
+                }
+            )
 
 
 class TestCopilotPayloadThinking:
@@ -312,6 +345,7 @@ class TestRouterPreservesThinkingFields:
             messages=[Message(role="user", content="Hello")],
             thinking_budget=16000,
             thinking_type="enabled",
+            reasoning_effort="high",
         )
 
         result = router._create_request_with_model(original, "claude-opus-4.6")
@@ -319,6 +353,7 @@ class TestRouterPreservesThinkingFields:
         assert result.model == "claude-opus-4.6"
         assert result.thinking_budget == 16000
         assert result.thinking_type == "enabled"
+        assert result.reasoning_effort == "high"
 
     def test_router_preserves_none_thinking_fields(self):
         """_create_request_with_model handles None thinking fields."""
@@ -381,6 +416,26 @@ class TestAnthropicProviderThinking:
         assert "thinking" in captured_payload
         assert captured_payload["thinking"]["type"] == "enabled"
         assert captured_payload["thinking"]["budget_tokens"] == 16000
+        assert "output_config" not in captured_payload
+
+    def test_anthropic_provider_prefers_effort_over_budget(self):
+        """Explicit effort uses output_config and suppresses a conflicting budget."""
+        from router_maestro.providers.anthropic import AnthropicProvider
+
+        provider = AnthropicProvider()
+        request = ChatRequest(
+            model="claude-opus-4.8",
+            messages=[Message(role="user", content="Hello")],
+            max_tokens=64000,
+            thinking_type="adaptive",
+            thinking_budget=16000,
+            reasoning_effort="xhigh",
+        )
+
+        payload = provider._build_payload(request)
+
+        assert payload["thinking"] == {"type": "adaptive"}
+        assert payload["output_config"] == {"effort": "xhigh"}
 
     @pytest.mark.asyncio
     async def test_anthropic_provider_omits_disabled_thinking(self):

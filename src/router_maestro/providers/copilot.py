@@ -72,7 +72,8 @@ def _claude_supports_reasoning(bare_lower: str) -> bool:
     opus-4.5, haiku-4.5) have no reasoning control surface.
     """
     return (
-        bare_lower.startswith("claude-opus-4.7")
+        bare_lower.startswith("claude-opus-4.8")
+        or bare_lower.startswith("claude-opus-4.7")
         or bare_lower.startswith("claude-opus-4.6")
         or bare_lower.startswith("claude-sonnet-4.6")
     )
@@ -1092,10 +1093,19 @@ class CopilotProvider(BaseProvider):
                     limits = caps.get("limits", {})
                     supports = caps.get("supports", {})
                     reasoning_values = supports.get("reasoning_effort")
-                    # Catalog field is optional and shape-flexible — accept
-                    # list/tuple of strings or treat anything else as "unset".
                     if isinstance(reasoning_values, (list, tuple)):
                         reasoning_values = [str(v) for v in reasoning_values if isinstance(v, str)]
+                    elif isinstance(reasoning_values, dict):
+                        values = reasoning_values.get("values")
+                        if isinstance(values, (list, tuple)):
+                            reasoning_values = []
+                            for item in values:
+                                if isinstance(item, str):
+                                    reasoning_values.append(item)
+                                elif isinstance(item, dict) and isinstance(item.get("value"), str):
+                                    reasoning_values.append(item["value"])
+                        else:
+                            reasoning_values = None
                     else:
                         reasoning_values = None
                     models.append(

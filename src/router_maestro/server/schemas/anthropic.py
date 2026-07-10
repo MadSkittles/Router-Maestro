@@ -129,6 +129,12 @@ class AnthropicThinkingConfig(BaseModel):
     budget_tokens: int | None = None
 
 
+class AnthropicOutputConfig(BaseModel):
+    """Output configuration for reasoning effort."""
+
+    effort: Literal["low", "medium", "high", "xhigh", "max"] | None = None
+
+
 class AnthropicMessagesRequest(BaseModel):
     """Anthropic Messages API request."""
 
@@ -146,6 +152,7 @@ class AnthropicMessagesRequest(BaseModel):
     tool_choice: AnthropicToolChoice | None = None
     thinking: AnthropicThinkingConfig | None = None
     service_tier: Literal["auto", "standard_only"] | None = None
+    output_config: AnthropicOutputConfig | None = None
 
     @model_validator(mode="before")
     @classmethod

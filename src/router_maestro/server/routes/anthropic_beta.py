@@ -26,6 +26,7 @@ from router_maestro.server.routes.anthropic import (
 from router_maestro.server.streaming import sse_streaming_response
 from router_maestro.utils import get_logger
 from router_maestro.utils.context_window import resolve_thinking_budget
+from router_maestro.utils.reasoning import VALID_EFFORTS
 
 logger = get_logger("server.routes.anthropic_beta")
 
@@ -54,6 +55,7 @@ _COPILOT_ACCEPTED_FIELDS = frozenset(
         "top_k",
         "stop_sequences",
         "metadata",
+        "output_config",
     }
 )
 
@@ -64,6 +66,22 @@ def _is_native_eligible(provider_name: str, actual_model: str) -> bool:
         return False
     bare = actual_model.split("/", 1)[-1].lower()
     return bare.startswith("claude-")
+
+
+def _sanitize_output_config(body: dict) -> str | None:
+    """Keep only a valid effort supported by Copilot's native endpoint."""
+    output_config = body.get("output_config")
+    if not isinstance(output_config, dict):
+        body.pop("output_config", None)
+        return None
+
+    effort = output_config.get("effort")
+    if effort not in VALID_EFFORTS:
+        body.pop("output_config", None)
+        return None
+
+    body["output_config"] = {"effort": effort}
+    return effort
 
 
 def _strip_history_thinking_blocks(body: dict) -> None:
@@ -105,11 +123,23 @@ def _strip_response(data: dict) -> dict:
 
 
 def _apply_thinking_budget_native(body: dict, actual_model: str) -> dict:
-    """Apply server-side thinking budget config to the raw Anthropic body.
+    """Apply effort precedence or the server budget fallback to a raw body.
 
-    Modifies ``body["thinking"]`` in-place if the server config specifies a
-    budget and the client hasn't already set one.
+    Explicit ``output_config.effort`` removes a conflicting thinking budget.
+    Without effort, the existing client/server budget resolution is unchanged.
     """
+    effort = _sanitize_output_config(body)
+    if effort is not None:
+        client_thinking = body.get("thinking")
+        if isinstance(client_thinking, dict) and "budget_tokens" in client_thinking:
+            thinking = dict(client_thinking)
+            thinking.pop("budget_tokens")
+            if thinking:
+                body["thinking"] = thinking
+            else:
+                body.pop("thinking", None)
+        return body
+
     from router_maestro.config import load_priorities_config
 
     priorities = load_priorities_config()
@@ -200,11 +230,13 @@ async def beta_messages(raw_request: FastAPIRequest):
     # Debug: log all top-level keys to identify fields Copilot might reject
     logger.debug("Beta request body keys: %s", sorted(body.keys()))
     logger.info(
-        "Received beta Anthropic request: model=%s, stream=%s, max_tokens=%s, thinking=%s",
+        "Received beta Anthropic request: model=%s, stream=%s, max_tokens=%s, "
+        "thinking=%s, output_config=%s",
         model,
         stream,
         body.get("max_tokens"),
         thinking,
+        body.get("output_config"),
     )
 
     # Resolve provider and check native eligibility
@@ -229,7 +261,11 @@ async def beta_messages(raw_request: FastAPIRequest):
         stream,
     )
 
-    # Apply server-side thinking budget
+    # Sanitize before the budget helper so unsupported output_config siblings
+    # cannot survive even if the helper is replaced by an integration hook.
+    _sanitize_output_config(body)
+
+    # Apply budget fallback only when effort is absent.
     body = _apply_thinking_budget_native(body, actual_model)
 
     # Replace model with the resolved catalog name

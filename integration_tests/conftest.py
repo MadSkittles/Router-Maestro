@@ -20,6 +20,7 @@ import pytest
 
 from router_maestro.auth import AuthManager
 from router_maestro.config.server import get_current_context_api_key
+from router_maestro.utils.model_match import normalize_model_id
 from router_maestro.utils.responses_bridge import RESPONSES_ELIGIBLE_MODELS
 
 STARTUP_TIMEOUT_SECONDS = 45.0
@@ -196,6 +197,25 @@ def anthropic_thinking_models(copilot_models: list[str]) -> list[str]:
         predicate=_is_anthropic_thinking_model,
         description="Claude-family Copilot models",
     )
+
+
+@pytest.fixture(scope="session")
+def anthropic_effort_profile(copilot_models: list[str]) -> tuple[str, str]:
+    """Choose a Claude model and an effort tier verified by the Copilot endpoint."""
+    profiles = (
+        ("claude-opus-4.8", "xhigh"),
+        ("claude-opus-4.7", "xhigh"),
+        ("claude-opus-4.6", "high"),
+        ("claude-sonnet-4.6", "high"),
+    )
+    models_by_normalized_id = {
+        normalize_model_id(bare_model(model)): model for model in copilot_models
+    }
+    for bare_id, effort in profiles:
+        model = models_by_normalized_id.get(normalize_model_id(bare_id))
+        if model is not None:
+            return model, effort
+    pytest.skip("No Copilot Claude model with output_config.effort support is available")
 
 
 @pytest.fixture(scope="session")
@@ -480,6 +500,24 @@ def anthropic_reasoning_payload(
     if budget is not None:
         payload["thinking"] = {"type": "enabled", "budget_tokens": budget}
     return payload
+
+
+def anthropic_effort_payload(
+    model: str,
+    *,
+    effort: str,
+    budget: int = 1024,
+    stream: bool = False,
+) -> dict[str, Any]:
+    """Anthropic adaptive-thinking request with a deliberately conflicting budget."""
+    return {
+        "model": model,
+        "messages": [{"role": "user", "content": REASONING_PROMPT}],
+        "max_tokens": max(4096, budget + 1024),
+        "stream": stream,
+        "thinking": {"type": "adaptive", "budget_tokens": budget},
+        "output_config": {"effort": effort},
+    }
 
 
 def anthropic_tool_payload(model: str, *, stream: bool = False) -> dict[str, Any]:

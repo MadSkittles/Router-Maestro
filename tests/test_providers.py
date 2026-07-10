@@ -183,6 +183,49 @@ class TestProviderBase:
 
         assert [model.id for model in models] == ["gpt-4o"]
 
+    @pytest.mark.asyncio
+    async def test_copilot_models_parse_structured_reasoning_effort_values(self):
+        """Copilot advertises effort tiers as objects under a values list."""
+
+        def handler(_request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                json={
+                    "data": [
+                        {
+                            "id": "claude-opus-4.8",
+                            "name": "Claude Opus 4.8",
+                            "model_picker_enabled": True,
+                            "capabilities": {
+                                "type": "chat",
+                                "supports": {
+                                    "reasoning_effort": {
+                                        "values": [
+                                            {"value": "low"},
+                                            {"value": "xhigh"},
+                                            {"value": "max"},
+                                        ]
+                                    }
+                                },
+                            },
+                        }
+                    ]
+                },
+                request=httpx.Request("GET", "https://api.githubcopilot.com/models"),
+            )
+
+        provider = CopilotProvider()
+        provider._cached_token = "token"
+        provider.ensure_token = AsyncMock()  # type: ignore[method-assign]
+
+        with patch(
+            "httpx.AsyncClient",
+            return_value=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+        ):
+            models = await provider.list_models(force_refresh=True)
+
+        assert models[0].reasoning_effort_values == ["low", "xhigh", "max"]
+
     def test_openai_provider_init(self):
         """Test OpenAIProvider initialization."""
         provider = OpenAIProvider()

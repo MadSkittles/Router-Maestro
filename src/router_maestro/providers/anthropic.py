@@ -151,9 +151,13 @@ class AnthropicProvider(BaseProvider):
             payload["temperature"] = request.temperature
         if request.thinking_type and request.thinking_type != "disabled":
             thinking_config: dict = {"type": request.thinking_type}
-            if request.thinking_budget:
+            if request.thinking_budget is not None and request.reasoning_effort is None:
                 thinking_config["budget_tokens"] = request.thinking_budget
             payload["thinking"] = thinking_config
+
+        if request.reasoning_effort is not None:
+            payload["output_config"] = {"effort": request.reasoning_effort}
+
         if request.tools:
             payload["tools"] = self._convert_tools(request.tools)
         if request.tool_choice:

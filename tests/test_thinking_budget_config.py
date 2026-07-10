@@ -193,11 +193,13 @@ class TestChatRequestWithThinking:
         req = self._make_request()
         req.temperature = 0.5
         req.max_tokens = 1000
+        req.reasoning_effort = "high"
         updated = req.with_thinking(thinking_budget=8000, thinking_type="enabled")
         assert updated.model == "test-model"
         assert updated.temperature == 0.5
         assert updated.max_tokens == 1000
         assert updated.messages == req.messages
+        assert updated.reasoning_effort == "high"
 
     def test_original_not_mutated(self):
         """Original request is not mutated."""
@@ -255,6 +257,31 @@ class TestAnthropicRouteThinkingBudget:
         assert result.thinking_type == "enabled"
 
     @pytest.mark.asyncio
+    async def test_explicit_effort_clears_budget_without_resolving_server_default(
+        self, monkeypatch
+    ):
+        """Effort is authoritative and bypasses all client/server budget resolution."""
+        router = MagicMock()
+        resolver = MagicMock()
+        monkeypatch.setattr(anthropic_route, "resolve_thinking_budget", resolver)
+        request = ChatRequest(
+            model="claude-opus-4.8",
+            messages=[Message(role="user", content="hi")],
+            max_tokens=64000,
+            thinking_budget=4096,
+            thinking_type="adaptive",
+            reasoning_effort="xhigh",
+        )
+
+        result = await _apply_thinking_budget(router, request, "claude-opus-4-8")
+
+        assert result.thinking_budget is None
+        assert result.thinking_type == "adaptive"
+        assert result.reasoning_effort == "xhigh"
+        router.get_model_info.assert_not_called()
+        resolver.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_messages_logs_inbound_thinking_metadata(self, monkeypatch):
         """Inbound logs include raw thinking metadata needed to debug client budgets."""
 
@@ -280,9 +307,12 @@ class TestAnthropicRouteThinkingBudget:
         await anthropic_route.messages(request, RawRequest())
 
         log.info.assert_called_once()
-        _message, model, stream, max_tokens, thinking, raw_thinking = log.info.call_args.args
+        _message, model, stream, max_tokens, thinking, raw_thinking, effort = (
+            log.info.call_args.args
+        )
         assert model == "test"
         assert stream is False
         assert max_tokens == 64000
         assert thinking == {"type": "enabled", "budget_tokens": 63999}
         assert raw_thinking == {"type": "enabled", "budget_tokens": 63999}
+        assert effort is None

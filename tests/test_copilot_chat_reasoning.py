@@ -32,6 +32,14 @@ def test_claude_47_cold_start_clamps_xhigh_and_max_to_high():
         assert p.get("reasoning_effort") == "high", input_effort
 
 
+def test_claude_48_cold_start_effort_wins_over_budget():
+    """Opus 4.8 must retain explicit effort before the catalog is warm."""
+    p = _base_payload()
+    apply_copilot_chat_reasoning(p, "claude-opus-4.8", 1024, "xhigh")
+    assert p.get("reasoning_effort") == "high"
+    assert "thinking_budget" not in p
+
+
 def test_claude_46_uses_reasoning_effort_not_thinking_budget():
     """opus-4.6 / sonnet-4.6 on Copilot expose effort, not budget."""
     for model in ("claude-opus-4.6", "claude-sonnet-4.6"):
