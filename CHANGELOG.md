@@ -4,16 +4,44 @@ All notable changes to Router-Maestro are documented here.
 
 ---
 
-## Unreleased
+## v0.5.3 (2026-07-10)
+
+### Changes
+
+- **Responses bridge configuration in Docker Compose.** Pass
+  `ROUTER_MAESTRO_EXPERIMENTAL_RESPONSES_API` through the production Compose
+  service and document the opt-in environment variable in `.env.example`.
 
 ### Fixes
 
-- **Anthropic adaptive effort passthrough.** Preserve typed
+- **Anthropic adaptive effort passthrough (#120).** Preserve typed
   `output_config.effort` through standard and beta-native Anthropic routes and
   prefer it over conflicting client or server thinking budgets. Requests
   without effort retain the existing `budget_tokens` fallback. Copilot catalog
   parsing now also accepts the structured reasoning-effort capability shape so
   supported `xhigh`/`max` tiers are not unnecessarily downgraded.
+
+- **Cross-provider request fidelity (#119).** Convert OpenAI-style tools and
+  tool choices to Anthropic-native wire shapes, preserve Gemini `top_p` and
+  stop sequences, and return a non-retryable 501 when a provider does not
+  support the Responses API.
+
+- **Streaming choices, usage, and audit finalization (#119).** Process every
+  Copilot SSE choice so split text and tool-call deltas are retained, preserve
+  usage-only chunks from OpenAI-compatible providers, and finalize stream
+  audit state on both success and provider failure.
+
+- **Responses special tool calls (#119).** Preserve non-streaming Copilot
+  `custom_tool_call` and `tool_search_call` outputs in their native Responses
+  wire shapes instead of treating them as ordinary function calls.
+
+- **Admin configuration and Copilot OAuth login (#119).** Apply priority
+  updates immediately by refreshing router state and persist Copilot's
+  returned API endpoint during OAuth login.
+
+- **Sensitive config validation logs (#119).** Avoid logging validation input
+  values that may contain credentials while retaining the fallback to default
+  configuration.
 
 ---
 
