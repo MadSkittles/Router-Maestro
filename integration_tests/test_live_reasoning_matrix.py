@@ -10,6 +10,7 @@ from integration_tests.conftest import (
     ANTHROPIC_THINKING_BUDGETS,
     OPENAI_REASONING_EFFORTS,
     STREAM_MODES,
+    anthropic_effort_payload,
     anthropic_reasoning_payload,
     assert_anthropic_usage,
     assert_http_success,
@@ -68,6 +69,34 @@ def test_anthropic_gpt5_responses_bridge_thinking_budget_matrix(
     assert not failures, "\n".join(failures)
 
 
+def test_anthropic_output_config_effort_precedence(
+    client: httpx.Client,
+    anthropic_effort_profile: tuple[str, str],
+):
+    """Standard Anthropic path should prefer explicit effort over a low budget."""
+    model, effort = anthropic_effort_profile
+    failures: list[str] = []
+
+    for stream in STREAM_MODES:
+        payload = anthropic_effort_payload(model, effort=effort, stream=stream)
+        try:
+            if stream:
+                data = _post_anthropic_payload_stream(client, payload)
+            else:
+                response = client.post(
+                    "/api/anthropic/v1/messages",
+                    json=payload,
+                    timeout=480.0,
+                )
+                assert_http_success(response)
+                data = response.json()
+            _assert_anthropic_reasoning_result(data)
+        except AssertionError as exc:
+            failures.append(f"{bare_model(model)}|effort={effort}|stream={stream}: {exc}")
+
+    assert not failures, "\n".join(failures)
+
+
 def test_openai_chat_reasoning_effort_matrix(
     client: httpx.Client,
     openai_reasoning_models: list[str],
@@ -110,10 +139,20 @@ def _post_anthropic_stream(
     model: str,
     budget: int | None,
 ) -> dict[str, Any]:
+    return _post_anthropic_payload_stream(
+        client,
+        anthropic_reasoning_payload(model, budget=budget, stream=True),
+    )
+
+
+def _post_anthropic_payload_stream(
+    client: httpx.Client,
+    payload: dict[str, Any],
+) -> dict[str, Any]:
     with client.stream(
         "POST",
         "/api/anthropic/v1/messages",
-        json=anthropic_reasoning_payload(model, budget=budget, stream=True),
+        json=payload,
         timeout=480.0,
     ) as response:
         assert_http_success(response)

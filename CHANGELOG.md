@@ -4,6 +4,19 @@ All notable changes to Router-Maestro are documented here.
 
 ---
 
+## Unreleased
+
+### Fixes
+
+- **Anthropic adaptive effort passthrough.** Preserve typed
+  `output_config.effort` through standard and beta-native Anthropic routes and
+  prefer it over conflicting client or server thinking budgets. Requests
+  without effort retain the existing `budget_tokens` fallback. Copilot catalog
+  parsing now also accepts the structured reasoning-effort capability shape so
+  supported `xhigh`/`max` tiers are not unnecessarily downgraded.
+
+---
+
 ## v0.5.0 (2026-07-07)
 
 ### Features

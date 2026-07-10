@@ -124,6 +124,10 @@ Both preserve the protocol rule that `budget_tokens < max_tokens`. Router-Maestr
 default ceiling is slightly higher so high client budgets can map to the local
 `max` reasoning tier before provider-specific catalog clamping.
 
+These budget calculations are used only when the request does not contain an
+explicit Anthropic `output_config.effort`. Effort is a tiered behavioral control,
+not an exact token budget, and takes precedence when both fields are present.
+
 ---
 
 ## Key Differences

@@ -70,11 +70,14 @@ def translate_anthropic_to_openai(request: AnthropicMessagesRequest) -> ChatRequ
         thinking_type = request.thinking.type
         thinking_budget = request.thinking.budget_tokens
 
+    reasoning_effort = request.output_config.effort if request.output_config else None
+
     logger.debug(
-        "Translating Anthropic request: model=%s -> %s, messages=%d",
+        "Translating Anthropic request: model=%s -> %s, messages=%d, reasoning_effort=%s",
         request.model,
         _translate_model_name(request.model),
         len(messages),
+        reasoning_effort,
     )
 
     return ChatRequest(
@@ -87,6 +90,7 @@ def translate_anthropic_to_openai(request: AnthropicMessagesRequest) -> ChatRequ
         tool_choice=tool_choice,
         thinking_budget=thinking_budget,
         thinking_type=thinking_type,
+        reasoning_effort=reasoning_effort,
     )
 
 

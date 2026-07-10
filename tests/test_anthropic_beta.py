@@ -9,11 +9,13 @@ from fastapi.responses import JSONResponse
 from fastapi.testclient import TestClient
 
 from router_maestro.providers.copilot import CopilotProvider
+from router_maestro.server.routes.anthropic import ANTHROPIC_PING_FRAME
 from router_maestro.server.routes.anthropic_beta import (
     _apply_thinking_budget_native,
     _clean_stream_frame,
     _is_native_eligible,
     _is_signature_error,
+    _sanitize_output_config,
     _strip_history_thinking_blocks,
     _strip_response,
     router,
@@ -201,6 +203,37 @@ class TestStripHistoryThinkingBlocks:
 
 
 class TestApplyThinkingBudgetNative:
+    @patch("router_maestro.server.routes.anthropic_beta.resolve_thinking_budget")
+    def test_effort_removes_conflicting_budget(self, mock_resolve_tb):
+        body = {
+            "thinking": {"type": "adaptive", "budget_tokens": 16000},
+            "output_config": {"effort": "xhigh"},
+        }
+
+        result = _apply_thinking_budget_native(body, "claude-opus-4.8")
+
+        assert result["thinking"] == {"type": "adaptive"}
+        assert result["output_config"] == {"effort": "xhigh"}
+        mock_resolve_tb.assert_not_called()
+
+    @patch("router_maestro.server.routes.anthropic_beta.get_router")
+    @patch("router_maestro.config.load_priorities_config")
+    @patch("router_maestro.server.routes.anthropic_beta.resolve_thinking_budget")
+    def test_no_effort_uses_budget_fallback(self, mock_resolve_tb, mock_config, mock_router):
+        mock_config.return_value = MagicMock(
+            thinking=MagicMock(default_budget=16000, auto_enable=False, model_budgets={})
+        )
+        mock_router.return_value = MagicMock(_models_cache={})
+        mock_resolve_tb.return_value = (16000, "adaptive")
+
+        result = _apply_thinking_budget_native(
+            {"thinking": {"type": "adaptive"}},
+            "claude-opus-4.8",
+        )
+
+        assert result["thinking"] == {"type": "adaptive", "budget_tokens": 16000}
+        mock_resolve_tb.assert_called_once()
+
     @patch("router_maestro.server.routes.anthropic_beta.get_router")
     @patch("router_maestro.config.load_priorities_config")
     @patch("router_maestro.server.routes.anthropic_beta.resolve_thinking_budget")
@@ -230,6 +263,26 @@ class TestApplyThinkingBudgetNative:
         body = {"thinking": {"type": "enabled", "budget_tokens": 5000}}
         result = _apply_thinking_budget_native(body, "claude-sonnet-4.5")
         assert "thinking" not in result
+
+
+class TestSanitizeOutputConfig:
+    def test_preserves_only_valid_effort(self):
+        body = {"output_config": {"effort": "xhigh", "format": "json"}}
+
+        _sanitize_output_config(body)
+
+        assert body["output_config"] == {"effort": "xhigh"}
+
+    @pytest.mark.parametrize(
+        "value",
+        [None, {}, {"format": "json"}, {"effort": "invalid"}, "xhigh"],
+    )
+    def test_removes_output_config_without_valid_effort(self, value):
+        body = {"output_config": value}
+
+        _sanitize_output_config(body)
+
+        assert "output_config" not in body
 
 
 # --- Integration tests with TestClient ---
@@ -500,6 +553,74 @@ class TestBetaMessagesEndpoint:
         # Known fields should be preserved
         assert forwarded_body["model"] == "claude-sonnet-4.5"
         assert forwarded_body["max_tokens"] == 100
+
+    @patch("router_maestro.server.routes.anthropic_beta._resolve_model")
+    def test_effort_forwarded_and_conflicting_budget_removed(self, mock_resolve, client):
+        mock_provider = MagicMock(spec=CopilotProvider)
+        mock_provider.ensure_token = AsyncMock()
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {
+            "id": "msg_123",
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "text", "text": "ok"}],
+            "model": "claude-opus-4.8",
+            "stop_reason": "end_turn",
+            "usage": {"input_tokens": 5, "output_tokens": 2},
+        }
+        mock_provider._send_with_auth_retry = AsyncMock(return_value=mock_response)
+        mock_resolve.return_value = ("github-copilot", "claude-opus-4.8", mock_provider)
+
+        resp = client.post(
+            "/api/anthropic/beta/v1/messages",
+            json={
+                "model": "claude-opus-4-8",
+                "max_tokens": 64000,
+                "messages": [{"role": "user", "content": "Hi"}],
+                "thinking": {"type": "adaptive", "budget_tokens": 16000},
+                "output_config": {"effort": "xhigh", "format": "json"},
+            },
+        )
+
+        assert resp.status_code == 200
+        forwarded = mock_provider._send_with_auth_retry.call_args.kwargs["json"]
+        assert forwarded["thinking"] == {"type": "adaptive"}
+        assert forwarded["output_config"] == {"effort": "xhigh"}
+
+    @patch("router_maestro.server.routes.anthropic_beta.sse_streaming_response")
+    @patch("router_maestro.server.routes.anthropic_beta._stream_passthrough")
+    @patch("router_maestro.server.routes.anthropic_beta._resolve_model")
+    def test_stream_effort_forwarded_and_conflicting_budget_removed(
+        self, mock_resolve, mock_stream, mock_sse_response, client
+    ):
+        mock_provider = MagicMock(spec=CopilotProvider)
+        mock_provider.ensure_token = AsyncMock()
+        mock_resolve.return_value = ("github-copilot", "claude-opus-4.8", mock_provider)
+        stream_marker = object()
+        mock_stream.return_value = stream_marker
+        mock_sse_response.return_value = JSONResponse(content={"stream": "captured"})
+
+        resp = client.post(
+            "/api/anthropic/beta/v1/messages",
+            json={
+                "model": "claude-opus-4-8",
+                "max_tokens": 64000,
+                "stream": True,
+                "messages": [{"role": "user", "content": "Hi"}],
+                "thinking": {"type": "adaptive", "budget_tokens": 16000},
+                "output_config": {"effort": "xhigh", "format": "json"},
+            },
+        )
+
+        assert resp.status_code == 200
+        forwarded = mock_stream.call_args.args[1]
+        assert forwarded["thinking"] == {"type": "adaptive"}
+        assert forwarded["output_config"] == {"effort": "xhigh"}
+        mock_sse_response.assert_called_once_with(
+            stream_marker,
+            keepalive_frame=ANTHROPIC_PING_FRAME,
+        )
 
     def test_missing_model_returns_400(self, client):
         """Request without model field returns 400."""

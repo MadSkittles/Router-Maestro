@@ -84,8 +84,15 @@ async def _apply_thinking_budget(
     lookups since translate_anthropic_to_openai may strip date suffixes.
     Falls back to original_model for config key matching.
 
-    Returns the original request unchanged if no adjustment is needed.
+    Returns the original request unchanged if no adjustment is needed. Explicit
+    reasoning effort takes priority over all client and server budgets.
     """
+    if chat_request.reasoning_effort is not None:
+        return chat_request.with_thinking(
+            thinking_budget=None,
+            thinking_type=chat_request.thinking_type,
+        )
+
     from router_maestro.config import load_priorities_config
 
     priorities = load_priorities_config()
@@ -280,15 +287,17 @@ def _mid_conv_system_rejection_response() -> JSONResponse:
 async def messages(request: AnthropicMessagesRequest, raw_request: FastAPIRequest):
     """Handle Anthropic Messages API requests."""
     parsed_thinking = request.thinking.model_dump(exclude_none=True) if request.thinking else None
+    effort = request.output_config.effort if request.output_config else None
     raw_thinking = await _raw_body_thinking(raw_request)
     logger.info(
         "Received Anthropic messages request: model=%s, stream=%s, max_tokens=%s, "
-        "thinking=%s, raw_thinking=%s",
+        "thinking=%s, raw_thinking=%s, effort=%s",
         request.model,
         request.stream,
         request.max_tokens,
         parsed_thinking,
         raw_thinking,
+        effort,
     )
 
     # Handle test model

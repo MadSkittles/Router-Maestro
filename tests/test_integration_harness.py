@@ -61,6 +61,22 @@ def test_reasoning_matrix_payloads_cover_budget_and_effort_controls():
     assert openai["stream_options"] == {"include_usage": True}
 
 
+def test_anthropic_effort_payload_includes_conflicting_budget():
+    """Live coverage must exercise effort precedence, not effort in isolation."""
+    conftest = importlib.import_module("integration_tests.conftest")
+
+    payload = conftest.anthropic_effort_payload(
+        "github-copilot/claude-opus-4.8",
+        effort="xhigh",
+        budget=1024,
+        stream=True,
+    )
+
+    assert payload["thinking"] == {"type": "adaptive", "budget_tokens": 1024}
+    assert payload["output_config"] == {"effort": "xhigh"}
+    assert payload["stream"] is True
+
+
 def test_integration_tests_include_reasoning_and_gemini_family_matrices():
     """Local live tests should cover the e2e reasoning and Gemini family gaps."""
     integration_dir = ROOT / "integration_tests"
@@ -71,6 +87,7 @@ def test_integration_tests_include_reasoning_and_gemini_family_matrices():
     assert "test_anthropic_claude_thinking_budget_matrix" in reasoning
     assert "test_anthropic_gpt5_responses_bridge_thinking_budget_matrix" in reasoning
     assert "test_openai_chat_reasoning_effort_matrix" in reasoning
+    assert "test_anthropic_output_config_effort_precedence" in reasoning
     assert "test_gemini_family_generate_content_matrix" in gemini
 
 

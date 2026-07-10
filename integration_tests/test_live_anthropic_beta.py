@@ -17,6 +17,7 @@ from integration_tests.conftest import (
     STREAM_MODES,
     anthropic_compat_payload,
     anthropic_count_tokens_payload,
+    anthropic_effort_payload,
     anthropic_payload,
     anthropic_reasoning_payload,
     anthropic_tool_choice_any_payload,
@@ -264,6 +265,37 @@ def test_beta_thinking_streaming(client: httpx.Client, chat_model: str):
         if isinstance(p, dict) and p.get("delta", {}).get("type") == "signature_delta"
     ]
     assert sig_deltas, "Expected signature_delta events"
+
+
+def test_beta_output_config_effort_precedence(
+    client: httpx.Client,
+    anthropic_effort_profile: tuple[str, str],
+):
+    """Native path should preserve effort and remove its conflicting budget."""
+    model, effort = anthropic_effort_profile
+    failures: list[str] = []
+
+    for stream in STREAM_MODES:
+        payload = anthropic_effort_payload(model, effort=effort, stream=stream)
+        try:
+            if stream:
+                with client.stream("POST", BETA, json=payload, timeout=480.0) as response:
+                    assert_http_success(response)
+                    events = parse_sse_events(response)
+                event_names = [name for name, _event in events]
+                assert "message_stop" in event_names, events
+                errors = [event for name, event in events if name == "error"]
+                assert not errors, errors
+            else:
+                response = client.post(BETA, json=payload, timeout=480.0)
+                assert_http_success(response)
+                data = response.json()
+                assert data["type"] == "message"
+                assert_anthropic_usage(data["usage"])
+        except AssertionError as exc:
+            failures.append(f"{bare_model(model)}|effort={effort}|stream={stream}: {exc}")
+
+    assert not failures, "\n".join(failures)
 
 
 def test_beta_thinking_budget_matrix(
