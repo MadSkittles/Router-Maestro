@@ -4,6 +4,19 @@ All notable changes to Router-Maestro are documented here.
 
 ---
 
+## v0.5.4 (2026-07-10)
+
+### Fixes
+
+- **Anthropic manual thinking with effort.** Preserve and normalize the
+  protocol-required `thinking.budget_tokens` when `thinking.type="enabled"`
+  and `output_config.effort` are both present across standard and beta-native
+  routes. Copilot-native requests also map effort to the closest tier
+  advertised by the live model catalog, preventing unsupported values such as
+  Opus 4.6 `xhigh`.
+
+---
+
 ## v0.5.3 (2026-07-10)
 
 ### Changes
@@ -13,12 +26,6 @@ All notable changes to Router-Maestro are documented here.
   service and document the opt-in environment variable in `.env.example`.
 
 ### Fixes
-
-- **Anthropic manual thinking with effort.** Preserve `thinking.budget_tokens`
-  when `thinking.type="enabled"` and `output_config.effort` are both present,
-  avoiding invalid enabled-thinking payloads in standard and beta-native routes.
-  The Copilot beta-native path also maps effort to the closest tier advertised
-  by the model catalog, preventing unsupported values such as Opus 4.6 `xhigh`.
 
 - **Anthropic adaptive effort passthrough (#120).** Preserve typed
   `output_config.effort` through standard and beta-native Anthropic routes and
