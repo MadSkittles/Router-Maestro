@@ -10,7 +10,17 @@ from typing import Any
 
 from fastapi import APIRouter, HTTPException
 
-from router_maestro.providers import ProviderError
+from router_maestro.providers import (
+    ProviderError,
+    ResponseStatus,
+    TerminalError,
+    TerminalOutcome,
+    TransportTermination,
+    client_cancelled_outcome,
+    exception_outcome,
+    resolve_terminal_outcome,
+    unexpected_eof_outcome,
+)
 from router_maestro.providers import ResponsesRequest as InternalResponsesRequest
 from router_maestro.routing import Router, get_router
 from router_maestro.server.schemas import (
@@ -20,6 +30,7 @@ from router_maestro.server.schemas import (
 )
 from router_maestro.server.streaming import sse_streaming_response
 from router_maestro.utils import get_logger
+from router_maestro.utils.async_iterators import close_async_iterator
 from router_maestro.utils.reasoning import VALID_EFFORTS
 
 logger = get_logger("server.routes.responses")
@@ -391,15 +402,36 @@ async def create_response(request: ResponsesRequest):
                         )
                     )
 
+        outcome = resolve_terminal_outcome(response.terminal_outcome, None)
+        if outcome is None:
+            outcome = TerminalOutcome(
+                transport=TransportTermination.EXPLICIT_TERMINAL,
+                response_status=ResponseStatus.COMPLETED,
+            )
+        elif outcome.transport is not TransportTermination.EXPLICIT_TERMINAL:
+            outcome = TerminalOutcome(
+                transport=TransportTermination.EXPLICIT_TERMINAL,
+                response_status=ResponseStatus.FAILED,
+                error=TerminalError(
+                    code="upstream_protocol_error",
+                    message="Provider returned an invalid non-stream terminal outcome",
+                ),
+            )
+        error = (
+            {"code": outcome.error.code, "message": outcome.error.message}
+            if outcome.error is not None
+            else None
+        )
+
         return ResponsesResponse.model_construct(
             id=response_id,
             object="response",
             model=response.model,
-            status="completed",
+            status=outcome.response_status.value,
             output=output,
             usage=usage,
-            error=None,
-            incomplete_details=None,
+            error=error,
+            incomplete_details=outcome.incomplete_details,
         )
     except ProviderError as e:
         elapsed_ms = (time.time() - start_time) * 1000
@@ -458,6 +490,8 @@ class _StreamMessageState:
             self.output_index += 1
         self.message_started = False
         self.current_message_id = None
+        self.accumulated_content = ""
+        self.content_index = 0
         return events
 
     def close_open_reasoning(self, advance_index: bool = True) -> list[str]:
@@ -531,6 +565,8 @@ async def stream_response(
     response_id = generate_id("resp")
     created_at = int(time.time())
     pipeline = None
+    stream = None
+    terminal_outcome: TerminalOutcome | None = None
     try:
         stream, provider_name = await model_router.responses_completion_stream(request)
 
@@ -561,7 +597,6 @@ async def stream_response(
 
         state = _StreamMessageState()
         final_usage = None
-        stream_completed = False
 
         # response.created
         yield sse_event(
@@ -591,6 +626,7 @@ async def stream_response(
             # Feed through guards
             abort_reason = pipeline.feed_stream(chunk)
             if abort_reason:
+                terminal_outcome = exception_outcome(abort_reason, code="overloaded")
                 logger.warning("Responses stream aborted: %s", abort_reason)
                 yield sse_event(
                     {
@@ -606,7 +642,11 @@ async def stream_response(
                         },
                     }
                 )
-                pipeline.finish(status=529, body_summary=abort_reason)
+                pipeline.finish(
+                    wire_status=200,
+                    outcome=terminal_outcome,
+                    body_summary=abort_reason,
+                )
                 return
 
             # Handle reasoning summary text deltas. gpt-5.x and other thinking
@@ -871,87 +911,75 @@ async def stream_response(
             if chunk.usage:
                 final_usage = chunk.usage
 
-            if chunk.finish_reason:
-                stream_completed = True
-
+            chunk_outcome = resolve_terminal_outcome(
+                chunk.terminal_outcome,
+                chunk.finish_reason,
+            )
+            if chunk_outcome is not None:
+                terminal_outcome = chunk_outcome
                 for evt in state.close_open_reasoning():
                     yield evt
                 for evt in state.close_open_message(advance_index=False):
                     yield evt
 
-                yield sse_event(
-                    {
-                        "type": "response.completed",
-                        "response": {
-                            **base_response,
-                            "status": "completed",
-                            "output": state.output_items,
-                            "usage": make_usage(final_usage),
-                        },
-                    }
+                yield _terminal_response_event(
+                    chunk_outcome,
+                    base_response=base_response,
+                    output=state.output_items,
+                    usage=make_usage(final_usage),
                 )
+                pipeline.finish(
+                    wire_status=200,
+                    outcome=chunk_outcome,
+                    body_summary=(
+                        chunk_outcome.error.message if chunk_outcome.error is not None else None
+                    ),
+                )
+                return
 
-        if not stream_completed:
-            logger.warning(
-                "Stream ended without finish_reason: req_id=%s model=%s output_items=%d "
-                "accumulated_text_len=%d message_started=%s — emitting fallback completion",
-                request_id,
-                request.model,
-                len(state.output_items),
-                len(state.accumulated_content),
-                state.message_started,
-            )
+        terminal_outcome = unexpected_eof_outcome()
+        logger.warning(
+            "Stream ended without explicit terminal: req_id=%s model=%s output_items=%d "
+            "accumulated_text_len=%d message_started=%s",
+            request_id,
+            request.model,
+            len(state.output_items),
+            len(state.accumulated_content),
+            state.message_started,
+        )
 
-            for evt in state.close_open_reasoning():
-                yield evt
-            for evt in state.close_open_message(advance_index=False):
-                yield evt
+        for evt in state.close_open_reasoning():
+            yield evt
+        for evt in state.close_open_message(advance_index=False):
+            yield evt
 
-            yield sse_event(
-                {
-                    "type": "response.completed",
-                    "response": {
-                        **base_response,
-                        "status": "completed",
-                        "output": state.output_items,
-                        "usage": make_usage(final_usage),
-                    },
-                }
-            )
+        yield _terminal_response_event(
+            terminal_outcome,
+            base_response=base_response,
+            output=state.output_items,
+            usage=make_usage(final_usage),
+        )
 
         elapsed_ms = (time.time() - start_time) * 1000
-        function_call_count = sum(
-            1 for item in state.output_items if item.get("type") == "function_call"
-        )
-        message_count = sum(1 for item in state.output_items if item.get("type") == "message")
-        reasoning_count = sum(1 for item in state.output_items if item.get("type") == "reasoning")
         logger.info(
-            "Stream completed: req_id=%s model=%s elapsed=%.1fms output_items=%d "
-            "(messages=%d, function_calls=%d, reasoning=%d) text_len=%d "
-            "reasoning_text_len=%d stream_completed=%s usage=%s",
+            "Stream terminated: req_id=%s model=%s elapsed=%.1fms output_items=%d "
+            "transport=%s response_status=%s usage=%s",
             request_id,
             request.model,
             elapsed_ms,
             len(state.output_items),
-            message_count,
-            function_call_count,
-            reasoning_count,
-            len(state.accumulated_content),
-            sum(
-                len(part.get("text", ""))
-                for item in state.output_items
-                if item.get("type") == "reasoning"
-                for part in item.get("summary", [])
-            ),
-            stream_completed,
+            terminal_outcome.transport.value,
+            terminal_outcome.response_status.value,
             final_usage,
         )
-
-        # NOTE: Do NOT send "data: [DONE]\n\n" - agent-maestro doesn't send it
-        # for Responses API
-        pipeline.finish(status=200)
+        pipeline.finish(
+            wire_status=200,
+            outcome=terminal_outcome,
+            body_summary=terminal_outcome.error.message,
+        )
 
     except ProviderError as e:
+        terminal_outcome = exception_outcome(str(e), code="provider_error")
         elapsed_ms = (time.time() - start_time) * 1000
         logger.error(
             "Stream failed: req_id=%s, elapsed=%.1fms, error=%s",
@@ -960,7 +988,11 @@ async def stream_response(
             e,
         )
         if pipeline is not None:
-            pipeline.finish(status=e.status_code, body_summary=str(e))
+            pipeline.finish(
+                wire_status=200,
+                outcome=terminal_outcome,
+                body_summary=str(e),
+            )
         # Send response.failed event matching OpenAI spec
         yield sse_event(
             {
@@ -981,9 +1013,12 @@ async def stream_response(
             }
         )
     except asyncio.CancelledError:
+        if pipeline is not None:
+            pipeline.finish(wire_status=200, outcome=client_cancelled_outcome())
         logger.info("Responses stream cancelled by client: req_id=%s", request_id)
         raise
     except Exception:
+        terminal_outcome = exception_outcome("Internal server error", code="server_error")
         elapsed_ms = (time.time() - start_time) * 1000
         logger.error(
             "Unexpected error in responses stream: req_id=%s, elapsed=%.1fms",
@@ -991,6 +1026,12 @@ async def stream_response(
             elapsed_ms,
             exc_info=True,
         )
+        if pipeline is not None:
+            pipeline.finish(
+                wire_status=200,
+                outcome=terminal_outcome,
+                body_summary="Internal server error",
+            )
         # Reuse the stream's response_id/created_at (hoisted above the try) so
         # clients correlating events by id see a consistent response object.
         yield sse_event(
@@ -1011,6 +1052,65 @@ async def stream_response(
                 },
             }
         )
+    finally:
+        await close_async_iterator(stream)
+
+
+def _terminal_response_event(
+    outcome: TerminalOutcome,
+    *,
+    base_response: dict[str, Any],
+    output: list[dict[str, Any]],
+    usage: dict[str, Any] | None,
+) -> str:
+    """Encode one canonical terminal outcome as a Responses SSE event."""
+    if outcome.transport is TransportTermination.UNEXPECTED_EOF:
+        event_type = "response.incomplete"
+        status = "incomplete"
+        incomplete_details = {"reason": "unexpected_eof"}
+        error = None
+    elif outcome.response_status is ResponseStatus.COMPLETED:
+        event_type = "response.completed"
+        status = "completed"
+        incomplete_details = None
+        error = None
+    elif outcome.response_status is ResponseStatus.INCOMPLETE:
+        event_type = "response.incomplete"
+        status = "incomplete"
+        incomplete_details = outcome.incomplete_details
+        error = None
+    elif outcome.response_status is ResponseStatus.CANCELLED:
+        event_type = "response.failed"
+        status = "cancelled"
+        incomplete_details = None
+        error = (
+            {"code": outcome.error.code, "message": outcome.error.message}
+            if outcome.error is not None
+            else None
+        )
+    else:
+        event_type = "response.failed"
+        status = "failed"
+        incomplete_details = outcome.incomplete_details
+        error = (
+            {"code": outcome.error.code, "message": outcome.error.message}
+            if outcome.error is not None
+            else None
+        )
+
+    return sse_event(
+        {
+            "type": event_type,
+            "response": {
+                **base_response,
+                "status": status,
+                "output": output,
+                "usage": usage,
+                "error": error,
+                "incomplete_details": incomplete_details,
+            },
+        }
+    )
 
 
 def _close_message_events(

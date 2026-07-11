@@ -1,12 +1,20 @@
 """Regression tests for streaming routes finalizing RequestPipeline."""
 
+import logging
 from collections.abc import AsyncIterator
 
 import pytest
 
+from router_maestro.config.priorities import PrioritiesConfig
+from router_maestro.pipeline.request_pipeline import RequestPipeline
 from router_maestro.providers import ChatRequest, ChatStreamChunk, Message
 from router_maestro.providers import ResponsesRequest as InternalResponsesRequest
-from router_maestro.providers.base import ProviderError, ResponsesStreamChunk
+from router_maestro.providers.base import (
+    ProviderError,
+    ResponsesStreamChunk,
+    exception_outcome,
+    unexpected_eof_outcome,
+)
 from router_maestro.server.routes import anthropic, chat, gemini, responses
 
 
@@ -17,7 +25,7 @@ class _PipelineSpy:
         self.request_id = request_id
         self.model = model
         self.tool_names = tool_names
-        self.finished: list[tuple[int, str | None]] = []
+        self.finished: list[tuple[int | None, object | None, str | None]] = []
         _PipelineSpy.instances.append(self)
 
     @classmethod
@@ -35,8 +43,17 @@ class _PipelineSpy:
     def check_invoke_at_finish(self) -> list[dict] | None:
         return None
 
-    def finish(self, status: int = 200, body_summary: str | None = None) -> None:
-        self.finished.append((status, body_summary))
+    def finish(
+        self,
+        *,
+        wire_status: int | None = None,
+        outcome: object | None = None,
+        body_summary: str | None = None,
+        status: int | None = None,
+    ) -> None:
+        self.finished.append(
+            (wire_status if wire_status is not None else status, outcome, body_summary)
+        )
 
 
 class _ChatRouter:
@@ -133,7 +150,12 @@ async def test_stream_routes_finish_pipeline_on_success(
 
     assert events
     assert len(pipeline_spy) == 1
-    assert pipeline_spy[0].finished == [(200, None)]
+    assert len(pipeline_spy[0].finished) == 1
+    wire_status, outcome, summary = pipeline_spy[0].finished[0]
+    assert wire_status == 200
+    assert summary is None
+    assert outcome.transport.value == "explicit_terminal"
+    assert outcome.response_status.value == "completed"
 
 
 @pytest.mark.asyncio
@@ -185,4 +207,92 @@ async def test_stream_routes_finish_pipeline_on_provider_error_after_pipeline_ex
 
     assert any("upstream failed" in event for event in events)
     assert len(pipeline_spy) == 1
-    assert pipeline_spy[0].finished == [(503, "upstream failed")]
+    assert len(pipeline_spy[0].finished) == 1
+    wire_status, outcome, summary = pipeline_spy[0].finished[0]
+    assert wire_status == 200
+    assert summary == "upstream failed"
+    assert outcome.transport.value == "exception"
+    assert outcome.response_status.value == "failed"
+
+
+class _AuditSpy:
+    def __init__(self):
+        self.outbound: list[tuple[int, str | None, object]] = []
+        self.flush_count = 0
+
+    def record_outbound(
+        self,
+        status: int,
+        *,
+        body_summary: str | None,
+        outcome: object,
+    ) -> None:
+        self.outbound.append((status, body_summary, outcome))
+
+    def flush(self) -> None:
+        self.flush_count += 1
+
+
+def _real_pipeline(audit: _AuditSpy) -> RequestPipeline:
+    return RequestPipeline(
+        request_id="req-test",
+        guards=[],
+        leak_guard=None,
+        audit=audit,
+        config=PrioritiesConfig.get_default(),
+    )
+
+
+def test_pipeline_finish_stores_first_wire_status_and_outcome():
+    audit = _AuditSpy()
+    pipeline = _real_pipeline(audit)
+    outcome = unexpected_eof_outcome()
+
+    pipeline.finish(wire_status=200, outcome=outcome, body_summary="first")
+
+    assert pipeline.wire_status == 200
+    assert pipeline.outcome is outcome
+    assert audit.outbound == [(200, "first", outcome)]
+    assert audit.flush_count == 1
+
+
+def test_pipeline_finish_exact_duplicate_is_silent_noop(caplog):
+    audit = _AuditSpy()
+    pipeline = _real_pipeline(audit)
+    outcome = unexpected_eof_outcome()
+
+    with caplog.at_level(logging.ERROR, logger="router_maestro.pipeline"):
+        pipeline.finish(wire_status=200, outcome=outcome, body_summary="first")
+        pipeline.finish(wire_status=200, outcome=outcome, body_summary="second")
+
+    assert "conflicting finalization" not in caplog.text
+    assert audit.outbound == [(200, "first", outcome)]
+    assert audit.flush_count == 1
+
+
+@pytest.mark.parametrize("conflict", ["wire-status", "outcome"])
+def test_pipeline_finish_logs_conflict_and_retains_first_finalization(
+    caplog,
+    monkeypatch,
+    conflict: str,
+):
+    audit = _AuditSpy()
+    pipeline = _real_pipeline(audit)
+    first_outcome = unexpected_eof_outcome()
+    second_outcome = exception_outcome("late failure")
+    monkeypatch.setattr(logging.getLogger("router_maestro"), "propagate", True)
+    monkeypatch.setattr(logging.getLogger("router_maestro.pipeline"), "propagate", True)
+
+    pipeline.finish(wire_status=200, outcome=first_outcome, body_summary="first")
+    with caplog.at_level(logging.ERROR, logger="router_maestro.pipeline"):
+        pipeline.finish(
+            wire_status=500 if conflict == "wire-status" else 200,
+            outcome=second_outcome if conflict == "outcome" else first_outcome,
+            body_summary="second",
+        )
+
+    assert "conflicting finalization" in caplog.text
+    assert pipeline.wire_status == 200
+    assert pipeline.outcome is first_outcome
+    assert audit.outbound == [(200, "first", first_outcome)]
+    assert audit.flush_count == 1

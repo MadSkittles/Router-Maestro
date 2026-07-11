@@ -28,7 +28,12 @@ from router_maestro.providers.base import (
     ResponsesRequest,
     ResponsesResponse,
     ResponsesStreamChunk,
+    ResponseStatus,
     ResponsesToolCall,
+    TerminalError,
+    TerminalOutcome,
+    TransportTermination,
+    resolve_terminal_outcome,
 )
 from router_maestro.providers.tool_parsing import recover_tool_calls_from_content
 from router_maestro.utils import get_logger
@@ -66,6 +71,61 @@ _BENIGN_UPSTREAM_EVENTS = frozenset(
     }
 )
 _BENIGN_DONE_ITEM_TYPES = frozenset({"message"})
+
+
+def _responses_terminal_outcome(response: Any) -> TerminalOutcome:
+    """Preserve one native Responses terminal payload without chat mapping."""
+
+    def protocol_error(message: str) -> TerminalOutcome:
+        return TerminalOutcome(
+            transport=TransportTermination.EXCEPTION,
+            response_status=ResponseStatus.FAILED,
+            error=TerminalError(code="upstream_protocol_error", message=message),
+        )
+
+    if not isinstance(response, dict):
+        return protocol_error("Copilot Responses terminal response must be an object")
+
+    raw_status = response.get("status")
+    if not isinstance(raw_status, str):
+        return protocol_error("Copilot Responses status must be a string terminal value")
+    try:
+        status = ResponseStatus(raw_status)
+    except ValueError:
+        return protocol_error("Copilot Responses status is not a recognized terminal value")
+
+    raw_error = response.get("error")
+    if raw_error is not None and not isinstance(raw_error, dict):
+        return protocol_error("Copilot Responses error must be an object or null")
+    error = None
+    if isinstance(raw_error, dict):
+        code = raw_error.get("code")
+        message = raw_error.get("message")
+        if code is not None and not isinstance(code, str):
+            return protocol_error("Copilot Responses error code must be a string or null")
+        if message is not None and not isinstance(message, str):
+            return protocol_error("Copilot Responses error message must be a string or null")
+        error = TerminalError(
+            code=code or "upstream_error",
+            message=message or "Upstream response failed",
+        )
+
+    details = response.get("incomplete_details")
+    if details is not None and not isinstance(details, dict):
+        return protocol_error("Copilot Responses incomplete_details must be an object or null")
+    if isinstance(details, dict):
+        reason = details.get("reason")
+        if reason is not None and not isinstance(reason, str):
+            return protocol_error("Copilot Responses incomplete reason must be a string or null")
+    outcome = TerminalOutcome(
+        transport=TransportTermination.EXPLICIT_TERMINAL,
+        response_status=status,
+        incomplete_details=details,
+        error=error,
+    )
+    return resolve_terminal_outcome(outcome, None) or protocol_error(
+        "Copilot Responses terminal payload has no outcome"
+    )
 
 
 def _claude_supports_reasoning(bare_lower: str) -> bool:
@@ -867,8 +927,22 @@ class CopilotProvider(BaseProvider):
                 request.model,
             )
             responses_req = chat_request_to_responses_request(request)
+            emitted_tool_call = False
             async for resp_chunk in self.responses_completion_stream(responses_req):
-                yield responses_chunk_to_chat_chunk(resp_chunk)
+                chat_chunk = responses_chunk_to_chat_chunk(resp_chunk)
+                if resp_chunk.tool_call is not None:
+                    emitted_tool_call = True
+                terminal_outcome = resp_chunk.terminal_outcome
+                can_upgrade_tool_finish = terminal_outcome is None or (
+                    terminal_outcome.response_status is ResponseStatus.COMPLETED
+                )
+                if (
+                    emitted_tool_call
+                    and can_upgrade_tool_finish
+                    and chat_chunk.finish_reason == "stop"
+                ):
+                    chat_chunk.finish_reason = "tool_calls"
+                yield chat_chunk
             return
 
         await self.ensure_token()
@@ -1332,45 +1406,28 @@ class CopilotProvider(BaseProvider):
             )
             response.raise_for_status()
             data = response.json()
+            safe_data = data if isinstance(data, dict) else {}
 
-            content = self._extract_response_content(data)
-            tool_calls = self._extract_tool_calls(data)
-            thinking, thinking_id, thinking_sig = self._extract_reasoning(data)
+            content = self._extract_response_content(safe_data)
+            tool_calls = self._extract_tool_calls(safe_data)
+            thinking, thinking_id, thinking_sig = self._extract_reasoning(safe_data)
 
             usage = None
-            if "usage" in data:
-                usage = data["usage"]
+            if "usage" in safe_data:
+                usage = safe_data["usage"]
 
-            from router_maestro.utils.responses_bridge import map_responses_status_to_chat
-
-            status = data.get("status")
-            incomplete_reason = None
-            incomplete = data.get("incomplete_details")
-            if isinstance(incomplete, dict):
-                incomplete_reason = incomplete.get("reason")
-
-            # Surface terminal upstream failures as provider errors instead of
-            # silently returning a blank successful completion.
-            if status in ("failed", "cancelled"):
-                err = data.get("error") or {}
-                msg = err.get("message") if isinstance(err, dict) else None
-                raise ProviderError(
-                    f"Copilot /responses {status}: {msg or 'no error message'}",
-                    status_code=502,
-                )
-
-            finish_reason = map_responses_status_to_chat(status, incomplete_reason)
+            terminal_outcome = _responses_terminal_outcome(data)
 
             logger.debug("Copilot responses completion successful")
             return ResponsesResponse(
                 content=content,
-                model=data.get("model", request.model),
+                model=safe_data.get("model", request.model),
                 usage=usage,
                 tool_calls=tool_calls if tool_calls else None,
                 thinking=thinking,
                 thinking_id=thinking_id,
                 thinking_signature=thinking_sig,
-                finish_reason=finish_reason,
+                terminal_outcome=terminal_outcome,
             )
         except httpx.HTTPStatusError as e:
             self._raise_http_status_error("Copilot", e, logger, include_body=True)
@@ -1445,14 +1502,10 @@ class CopilotProvider(BaseProvider):
 
                     data_str = line[6:]  # Remove "data: " prefix
                     if data_str == "[DONE]":
-                        # Stream ended, emit final chunk if we haven't already
-                        if not stream_finished:
-                            yield ResponsesStreamChunk(
-                                content="",
-                                finish_reason=("tool_calls" if emitted_tool_call else "stop"),
-                                usage=final_usage,
-                            )
-                            stream_finished = True
+                        # ``[DONE]`` terminates the SSE transport but carries no
+                        # Responses semantic status. The route detects an
+                        # unexpected EOF unless response.done/completed already
+                        # produced an explicit terminal chunk.
                         break
 
                     data = json.loads(data_str)
@@ -1707,105 +1760,32 @@ class CopilotProvider(BaseProvider):
                                 key = f"output_item.done:{item_type}"
                                 unknown_event_counts[key] = unknown_event_counts.get(key, 0) + 1
 
-                    # Handle done event to get final usage
-                    elif event_type == "response.done":
-                        from router_maestro.utils.responses_bridge import (
-                            map_responses_status_to_chat,
-                        )
-
+                    # Preserve the inner response status even when an upstream
+                    # gateway uses a mismatched outer event name (for example,
+                    # response.completed carrying status=incomplete).
+                    elif event_type in {
+                        "response.done",
+                        "response.completed",
+                        "response.incomplete",
+                        "response.failed",
+                    }:
                         resp = data.get("response", {})
-                        final_usage = resp.get("usage")
-                        status = resp.get("status")
-                        if status in ("failed", "cancelled"):
-                            err = resp.get("error") or {}
-                            msg = err.get("message") if isinstance(err, dict) else None
-                            raise ProviderError(
-                                f"Copilot /responses {status}: {msg or 'no error message'}",
-                                status_code=502,
-                            )
-                        incomplete = resp.get("incomplete_details") or {}
-                        incomplete_reason = incomplete.get("reason")
-                        finish = map_responses_status_to_chat(status, incomplete_reason) or "stop"
-                        if emitted_tool_call and finish == "stop":
-                            finish = "tool_calls"
-                        if status == "incomplete":
-                            logger.warning(
-                                "Copilot /responses stream incomplete: model=%s status=%s "
-                                "incomplete_reason=%s mapped_finish=%s emitted_tool_call=%s "
-                                "usage=%s",
-                                request.model,
-                                status,
-                                incomplete_reason,
-                                finish,
-                                emitted_tool_call,
-                                final_usage,
-                            )
-                        else:
-                            logger.info(
-                                "Copilot /responses stream done: model=%s status=%s "
-                                "mapped_finish=%s emitted_tool_call=%s usage=%s",
-                                request.model,
-                                status,
-                                finish,
-                                emitted_tool_call,
-                                final_usage,
-                            )
+                        if isinstance(resp, dict):
+                            final_usage = resp.get("usage") or final_usage
+                        terminal_outcome = _responses_terminal_outcome(resp)
+                        logger.info(
+                            "Copilot /responses stream terminal: model=%s outer_type=%s "
+                            "status=%s emitted_tool_call=%s usage=%s",
+                            request.model,
+                            event_type,
+                            terminal_outcome.response_status.value,
+                            emitted_tool_call,
+                            final_usage,
+                        )
                         yield ResponsesStreamChunk(
                             content="",
-                            finish_reason=finish,
                             usage=final_usage,
-                        )
-                        stream_finished = True
-
-                    # Handle completed events
-                    elif event_type == "response.completed":
-                        from router_maestro.utils.responses_bridge import (
-                            map_responses_status_to_chat,
-                        )
-
-                        # Final response received - emit finish chunk
-                        resp = data.get("response", {})
-                        if not final_usage:
-                            final_usage = resp.get("usage")
-                        status = resp.get("status")
-                        if status in ("failed", "cancelled"):
-                            err = resp.get("error") or {}
-                            msg = err.get("message") if isinstance(err, dict) else None
-                            raise ProviderError(
-                                f"Copilot /responses {status}: {msg or 'no error message'}",
-                                status_code=502,
-                            )
-                        incomplete = resp.get("incomplete_details") or {}
-                        incomplete_reason = incomplete.get("reason")
-                        finish = map_responses_status_to_chat(status, incomplete_reason) or "stop"
-                        if emitted_tool_call and finish == "stop":
-                            finish = "tool_calls"
-                        if status == "incomplete":
-                            logger.warning(
-                                "Copilot /responses stream incomplete (via .completed): "
-                                "model=%s status=%s incomplete_reason=%s mapped_finish=%s "
-                                "emitted_tool_call=%s usage=%s",
-                                request.model,
-                                status,
-                                incomplete_reason,
-                                finish,
-                                emitted_tool_call,
-                                final_usage,
-                            )
-                        else:
-                            logger.info(
-                                "Copilot /responses stream completed: model=%s status=%s "
-                                "mapped_finish=%s emitted_tool_call=%s usage=%s",
-                                request.model,
-                                status,
-                                finish,
-                                emitted_tool_call,
-                                final_usage,
-                            )
-                        yield ResponsesStreamChunk(
-                            content="",
-                            finish_reason=finish,
-                            usage=final_usage,
+                            terminal_outcome=terminal_outcome,
                         )
                         stream_finished = True
 
@@ -1820,13 +1800,11 @@ class CopilotProvider(BaseProvider):
                                 unknown_event_counts.get(event_type, 0) + 1
                             )
 
-                # If stream ended without explicit completion event, emit final chunk
                 if not stream_finished:
-                    logger.debug("Stream ended without completion event, emitting final chunk")
-                    yield ResponsesStreamChunk(
-                        content="",
-                        finish_reason="tool_calls" if emitted_tool_call else "stop",
-                        usage=final_usage,
+                    logger.warning(
+                        "Copilot /responses transport ended without an explicit terminal event: "
+                        "model=%s",
+                        request.model,
                     )
 
                 if unknown_event_counts:

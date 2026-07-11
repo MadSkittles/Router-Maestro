@@ -5,7 +5,7 @@ import pytest
 from router_maestro.pipeline.beta_strip import strip_beta_tokens
 from router_maestro.pipeline.leak_guard import LeakGuard, RawFrameLeakGuard
 from router_maestro.pipeline.runaway_guard import RunawayGuard
-from router_maestro.providers.base import ChatStreamChunk
+from router_maestro.providers.base import ChatStreamChunk, ResponsesStreamChunk, ResponsesToolCall
 
 
 class TestLeakGuard:
@@ -196,6 +196,57 @@ class TestRunawayGuard:
     def test_feed_text_noop(self):
         guard = RunawayGuard()
         assert guard.feed_text("anything") is None
+
+    def test_counts_content_and_all_tool_arguments_once_per_chunk(self):
+        guard = RunawayGuard(max_bytes=10, max_deltas=50_000)
+        chunk = ChatStreamChunk(
+            content="abc",
+            tool_calls=[
+                {"function": {"arguments": "de"}},
+                {"function": {"arguments": "fghi"}},
+            ],
+        )
+
+        result = guard.feed_chunk(chunk)
+
+        assert result is None
+        assert guard._total_bytes == 9
+        assert guard._delta_count == 1
+        assert guard.feed_text(chunk.content) is None
+        assert guard._total_bytes == 9
+        assert guard._delta_count == 1
+
+    def test_tool_arguments_use_utf8_bytes_and_trip_max_bytes(self):
+        guard = RunawayGuard(max_bytes=5, max_deltas=50_000)
+        chunk = ChatStreamChunk(
+            content="",
+            tool_calls=[{"function": {"arguments": "猫猫"}}],
+        )
+
+        result = guard.feed_chunk(chunk)
+
+        assert result == "runaway_guard:max_bytes_exceeded:6>5"
+        assert guard._delta_count == 1
+
+    def test_empty_tool_chunk_still_counts_one_delta(self):
+        guard = RunawayGuard(max_bytes=10_000_000, max_deltas=50_000)
+
+        assert guard.feed_chunk(ChatStreamChunk(content="", tool_calls=[{}])) is None
+
+        assert guard._total_bytes == 0
+        assert guard._delta_count == 1
+
+    def test_complete_responses_tool_call_arguments_count_once(self):
+        guard = RunawayGuard(max_bytes=5, max_deltas=50_000)
+        chunk = ResponsesStreamChunk(
+            content="",
+            tool_call=ResponsesToolCall(call_id="call-1", name="alpha", arguments="abcdef"),
+        )
+
+        result = guard.feed_chunk(chunk)
+
+        assert result == "runaway_guard:max_bytes_exceeded:6>5"
+        assert guard._delta_count == 1
 
 
 class TestBetaStrip:

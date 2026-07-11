@@ -21,10 +21,13 @@ import json
 import os
 import time
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from router_maestro.config.paths import get_data_dir
 from router_maestro.utils import get_logger
+
+if TYPE_CHECKING:
+    from router_maestro.providers.base import TerminalOutcome
 
 logger = get_logger("utils.audit")
 
@@ -130,8 +133,9 @@ class AuditTrace:
         status: int,
         headers: dict[str, str] | None = None,
         body_summary: str | None = None,
+        outcome: "TerminalOutcome | None" = None,
     ) -> None:
-        self._records["outbound"] = {
+        record: dict[str, Any] = {
             "timestamp": time.time(),
             "request_id": self._request_id,
             "status": status,
@@ -139,6 +143,17 @@ class AuditTrace:
             "body_summary": body_summary,
             "duration_ms": round((time.time() - self._start_time) * 1000, 1),
         }
+        if outcome is not None:
+            record["transport_termination"] = outcome.transport.value
+            record["response_status"] = outcome.response_status.value
+            record["finish_reason"] = outcome.finish_reason
+            record["incomplete_details"] = outcome.incomplete_details
+            if outcome.error is not None:
+                record["error"] = {
+                    "code": outcome.error.code,
+                    "message": outcome.error.message,
+                }
+        self._records["outbound"] = record
 
     def flush(self) -> None:
         """Write all collected records to disk."""

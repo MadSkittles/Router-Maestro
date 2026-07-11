@@ -2,6 +2,7 @@
 
 import json
 
+from router_maestro.providers.base import unexpected_eof_outcome
 from router_maestro.utils.audit import AuditTrace, is_tracing_enabled
 
 
@@ -63,6 +64,21 @@ class TestAuditTrace:
         resp = json.loads((tmp_path / "req-stream" / "upstream_resp.json").read_text())
         assert resp["stream_summary"] == "42 chunks, 5000 bytes"
         assert "body" not in resp
+
+    def test_outbound_separates_wire_status_from_terminal_outcome(self, tmp_path):
+        trace = AuditTrace("req-eof", tmp_path)
+        trace.record_outbound(
+            200,
+            body_summary="upstream stream ended unexpectedly",
+            outcome=unexpected_eof_outcome(),
+        )
+        trace.flush()
+
+        outbound = json.loads((tmp_path / "req-eof" / "outbound.json").read_text())
+        assert outbound["status"] == 200
+        assert outbound["transport_termination"] == "unexpected_eof"
+        assert outbound["response_status"] == "unknown"
+        assert outbound["error"]["code"] == "unexpected_eof"
 
 
 class TestTracingEnabled:

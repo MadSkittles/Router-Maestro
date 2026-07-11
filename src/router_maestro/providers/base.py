@@ -2,14 +2,230 @@
 
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
+from enum import StrEnum
 from logging import Logger
-from typing import Literal, NoReturn
+from typing import Any, Literal, NoReturn
 
 import httpx
 
 TIMEOUT_NON_STREAMING = httpx.Timeout(connect=30.0, read=240.0, write=30.0, pool=30.0)
 TIMEOUT_STREAMING = httpx.Timeout(connect=30.0, read=600.0, write=30.0, pool=30.0)
+
+
+class TransportTermination(StrEnum):
+    """How delivery of a provider stream ended."""
+
+    EXPLICIT_TERMINAL = "explicit_terminal"
+    UNEXPECTED_EOF = "unexpected_eof"
+    CLIENT_CANCELLED = "client_cancelled"
+    EXCEPTION = "exception"
+
+
+class ResponseStatus(StrEnum):
+    """Provider response semantics, independent of transport termination."""
+
+    COMPLETED = "completed"
+    INCOMPLETE = "incomplete"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+    UNKNOWN = "unknown"
+
+
+@dataclass(frozen=True, slots=True)
+class TerminalError:
+    """Safe, protocol-independent terminal error details."""
+
+    code: str
+    message: str
+
+
+@dataclass(frozen=True, slots=True)
+class TerminalOutcome:
+    """Orthogonal transport and response state for a terminal stream outcome."""
+
+    transport: TransportTermination
+    response_status: ResponseStatus
+    finish_reason: str | None = None
+    incomplete_details: dict[str, Any] | None = None
+    error: TerminalError | None = None
+
+    @property
+    def is_success(self) -> bool:
+        """Return whether this is an explicitly completed response."""
+        return (
+            self.transport is TransportTermination.EXPLICIT_TERMINAL
+            and self.response_status is ResponseStatus.COMPLETED
+        )
+
+
+def resolve_terminal_outcome(
+    outcome: TerminalOutcome | None,
+    finish_reason: str | None,
+) -> TerminalOutcome | None:
+    """Validate and resolve canonical and legacy stream terminal data."""
+    completed_reasons = {"stop", "tool_calls"}
+    incomplete_reasons = {"length", "content_filter"}
+    finish_status = {
+        **dict.fromkeys(completed_reasons, ResponseStatus.COMPLETED),
+        **dict.fromkeys(incomplete_reasons, ResponseStatus.INCOMPLETE),
+    }
+
+    def protocol_error(message: str) -> TerminalOutcome:
+        return TerminalOutcome(
+            transport=TransportTermination.EXCEPTION,
+            response_status=ResponseStatus.FAILED,
+            error=TerminalError(code="upstream_protocol_error", message=message),
+        )
+
+    if outcome is None:
+        if finish_reason is None:
+            return None
+        response_status = finish_status.get(finish_reason)
+        if response_status is None:
+            return protocol_error(f"Unknown upstream finish reason: {finish_reason}")
+        outcome = TerminalOutcome(
+            transport=TransportTermination.EXPLICIT_TERMINAL,
+            response_status=response_status,
+            finish_reason=finish_reason,
+        )
+
+    allowed_statuses = {
+        TransportTermination.UNEXPECTED_EOF: {ResponseStatus.UNKNOWN},
+        TransportTermination.CLIENT_CANCELLED: {ResponseStatus.CANCELLED},
+        TransportTermination.EXCEPTION: {ResponseStatus.FAILED},
+        TransportTermination.EXPLICIT_TERMINAL: {
+            ResponseStatus.COMPLETED,
+            ResponseStatus.INCOMPLETE,
+            ResponseStatus.FAILED,
+            ResponseStatus.CANCELLED,
+        },
+    }
+    if outcome.response_status not in allowed_statuses[outcome.transport]:
+        return protocol_error(
+            "Illegal upstream terminal combination: "
+            f"{outcome.transport.value} with {outcome.response_status.value}"
+        )
+    if outcome.response_status in {ResponseStatus.COMPLETED, ResponseStatus.INCOMPLETE} and (
+        outcome.error is not None
+    ):
+        return protocol_error(
+            f"Terminal error conflicts with response status {outcome.response_status.value}"
+        )
+
+    canonical_finish = outcome.finish_reason
+    if canonical_finish is not None:
+        canonical_status = finish_status.get(canonical_finish)
+        if canonical_status is None:
+            return protocol_error(f"Unknown upstream finish reason: {canonical_finish}")
+        if outcome.transport is not TransportTermination.EXPLICIT_TERMINAL:
+            return protocol_error(
+                f"Finish reason {canonical_finish} is invalid for {outcome.transport.value}"
+            )
+        if canonical_status is not outcome.response_status:
+            return protocol_error(
+                f"Finish reason {canonical_finish} conflicts with "
+                f"response status {outcome.response_status.value}"
+            )
+
+    if finish_reason is not None:
+        legacy_status = finish_status.get(finish_reason)
+        if legacy_status is None:
+            return protocol_error(f"Unknown upstream finish reason: {finish_reason}")
+        neutral_incomplete_projection = (
+            outcome.transport is TransportTermination.EXPLICIT_TERMINAL
+            and outcome.response_status is ResponseStatus.INCOMPLETE
+            and canonical_finish is None
+            and finish_reason == "stop"
+            and (outcome.incomplete_details or {}).get("reason")
+            not in {"max_output_tokens", "content_filter"}
+        )
+        if canonical_finish is not None and canonical_finish != finish_reason:
+            return protocol_error(
+                "Canonical and legacy finish reasons conflict: "
+                f"{canonical_finish} != {finish_reason}"
+            )
+        if (
+            outcome.transport is not TransportTermination.EXPLICIT_TERMINAL
+            or legacy_status is not outcome.response_status
+        ) and not neutral_incomplete_projection:
+            return protocol_error(
+                f"Finish reason {finish_reason} conflicts with "
+                f"response status {outcome.response_status.value}"
+            )
+        if canonical_finish is None and not neutral_incomplete_projection:
+            outcome = replace(outcome, finish_reason=finish_reason)
+            canonical_finish = finish_reason
+
+    if outcome.response_status not in {ResponseStatus.COMPLETED, ResponseStatus.INCOMPLETE}:
+        if canonical_finish is not None:
+            return protocol_error(
+                f"Finish reason {canonical_finish} conflicts with "
+                f"response status {outcome.response_status.value}"
+            )
+
+    incomplete_reason = (outcome.incomplete_details or {}).get("reason")
+    if outcome.incomplete_details is not None and (
+        outcome.response_status is not ResponseStatus.INCOMPLETE
+    ):
+        return protocol_error(
+            f"Incomplete details conflict with response status {outcome.response_status.value}"
+        )
+    if canonical_finish == "length" and incomplete_reason not in {None, "max_output_tokens"}:
+        return protocol_error(
+            f"Finish reason length conflicts with incomplete reason {incomplete_reason}"
+        )
+    if canonical_finish == "content_filter" and incomplete_reason not in {None, "content_filter"}:
+        return protocol_error(
+            f"Finish reason content_filter conflicts with incomplete reason {incomplete_reason}"
+        )
+
+    return outcome
+
+
+def finish_reason_for_outcome(outcome: TerminalOutcome) -> str | None:
+    """Map a canonical terminal outcome to the legacy Chat finish reason."""
+    if outcome.finish_reason is not None:
+        return outcome.finish_reason
+    if outcome.response_status is ResponseStatus.COMPLETED:
+        return "stop"
+    if outcome.response_status is ResponseStatus.INCOMPLETE:
+        reason = (outcome.incomplete_details or {}).get("reason")
+        if reason == "max_output_tokens":
+            return "length"
+        if reason == "content_filter":
+            return "content_filter"
+        return "stop"
+    return None
+
+
+def unexpected_eof_outcome() -> TerminalOutcome:
+    """Build the non-success outcome for transport EOF before a terminal event."""
+    return TerminalOutcome(
+        transport=TransportTermination.UNEXPECTED_EOF,
+        response_status=ResponseStatus.UNKNOWN,
+        error=TerminalError(
+            code="unexpected_eof",
+            message="Upstream stream ended before an explicit terminal event",
+        ),
+    )
+
+
+def exception_outcome(message: str, *, code: str = "stream_error") -> TerminalOutcome:
+    """Build a failed outcome for an exception while consuming a stream."""
+    return TerminalOutcome(
+        transport=TransportTermination.EXCEPTION,
+        response_status=ResponseStatus.FAILED,
+        error=TerminalError(code=code, message=message),
+    )
+
+
+def client_cancelled_outcome() -> TerminalOutcome:
+    """Build the outcome recorded when downstream cancellation stops delivery."""
+    return TerminalOutcome(
+        transport=TransportTermination.CLIENT_CANCELLED,
+        response_status=ResponseStatus.CANCELLED,
+    )
 
 
 @dataclass
@@ -98,6 +314,7 @@ class ChatStreamChunk:
     thinking: str | None = None  # Incremental reasoning text delta
     thinking_signature: str | None = None  # Opaque/encrypted reasoning blob, if provided
     thinking_id: str | None = None  # Upstream reasoning item id the blob is signed against
+    terminal_outcome: TerminalOutcome | None = None
 
 
 @dataclass
@@ -214,6 +431,9 @@ class ResponsesResponse:
     # ("stop" | "length" | "content_filter" | "tool_calls"). None means
     # the bridge should pick a default based on tool_calls presence.
     finish_reason: str | None = None
+    # Canonical Responses terminal semantics. Native Responses adapters must
+    # prefer this over the lossy chat-style finish_reason above.
+    terminal_outcome: TerminalOutcome | None = None
 
 
 @dataclass
@@ -232,6 +452,7 @@ class ResponsesStreamChunk:
     # see ResponsesResponse.thinking_id).
     thinking_id: str | None = None
     thinking_signature: str | None = None
+    terminal_outcome: TerminalOutcome | None = None
 
 
 class ProviderError(Exception):

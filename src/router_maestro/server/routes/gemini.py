@@ -5,7 +5,17 @@ from collections.abc import AsyncGenerator
 
 from fastapi import APIRouter, HTTPException
 
-from router_maestro.providers import ChatRequest, ProviderError
+from router_maestro.providers import (
+    ChatRequest,
+    ProviderError,
+    ResponseStatus,
+    TerminalOutcome,
+    client_cancelled_outcome,
+    exception_outcome,
+    finish_reason_for_outcome,
+    resolve_terminal_outcome,
+    unexpected_eof_outcome,
+)
 from router_maestro.routing import get_router
 from router_maestro.server.schemas.gemini import (
     GeminiCandidate,
@@ -23,6 +33,7 @@ from router_maestro.server.translation_gemini import (
     translate_openai_to_gemini,
 )
 from router_maestro.utils import get_logger
+from router_maestro.utils.async_iterators import close_async_iterator
 from router_maestro.utils.responses_bridge import (
     is_experimental_responses_enabled,
 )
@@ -272,6 +283,8 @@ async def _stream_response(
 ) -> AsyncGenerator[str, None]:
     """Stream Gemini-format SSE response from the upstream provider."""
     pipeline = None
+    stream = None
+    terminal_outcome: TerminalOutcome | None = None
     try:
         stream, _provider_name = await model_router.chat_completion_stream(request)
 
@@ -288,9 +301,34 @@ async def _stream_response(
         async for chunk in stream:
             abort_reason = pipeline.feed_stream(chunk)
             if abort_reason:
+                terminal_outcome = exception_outcome(abort_reason, code="overloaded")
                 logger.warning("Gemini stream aborted: %s", abort_reason)
                 yield _sse_error_data("Overloaded: please retry this request")
-                pipeline.finish(status=529, body_summary=abort_reason)
+                pipeline.finish(
+                    wire_status=200,
+                    outcome=terminal_outcome,
+                    body_summary=abort_reason,
+                )
+                return
+
+            chunk_outcome = resolve_terminal_outcome(
+                chunk.terminal_outcome,
+                chunk.finish_reason,
+            )
+            if chunk_outcome is not None:
+                terminal_outcome = chunk_outcome
+            if chunk_outcome is not None and chunk_outcome.response_status not in {
+                ResponseStatus.COMPLETED,
+                ResponseStatus.INCOMPLETE,
+            }:
+                error = chunk_outcome.error
+                message = error.message if error is not None else "Upstream response failed"
+                yield _sse_error_data(message)
+                pipeline.finish(
+                    wire_status=200,
+                    outcome=chunk_outcome,
+                    body_summary=message,
+                )
                 return
 
             openai_chunk = {
@@ -300,7 +338,11 @@ async def _stream_response(
                             "content": (chunk.content if chunk.content else None),
                             "tool_calls": chunk.tool_calls,
                         },
-                        "finish_reason": chunk.finish_reason,
+                        "finish_reason": (
+                            finish_reason_for_outcome(chunk_outcome)
+                            if chunk_outcome is not None
+                            else chunk.finish_reason
+                        ),
                     }
                 ],
                 "usage": chunk.usage,
@@ -314,18 +356,44 @@ async def _stream_response(
                     "\r\n\r\n"
                 )
 
-        pipeline.finish(status=200)
+            if chunk_outcome is not None:
+                pipeline.finish(wire_status=200, outcome=chunk_outcome)
+                return
+
+        terminal_outcome = unexpected_eof_outcome()
+        yield _sse_error_data(terminal_outcome.error.code)
+        pipeline.finish(
+            wire_status=200,
+            outcome=terminal_outcome,
+            body_summary=terminal_outcome.error.message,
+        )
 
     except ProviderError as e:
+        terminal_outcome = exception_outcome(str(e), code="provider_error")
         if pipeline is not None:
-            pipeline.finish(status=e.status_code, body_summary=str(e))
+            pipeline.finish(
+                wire_status=200,
+                outcome=terminal_outcome,
+                body_summary=str(e),
+            )
         yield _sse_error_data(str(e))
     except asyncio.CancelledError:
+        if pipeline is not None:
+            pipeline.finish(wire_status=200, outcome=client_cancelled_outcome())
         logger.info("Gemini stream cancelled by client")
         raise
     except Exception:
+        terminal_outcome = exception_outcome("Internal server error", code="server_error")
+        if pipeline is not None:
+            pipeline.finish(
+                wire_status=200,
+                outcome=terminal_outcome,
+                body_summary="Internal server error",
+            )
         logger.error("Unexpected error in Gemini stream", exc_info=True)
         yield _sse_error_data("Internal server error")
+    finally:
+        await close_async_iterator(stream)
 
 
 def _sse_error_data(message: str) -> str:

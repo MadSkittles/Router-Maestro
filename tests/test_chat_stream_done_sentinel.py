@@ -1,9 +1,8 @@
-"""Regression: OpenAI Chat streaming must terminate with ``data: [DONE]``.
+"""Regression: OpenAI Chat errors must not masquerade as successful termination.
 
-Spec-compliant SSE clients (the openai SDK) wait for the ``[DONE]`` sentinel to
-close the stream. Previously the error paths yielded an error frame but no
-``[DONE]``, so clients could hang. Both the ProviderError and the unexpected
-Exception paths must emit it.
+``[DONE]`` is the successful Chat Completions stream sentinel. Once an error
+frame is emitted, physical SSE EOF ends the stream without a contradictory
+success sentinel.
 """
 
 from collections.abc import AsyncIterator
@@ -50,20 +49,22 @@ def _request() -> ChatRequest:
 
 
 @pytest.mark.asyncio
-async def test_provider_error_stream_ends_with_done():
+async def test_provider_error_stream_ends_without_done():
     router = _ProviderErrorRouter()
     events = [e async for e in stream_response(router, _request())]  # type: ignore[arg-type]
 
-    assert events[-1] == "data: [DONE]\n\n"
+    assert events[-1] != "data: [DONE]\n\n"
+    assert all(event != "data: [DONE]\n\n" for event in events)
     assert any("upstream exploded" in e for e in events)
 
 
 @pytest.mark.asyncio
-async def test_unexpected_error_stream_ends_with_done():
+async def test_unexpected_error_stream_ends_without_done():
     router = _UnexpectedErrorRouter()
     events = [e async for e in stream_response(router, _request())]  # type: ignore[arg-type]
 
-    assert events[-1] == "data: [DONE]\n\n"
+    assert events[-1] != "data: [DONE]\n\n"
+    assert all(event != "data: [DONE]\n\n" for event in events)
     # Internal error message is generic — no leak of the RuntimeError text.
     assert any("Internal server error" in e for e in events)
     assert not any("boom" in e for e in events)

@@ -33,9 +33,10 @@ OpenAI Request ──────────────── (passthrough) �
 
 When `output_config.effort` is present with adaptive thinking, Router-Maestro
 clears the internal `thinking_budget` before provider routing. Manual
-`thinking.type="enabled"` retains its required `budget_tokens` alongside effort.
-Without effort, the existing budget fallback remains: client `budget_tokens`,
-per-model server budget, then the server default for an explicit thinking request.
+`thinking.type="enabled"` retains its required `budget_tokens` alongside effort
+when sufficient output-token headroom exists. Without effort, the existing budget
+fallback remains: client `budget_tokens`, per-model server budget, then the server
+default for an explicit thinking request.
 Adaptive budgets may be used internally for provider effort mapping, but
 Anthropic-native payloads always serialize adaptive thinking as
 `{"type":"adaptive"}` without `budget_tokens`.
@@ -173,10 +174,14 @@ apply_copilot_chat_reasoning(
 The beta native Copilot route preserves only a valid `output_config.effort`
 member and strips unsupported siblings such as `output_config.format`. Explicit
 effort removes only an adaptive `thinking.budget_tokens`; manual enabled thinking
-keeps its required budget before forwarding. When the Copilot model catalog
-advertises an effort allowlist, the requested value is mapped to the closest
-supported tier using the same higher-first policy as the Copilot chat and
-Responses paths.
+keeps its required budget before forwarding when `budget_tokens < max_tokens`.
+If enabled thinking omits `budget_tokens`, the configured server default is used.
+Present `max_tokens` and `thinking.budget_tokens` values must be positive,
+non-boolean integers; malformed requests receive an Anthropic
+`invalid_request_error` before native completion token refresh or completion I/O.
+When the Copilot model catalog advertises an effort allowlist, the requested value
+is mapped to the closest supported tier using the same higher-first policy as the
+Copilot chat and Responses paths.
 
 #### OpenAI / OpenAI-Compatible (`providers/openai_base.py`)
 - Direct passthrough of OpenAI format

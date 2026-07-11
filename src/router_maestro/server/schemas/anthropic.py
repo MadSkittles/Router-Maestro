@@ -367,6 +367,16 @@ AnthropicStreamEvent = (
 )
 
 
+class AnthropicToolCallAccumulator(BaseModel):
+    """One upstream tool call buffered until the message terminal is explicit."""
+
+    upstream_index: int | None = None
+    tool_id: str | None = None
+    name: str | None = None
+    argument_fragments: list[str] = Field(default_factory=list)
+    arrival_ordinal: int
+
+
 class AnthropicStreamState(BaseModel):
     """State for tracking streaming translation."""
 
@@ -374,7 +384,8 @@ class AnthropicStreamState(BaseModel):
     content_block_index: int = 0
     content_block_open: bool = False
     thinking_block_open: bool = False  # True while a thinking content_block is open
-    tool_calls: dict[int, dict] = Field(default_factory=dict)
+    tool_calls: list[AnthropicToolCallAccumulator] = Field(default_factory=list)
+    next_tool_arrival_ordinal: int = 0
     estimated_input_tokens: int = 0  # Estimated input tokens from request
     last_usage: dict | None = None  # Track the latest usage from stream chunks
     message_complete: bool = False  # Track if message_stop was sent

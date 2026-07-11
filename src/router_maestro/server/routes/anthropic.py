@@ -10,7 +10,18 @@ from fastapi import APIRouter, HTTPException
 from fastapi import Request as FastAPIRequest
 from fastapi.responses import JSONResponse
 
-from router_maestro.providers import AnthropicProvider, ChatRequest, ProviderError
+from router_maestro.providers import (
+    AnthropicProvider,
+    ChatRequest,
+    ProviderError,
+    ResponseStatus,
+    TerminalOutcome,
+    client_cancelled_outcome,
+    exception_outcome,
+    finish_reason_for_outcome,
+    resolve_terminal_outcome,
+    unexpected_eof_outcome,
+)
 from router_maestro.routing import Router, get_router
 from router_maestro.server.schemas.anthropic import (
     AnthropicCountTokensRequest,
@@ -26,6 +37,7 @@ from router_maestro.server.schemas.anthropic import (
 )
 from router_maestro.server.streaming import sse_streaming_response
 from router_maestro.server.translation import (
+    AnthropicStreamProtocolError,
     build_message_start_event,
     translate_anthropic_to_openai,
     translate_openai_chunk_to_anthropic_events,
@@ -35,6 +47,7 @@ from router_maestro.utils import (
     get_logger,
     map_openai_stop_reason_to_anthropic,
 )
+from router_maestro.utils.async_iterators import close_async_iterator
 from router_maestro.utils.context_window import resolve_thinking_budget
 from router_maestro.utils.responses_bridge import (
     is_experimental_responses_enabled,
@@ -557,6 +570,8 @@ async def stream_response(
     yield f"event: ping\ndata: {json.dumps({'type': 'ping'})}\n\n"
 
     pipeline = None
+    stream = None
+    terminal_outcome: TerminalOutcome | None = None
     try:
         stream, provider_name = await model_router.chat_completion_stream(request)
 
@@ -588,21 +603,50 @@ async def stream_response(
             # Feed through guards (leak detection + runaway)
             abort_reason = pipeline.feed_stream(chunk)
             if abort_reason:
+                terminal_outcome = exception_outcome(abort_reason, code="overloaded")
                 logger.warning("Stream aborted: %s", abort_reason)
                 yield _sse_error_event("Overloaded: please retry this request")
-                pipeline.finish(status=529, body_summary=abort_reason)
+                pipeline.finish(
+                    wire_status=200,
+                    outcome=terminal_outcome,
+                    body_summary=abort_reason,
+                )
                 return
 
             if chunk.tool_calls:
                 saw_real_tool_call = True
 
+            chunk_outcome = resolve_terminal_outcome(
+                chunk.terminal_outcome,
+                chunk.finish_reason,
+            )
+            if chunk_outcome is not None:
+                terminal_outcome = chunk_outcome
             recovered_tool_calls = chunk.tool_calls
-            finish_reason = chunk.finish_reason
+            finish_reason = (
+                finish_reason_for_outcome(chunk_outcome)
+                if chunk_outcome is not None
+                else chunk.finish_reason
+            )
             if finish_reason and not saw_real_tool_call:
                 leaked = pipeline.check_invoke_at_finish()
                 if leaked:
                     recovered_tool_calls = leaked
                     finish_reason = "tool_calls"
+
+            if chunk_outcome is not None and chunk_outcome.response_status not in {
+                ResponseStatus.COMPLETED,
+                ResponseStatus.INCOMPLETE,
+            }:
+                error = chunk_outcome.error
+                message = error.message if error is not None else "Upstream response failed"
+                yield _sse_error_event(message)
+                pipeline.finish(
+                    wire_status=200,
+                    outcome=chunk_outcome,
+                    body_summary=message,
+                )
+                return
 
             # Build OpenAI-style chunk for translation. Forward reasoning
             # under both legacy field names so the translator can pick it up.
@@ -625,23 +669,65 @@ async def stream_response(
                 "usage": chunk.usage,  # Pass through usage info
             }
 
-            events = translate_openai_chunk_to_anthropic_events(openai_chunk, state, original_model)
+            try:
+                events = translate_openai_chunk_to_anthropic_events(
+                    openai_chunk, state, original_model
+                )
+            except AnthropicStreamProtocolError:
+                terminal_outcome = exception_outcome(
+                    "Invalid tool call from upstream",
+                    code="upstream_protocol_error",
+                )
+                logger.warning("Invalid Anthropic tool stream from upstream", exc_info=True)
+                yield _sse_error_event("Invalid tool call from upstream")
+                pipeline.finish(
+                    wire_status=200,
+                    outcome=terminal_outcome,
+                    body_summary="Invalid tool call from upstream",
+                )
+                return
 
             for event in events:
                 yield f"event: {event['type']}\ndata: {json.dumps(event)}\n\n"
 
-        pipeline.finish(status=200)
+            if chunk_outcome is not None:
+                pipeline.finish(wire_status=200, outcome=chunk_outcome)
+                return
+
+        terminal_outcome = unexpected_eof_outcome()
+        yield _sse_error_event(terminal_outcome.error.code)
+        pipeline.finish(
+            wire_status=200,
+            outcome=terminal_outcome,
+            body_summary=terminal_outcome.error.message,
+        )
 
     except ProviderError as e:
+        terminal_outcome = exception_outcome(str(e), code="provider_error")
         if pipeline is not None:
-            pipeline.finish(status=e.status_code, body_summary=str(e))
+            pipeline.finish(
+                wire_status=200,
+                outcome=terminal_outcome,
+                body_summary=str(e),
+            )
         yield _sse_error_event(str(e))
     except asyncio.CancelledError:
+        if pipeline is not None:
+            pipeline.finish(wire_status=200, outcome=client_cancelled_outcome())
         logger.info("Anthropic stream cancelled by client")
         raise
     except Exception:
+        terminal_outcome = exception_outcome("Internal server error", code="server_error")
+        if pipeline is not None:
+            pipeline.finish(
+                wire_status=200,
+                outcome=terminal_outcome,
+                body_summary="Internal server error",
+            )
         logger.error("Unexpected error in Anthropic stream", exc_info=True)
         yield _sse_error_event("Internal server error")
+    finally:
+        await close_async_iterator(stream)
 
 
 def _sse_error_event(message: str) -> str:

@@ -124,12 +124,20 @@ Both preserve the protocol rule that `budget_tokens < max_tokens`. Router-Maestr
 default ceiling is slightly higher so high client budgets can map to the local
 `max` reasoning tier before provider-specific catalog clamping.
 
+For beta-native Anthropic requests, explicitly supplied `max_tokens` and
+`thinking.budget_tokens` must each be a positive, non-boolean integer, and the
+budget must be strictly less than `max_tokens`. Consequently, an enabled
+1024-token budget is rejected with `max_tokens=1024` and accepted with
+`max_tokens=1025`. Omitting `budget_tokens` remains valid and selects the
+configured server default, normalized to the available output headroom.
+
 These budget calculations are bypassed for adaptive thinking when the request
 contains an explicit Anthropic `output_config.effort`. Effort is a tiered
 behavioral control, not an exact token budget. Manual `thinking.type="enabled"`
-still keeps its protocol-required budget alongside effort. An adaptive budget
-may remain as an internal routing signal when effort is absent, but it is never
-serialized into an Anthropic-native adaptive thinking object.
+still keeps its protocol-required budget alongside effort when sufficient
+output-token headroom exists. An adaptive budget may remain as an internal
+routing signal when effort is absent, but it is never serialized into an
+Anthropic-native adaptive thinking object.
 
 ---
 
