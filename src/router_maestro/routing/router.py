@@ -26,6 +26,7 @@ from router_maestro.providers import (
     ResponsesStreamChunk,
 )
 from router_maestro.utils import get_logger
+from router_maestro.utils.async_iterators import close_async_iterator
 from router_maestro.utils.cache import TTLCache
 from router_maestro.utils.model_match import (
     fuzzy_match_model,
@@ -46,6 +47,41 @@ _router_instance: "Router | None" = None
 RequestT = TypeVar("RequestT")
 ResponseT = TypeVar("ResponseT")
 ChunkT = TypeVar("ChunkT")
+
+
+class _PrimedStream(AsyncIterator[ChunkT]):
+    """Own a primed stream and close its inner iterator even before iteration."""
+
+    def __init__(self, first_chunk: ChunkT | None, stream: AsyncIterator[ChunkT]) -> None:
+        self._first_chunk = first_chunk
+        self._has_first_chunk = first_chunk is not None
+        self._stream = stream
+        self._closed = False
+
+    def __aiter__(self) -> "_PrimedStream[ChunkT]":
+        return self
+
+    async def __anext__(self) -> ChunkT:
+        if self._closed:
+            raise StopAsyncIteration
+        if self._has_first_chunk:
+            self._has_first_chunk = False
+            first_chunk = self._first_chunk
+            self._first_chunk = None
+            return first_chunk  # type: ignore[return-value]
+        try:
+            return await anext(self._stream)
+        except StopAsyncIteration:
+            await self.aclose()
+            raise
+
+    async def aclose(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        self._has_first_chunk = False
+        self._first_chunk = None
+        await close_async_iterator(self._stream)
 
 
 def get_router() -> "Router":
@@ -708,6 +744,7 @@ class Router:
             try:
                 await candidate_provider.ensure_token()
                 stream = call_stream(candidate_provider, candidate_request)
+                stream = self._wrap_stream_errors(stream, candidate_name, _with_prefix)
                 first_chunk = await anext(stream, None)
             except ProviderError as error:
                 logger.warning(_with_prefix("provider %s failed: %s"), candidate_name, error)
@@ -723,21 +760,18 @@ class Router:
 
             return self._chain_first_chunk(
                 first_chunk,
-                self._wrap_stream_errors(stream, candidate_name, _with_prefix),
+                stream,
             ), candidate_name
 
         if last_error is not None:
             raise last_error
         raise ProviderError("No stream fallback candidates available", status_code=503)
 
-    async def _chain_first_chunk(
+    def _chain_first_chunk(
         self, first_chunk: ChunkT | None, stream: AsyncIterator[ChunkT]
     ) -> AsyncIterator[ChunkT]:
         """Yield a primed first chunk followed by the rest of the stream."""
-        if first_chunk is not None:
-            yield first_chunk
-        async for chunk in stream:
-            yield chunk
+        return _PrimedStream(first_chunk, stream)
 
     async def _wrap_stream_errors(
         self,
@@ -752,6 +786,8 @@ class Router:
         except ProviderError as error:
             logger.warning(format_message("stream provider %s failed: %s"), provider_name, error)
             raise
+        finally:
+            await close_async_iterator(stream)
 
     async def responses_completion(
         self,

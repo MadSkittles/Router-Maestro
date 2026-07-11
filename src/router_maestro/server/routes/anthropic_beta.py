@@ -37,6 +37,7 @@ COPILOT_COUNT_TOKENS_PATH = "/v1/messages/count_tokens"
 
 _STRIP_RESPONSE_KEYS = frozenset({"copilot_usage", "stop_details"})
 _STRIP_STREAM_MESSAGE_STOP_KEYS = frozenset({"copilot_usage", "amazon-bedrock-invocationMetrics"})
+_THINKING_TYPES = frozenset({"enabled", "adaptive", "disabled"})
 
 # Fields the Copilot native Anthropic endpoint accepts. Anything not in this
 # set is stripped before forwarding — Copilot returns 400 on unknown fields.
@@ -82,6 +83,52 @@ def _sanitize_output_config(body: dict) -> str | None:
 
     body["output_config"] = {"effort": effort}
     return effort
+
+
+def _invalid_request(message: str) -> JSONResponse:
+    """Return an Anthropic-native invalid request response."""
+    return JSONResponse(
+        status_code=400,
+        content={
+            "type": "error",
+            "error": {
+                "type": "invalid_request_error",
+                "message": message,
+            },
+        },
+    )
+
+
+def _validate_native_thinking(body: dict) -> JSONResponse | None:
+    """Validate raw token limits before native thinking-budget resolution."""
+    max_tokens = body.get("max_tokens")
+    if "max_tokens" in body and (
+        not isinstance(max_tokens, int) or isinstance(max_tokens, bool) or max_tokens <= 0
+    ):
+        return _invalid_request("max_tokens must be a positive integer")
+
+    if "thinking" not in body:
+        return None
+
+    thinking = body["thinking"]
+    if not isinstance(thinking, dict):
+        return _invalid_request("thinking must be an object")
+
+    thinking_type = thinking.get("type")
+    if not isinstance(thinking_type, str) or thinking_type not in _THINKING_TYPES:
+        return _invalid_request("thinking.type must be enabled, adaptive, or disabled")
+
+    if "budget_tokens" not in thinking:
+        return None
+
+    budget = thinking["budget_tokens"]
+    if not isinstance(budget, int) or isinstance(budget, bool) or budget <= 0:
+        return _invalid_request("thinking.budget_tokens must be a positive integer")
+
+    if max_tokens is not None and budget >= max_tokens:
+        return _invalid_request("thinking.budget_tokens must be less than max_tokens")
+
+    return None
 
 
 def _strip_history_thinking_blocks(body: dict) -> None:
@@ -302,6 +349,10 @@ async def beta_messages(raw_request: FastAPIRequest):
         actual_model,
         stream,
     )
+
+    validation_error = _validate_native_thinking(body)
+    if validation_error is not None:
+        return validation_error
 
     # Sanitize before the budget helper so unsupported output_config siblings
     # cannot survive even if the helper is replaced by an integration hook.

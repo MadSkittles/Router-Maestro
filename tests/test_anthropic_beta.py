@@ -8,6 +8,7 @@ from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 from fastapi.testclient import TestClient
 
+from router_maestro.config import PrioritiesConfig, ThinkingBudgetConfig
 from router_maestro.providers.base import ModelInfo
 from router_maestro.providers.copilot import CopilotProvider
 from router_maestro.server.routes.anthropic import ANTHROPIC_PING_FRAME
@@ -470,7 +471,225 @@ def client(app):
     return TestClient(app)
 
 
+@pytest.fixture
+def non_raising_client(app):
+    return TestClient(app, raise_server_exceptions=False)
+
+
+def _native_provider() -> MagicMock:
+    provider = MagicMock(spec=CopilotProvider)
+    provider.ensure_token = AsyncMock()
+
+    response = MagicMock()
+    response.status_code = 200
+    response.json.return_value = {
+        "id": "msg_123",
+        "type": "message",
+        "role": "assistant",
+        "content": [{"type": "text", "text": "ok"}],
+        "model": "claude-sonnet-4.5",
+        "stop_reason": "end_turn",
+        "usage": {"input_tokens": 5, "output_tokens": 2},
+    }
+    provider._send_with_auth_retry = AsyncMock(return_value=response)
+    return provider
+
+
 class TestBetaMessagesEndpoint:
+    @pytest.mark.parametrize(
+        "invalid_budget",
+        ["1024", [], {}, True, 1024.5, 0, -1],
+        ids=["string", "list", "dict", "bool", "fractional-float", "zero", "negative"],
+    )
+    @patch("router_maestro.server.routes.anthropic_beta.get_router")
+    @patch("router_maestro.server.routes.anthropic_beta._resolve_model")
+    def test_invalid_budget_returns_anthropic_client_error(
+        self,
+        mock_resolve,
+        mock_router,
+        non_raising_client,
+        invalid_budget,
+    ):
+        provider = _native_provider()
+        mock_resolve.return_value = ("github-copilot", "claude-sonnet-4.5", provider)
+        mock_router.return_value = MagicMock(_models_cache={})
+
+        response = non_raising_client.post(
+            "/api/anthropic/beta/v1/messages",
+            json={
+                "model": "claude-sonnet-4.5",
+                "max_tokens": 2048,
+                "messages": [{"role": "user", "content": "Hi"}],
+                "thinking": {"type": "enabled", "budget_tokens": invalid_budget},
+            },
+        )
+
+        assert response.status_code == 400
+        assert response.json() == {
+            "type": "error",
+            "error": {
+                "type": "invalid_request_error",
+                "message": "thinking.budget_tokens must be a positive integer",
+            },
+        }
+        provider.ensure_token.assert_not_awaited()
+        provider._send_with_auth_retry.assert_not_awaited()
+
+    @pytest.mark.parametrize(
+        "invalid_max_tokens",
+        ["2048", [], {}, True, 2048.5, 0, -1],
+        ids=["string", "list", "dict", "bool", "fractional-float", "zero", "negative"],
+    )
+    @patch("router_maestro.server.routes.anthropic_beta.get_router")
+    @patch("router_maestro.server.routes.anthropic_beta._resolve_model")
+    def test_invalid_max_tokens_returns_anthropic_client_error(
+        self,
+        mock_resolve,
+        mock_router,
+        non_raising_client,
+        invalid_max_tokens,
+    ):
+        provider = _native_provider()
+        mock_resolve.return_value = ("github-copilot", "claude-sonnet-4.5", provider)
+        mock_router.return_value = MagicMock(_models_cache={})
+
+        response = non_raising_client.post(
+            "/api/anthropic/beta/v1/messages",
+            json={
+                "model": "claude-sonnet-4.5",
+                "max_tokens": invalid_max_tokens,
+                "messages": [{"role": "user", "content": "Hi"}],
+            },
+        )
+
+        assert response.status_code == 400
+        assert response.json() == {
+            "type": "error",
+            "error": {
+                "type": "invalid_request_error",
+                "message": "max_tokens must be a positive integer",
+            },
+        }
+        provider.ensure_token.assert_not_awaited()
+        provider._send_with_auth_retry.assert_not_awaited()
+
+    @pytest.mark.parametrize(
+        ("thinking", "message"),
+        [
+            ("enabled", "thinking must be an object"),
+            ({"type": "unknown"}, "thinking.type must be enabled, adaptive, or disabled"),
+            ({"type": []}, "thinking.type must be enabled, adaptive, or disabled"),
+            ({"type": {}}, "thinking.type must be enabled, adaptive, or disabled"),
+        ],
+        ids=["non-object", "unknown-type", "list-type", "dict-type"],
+    )
+    @patch("router_maestro.server.routes.anthropic_beta.get_router")
+    @patch("router_maestro.server.routes.anthropic_beta._resolve_model")
+    def test_invalid_thinking_returns_anthropic_client_error(
+        self,
+        mock_resolve,
+        mock_router,
+        non_raising_client,
+        thinking,
+        message,
+    ):
+        provider = _native_provider()
+        mock_resolve.return_value = ("github-copilot", "claude-sonnet-4.5", provider)
+        mock_router.return_value = MagicMock(_models_cache={})
+
+        response = non_raising_client.post(
+            "/api/anthropic/beta/v1/messages",
+            json={
+                "model": "claude-sonnet-4.5",
+                "max_tokens": 2048,
+                "messages": [{"role": "user", "content": "Hi"}],
+                "thinking": thinking,
+            },
+        )
+
+        assert response.status_code == 400
+        assert response.json() == {
+            "type": "error",
+            "error": {"type": "invalid_request_error", "message": message},
+        }
+        provider.ensure_token.assert_not_awaited()
+        provider._send_with_auth_retry.assert_not_awaited()
+
+    @pytest.mark.parametrize(
+        ("max_tokens", "expected_status"),
+        [(1024, 400), (1025, 200)],
+        ids=["no-headroom", "one-token-headroom"],
+    )
+    @patch("router_maestro.server.routes.anthropic_beta.get_router")
+    @patch("router_maestro.server.routes.anthropic_beta._resolve_model")
+    def test_invalid_budget_must_be_less_than_max_tokens(
+        self,
+        mock_resolve,
+        mock_router,
+        non_raising_client,
+        max_tokens,
+        expected_status,
+    ):
+        provider = _native_provider()
+        mock_resolve.return_value = ("github-copilot", "claude-sonnet-4.5", provider)
+        mock_router.return_value = MagicMock(_models_cache={})
+
+        response = non_raising_client.post(
+            "/api/anthropic/beta/v1/messages",
+            json={
+                "model": "claude-sonnet-4.5",
+                "max_tokens": max_tokens,
+                "messages": [{"role": "user", "content": "Hi"}],
+                "thinking": {"type": "enabled", "budget_tokens": 1024},
+            },
+        )
+
+        assert response.status_code == expected_status
+        if expected_status == 400:
+            assert response.json() == {
+                "type": "error",
+                "error": {
+                    "type": "invalid_request_error",
+                    "message": "thinking.budget_tokens must be less than max_tokens",
+                },
+            }
+            provider.ensure_token.assert_not_awaited()
+            provider._send_with_auth_retry.assert_not_awaited()
+        else:
+            forwarded = provider._send_with_auth_retry.call_args.kwargs["json"]
+            assert forwarded["thinking"] == {"type": "enabled", "budget_tokens": 1024}
+
+    @patch("router_maestro.config.load_priorities_config")
+    @patch("router_maestro.server.routes.anthropic_beta.get_router")
+    @patch("router_maestro.server.routes.anthropic_beta._resolve_model")
+    def test_enabled_thinking_without_budget_uses_configured_default(
+        self,
+        mock_resolve,
+        mock_router,
+        mock_load_config,
+        non_raising_client,
+    ):
+        provider = _native_provider()
+        mock_resolve.return_value = ("github-copilot", "claude-sonnet-4.5", provider)
+        mock_router.return_value = MagicMock(_models_cache={})
+        mock_load_config.return_value = PrioritiesConfig(
+            thinking=ThinkingBudgetConfig(default_budget=4096)
+        )
+
+        response = non_raising_client.post(
+            "/api/anthropic/beta/v1/messages",
+            json={
+                "model": "claude-sonnet-4.5",
+                "max_tokens": 8192,
+                "messages": [{"role": "user", "content": "Hi"}],
+                "thinking": {"type": "enabled"},
+            },
+        )
+
+        assert response.status_code == 200
+        forwarded = provider._send_with_auth_retry.call_args.kwargs["json"]
+        assert forwarded["thinking"] == {"type": "enabled", "budget_tokens": 4096}
+
     @patch("router_maestro.server.routes.anthropic_beta._resolve_model")
     def test_native_passthrough_non_streaming(self, mock_resolve, client):
         """Claude model on Copilot uses native passthrough."""
@@ -555,6 +774,28 @@ class TestBetaMessagesEndpoint:
         )
 
         mock_standard.assert_called_once()
+
+    @patch("router_maestro.server.routes.anthropic_beta.standard_messages")
+    @patch("router_maestro.server.routes.anthropic_beta._resolve_model")
+    def test_non_native_fallback_preserves_pydantic_coercion(
+        self, mock_resolve, mock_standard, client
+    ):
+        mock_resolve.return_value = ("anthropic", "claude-sonnet-4.5", None)
+        mock_standard.return_value = JSONResponse(content={})
+
+        response = client.post(
+            "/api/anthropic/beta/v1/messages",
+            json={
+                "model": "claude-sonnet-4.5",
+                "max_tokens": "2048",
+                "messages": [{"role": "user", "content": "Hi"}],
+            },
+        )
+
+        assert response.status_code == 200
+        mock_standard.assert_awaited_once()
+        parsed_request = mock_standard.await_args.kwargs["request"]
+        assert parsed_request.max_tokens == 2048
 
     @patch("router_maestro.server.routes.anthropic_beta._resolve_model")
     def test_upstream_error_forwarded(self, mock_resolve, client):

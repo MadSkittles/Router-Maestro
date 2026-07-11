@@ -13,7 +13,13 @@ import httpx
 import pytest
 
 from router_maestro.providers import CopilotProvider
-from router_maestro.providers.base import ResponsesRequest, ResponsesStreamChunk
+from router_maestro.providers.base import (
+    ResponsesRequest,
+    ResponsesStreamChunk,
+    ResponseStatus,
+    TerminalError,
+    TransportTermination,
+)
 
 
 def _sse_lines(events: list[dict]) -> bytes:
@@ -58,6 +64,206 @@ async def _collect(provider: CopilotProvider, model: str = "gpt-5.5") -> list:
     ):
         chunks.append(chunk)
     return chunks
+
+
+class TestTerminalInvariant:
+    """Transport closure must not synthesize a semantic Responses terminal."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "body",
+        [
+            _sse_lines(
+                [
+                    {
+                        "type": "response.output_text.delta",
+                        "item_id": "msg-1",
+                        "delta": "partial",
+                    }
+                ]
+            ),
+            _sse_lines(
+                [
+                    {
+                        "type": "response.output_text.delta",
+                        "item_id": "msg-1",
+                        "delta": "partial",
+                    }
+                ]
+            )
+            + b"data: [DONE]\n\n",
+        ],
+        ids=["raw-eof", "done-sentinel"],
+    )
+    async def test_eof_without_response_terminal_does_not_emit_finish(self, body: bytes):
+        provider = _make_provider_with_stream(body)
+
+        chunks = await _collect(provider)
+
+        assert "".join(chunk.content for chunk in chunks) == "partial"
+        assert not any(chunk.finish_reason for chunk in chunks)
+
+
+class TestNativeTerminalStatus:
+    """Every Responses terminal envelope preserves its inner response semantics."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("outer_type", "inner", "expected_status"),
+        [
+            ("response.done", {"status": "completed"}, ResponseStatus.COMPLETED),
+            (
+                "response.completed",
+                {
+                    "status": "incomplete",
+                    "incomplete_details": {
+                        "reason": "max_output_tokens",
+                        "vendor": {"limit": 12},
+                    },
+                },
+                ResponseStatus.INCOMPLETE,
+            ),
+            (
+                "response.incomplete",
+                {
+                    "status": "incomplete",
+                    "incomplete_details": {
+                        "reason": "content_filter",
+                        "vendor": "safety",
+                    },
+                },
+                ResponseStatus.INCOMPLETE,
+            ),
+            (
+                "response.incomplete",
+                {
+                    "status": "incomplete",
+                    "incomplete_details": {"reason": "vendor_limit", "raw": [1, 2]},
+                },
+                ResponseStatus.INCOMPLETE,
+            ),
+            (
+                "response.failed",
+                {
+                    "status": "failed",
+                    "error": {"code": "upstream_failed", "message": "boom"},
+                },
+                ResponseStatus.FAILED,
+            ),
+            (
+                "response.failed",
+                {"status": "cancelled", "error": None},
+                ResponseStatus.CANCELLED,
+            ),
+        ],
+        ids=[
+            "done-completed",
+            "outer-completed-inner-incomplete",
+            "incomplete-content-filter",
+            "incomplete-unknown-details",
+            "failed",
+            "cancelled",
+        ],
+    )
+    async def test_terminal_envelopes_emit_one_canonical_chunk(
+        self, outer_type: str, inner: dict, expected_status: ResponseStatus
+    ):
+        usage = {"input_tokens": 4, "output_tokens": 2, "total_tokens": 6}
+        response = {**inner, "usage": usage}
+        provider = _make_provider_with_stream(
+            _sse_lines([{"type": outer_type, "response": response}])
+        )
+
+        chunks = await _collect(provider)
+
+        assert len(chunks) == 1
+        terminal = chunks[0]
+        assert terminal.finish_reason is None
+        assert terminal.usage == usage
+        assert terminal.terminal_outcome is not None
+        assert terminal.terminal_outcome.transport is TransportTermination.EXPLICIT_TERMINAL
+        assert terminal.terminal_outcome.response_status is expected_status
+        assert terminal.terminal_outcome.incomplete_details == inner.get("incomplete_details")
+        raw_error = inner.get("error")
+        if raw_error is None:
+            assert terminal.terminal_outcome.error is None
+        else:
+            assert terminal.terminal_outcome.error == TerminalError(
+                code=raw_error["code"], message=raw_error["message"]
+            )
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "response",
+        [
+            {"status": "unknown"},
+            {"status": "in_progress"},
+            {"status": None},
+            {"status": []},
+            {
+                "status": "completed",
+                "error": {"code": "conflict", "message": "must not coexist"},
+            },
+            {
+                "status": "incomplete",
+                "incomplete_details": {"reason": "max_output_tokens"},
+                "error": {"code": "conflict", "message": "must not coexist"},
+            },
+            {
+                "status": "completed",
+                "incomplete_details": {"reason": "max_output_tokens"},
+            },
+            {"status": "failed", "error": "not-an-object"},
+            {"status": "incomplete", "incomplete_details": "not-an-object"},
+        ],
+        ids=[
+            "unknown",
+            "in-progress",
+            "null",
+            "non-string",
+            "completed-with-error",
+            "incomplete-with-error",
+            "completed-with-details",
+            "malformed-error",
+            "malformed-details",
+        ],
+    )
+    async def test_streaming_malformed_terminal_is_protocol_failure(self, response: dict):
+        provider = _make_provider_with_stream(
+            _sse_lines([{"type": "response.completed", "response": response}])
+        )
+
+        chunks = await _collect(provider)
+
+        assert len(chunks) == 1
+        outcome = chunks[0].terminal_outcome
+        assert outcome is not None
+        assert outcome.transport is TransportTermination.EXCEPTION
+        assert outcome.response_status is ResponseStatus.FAILED
+        assert outcome.error is not None
+        assert outcome.error.code == "upstream_protocol_error"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "response",
+        [None, [], ["DO_NOT_LEAK"]],
+        ids=["null", "list", "list-secret"],
+    )
+    async def test_streaming_terminal_response_must_be_object(self, response):
+        provider = _make_provider_with_stream(
+            _sse_lines([{"type": "response.completed", "response": response}])
+        )
+
+        chunks = await _collect(provider)
+
+        assert len(chunks) == 1
+        outcome = chunks[0].terminal_outcome
+        assert outcome is not None
+        assert outcome.transport is TransportTermination.EXCEPTION
+        assert outcome.response_status is ResponseStatus.FAILED
+        assert outcome.error is not None
+        assert outcome.error.code == "upstream_protocol_error"
+        assert "DO_NOT_LEAK" not in outcome.error.message
 
 
 class TestToolSearchCallForwarding:

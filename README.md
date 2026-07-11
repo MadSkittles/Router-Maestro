@@ -32,8 +32,11 @@ Router-Maestro acts as a proxy that gives you access to models from multiple pro
 - **Anthropic adaptive effort passthrough**: `output_config.effort` is preserved
   across standard and beta-native Anthropic routes. Explicit effort replaces
   an adaptive thinking budget, while manual `thinking.type="enabled"` retains
-  its protocol-required `budget_tokens`. Copilot-native requests map effort to
-  the closest tier advertised by each model's live catalog.
+  its protocol-required `budget_tokens` when `budget_tokens < max_tokens`.
+  Omitting `budget_tokens` uses the configured server default. The beta-native
+  route rejects present token limits unless they are positive, non-boolean
+  integers. Copilot-native requests map effort to the closest tier advertised
+  by each model's live catalog.
 
 ## Table of Contents
 

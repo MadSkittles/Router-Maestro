@@ -134,6 +134,39 @@ async def test_openai_chat_stream_emits_usage_only_chunk():
     }
 
 
+@pytest.mark.asyncio
+async def test_openai_chat_stream_keeps_usage_chunk_after_explicit_finish():
+    """OpenAI may send include_usage data after the terminal choice chunk."""
+    router = _StubRouter(
+        [
+            ChatStreamChunk(content="hello"),
+            ChatStreamChunk(content="", finish_reason="stop"),
+            ChatStreamChunk(
+                content="",
+                usage={
+                    "prompt_tokens": 12,
+                    "completion_tokens": 3,
+                    "total_tokens": 15,
+                },
+            ),
+        ]
+    )
+    request = ChatRequest(
+        model="github-copilot/gpt-4o",
+        messages=[Message(role="user", content="hi")],
+        stream=True,
+    )
+
+    raw_events = [event async for event in stream_response(router, request)]  # type: ignore[arg-type]
+    events = _parse_chat_stream_events(raw_events)
+
+    assert raw_events[-1] == "data: [DONE]\n\n"
+    usage_events = [event for event in events if event.get("usage")]
+    assert len(usage_events) == 1
+    assert usage_events[0]["choices"][0]["finish_reason"] == "stop"
+    assert usage_events[0]["usage"]["total_tokens"] == 15
+
+
 async def _noop() -> None:
     return None
 

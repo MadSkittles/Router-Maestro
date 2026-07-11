@@ -16,8 +16,17 @@ from typing import Any
 import pytest
 
 from router_maestro.providers import ResponsesRequest as InternalResponsesRequest
-from router_maestro.providers.base import ResponsesResponse as InternalResponsesResponse
-from router_maestro.providers.base import ResponsesStreamChunk, ResponsesToolCall
+from router_maestro.providers.base import (
+    ResponsesResponse as InternalResponsesResponse,
+)
+from router_maestro.providers.base import (
+    ResponsesStreamChunk,
+    ResponseStatus,
+    ResponsesToolCall,
+    TerminalError,
+    TerminalOutcome,
+    TransportTermination,
+)
 from router_maestro.server.routes.responses import create_response, stream_response
 from router_maestro.server.schemas.responses import ResponsesRequest
 
@@ -249,6 +258,201 @@ class TestNonStreamingToolCallWireShape:
         }
 
 
+class TestNativeNonStreamingTerminalStatus:
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("status", "details", "error"),
+        [
+            (ResponseStatus.COMPLETED, None, None),
+            (
+                ResponseStatus.INCOMPLETE,
+                {"reason": "max_output_tokens", "vendor": {"limit": 3}},
+                None,
+            ),
+            (
+                ResponseStatus.INCOMPLETE,
+                {"reason": "content_filter", "vendor": "safety"},
+                None,
+            ),
+            (
+                ResponseStatus.FAILED,
+                None,
+                TerminalError(code="upstream_failed", message="boom"),
+            ),
+            (ResponseStatus.CANCELLED, None, None),
+        ],
+    )
+    async def test_preserves_terminal_status_details_error_output_and_usage(
+        self, monkeypatch, status, details, error
+    ):
+        usage = {"input_tokens": 2, "output_tokens": 1, "total_tokens": 3}
+        internal = InternalResponsesResponse(
+            content="partial",
+            model="github-copilot/gpt-5",
+            usage=usage,
+            terminal_outcome=TerminalOutcome(
+                transport=TransportTermination.EXPLICIT_TERMINAL,
+                response_status=status,
+                incomplete_details=details,
+                error=error,
+            ),
+        )
+        monkeypatch.setattr(
+            "router_maestro.server.routes.responses.get_router",
+            lambda: _NonStreamStubRouter(internal),
+        )
+
+        response = await create_response(
+            ResponsesRequest(model="github-copilot/gpt-5", input="hi", stream=False)
+        )
+
+        assert response.status == status.value
+        assert response.incomplete_details == details
+        assert response.error == (
+            {"code": error.code, "message": error.message} if error is not None else None
+        )
+        assert response.usage is not None
+        assert response.usage.model_dump(exclude_none=True) == usage
+        assert len(response.output) == 1
+        output_item = response.output[0]
+        assert isinstance(output_item, dict)
+        assert output_item["content"][0]["text"] == "partial"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "outcome",
+        [
+            TerminalOutcome(
+                transport=TransportTermination.UNEXPECTED_EOF,
+                response_status=ResponseStatus.UNKNOWN,
+                error=TerminalError(code="unexpected_eof", message="ended early"),
+            ),
+            TerminalOutcome(
+                transport=TransportTermination.EXCEPTION,
+                response_status=ResponseStatus.COMPLETED,
+            ),
+            TerminalOutcome(
+                transport=TransportTermination.EXPLICIT_TERMINAL,
+                response_status=ResponseStatus.COMPLETED,
+                error=TerminalError(code="conflict", message="must not coexist"),
+            ),
+        ],
+        ids=["unexpected-eof", "illegal-exception-completed", "completed-with-error"],
+    )
+    async def test_invalid_provider_terminal_metadata_is_protocol_failed_response(
+        self, monkeypatch, outcome
+    ):
+        internal = InternalResponsesResponse(
+            content="partial",
+            model="github-copilot/gpt-5",
+            terminal_outcome=outcome,
+        )
+        monkeypatch.setattr(
+            "router_maestro.server.routes.responses.get_router",
+            lambda: _NonStreamStubRouter(internal),
+        )
+
+        response = await create_response(
+            ResponsesRequest(model="github-copilot/gpt-5", input="hi", stream=False)
+        )
+
+        assert response.status == "failed"
+        assert response.incomplete_details is None
+        assert response.error is not None
+        assert response.error["code"] == "upstream_protocol_error"
+
+    @pytest.mark.asyncio
+    async def test_explicit_failed_provider_error_is_preserved(self, monkeypatch):
+        internal = InternalResponsesResponse(
+            content="partial",
+            model="github-copilot/gpt-5",
+            terminal_outcome=TerminalOutcome(
+                transport=TransportTermination.EXPLICIT_TERMINAL,
+                response_status=ResponseStatus.FAILED,
+                error=TerminalError(code="quota_exhausted", message="safe failure"),
+            ),
+        )
+        monkeypatch.setattr(
+            "router_maestro.server.routes.responses.get_router",
+            lambda: _NonStreamStubRouter(internal),
+        )
+
+        response = await create_response(
+            ResponsesRequest(model="github-copilot/gpt-5", input="hi", stream=False)
+        )
+
+        assert response.status == "failed"
+        assert response.error == {"code": "quota_exhausted", "message": "safe failure"}
+
+
+class TestNativeStreamingTerminalStatus:
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("status", "details", "error", "event_type"),
+        [
+            (ResponseStatus.COMPLETED, None, None, "response.completed"),
+            (
+                ResponseStatus.INCOMPLETE,
+                {"reason": "max_output_tokens", "vendor": {"limit": 3}},
+                None,
+                "response.incomplete",
+            ),
+            (
+                ResponseStatus.INCOMPLETE,
+                {"reason": "content_filter", "vendor": "safety"},
+                None,
+                "response.incomplete",
+            ),
+            (
+                ResponseStatus.FAILED,
+                None,
+                TerminalError(code="upstream_failed", message="boom"),
+                "response.failed",
+            ),
+            (ResponseStatus.FAILED, None, None, "response.failed"),
+            (ResponseStatus.CANCELLED, None, None, "response.failed"),
+        ],
+    )
+    async def test_encodes_canonical_status_without_manufacturing_success(
+        self, status, details, error, event_type
+    ):
+        outcome = TerminalOutcome(
+            transport=TransportTermination.EXPLICIT_TERMINAL,
+            response_status=status,
+            incomplete_details=details,
+            error=error,
+        )
+
+        events = await _drive(
+            [
+                ResponsesStreamChunk(content="partial"),
+                ResponsesStreamChunk(
+                    content="",
+                    usage={"input_tokens": 2, "output_tokens": 1, "total_tokens": 3},
+                    terminal_outcome=outcome,
+                ),
+            ]
+        )
+
+        terminal_events = [
+            event
+            for event in events
+            if event.get("type") in {"response.completed", "response.incomplete", "response.failed"}
+        ]
+        assert len(terminal_events) == 1
+        terminal = terminal_events[0]
+        assert terminal["type"] == event_type
+        assert terminal["response"]["status"] == status.value
+        assert terminal["response"]["incomplete_details"] == details
+        assert terminal["response"]["error"] == (
+            {"code": error.code, "message": error.message} if error is not None else None
+        )
+        assert terminal["response"]["output"][0]["content"][0]["text"] == "partial"
+        assert terminal["response"]["usage"]["input_tokens"] == 2
+        assert terminal["response"]["usage"]["output_tokens"] == 1
+        assert terminal["response"]["usage"]["total_tokens"] == 3
+
+
 class TestResponsesStreamUsageWireShape:
     """Responses streaming should preserve upstream usage detail fields."""
 
@@ -279,6 +483,115 @@ class TestResponsesStreamUsageWireShape:
             "output_tokens_details": {"reasoning_tokens": 9},
             "total_tokens": 120,
         }
+
+
+class TestResponsesStreamItemStateIsolation:
+    """Each interleaved Responses output item owns its accumulated state."""
+
+    @staticmethod
+    def _done_items(events: list[dict[str, Any]]) -> list[tuple[int, dict[str, Any]]]:
+        return [
+            (event["output_index"], event["item"])
+            for event in events
+            if event.get("type") == "response.output_item.done"
+        ]
+
+    @staticmethod
+    def _completed_output(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        completed = next(event for event in events if event.get("type") == "response.completed")
+        return completed["response"]["output"]
+
+    @pytest.mark.asyncio
+    async def test_text_reasoning_text_keeps_messages_independent(self):
+        events = await _drive(
+            [
+                ResponsesStreamChunk(content="A"),
+                ResponsesStreamChunk(content="", thinking="R", thinking_id="rs-test"),
+                ResponsesStreamChunk(content="B"),
+                ResponsesStreamChunk(content="", finish_reason="stop"),
+            ]
+        )
+
+        done_items = self._done_items(events)
+        assert [index for index, _ in done_items] == [0, 1, 2]
+        assert [item["type"] for _, item in done_items] == ["message", "reasoning", "message"]
+        assert done_items[0][1]["content"][0]["text"] == "A"
+        assert done_items[1][1]["summary"][0]["text"] == "R"
+        assert done_items[2][1]["content"][0]["text"] == "B"
+
+        output = self._completed_output(events)
+        assert [item["type"] for item in output] == ["message", "reasoning", "message"]
+        assert output[0]["content"][0]["text"] == "A"
+        assert output[1]["summary"][0]["text"] == "R"
+        assert output[2]["content"][0]["text"] == "B"
+
+    @pytest.mark.asyncio
+    async def test_text_tool_text_keeps_messages_independent(self):
+        events = await _drive(
+            [
+                ResponsesStreamChunk(content="A"),
+                ResponsesStreamChunk(
+                    content="",
+                    tool_call=ResponsesToolCall(
+                        call_id="call-state-isolation",
+                        name="lookup",
+                        arguments='{"query": "x"}',
+                        kind="function",
+                    ),
+                ),
+                ResponsesStreamChunk(content="B"),
+                ResponsesStreamChunk(content="", finish_reason="stop"),
+            ]
+        )
+
+        done_items = self._done_items(events)
+        assert [index for index, _ in done_items] == [0, 1, 2]
+        assert [item["type"] for _, item in done_items] == [
+            "message",
+            "function_call",
+            "message",
+        ]
+        assert done_items[0][1]["content"][0]["text"] == "A"
+        assert done_items[2][1]["content"][0]["text"] == "B"
+
+        output = self._completed_output(events)
+        assert [item["type"] for item in output] == ["message", "function_call", "message"]
+        assert output[0]["content"][0]["text"] == "A"
+        assert output[2]["content"][0]["text"] == "B"
+
+    @pytest.mark.asyncio
+    async def test_reasoning_then_text_uses_separate_output_items(self):
+        events = await _drive(
+            [
+                ResponsesStreamChunk(content="", thinking="R", thinking_id="rs-test"),
+                ResponsesStreamChunk(content="A"),
+                ResponsesStreamChunk(content="", finish_reason="stop"),
+            ]
+        )
+
+        done_items = self._done_items(events)
+        assert [index for index, _ in done_items] == [0, 1]
+        assert [item["type"] for _, item in done_items] == ["reasoning", "message"]
+        assert done_items[0][1]["summary"][0]["text"] == "R"
+        assert done_items[1][1]["content"][0]["text"] == "A"
+        assert self._completed_output(events) == [item for _, item in done_items]
+
+    @pytest.mark.asyncio
+    async def test_consecutive_text_deltas_share_one_message_item(self):
+        events = await _drive(
+            [
+                ResponsesStreamChunk(content="A"),
+                ResponsesStreamChunk(content="B"),
+                ResponsesStreamChunk(content="", finish_reason="stop"),
+            ]
+        )
+
+        done_items = self._done_items(events)
+        assert len(done_items) == 1
+        assert done_items[0][0] == 0
+        assert done_items[0][1]["type"] == "message"
+        assert done_items[0][1]["content"][0]["text"] == "AB"
+        assert self._completed_output(events) == [done_items[0][1]]
 
 
 class TestFunctionCallWireShape:

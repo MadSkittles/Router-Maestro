@@ -22,9 +22,12 @@ from router_maestro.providers.base import (
     ChatResponse,
     ChatStreamChunk,
     Message,
+    ProviderError,
     ResponsesRequest,
     ResponsesResponse,
     ResponsesStreamChunk,
+    ResponseStatus,
+    finish_reason_for_outcome,
 )
 
 ENV_FLAG = "ROUTER_MAESTRO_EXPERIMENTAL_RESPONSES_API"
@@ -371,7 +374,22 @@ def responses_response_to_chat_response(
             "total_tokens": resp.usage.get("total_tokens", prompt + completion),
         }
 
-    finish_reason = resp.finish_reason
+    outcome = resp.terminal_outcome
+    if outcome is not None and outcome.response_status not in {
+        ResponseStatus.COMPLETED,
+        ResponseStatus.INCOMPLETE,
+    }:
+        message = (
+            outcome.error.message if outcome.error is not None else outcome.response_status.value
+        )
+        raise ProviderError(
+            f"Copilot /responses {outcome.response_status.value}: {message}",
+            status_code=502,
+        )
+
+    finish_reason = (
+        finish_reason_for_outcome(outcome) if outcome is not None else resp.finish_reason
+    )
     if tool_calls and finish_reason in (None, "stop"):
         # A "completed" status with tool calls is a tool-use turn, not a normal
         # stop — Anthropic/Gemini translators key tool execution off this.
@@ -416,12 +434,17 @@ def responses_chunk_to_chat_chunk(chunk: ResponsesStreamChunk) -> ChatStreamChun
             "total_tokens": chunk.usage.get("total_tokens", prompt + completion),
         }
 
+    finish_reason = chunk.finish_reason
+    if chunk.terminal_outcome is not None:
+        finish_reason = finish_reason_for_outcome(chunk.terminal_outcome)
+
     return ChatStreamChunk(
         content=chunk.content or "",
-        finish_reason=chunk.finish_reason,
+        finish_reason=finish_reason,
         usage=usage,
         tool_calls=tool_calls,
         thinking=getattr(chunk, "thinking", None),
         thinking_signature=getattr(chunk, "thinking_signature", None),
         thinking_id=getattr(chunk, "thinking_id", None),
+        terminal_outcome=chunk.terminal_outcome,
     )

@@ -1,5 +1,9 @@
 """Advanced tests for translation module."""
 
+import json
+
+import pytest
+
 from router_maestro.server.schemas.anthropic import (
     AnthropicAssistantMessage,
     AnthropicImageBlock,
@@ -11,12 +15,12 @@ from router_maestro.server.schemas.anthropic import (
     AnthropicUserMessage,
 )
 from router_maestro.server.translation import (
+    AnthropicStreamProtocolError,
     _extract_multimodal_content,
     _extract_text_content,
     _extract_tool_calls,
     _handle_assistant_message,
     _handle_user_message,
-    _is_tool_block_open,
     _sanitize_system_prompt,
     _translate_messages,
     _translate_model_name,
@@ -25,6 +29,73 @@ from router_maestro.server.translation import (
     translate_openai_chunk_to_anthropic_events,
     translate_openai_to_anthropic,
 )
+
+
+def _stream_chunk(
+    *,
+    content: str | None = None,
+    tool_calls: list[dict] | None = None,
+    finish_reason: str | None = None,
+) -> dict:
+    delta: dict = {}
+    if content is not None:
+        delta["content"] = content
+    if tool_calls is not None:
+        delta["tool_calls"] = tool_calls
+    return {
+        "id": "chunk-test",
+        "choices": [{"delta": delta, "finish_reason": finish_reason}],
+    }
+
+
+def _tool_delta(
+    *,
+    index: int | None = None,
+    tool_id: str | None = None,
+    name: str | None = None,
+    arguments: str | None = None,
+) -> dict:
+    tool_call: dict = {"function": {}}
+    if index is not None:
+        tool_call["index"] = index
+    if tool_id is not None:
+        tool_call["id"] = tool_id
+    if name is not None:
+        tool_call["function"]["name"] = name
+    if arguments is not None:
+        tool_call["function"]["arguments"] = arguments
+    return tool_call
+
+
+def _tool_blocks(events: list[dict]) -> list[dict]:
+    blocks: list[dict] = []
+    for position, event in enumerate(events):
+        block = event.get("content_block", {})
+        if event.get("type") != "content_block_start" or block.get("type") != "tool_use":
+            continue
+        index = event["index"]
+        delta_position, delta = next(
+            (candidate_position, candidate)
+            for candidate_position, candidate in enumerate(events)
+            if candidate.get("type") == "content_block_delta"
+            and candidate.get("index") == index
+            and candidate.get("delta", {}).get("type") == "input_json_delta"
+        )
+        stop_position = next(
+            candidate_position
+            for candidate_position, candidate in enumerate(events)
+            if candidate.get("type") == "content_block_stop" and candidate.get("index") == index
+        )
+        blocks.append(
+            {
+                "id": block["id"],
+                "json": delta["delta"]["partial_json"],
+                "start_index": position,
+                "delta_index": delta_position,
+                "stop_index": stop_position,
+            }
+        )
+    return blocks
 
 
 class TestModelNameTranslationAdvanced:
@@ -654,8 +725,8 @@ class TestTranslateOpenAIChunkToAnthropicEvents:
         assert any(e["type"] == "message_stop" for e in events)
         assert state.message_complete is True
 
-    def test_tool_call_events(self):
-        """Test tool call event generation."""
+    def test_tool_call_is_buffered_until_explicit_terminal(self):
+        """Tool blocks are transactional and cannot be exposed before validation."""
         state = AnthropicStreamState()
         state.message_start_sent = True
 
@@ -668,7 +739,7 @@ class TestTranslateOpenAIChunkToAnthropicEvents:
                             {
                                 "index": 0,
                                 "id": "tc-1",
-                                "function": {"name": "test", "arguments": ""},
+                                "function": {"name": "test", "arguments": "{}"},
                             }
                         ]
                     },
@@ -679,10 +750,385 @@ class TestTranslateOpenAIChunkToAnthropicEvents:
 
         events = translate_openai_chunk_to_anthropic_events(chunk, state, "claude-3")
 
-        # Should have content_block_start for tool_use
-        start_events = [e for e in events if e["type"] == "content_block_start"]
-        assert len(start_events) == 1
-        assert start_events[0]["content_block"]["type"] == "tool_use"
+        assert events == []
+
+        terminal = {
+            "id": "chunk-2",
+            "choices": [{"delta": {}, "finish_reason": "tool_calls"}],
+        }
+        events = translate_openai_chunk_to_anthropic_events(terminal, state, "claude-3")
+
+        assert [event["type"] for event in events] == [
+            "content_block_start",
+            "content_block_delta",
+            "content_block_stop",
+            "message_delta",
+            "message_stop",
+        ]
+        assert events[0]["content_block"] == {
+            "type": "tool_use",
+            "id": "tc-1",
+            "name": "test",
+            "input": {},
+        }
+        assert events[1]["delta"] == {
+            "type": "input_json_delta",
+            "partial_json": "{}",
+        }
+
+    def test_interleaved_parallel_tools_flush_in_stable_explicit_index_order(self):
+        state = AnthropicStreamState(message_start_sent=True)
+
+        chunks = [
+            _stream_chunk(
+                tool_calls=[_tool_delta(index=7, tool_id="tool-a", name="alpha", arguments='{"a":')]
+            ),
+            _stream_chunk(
+                tool_calls=[
+                    _tool_delta(index=2, tool_id="tool-b", name="beta", arguments='{"b":2}')
+                ]
+            ),
+            _stream_chunk(tool_calls=[_tool_delta(index=7, arguments="1}")]),
+        ]
+
+        before_terminal = [
+            event
+            for chunk in chunks
+            for event in translate_openai_chunk_to_anthropic_events(chunk, state, "claude-3")
+        ]
+        terminal = translate_openai_chunk_to_anthropic_events(
+            _stream_chunk(finish_reason="tool_calls"), state, "claude-3"
+        )
+
+        assert before_terminal == []
+        blocks = _tool_blocks(terminal)
+        assert [(block["id"], block["json"]) for block in blocks] == [
+            ("tool-b", '{"b":2}'),
+            ("tool-a", '{"a":1}'),
+        ]
+        assert all(block["delta_index"] < block["stop_index"] for block in blocks)
+
+    def test_indexless_calls_use_id_identity_and_arrival_order(self):
+        state = AnthropicStreamState(message_start_sent=True)
+
+        chunks = [
+            _stream_chunk(
+                tool_calls=[_tool_delta(tool_id="tool-a", name="alpha", arguments='{"a":')]
+            ),
+            _stream_chunk(
+                tool_calls=[_tool_delta(tool_id="tool-b", name="beta", arguments='{"b":2}')]
+            ),
+            _stream_chunk(tool_calls=[_tool_delta(tool_id="tool-a", arguments="1}")]),
+        ]
+        for chunk in chunks:
+            assert translate_openai_chunk_to_anthropic_events(chunk, state, "claude-3") == []
+
+        events = translate_openai_chunk_to_anthropic_events(
+            _stream_chunk(finish_reason="tool_calls"), state, "claude-3"
+        )
+
+        assert [(block["id"], block["json"]) for block in _tool_blocks(events)] == [
+            ("tool-a", '{"a":1}'),
+            ("tool-b", '{"b":2}'),
+        ]
+
+    def test_tool_text_tool_keeps_text_live_and_flushes_tools_after_text(self):
+        state = AnthropicStreamState(message_start_sent=True)
+
+        assert (
+            translate_openai_chunk_to_anthropic_events(
+                _stream_chunk(
+                    tool_calls=[
+                        _tool_delta(index=1, tool_id="tool-a", name="alpha", arguments="{}")
+                    ]
+                ),
+                state,
+                "claude-3",
+            )
+            == []
+        )
+        text_events = translate_openai_chunk_to_anthropic_events(
+            _stream_chunk(content="still working"), state, "claude-3"
+        )
+        assert any(event.get("delta", {}).get("text") == "still working" for event in text_events)
+        assert (
+            translate_openai_chunk_to_anthropic_events(
+                _stream_chunk(
+                    tool_calls=[_tool_delta(index=0, tool_id="tool-b", name="beta", arguments="{}")]
+                ),
+                state,
+                "claude-3",
+            )
+            == []
+        )
+
+        terminal = translate_openai_chunk_to_anthropic_events(
+            _stream_chunk(finish_reason="tool_calls"), state, "claude-3"
+        )
+
+        assert terminal[0] == {"type": "content_block_stop", "index": 0}
+        blocks = _tool_blocks(terminal)
+        assert [block["id"] for block in blocks] == ["tool-b", "tool-a"]
+        assert [event["index"] for event in terminal if event["type"] == "content_block_start"] == [
+            1,
+            2,
+        ]
+
+    def test_tool_fragment_does_not_close_live_thinking_block(self):
+        state = AnthropicStreamState(message_start_sent=True)
+        first_thinking = translate_openai_chunk_to_anthropic_events(
+            {
+                "id": "chunk-thinking-1",
+                "choices": [{"delta": {"reasoning_text": "first"}, "finish_reason": None}],
+            },
+            state,
+            "claude-3",
+        )
+        assert [event["type"] for event in first_thinking] == [
+            "content_block_start",
+            "content_block_delta",
+        ]
+
+        tool_events = translate_openai_chunk_to_anthropic_events(
+            _stream_chunk(
+                tool_calls=[_tool_delta(index=0, tool_id="tool-a", name="alpha", arguments="{}")]
+            ),
+            state,
+            "claude-3",
+        )
+        second_thinking = translate_openai_chunk_to_anthropic_events(
+            {
+                "id": "chunk-thinking-2",
+                "choices": [{"delta": {"reasoning_text": "second"}, "finish_reason": None}],
+            },
+            state,
+            "claude-3",
+        )
+
+        assert tool_events == []
+        assert second_thinking == [
+            {
+                "type": "content_block_delta",
+                "index": 0,
+                "delta": {"type": "thinking_delta", "thinking": "second"},
+            }
+        ]
+
+        terminal = translate_openai_chunk_to_anthropic_events(
+            _stream_chunk(finish_reason="tool_calls"), state, "claude-3"
+        )
+        assert terminal[0] == {"type": "content_block_stop", "index": 0}
+        tool_block = _tool_blocks(terminal)[0]
+        assert tool_block["id"] == "tool-a"
+        assert terminal[tool_block["start_index"]]["index"] == 1
+
+    @pytest.mark.parametrize(
+        ("tool_calls", "match"),
+        [
+            (
+                [_tool_delta(index=0, tool_id="tool-a", name="alpha", arguments="{")],
+                "valid JSON object",
+            ),
+            (
+                [_tool_delta(index=0, tool_id="tool-a", name="alpha", arguments="[]")],
+                "JSON object",
+            ),
+            (
+                [_tool_delta(index=0, name="alpha", arguments="{}")],
+                "missing id",
+            ),
+            (
+                [_tool_delta(index=0, tool_id="tool-a", arguments="{}")],
+                "missing name",
+            ),
+        ],
+        ids=["truncated-json", "non-object-json", "missing-id", "missing-name"],
+    )
+    def test_terminal_validation_is_transactional(self, tool_calls, match):
+        state = AnthropicStreamState(message_start_sent=True)
+        assert (
+            translate_openai_chunk_to_anthropic_events(
+                _stream_chunk(tool_calls=tool_calls), state, "claude-3"
+            )
+            == []
+        )
+
+        with pytest.raises(AnthropicStreamProtocolError, match=match):
+            translate_openai_chunk_to_anthropic_events(
+                _stream_chunk(finish_reason="tool_calls"), state, "claude-3"
+            )
+
+        assert state.message_complete is False
+        assert state.content_block_open is False
+
+    def test_explicit_incomplete_terminal_still_validates_tool_arguments(self):
+        state = AnthropicStreamState(message_start_sent=True)
+        translate_openai_chunk_to_anthropic_events(
+            _stream_chunk(
+                tool_calls=[_tool_delta(index=0, tool_id="tool-a", name="alpha", arguments="{")]
+            ),
+            state,
+            "claude-3",
+        )
+
+        with pytest.raises(AnthropicStreamProtocolError, match="valid JSON object"):
+            translate_openai_chunk_to_anthropic_events(
+                _stream_chunk(finish_reason="length"), state, "claude-3"
+            )
+
+    def test_conflicting_tool_identity_is_protocol_error(self):
+        state = AnthropicStreamState(message_start_sent=True)
+        translate_openai_chunk_to_anthropic_events(
+            _stream_chunk(
+                tool_calls=[_tool_delta(index=0, tool_id="tool-a", name="alpha", arguments="{")]
+            ),
+            state,
+            "claude-3",
+        )
+
+        with pytest.raises(AnthropicStreamProtocolError, match="conflicting id"):
+            translate_openai_chunk_to_anthropic_events(
+                _stream_chunk(
+                    tool_calls=[_tool_delta(index=0, tool_id="tool-b", name="alpha", arguments="}")]
+                ),
+                state,
+                "claude-3",
+            )
+
+    def test_indexless_tool_is_upgraded_when_later_delta_adds_index(self):
+        state = AnthropicStreamState(message_start_sent=True)
+        translate_openai_chunk_to_anthropic_events(
+            _stream_chunk(tool_calls=[_tool_delta(tool_id="tool-a", name="alpha", arguments="{")]),
+            state,
+            "claude-3",
+        )
+        translate_openai_chunk_to_anthropic_events(
+            _stream_chunk(tool_calls=[_tool_delta(index=4, tool_id="tool-a", arguments='"a":1}')]),
+            state,
+            "claude-3",
+        )
+
+        events = translate_openai_chunk_to_anthropic_events(
+            _stream_chunk(finish_reason="tool_calls"), state, "claude-3"
+        )
+
+        assert [(block["id"], json.loads(block["json"])) for block in _tool_blocks(events)] == [
+            ("tool-a", {"a": 1})
+        ]
+
+    def test_indexed_tool_is_completed_by_later_id_only_delta(self):
+        state = AnthropicStreamState(message_start_sent=True)
+        translate_openai_chunk_to_anthropic_events(
+            _stream_chunk(
+                tool_calls=[_tool_delta(index=4, tool_id="tool-a", name="alpha", arguments="{")]
+            ),
+            state,
+            "claude-3",
+        )
+        translate_openai_chunk_to_anthropic_events(
+            _stream_chunk(tool_calls=[_tool_delta(tool_id="tool-a", arguments='"a":1}')]),
+            state,
+            "claude-3",
+        )
+
+        events = translate_openai_chunk_to_anthropic_events(
+            _stream_chunk(finish_reason="tool_calls"), state, "claude-3"
+        )
+
+        assert [(block["id"], json.loads(block["json"])) for block in _tool_blocks(events)] == [
+            ("tool-a", {"a": 1})
+        ]
+
+    def test_empty_object_split_across_multiple_argument_fragments(self):
+        state = AnthropicStreamState(message_start_sent=True)
+        for fragment in ("{", "", "}"):
+            translate_openai_chunk_to_anthropic_events(
+                _stream_chunk(
+                    tool_calls=[
+                        _tool_delta(
+                            index=0,
+                            tool_id="tool-a",
+                            name="alpha",
+                            arguments=fragment,
+                        )
+                    ]
+                ),
+                state,
+                "claude-3",
+            )
+
+        events = translate_openai_chunk_to_anthropic_events(
+            _stream_chunk(finish_reason="tool_calls"), state, "claude-3"
+        )
+
+        assert _tool_blocks(events)[0]["json"] == "{}"
+
+    @pytest.mark.parametrize(
+        "second_delta",
+        [
+            _tool_delta(index=1, tool_id="tool-a", name="alpha", arguments="}"),
+            _tool_delta(index=0, tool_id="tool-b", name="alpha", arguments="}"),
+            _tool_delta(index=0, tool_id="tool-a", name="beta", arguments="}"),
+        ],
+        ids=["id-matches-other-index", "index-matches-other-id", "name-conflict"],
+    )
+    def test_conflicting_index_id_or_name_is_protocol_error(self, second_delta):
+        state = AnthropicStreamState(message_start_sent=True)
+        translate_openai_chunk_to_anthropic_events(
+            _stream_chunk(
+                tool_calls=[_tool_delta(index=0, tool_id="tool-a", name="alpha", arguments="{")]
+            ),
+            state,
+            "claude-3",
+        )
+        if second_delta["index"] == 1:
+            translate_openai_chunk_to_anthropic_events(
+                _stream_chunk(
+                    tool_calls=[
+                        _tool_delta(
+                            index=1,
+                            tool_id="tool-b",
+                            name="beta",
+                            arguments="{}",
+                        )
+                    ]
+                ),
+                state,
+                "claude-3",
+            )
+
+        with pytest.raises(AnthropicStreamProtocolError, match="conflicting"):
+            translate_openai_chunk_to_anthropic_events(
+                _stream_chunk(tool_calls=[second_delta]), state, "claude-3"
+            )
+
+    def test_fragment_without_index_or_id_is_protocol_error(self):
+        state = AnthropicStreamState(message_start_sent=True)
+
+        with pytest.raises(AnthropicStreamProtocolError, match="missing both index and id"):
+            translate_openai_chunk_to_anthropic_events(
+                _stream_chunk(tool_calls=[_tool_delta(arguments='{"a":1}')]),
+                state,
+                "claude-3",
+            )
+
+    @pytest.mark.parametrize(
+        "tool_call",
+        [
+            _tool_delta(index=True, tool_id="tool-a", name="alpha", arguments="{}"),
+            {"index": 0, "id": "tool-a", "function": []},
+            _tool_delta(index=0, tool_id="tool-a", name="alpha", arguments=None)
+            | {"function": {"name": "alpha", "arguments": {}}},
+        ],
+        ids=["boolean-index", "non-object-function", "non-string-arguments"],
+    )
+    def test_malformed_tool_delta_shape_is_protocol_error(self, tool_call):
+        state = AnthropicStreamState(message_start_sent=True)
+
+        with pytest.raises(AnthropicStreamProtocolError):
+            translate_openai_chunk_to_anthropic_events(
+                _stream_chunk(tool_calls=[tool_call]), state, "claude-3"
+            )
 
     def test_no_events_after_complete(self):
         """Test that no events are generated after message is complete."""
@@ -698,32 +1144,6 @@ class TestTranslateOpenAIChunkToAnthropicEvents:
         assert len(events) == 0
 
 
-class TestIsToolBlockOpen:
-    """Tests for tool block open detection."""
-
-    def test_not_open_when_no_block(self):
-        """Test returns False when no block is open."""
-        state = AnthropicStreamState()
-        state.content_block_open = False
-        assert _is_tool_block_open(state) is False
-
-    def test_not_open_when_text_block(self):
-        """Test returns False when text block is open."""
-        state = AnthropicStreamState()
-        state.content_block_open = True
-        state.content_block_index = 0
-        state.tool_calls = {}  # No tool calls
-        assert _is_tool_block_open(state) is False
-
-    def test_open_when_tool_block(self):
-        """Test returns True when tool block is open."""
-        state = AnthropicStreamState()
-        state.content_block_open = True
-        state.content_block_index = 1
-        state.tool_calls = {0: {"id": "tc-1", "name": "test", "anthropic_block_index": 1}}
-        assert _is_tool_block_open(state) is True
-
-
 class TestAnthropicStreamState:
     """Tests for AnthropicStreamState."""
 
@@ -733,7 +1153,7 @@ class TestAnthropicStreamState:
         assert state.message_start_sent is False
         assert state.content_block_index == 0
         assert state.content_block_open is False
-        assert state.tool_calls == {}
+        assert state.tool_calls == []
         assert state.message_complete is False
 
     def test_estimated_input_tokens(self):

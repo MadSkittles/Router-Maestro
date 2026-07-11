@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from unittest.mock import AsyncMock, patch
 
 import httpx
@@ -14,7 +15,11 @@ from router_maestro.providers.base import (
     ResponsesRequest,
     ResponsesResponse,
     ResponsesStreamChunk,
+    ResponseStatus,
     ResponsesToolCall,
+    TerminalError,
+    TerminalOutcome,
+    TransportTermination,
 )
 from router_maestro.utils.responses_bridge import (
     ENV_FLAG,
@@ -491,6 +496,21 @@ class TestResponsesToChat:
         chat = responses_response_to_chat_response(resp, "gpt-5.4")
         assert chat.finish_reason == "tool_calls"
 
+    def test_canonical_completed_with_tool_calls_maps_to_tool_calls(self):
+        resp = ResponsesResponse(
+            content="",
+            model="gpt-5.4",
+            tool_calls=[ResponsesToolCall(call_id="c1", name="fn", arguments="{}")],
+            terminal_outcome=TerminalOutcome(
+                transport=TransportTermination.EXPLICIT_TERMINAL,
+                response_status=ResponseStatus.COMPLETED,
+            ),
+        )
+
+        chat = responses_response_to_chat_response(resp, "gpt-5.4")
+
+        assert chat.finish_reason == "tool_calls"
+
     def test_explicit_length_with_tool_calls_keeps_length(self):
         """A non-stop upstream finish_reason should NOT be downgraded by tool calls."""
         resp = ResponsesResponse(
@@ -501,6 +521,44 @@ class TestResponsesToChat:
         )
         chat = responses_response_to_chat_response(resp, "gpt-5.4")
         assert chat.finish_reason == "length"
+
+    @pytest.mark.parametrize(
+        ("reason", "expected"),
+        [
+            ("max_output_tokens", "length"),
+            ("content_filter", "content_filter"),
+            ("other", "stop"),
+        ],
+    )
+    def test_canonical_incomplete_maps_only_at_chat_adapter(self, reason, expected):
+        resp = ResponsesResponse(
+            content="partial",
+            model="gpt-5.4",
+            terminal_outcome=TerminalOutcome(
+                transport=TransportTermination.EXPLICIT_TERMINAL,
+                response_status=ResponseStatus.INCOMPLETE,
+                incomplete_details={"reason": reason, "vendor": "preserved"},
+            ),
+        )
+
+        chat = responses_response_to_chat_response(resp, "gpt-5.4")
+
+        assert chat.finish_reason == expected
+
+    @pytest.mark.parametrize("status", [ResponseStatus.FAILED, ResponseStatus.CANCELLED])
+    def test_canonical_failure_cannot_become_non_stream_chat_success(self, status):
+        resp = ResponsesResponse(
+            content="partial",
+            model="gpt-5.4",
+            terminal_outcome=TerminalOutcome(
+                transport=TransportTermination.EXPLICIT_TERMINAL,
+                response_status=status,
+                error=TerminalError(code="upstream_terminal", message=status.value),
+            ),
+        )
+
+        with pytest.raises(ProviderError, match=status.value):
+            responses_response_to_chat_response(resp, "gpt-5.4")
 
 
 class TestStreamChunkConversion:
@@ -536,13 +594,220 @@ class TestStreamChunkConversion:
         assert out.finish_reason == "stop"
         assert out.usage == {"prompt_tokens": 3, "completion_tokens": 2, "total_tokens": 5}
 
+    def test_canonical_terminal_outcome_is_preserved(self):
+        from router_maestro.providers.base import (
+            ResponseStatus,
+            TerminalOutcome,
+            TransportTermination,
+        )
 
-class TestCopilotResponsesFailureRaises:
-    """Terminal upstream statuses must surface as ProviderError, not stop."""
+        outcome = TerminalOutcome(
+            transport=TransportTermination.EXPLICIT_TERMINAL,
+            response_status=ResponseStatus.INCOMPLETE,
+            incomplete_details={"reason": "max_output_tokens"},
+        )
+
+        out = responses_chunk_to_chat_chunk(
+            ResponsesStreamChunk(content="", terminal_outcome=outcome)
+        )
+
+        assert out.terminal_outcome is outcome
+
+    @pytest.mark.parametrize(
+        ("reason", "expected"),
+        [
+            ("max_output_tokens", "length"),
+            ("content_filter", "content_filter"),
+            ("other", "stop"),
+        ],
+    )
+    def test_canonical_incomplete_maps_to_lossy_chat_finish(self, reason, expected):
+        outcome = TerminalOutcome(
+            transport=TransportTermination.EXPLICIT_TERMINAL,
+            response_status=ResponseStatus.INCOMPLETE,
+            incomplete_details={"reason": reason},
+        )
+
+        out = responses_chunk_to_chat_chunk(
+            ResponsesStreamChunk(content="", terminal_outcome=outcome)
+        )
+
+        assert out.finish_reason == expected
+        assert out.terminal_outcome is outcome
+
+    @pytest.mark.parametrize("status", [ResponseStatus.FAILED, ResponseStatus.CANCELLED])
+    def test_canonical_failure_stream_has_no_success_finish(self, status):
+        outcome = TerminalOutcome(
+            transport=TransportTermination.EXPLICIT_TERMINAL,
+            response_status=status,
+            error=TerminalError(code="upstream_terminal", message=status.value),
+        )
+
+        out = responses_chunk_to_chat_chunk(
+            ResponsesStreamChunk(content="", terminal_outcome=outcome)
+        )
+
+        assert out.finish_reason is None
+        assert out.terminal_outcome is outcome
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("status", ["failed", "cancelled"])
-    async def test_non_streaming_failed_raises(self, status):
+    async def test_copilot_chat_stream_completed_after_tool_call_maps_to_tool_calls(
+        self, monkeypatch
+    ):
+        from router_maestro.providers.copilot import CopilotProvider
+
+        monkeypatch.setenv(ENV_FLAG, "1")
+        provider = CopilotProvider()
+        outcome = TerminalOutcome(
+            transport=TransportTermination.EXPLICIT_TERMINAL,
+            response_status=ResponseStatus.COMPLETED,
+        )
+
+        async def responses_stream(_request):
+            yield ResponsesStreamChunk(
+                content="",
+                tool_call=ResponsesToolCall(call_id="c1", name="fn", arguments="{}"),
+            )
+            yield ResponsesStreamChunk(content="", terminal_outcome=outcome)
+
+        monkeypatch.setattr(provider, "responses_completion_stream", responses_stream)
+        request = ChatRequest(
+            model="gpt-5.4",
+            messages=[Message(role="user", content="hi")],
+            stream=True,
+            use_responses_api=True,
+        )
+
+        chunks = [chunk async for chunk in provider.chat_completion_stream(request)]
+
+        assert chunks[0].tool_calls is not None
+        assert chunks[-1].finish_reason == "tool_calls"
+        assert chunks[-1].terminal_outcome is outcome
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("reason", "expected_finish"),
+        [
+            (None, "stop"),
+            ("vendor_limit", "stop"),
+            ("max_output_tokens", "length"),
+            ("content_filter", "content_filter"),
+        ],
+    )
+    async def test_copilot_chat_stream_tool_call_keeps_incomplete_semantics(
+        self, monkeypatch, reason, expected_finish
+    ):
+        from router_maestro.providers.copilot import CopilotProvider
+
+        monkeypatch.setenv(ENV_FLAG, "1")
+        provider = CopilotProvider()
+        outcome = TerminalOutcome(
+            transport=TransportTermination.EXPLICIT_TERMINAL,
+            response_status=ResponseStatus.INCOMPLETE,
+            incomplete_details={"reason": reason} if reason is not None else None,
+        )
+
+        async def responses_stream(_request):
+            yield ResponsesStreamChunk(
+                content="",
+                tool_call=ResponsesToolCall(call_id="c1", name="fn", arguments="{}"),
+            )
+            yield ResponsesStreamChunk(content="", terminal_outcome=outcome)
+
+        monkeypatch.setattr(provider, "responses_completion_stream", responses_stream)
+        request = ChatRequest(
+            model="gpt-5.4",
+            messages=[Message(role="user", content="hi")],
+            stream=True,
+            use_responses_api=True,
+        )
+
+        chunks = [chunk async for chunk in provider.chat_completion_stream(request)]
+
+        assert chunks[-1].finish_reason == expected_finish
+        assert chunks[-1].terminal_outcome is outcome
+
+        class RouteRouter:
+            async def chat_completion_stream(self, _request, fallback=True):
+                async def generate():
+                    for chunk in chunks:
+                        yield chunk
+
+                return generate(), "github-copilot"
+
+        from router_maestro.server.routes.chat import stream_response
+
+        route_events = [event async for event in stream_response(RouteRouter(), request)]
+        assert not any("upstream_protocol_error" in event for event in route_events)
+        assert route_events[-1] == "data: [DONE]\n\n"
+
+    @pytest.mark.asyncio
+    async def test_copilot_chat_stream_legacy_stop_after_tool_call_still_upgrades(
+        self, monkeypatch
+    ):
+        from router_maestro.providers.copilot import CopilotProvider
+
+        monkeypatch.setenv(ENV_FLAG, "1")
+        provider = CopilotProvider()
+
+        async def responses_stream(_request):
+            yield ResponsesStreamChunk(
+                content="",
+                tool_call=ResponsesToolCall(call_id="c1", name="fn", arguments="{}"),
+            )
+            yield ResponsesStreamChunk(content="", finish_reason="stop")
+
+        monkeypatch.setattr(provider, "responses_completion_stream", responses_stream)
+        request = ChatRequest(
+            model="gpt-5.4",
+            messages=[Message(role="user", content="hi")],
+            stream=True,
+            use_responses_api=True,
+        )
+
+        chunks = [chunk async for chunk in provider.chat_completion_stream(request)]
+
+        assert chunks[-1].finish_reason == "tool_calls"
+        assert chunks[-1].terminal_outcome is None
+
+
+class TestCopilotResponsesCanonicalStatus:
+    """Provider results preserve Responses semantics for the protocol adapters."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("status", "details", "error", "expected_status"),
+        [
+            ("completed", None, None, ResponseStatus.COMPLETED),
+            (
+                "incomplete",
+                {"reason": "max_output_tokens", "vendor": {"limit": 10}},
+                None,
+                ResponseStatus.INCOMPLETE,
+            ),
+            (
+                "incomplete",
+                {"reason": "content_filter", "vendor": "safety"},
+                None,
+                ResponseStatus.INCOMPLETE,
+            ),
+            (
+                "failed",
+                None,
+                {"code": "upstream_failed", "message": "upstream failed"},
+                ResponseStatus.FAILED,
+            ),
+            (
+                "cancelled",
+                None,
+                {"code": "upstream_cancelled", "message": "upstream cancelled"},
+                ResponseStatus.CANCELLED,
+            ),
+        ],
+    )
+    async def test_non_streaming_preserves_canonical_terminal(
+        self, status, details, error, expected_status
+    ):
         from router_maestro.providers.copilot import CopilotProvider
 
         provider = CopilotProvider()
@@ -552,8 +817,16 @@ class TestCopilotResponsesFailureRaises:
             json={
                 "status": status,
                 "model": "gpt-5.4",
-                "output": [],
-                "error": {"message": f"upstream {status}"},
+                "output": [
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "partial"}],
+                    }
+                ],
+                "usage": {"input_tokens": 2, "output_tokens": 1, "total_tokens": 3},
+                "incomplete_details": details,
+                "error": error,
             },
             request=httpx.Request("POST", "https://api.githubcopilot.com/responses"),
         )
@@ -566,10 +839,21 @@ class TestCopilotResponsesFailureRaises:
             patch.object(provider, "_get_headers", return_value={}),
             patch.object(provider, "_get_client", return_value=mock_client),
         ):
-            with pytest.raises(ProviderError) as exc:
-                await provider.responses_completion(ResponsesRequest(model="gpt-5.4", input="hi"))
-            assert status in str(exc.value)
-            assert "upstream" in str(exc.value)
+            out = await provider.responses_completion(ResponsesRequest(model="gpt-5.4", input="hi"))
+
+        assert out.content == "partial"
+        assert out.usage == {"input_tokens": 2, "output_tokens": 1, "total_tokens": 3}
+        assert out.finish_reason is None
+        assert out.terminal_outcome is not None
+        assert out.terminal_outcome.transport is TransportTermination.EXPLICIT_TERMINAL
+        assert out.terminal_outcome.response_status is expected_status
+        assert out.terminal_outcome.incomplete_details == details
+        if error is None:
+            assert out.terminal_outcome.error is None
+        else:
+            assert out.terminal_outcome.error == TerminalError(
+                code=error["code"], message=error["message"]
+            )
 
     @pytest.mark.asyncio
     async def test_non_streaming_completed_does_not_raise(self):
@@ -604,7 +888,246 @@ class TestCopilotResponsesFailureRaises:
         ):
             out = await provider.responses_completion(ResponsesRequest(model="gpt-5.4", input="hi"))
         assert out.content == "ok"
-        assert out.finish_reason == "stop"
+        assert out.finish_reason is None
+        assert out.terminal_outcome == TerminalOutcome(
+            transport=TransportTermination.EXPLICIT_TERMINAL,
+            response_status=ResponseStatus.COMPLETED,
+        )
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "terminal_fields",
+        [
+            {"status": "unknown"},
+            {"status": "in_progress"},
+            {"status": None},
+            {"status": []},
+            {
+                "status": "completed",
+                "error": {"code": "conflict", "message": "must not coexist"},
+            },
+            {
+                "status": "incomplete",
+                "incomplete_details": {"reason": "max_output_tokens"},
+                "error": {"code": "conflict", "message": "must not coexist"},
+            },
+            {
+                "status": "completed",
+                "incomplete_details": {"reason": "max_output_tokens"},
+            },
+            {"status": "failed", "error": "not-an-object"},
+            {"status": "incomplete", "incomplete_details": "not-an-object"},
+        ],
+        ids=[
+            "unknown",
+            "in-progress",
+            "null",
+            "non-string",
+            "completed-with-error",
+            "incomplete-with-error",
+            "completed-with-details",
+            "malformed-error",
+            "malformed-details",
+        ],
+    )
+    async def test_non_streaming_malformed_terminal_is_protocol_failure(self, terminal_fields):
+        from router_maestro.providers.copilot import CopilotProvider
+
+        provider = CopilotProvider()
+        mock_resp = httpx.Response(
+            200,
+            json={"model": "gpt-5.4", "output": [], **terminal_fields},
+            request=httpx.Request("POST", "https://api.githubcopilot.com/responses"),
+        )
+        mock_client = AsyncMock()
+        mock_client.post.return_value = mock_resp
+
+        with (
+            patch.object(provider, "ensure_token", AsyncMock(return_value=None)),
+            patch.object(provider, "_get_headers", return_value={}),
+            patch.object(provider, "_get_client", return_value=mock_client),
+        ):
+            out = await provider.responses_completion(ResponsesRequest(model="gpt-5.4", input="hi"))
+
+        assert out.finish_reason is None
+        assert out.terminal_outcome is not None
+        assert out.terminal_outcome.transport is TransportTermination.EXCEPTION
+        assert out.terminal_outcome.response_status is ResponseStatus.FAILED
+        assert out.terminal_outcome.error is not None
+        assert out.terminal_outcome.error.code == "upstream_protocol_error"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "payload",
+        [None, [], ["DO_NOT_LEAK"]],
+        ids=["null", "list", "list-secret"],
+    )
+    async def test_non_streaming_terminal_payload_must_be_object(self, payload):
+        from router_maestro.providers.copilot import CopilotProvider
+
+        provider = CopilotProvider()
+        mock_resp = httpx.Response(
+            200,
+            content=json.dumps(payload).encode(),
+            request=httpx.Request("POST", "https://api.githubcopilot.com/responses"),
+        )
+        mock_client = AsyncMock()
+        mock_client.post.return_value = mock_resp
+
+        with (
+            patch.object(provider, "ensure_token", AsyncMock(return_value=None)),
+            patch.object(provider, "_get_headers", return_value={}),
+            patch.object(provider, "_get_client", return_value=mock_client),
+        ):
+            out = await provider.responses_completion(ResponsesRequest(model="gpt-5.4", input="hi"))
+
+        assert out.content == ""
+        assert out.model == "gpt-5.4"
+        assert out.terminal_outcome is not None
+        assert out.terminal_outcome.transport is TransportTermination.EXCEPTION
+        assert out.terminal_outcome.response_status is ResponseStatus.FAILED
+        assert out.terminal_outcome.error is not None
+        assert out.terminal_outcome.error.code == "upstream_protocol_error"
+        assert "DO_NOT_LEAK" not in out.terminal_outcome.error.message
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("raw_error", "expected"),
+        [
+            ({}, TerminalError(code="upstream_error", message="Upstream response failed")),
+            (
+                {"code": "quota_exhausted"},
+                TerminalError(code="quota_exhausted", message="Upstream response failed"),
+            ),
+            (
+                {"message": "safe upstream message"},
+                TerminalError(code="upstream_error", message="safe upstream message"),
+            ),
+            (
+                {"code": None, "message": None, "extra": "ignored"},
+                TerminalError(code="upstream_error", message="Upstream response failed"),
+            ),
+        ],
+        ids=["empty", "code-only", "message-only", "null-fields"],
+    )
+    async def test_non_streaming_error_object_uses_safe_defaults(self, raw_error, expected):
+        from router_maestro.providers.copilot import CopilotProvider
+
+        provider = CopilotProvider()
+        mock_resp = httpx.Response(
+            200,
+            json={"status": "failed", "model": "gpt-5.4", "output": [], "error": raw_error},
+            request=httpx.Request("POST", "https://api.githubcopilot.com/responses"),
+        )
+        mock_client = AsyncMock()
+        mock_client.post.return_value = mock_resp
+
+        with (
+            patch.object(provider, "ensure_token", AsyncMock(return_value=None)),
+            patch.object(provider, "_get_headers", return_value={}),
+            patch.object(provider, "_get_client", return_value=mock_client),
+        ):
+            out = await provider.responses_completion(ResponsesRequest(model="gpt-5.4", input="hi"))
+
+        assert out.terminal_outcome is not None
+        assert out.terminal_outcome.error == expected
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "terminal_fields",
+        [
+            {"status": "failed", "error": {"code": ["DO_NOT_LEAK"]}},
+            {"status": "failed", "error": {"code": {"secret": "DO_NOT_LEAK"}}},
+            {"status": "failed", "error": {"code": 7}},
+            {"status": "failed", "error": {"code": True}},
+            {"status": "failed", "error": {"message": ["DO_NOT_LEAK"]}},
+            {"status": "failed", "error": {"message": {"secret": "DO_NOT_LEAK"}}},
+            {"status": "failed", "error": {"message": 7}},
+            {"status": "failed", "error": {"message": False}},
+            {"status": "incomplete", "incomplete_details": {"reason": ["DO_NOT_LEAK"]}},
+            {
+                "status": "incomplete",
+                "incomplete_details": {"reason": {"secret": "DO_NOT_LEAK"}},
+            },
+            {"status": "incomplete", "incomplete_details": {"reason": 7}},
+            {"status": "incomplete", "incomplete_details": {"reason": True}},
+        ],
+        ids=[
+            "code-list",
+            "code-dict",
+            "code-int",
+            "code-bool",
+            "message-list",
+            "message-dict",
+            "message-int",
+            "message-bool",
+            "reason-list",
+            "reason-dict",
+            "reason-int",
+            "reason-bool",
+        ],
+    )
+    async def test_non_streaming_terminal_subfields_require_strings_without_leaking(
+        self, terminal_fields
+    ):
+        from router_maestro.providers.copilot import CopilotProvider
+
+        provider = CopilotProvider()
+        mock_resp = httpx.Response(
+            200,
+            json={"model": "gpt-5.4", "output": [], **terminal_fields},
+            request=httpx.Request("POST", "https://api.githubcopilot.com/responses"),
+        )
+        mock_client = AsyncMock()
+        mock_client.post.return_value = mock_resp
+
+        with (
+            patch.object(provider, "ensure_token", AsyncMock(return_value=None)),
+            patch.object(provider, "_get_headers", return_value={}),
+            patch.object(provider, "_get_client", return_value=mock_client),
+        ):
+            out = await provider.responses_completion(ResponsesRequest(model="gpt-5.4", input="hi"))
+
+        assert out.terminal_outcome is not None
+        assert out.terminal_outcome.transport is TransportTermination.EXCEPTION
+        assert out.terminal_outcome.response_status is ResponseStatus.FAILED
+        assert out.terminal_outcome.error is not None
+        assert out.terminal_outcome.error.code == "upstream_protocol_error"
+        assert "DO_NOT_LEAK" not in out.terminal_outcome.error.message
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "details",
+        [{}, {"reason": None, "vendor": 1}, {"reason": "vendor_limit", "vendor": [1]}],
+        ids=["reason-absent", "reason-null", "reason-unknown-string"],
+    )
+    async def test_non_streaming_preserves_valid_incomplete_details(self, details):
+        from router_maestro.providers.copilot import CopilotProvider
+
+        provider = CopilotProvider()
+        mock_resp = httpx.Response(
+            200,
+            json={
+                "status": "incomplete",
+                "model": "gpt-5.4",
+                "output": [],
+                "incomplete_details": details,
+            },
+            request=httpx.Request("POST", "https://api.githubcopilot.com/responses"),
+        )
+        mock_client = AsyncMock()
+        mock_client.post.return_value = mock_resp
+
+        with (
+            patch.object(provider, "ensure_token", AsyncMock(return_value=None)),
+            patch.object(provider, "_get_headers", return_value={}),
+            patch.object(provider, "_get_client", return_value=mock_client),
+        ):
+            out = await provider.responses_completion(ResponsesRequest(model="gpt-5.4", input="hi"))
+
+        assert out.terminal_outcome is not None
+        assert out.terminal_outcome.response_status is ResponseStatus.INCOMPLETE
+        assert out.terminal_outcome.incomplete_details == details
 
 
 class TestGeminiRouteFieldPreservation:

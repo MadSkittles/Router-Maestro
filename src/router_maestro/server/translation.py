@@ -12,6 +12,7 @@ from router_maestro.server.schemas.anthropic import (
     AnthropicStreamState,
     AnthropicTextBlock,
     AnthropicThinkingBlock,
+    AnthropicToolCallAccumulator,
     AnthropicToolUseBlock,
     AnthropicUsage,
     AnthropicUserMessage,
@@ -19,6 +20,10 @@ from router_maestro.server.schemas.anthropic import (
 from router_maestro.utils import get_logger, map_openai_stop_reason_to_anthropic
 
 logger = get_logger("server.translation")
+
+
+class AnthropicStreamProtocolError(Exception):
+    """An upstream Chat stream cannot be represented as legal Anthropic SSE."""
 
 
 def _get_block_field(block, field: str, default=None):
@@ -642,8 +647,9 @@ def translate_openai_chunk_to_anthropic_events(
                 }
             )
 
-    # Close any open thinking block before text/tool content arrives
-    if state.thinking_block_open and (delta.get("content") or delta.get("tool_calls")):
+    # Tool fragments are only buffered, so they do not displace the live
+    # thinking block. Text is emitted immediately and must close thinking.
+    if state.thinking_block_open and delta.get("content"):
         events.append(
             {
                 "type": "content_block_stop",
@@ -656,17 +662,6 @@ def translate_openai_chunk_to_anthropic_events(
 
     # Handle text content
     if delta.get("content"):
-        # Close tool block if open
-        if _is_tool_block_open(state):
-            events.append(
-                {
-                    "type": "content_block_stop",
-                    "index": state.content_block_index,
-                }
-            )
-            state.content_block_index += 1
-            state.content_block_open = False
-
         # Start text block if not open
         if not state.content_block_open:
             events.append(
@@ -693,61 +688,19 @@ def translate_openai_chunk_to_anthropic_events(
             }
         )
 
-    # Handle tool calls
+    # Tool calls cannot be emitted incrementally in Anthropic format when
+    # upstream interleaves their argument deltas: Anthropic permits only one
+    # open content block at a time. Buffer them transactionally and flush only
+    # after an explicit message terminal proves every call is complete.
     if delta.get("tool_calls"):
         for tool_call in delta["tool_calls"]:
-            tool_index = tool_call.get("index", 0)
-
-            if tool_call.get("id") and tool_call.get("function", {}).get("name"):
-                # New tool call starting
-                if state.content_block_open:
-                    events.append(
-                        {
-                            "type": "content_block_stop",
-                            "index": state.content_block_index,
-                        }
-                    )
-                    state.content_block_index += 1
-                    state.content_block_open = False
-
-                anthropic_block_index = state.content_block_index
-                state.tool_calls[tool_index] = {
-                    "id": tool_call["id"],
-                    "name": tool_call["function"]["name"],
-                    "anthropic_block_index": anthropic_block_index,
-                }
-
-                events.append(
-                    {
-                        "type": "content_block_start",
-                        "index": anthropic_block_index,
-                        "content_block": {
-                            "type": "tool_use",
-                            "id": tool_call["id"],
-                            "name": tool_call["function"]["name"],
-                            "input": {},
-                        },
-                    }
-                )
-                state.content_block_open = True
-
-            if tool_call.get("function", {}).get("arguments"):
-                tool_info = state.tool_calls.get(tool_index)
-                if tool_info:
-                    events.append(
-                        {
-                            "type": "content_block_delta",
-                            "index": tool_info["anthropic_block_index"],
-                            "delta": {
-                                "type": "input_json_delta",
-                                "partial_json": tool_call["function"]["arguments"],
-                            },
-                        }
-                    )
+            _accumulate_tool_call(state, tool_call)
 
     # Handle finish
     finish_reason = choice.get("finish_reason")
     if finish_reason:
+        validated_tool_calls = _validated_tool_calls(state)
+
         if state.content_block_open:
             events.append(
                 {
@@ -757,6 +710,35 @@ def translate_openai_chunk_to_anthropic_events(
             )
             state.content_block_open = False
             state.thinking_block_open = False
+            if validated_tool_calls:
+                state.content_block_index += 1
+
+        for tool_call in validated_tool_calls:
+            block_index = state.content_block_index
+            events.extend(
+                [
+                    {
+                        "type": "content_block_start",
+                        "index": block_index,
+                        "content_block": {
+                            "type": "tool_use",
+                            "id": tool_call.tool_id,
+                            "name": tool_call.name,
+                            "input": {},
+                        },
+                    },
+                    {
+                        "type": "content_block_delta",
+                        "index": block_index,
+                        "delta": {
+                            "type": "input_json_delta",
+                            "partial_json": "".join(tool_call.argument_fragments),
+                        },
+                    },
+                    {"type": "content_block_stop", "index": block_index},
+                ]
+            )
+            state.content_block_index += 1
 
         # Get usage from accumulated values, chunk, or tracked last_usage
         prompt_tokens = state.accumulated_prompt_tokens or (
@@ -794,10 +776,102 @@ def translate_openai_chunk_to_anthropic_events(
     return events
 
 
-def _is_tool_block_open(state: AnthropicStreamState) -> bool:
-    """Check if a tool block is currently open."""
-    if not state.content_block_open:
-        return False
-    return any(
-        tc["anthropic_block_index"] == state.content_block_index for tc in state.tool_calls.values()
+def _accumulate_tool_call(state: AnthropicStreamState, tool_call: dict) -> None:
+    """Merge one OpenAI tool delta using index/id identity without guessing."""
+    if not isinstance(tool_call, dict):
+        raise AnthropicStreamProtocolError("tool call delta must be an object")
+    upstream_index = tool_call.get("index")
+    tool_id = tool_call.get("id")
+    function = tool_call.get("function")
+    if function is None:
+        function = {}
+    if not isinstance(function, dict):
+        raise AnthropicStreamProtocolError("tool call function must be an object")
+    name = function.get("name")
+    arguments = function.get("arguments")
+
+    if upstream_index is None and not tool_id:
+        raise AnthropicStreamProtocolError("tool call delta missing both index and id")
+    if upstream_index is not None and (
+        isinstance(upstream_index, bool)
+        or not isinstance(upstream_index, int)
+        or upstream_index < 0
+    ):
+        raise AnthropicStreamProtocolError("tool call index must be a non-negative integer")
+    for field_name, value in (("id", tool_id), ("name", name), ("arguments", arguments)):
+        if value is not None and not isinstance(value, str):
+            raise AnthropicStreamProtocolError(f"tool call {field_name} must be a string")
+
+    by_index = (
+        next(
+            (call for call in state.tool_calls if call.upstream_index == upstream_index),
+            None,
+        )
+        if upstream_index is not None
+        else None
     )
+    by_id = (
+        next(
+            (call for call in state.tool_calls if call.tool_id == tool_id),
+            None,
+        )
+        if tool_id
+        else None
+    )
+
+    if by_index is not None and by_id is not None and by_index is not by_id:
+        raise AnthropicStreamProtocolError("tool call has conflicting index and id")
+    call = by_index or by_id
+    if call is None:
+        call = AnthropicToolCallAccumulator(
+            upstream_index=upstream_index,
+            tool_id=tool_id or None,
+            name=name or None,
+            arrival_ordinal=state.next_tool_arrival_ordinal,
+        )
+        state.next_tool_arrival_ordinal += 1
+        state.tool_calls.append(call)
+    else:
+        if upstream_index is not None:
+            if call.upstream_index is not None and call.upstream_index != upstream_index:
+                raise AnthropicStreamProtocolError("tool call has conflicting index")
+            call.upstream_index = upstream_index
+        if tool_id:
+            if call.tool_id is not None and call.tool_id != tool_id:
+                raise AnthropicStreamProtocolError("tool call has conflicting id")
+            call.tool_id = tool_id
+
+    if name:
+        if call.name is not None and call.name != name:
+            raise AnthropicStreamProtocolError("tool call has conflicting name")
+        call.name = name
+    if arguments:
+        call.argument_fragments.append(arguments)
+
+
+def _validated_tool_calls(state: AnthropicStreamState) -> list[AnthropicToolCallAccumulator]:
+    """Validate all buffered calls before any tool wire event is emitted."""
+    for call in state.tool_calls:
+        if not call.tool_id:
+            raise AnthropicStreamProtocolError("tool call missing id")
+        if not call.name:
+            raise AnthropicStreamProtocolError("tool call missing name")
+        arguments = "".join(call.argument_fragments)
+        try:
+            parsed = json.loads(arguments)
+        except (json.JSONDecodeError, TypeError) as exc:
+            raise AnthropicStreamProtocolError(
+                "tool call arguments must be a valid JSON object"
+            ) from exc
+        if not isinstance(parsed, dict):
+            raise AnthropicStreamProtocolError("tool call arguments must be a JSON object")
+
+    explicitly_indexed = sorted(
+        (call for call in state.tool_calls if call.upstream_index is not None),
+        key=lambda call: call.upstream_index,
+    )
+    indexless = sorted(
+        (call for call in state.tool_calls if call.upstream_index is None),
+        key=lambda call: call.arrival_ordinal,
+    )
+    return explicitly_indexed + indexless

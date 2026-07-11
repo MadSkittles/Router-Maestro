@@ -33,14 +33,24 @@ class RunawayGuard:
 
     def feed_chunk(self, chunk) -> str | None:
         """Feed a chunk and check volume thresholds."""
+        self._delta_count += 1
         content = getattr(chunk, "content", None)
         if content:
             self._total_bytes += len(content.encode("utf-8"))
-            self._delta_count += 1
-        elif getattr(chunk, "tool_calls", None) or getattr(chunk, "tool_call", None):
-            pass
-        else:
-            self._delta_count += 1
+        for tool_call in getattr(chunk, "tool_calls", None) or []:
+            if not isinstance(tool_call, dict):
+                continue
+            function = tool_call.get("function")
+            if not isinstance(function, dict):
+                continue
+            arguments = function.get("arguments")
+            if isinstance(arguments, str):
+                self._total_bytes += len(arguments.encode("utf-8"))
+
+        complete_tool_call = getattr(chunk, "tool_call", None)
+        arguments = getattr(complete_tool_call, "arguments", None)
+        if isinstance(arguments, str):
+            self._total_bytes += len(arguments.encode("utf-8"))
 
         if self._total_bytes > self._max_bytes:
             reason = f"runaway_guard:max_bytes_exceeded:{self._total_bytes}>{self._max_bytes}"

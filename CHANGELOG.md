@@ -4,6 +4,19 @@ All notable changes to Router-Maestro are documented here.
 
 ---
 
+## Unreleased
+
+### Fixes
+
+- **Beta-native Anthropic token validation.** Return an Anthropic
+  `invalid_request_error` instead of an internal 500 for malformed
+  `thinking.budget_tokens` values. The beta-native route now requires present
+  budgets and `max_tokens` to be positive, non-boolean integers and enforces
+  `budget_tokens < max_tokens`; omitted budgets continue to use the configured
+  server default.
+
+---
+
 ## v0.5.4 (2026-07-10)
 
 ### Fixes

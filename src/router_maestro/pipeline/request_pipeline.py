@@ -16,7 +16,7 @@ Usage in a route:
             yield error_event(abort)
             break
     ...
-    pipeline.finish(status=200)
+    pipeline.finish(wire_status=200, outcome=terminal_outcome)
 """
 
 from __future__ import annotations
@@ -27,6 +27,7 @@ from router_maestro.config import load_priorities_config
 from router_maestro.config.priorities import PrioritiesConfig
 from router_maestro.pipeline.leak_guard import LeakGuard
 from router_maestro.pipeline.runaway_guard import RunawayGuard
+from router_maestro.providers.base import TerminalOutcome
 from router_maestro.utils import get_logger
 from router_maestro.utils.audit import AuditTrace, get_trace_dir, is_tracing_enabled
 
@@ -37,7 +38,7 @@ class RequestPipeline:
     """Per-request processing pipeline.
 
     Encapsulates guards and audit tracing. Create one per request,
-    feed it stream chunks, and call finish() at the end.
+    feed it stream chunks, and call finish() with the wire status and outcome.
     """
 
     __slots__ = (
@@ -45,6 +46,9 @@ class RequestPipeline:
         "_audit",
         "_leak_guard",
         "_config",
+        "_finished",
+        "_outcome",
+        "_wire_status",
         "_request_id",
     )
 
@@ -61,6 +65,9 @@ class RequestPipeline:
         self._leak_guard = leak_guard
         self._audit = audit
         self._config = config
+        self._finished = False
+        self._outcome: TerminalOutcome | None = None
+        self._wire_status: int | None = None
 
     @classmethod
     def create(
@@ -112,6 +119,16 @@ class RequestPipeline:
     @property
     def leak_guard(self) -> LeakGuard | None:
         return self._leak_guard
+
+    @property
+    def outcome(self) -> TerminalOutcome | None:
+        """Return the semantic terminal outcome after finalization."""
+        return self._outcome
+
+    @property
+    def wire_status(self) -> int | None:
+        """Return the HTTP status recorded by the first finalization."""
+        return self._wire_status
 
     @property
     def beta_strip_patterns(self) -> list[str]:
@@ -184,8 +201,34 @@ class RequestPipeline:
             return self._leak_guard.check_invoke_at_finish()
         return None
 
-    def finish(self, status: int = 200, body_summary: str | None = None) -> None:
-        """Finalize the pipeline: flush audit trace."""
+    def finish(
+        self,
+        *,
+        wire_status: int,
+        outcome: TerminalOutcome,
+        body_summary: str | None = None,
+    ) -> None:
+        """Finalize once with the actual wire status and semantic outcome."""
+        if self._finished:
+            if self._wire_status != wire_status or self._outcome != outcome:
+                logger.error(
+                    "Request pipeline conflicting finalization: request_id=%s "
+                    "first_wire_status=%s second_wire_status=%s "
+                    "first_outcome=%r second_outcome=%r",
+                    self._request_id,
+                    self._wire_status,
+                    wire_status,
+                    self._outcome,
+                    outcome,
+                )
+            return
+        self._finished = True
+        self._wire_status = wire_status
+        self._outcome = outcome
         if self._audit:
-            self._audit.record_outbound(status, body_summary=body_summary)
+            self._audit.record_outbound(
+                wire_status,
+                body_summary=body_summary,
+                outcome=outcome,
+            )
             self._audit.flush()
