@@ -57,11 +57,16 @@ class TestModelEligibility:
             "gpt-5.2",
             "gpt-5.4",
             "gpt-5.5",
+            "gpt-5.6",
             "gpt-5-mini",
             "gpt-5.4-mini",
             "gpt-5.2-codex",
             "gpt-5.3-codex",
+            "gpt-5.6-codex",
+            "gpt-5.6-sol",
             "github-copilot/gpt-5.4",  # provider prefix
+            "github-copilot/gpt-5.6",
+            "github-copilot/gpt-5.6-sol",
         ],
     )
     def test_eligible(self, model):
@@ -75,7 +80,12 @@ class TestModelEligibility:
             "gemini-3.1-pro-preview",
             "gpt-4.1",
             "gpt-4o",
+            "gpt-5.60",
+            "gpt-5.60-sol",
+            "gpt-5.6sol",
             "github-copilot/claude-opus-4.6",
+            "github-copilot/gpt-5.60",
+            "github-copilot/gpt-5.6sol",
         ],
     )
     def test_ineligible(self, model):
