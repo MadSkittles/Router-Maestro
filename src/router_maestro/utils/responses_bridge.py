@@ -43,7 +43,9 @@ RESPONSES_ELIGIBLE_MODELS: frozenset[str] = frozenset(
         "gpt-5.4",
         "gpt-5.4-mini",
         "gpt-5.5",
-        "gpt-5.6",
+        "gpt-5.6-sol",
+        "gpt-5.6-terra",
+        "gpt-5.6-luna",
         "gpt-5-mini",
     }
 )
@@ -62,8 +64,7 @@ def _bare_model(model: str) -> str:
 def is_model_responses_eligible(model: str) -> bool:
     """Whether the upstream serves this model via /responses."""
     bare = _bare_model(model)
-    # Exact match in allowlist, or any gpt-5.6-* variant (hyphenated suffix).
-    return bare in RESPONSES_ELIGIBLE_MODELS or bare.startswith("gpt-5.6-")
+    return bare in RESPONSES_ELIGIBLE_MODELS
 
 
 def should_use_responses_for_chat(request: ChatRequest, provider_name: str) -> bool:
