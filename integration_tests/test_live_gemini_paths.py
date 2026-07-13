@@ -9,25 +9,39 @@ from integration_tests.conftest import (
     assert_gemini_usage,
     assert_http_success,
     assert_text_response,
-    bare_model,
     event_payloads,
-    gemini_compat_payload,
+    gemini_model_path,
     gemini_payload,
     gemini_tool_payload,
     parse_sse_events,
+    post_gemini_generate_content_compat_probe,
 )
 
 
-def test_gemini_generate_content(client: httpx.Client, chat_model: str):
-    """Gemini generateContent should route to GHC with a bare path model."""
-    response = client.post(
-        f"/api/gemini/v1beta/models/{bare_model(chat_model)}:generateContent",
-        json=gemini_compat_payload(),
+def _assert_gemini_stream_model_identity(payloads: list[dict], expected: str) -> None:
+    versions = [payload["modelVersion"] for payload in payloads if "modelVersion" in payload]
+    assert versions, f"Gemini stream never reported modelVersion: {payloads}"
+    usage_payloads = [payload for payload in payloads if payload.get("usageMetadata")]
+    if usage_payloads:
+        final_version = usage_payloads[-1].get("modelVersion")
+        assert final_version == expected, (
+            "Gemini stream final usage payload modelVersion mismatch: "
+            f"expected {expected!r}, got {final_version!r}"
+        )
+    mismatches = [version for version in versions if version != expected]
+    assert not mismatches, (
+        f"Gemini stream modelVersion mismatch: expected {expected!r}, got {mismatches!r}"
     )
+    assert usage_payloads, f"Gemini stream never reported final usage: {payloads}"
+
+
+def test_gemini_generate_content(client: httpx.Client, chat_model: str):
+    """Gemini generateContent should preserve the provider-qualified model id."""
+    response = post_gemini_generate_content_compat_probe(client, chat_model)
     assert_http_success(response)
     data = response.json()
 
-    assert data["modelVersion"] == bare_model(chat_model)
+    assert data["modelVersion"] == chat_model
     assert data["candidates"], data
     candidate = data["candidates"][0]
     assert candidate["finishReason"] in {"STOP", "MAX_TOKENS", "SAFETY", "OTHER"}
@@ -40,7 +54,7 @@ def test_gemini_stream_generate_content(client: httpx.Client, chat_model: str):
     """Gemini streamGenerateContent should emit text chunks and final usage."""
     with client.stream(
         "POST",
-        f"/api/gemini/v1beta/models/{bare_model(chat_model)}:streamGenerateContent",
+        f"/api/gemini/v1beta/models/{gemini_model_path(chat_model)}:streamGenerateContent",
         json=gemini_payload(),
         timeout=180.0,
     ) as response:
@@ -49,6 +63,7 @@ def test_gemini_stream_generate_content(client: httpx.Client, chat_model: str):
 
     payloads = event_payloads(events)
     assert payloads, events
+    _assert_gemini_stream_model_identity(payloads, chat_model)
     assert any(
         part.get("text")
         for payload in payloads
@@ -63,7 +78,7 @@ def test_gemini_stream_generate_content(client: httpx.Client, chat_model: str):
 def test_gemini_count_tokens(client: httpx.Client, chat_model: str):
     """Gemini countTokens should return a local token estimate."""
     response = client.post(
-        f"/api/gemini/v1beta/models/{bare_model(chat_model)}:countTokens",
+        f"/api/gemini/v1beta/models/{gemini_model_path(chat_model)}:countTokens",
         json=gemini_payload(),
     )
     assert_http_success(response)
@@ -73,7 +88,7 @@ def test_gemini_count_tokens(client: httpx.Client, chat_model: str):
 def test_gemini_forced_tool_call(client: httpx.Client, tool_model: str):
     """Gemini generateContent should translate forced tools to functionCall."""
     response = client.post(
-        f"/api/gemini/v1beta/models/{bare_model(tool_model)}:generateContent",
+        f"/api/gemini/v1beta/models/{gemini_model_path(tool_model)}:generateContent",
         json=gemini_tool_payload(),
     )
     assert_http_success(response)
@@ -87,7 +102,7 @@ def test_gemini_forced_tool_call_streaming(client: httpx.Client, tool_model: str
     """Gemini streaming should emit functionCall parts for forced tools."""
     with client.stream(
         "POST",
-        f"/api/gemini/v1beta/models/{bare_model(tool_model)}:streamGenerateContent",
+        f"/api/gemini/v1beta/models/{gemini_model_path(tool_model)}:streamGenerateContent",
         json=gemini_tool_payload(),
         timeout=180.0,
     ) as response:

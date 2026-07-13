@@ -96,35 +96,20 @@ def translate_anthropic_to_openai(request: AnthropicMessagesRequest) -> ChatRequ
         thinking_budget=thinking_budget,
         thinking_type=thinking_type,
         reasoning_effort=reasoning_effort,
+        top_p=request.top_p,
+        top_k=request.top_k,
+        stop_sequences=request.stop_sequences,
+        metadata=request.metadata,
+        service_tier=request.service_tier,
     )
 
 
 def _translate_model_name(model: str) -> str:
-    """Translate model name for compatibility.
+    """Preserve the client's model identity for Router resolution.
 
-    Claude Code uses model names like 'claude-sonnet-4-20250514' or 'claude-sonnet-4.5'.
-    The Copilot API uses names like 'claude-sonnet-4' or may accept the full version.
+    Undated names already act as family aliases. Dated/versioned names are concrete
+    catalog identities and must not be collapsed before capability-aware routing.
     """
-    # Handle Claude model version suffixes
-    # e.g., claude-sonnet-4-20250514 -> claude-sonnet-4
-    # e.g., claude-opus-4.5 -> claude-opus-4.5 (keep as-is, it's a valid model)
-    # e.g., claude-haiku-4-5-20251001 -> claude-haiku-4.5 (hyphenated version to dot)
-
-    # Pattern: claude-{tier}-{major}[-{date_suffix}]
-    # We want to strip date suffixes like -20250514 but keep version numbers like .5
-    match = re.match(r"^(claude-(?:sonnet|opus|haiku)-\d+(?:\.\d+)?)-\d{8}$", model)
-    if match:
-        return match.group(1)
-
-    # Handle hyphenated version numbers (e.g., claude-haiku-4-5-20251001 -> claude-haiku-4.5)
-    # Claude Code may send versions like "4-5" instead of "4.5"
-    match = re.match(r"^(claude-(?:sonnet|opus|haiku))-(\d+)-(\d+)-(\d{8})$", model)
-    if match:
-        tier = match.group(1)
-        major = match.group(2)
-        minor = match.group(3)
-        return f"{tier}-{major}.{minor}"
-
     return model
 
 

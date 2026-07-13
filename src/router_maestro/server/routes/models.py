@@ -5,6 +5,7 @@ import time
 from fastapi import APIRouter
 
 from router_maestro.routing import get_router
+from router_maestro.routing.model_ref import catalog_model_public_id
 from router_maestro.server.schemas import ModelList, ModelObject
 
 router = APIRouter()
@@ -19,7 +20,11 @@ async def list_models() -> ModelList:
     return ModelList(
         data=[
             ModelObject(
-                id=model.id,
+                id=catalog_model_public_id(
+                    model.provider,
+                    model.id,
+                    id_is_qualified=model.id_is_qualified,
+                ),
                 created=int(time.time()),
                 owned_by=model.provider,
                 max_prompt_tokens=model.max_prompt_tokens,

@@ -32,7 +32,7 @@ def test_anthropic_messages_non_streaming_api_prefix(
 
     assert data["type"] == "message"
     assert data["role"] == "assistant"
-    assert data["model"]
+    assert data["model"] == chat_model
     assert data["stop_reason"] in {
         "end_turn",
         "max_tokens",
@@ -58,6 +58,7 @@ def test_anthropic_messages_non_streaming_root_path(
 
     assert data["type"] == "message"
     assert data["role"] == "assistant"
+    assert data["model"] == chat_model
     assert_anthropic_usage(data["usage"])
 
 
@@ -83,6 +84,8 @@ def test_anthropic_messages_streaming_api_prefix(
     assert "content_block_delta" in event_names
     assert "message_delta" in event_names
     assert "message_stop" in event_names
+    message_start = next(payload for name, payload in events if name == "message_start")
+    assert message_start["message"]["model"] == chat_model
     assert any(
         payload.get("delta", {}).get("type") == "text_delta"
         for payload in payloads
@@ -109,6 +112,8 @@ def test_anthropic_messages_streaming_root_path(
     event_names = [name for name, _payload in events]
     assert "message_start" in event_names
     assert "message_stop" in event_names
+    message_start = next(payload for name, payload in events if name == "message_start")
+    assert message_start["message"]["model"] == chat_model
 
 
 def test_anthropic_count_tokens_api_prefix(client: httpx.Client, chat_model: str):

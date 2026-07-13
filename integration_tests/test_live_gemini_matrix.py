@@ -12,6 +12,7 @@ from integration_tests.conftest import (
     assert_text_response,
     bare_model,
     event_payloads,
+    gemini_model_path,
     gemini_reasoning_payload,
     parse_sse_events,
 )
@@ -41,7 +42,7 @@ def test_gemini_family_generate_content_matrix(
 
 def _post_gemini_non_stream(client: httpx.Client, model: str) -> dict[str, Any]:
     response = client.post(
-        f"/api/gemini/v1beta/models/{bare_model(model)}:generateContent",
+        f"/api/gemini/v1beta/models/{gemini_model_path(model)}:generateContent",
         json=gemini_reasoning_payload(),
         timeout=240.0,
     )
@@ -52,7 +53,7 @@ def _post_gemini_non_stream(client: httpx.Client, model: str) -> dict[str, Any]:
 def _post_gemini_stream(client: httpx.Client, model: str) -> dict[str, Any]:
     with client.stream(
         "POST",
-        f"/api/gemini/v1beta/models/{bare_model(model)}:streamGenerateContent",
+        f"/api/gemini/v1beta/models/{gemini_model_path(model)}:streamGenerateContent",
         json=gemini_reasoning_payload(),
         timeout=240.0,
     ) as response:

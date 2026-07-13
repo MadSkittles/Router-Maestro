@@ -2,12 +2,14 @@
 
 import asyncio
 from collections.abc import AsyncGenerator
+from dataclasses import replace
 
 from fastapi import APIRouter, HTTPException
 
 from router_maestro.providers import (
     ChatRequest,
     ProviderError,
+    RequestOptionError,
     ResponseStatus,
     TerminalOutcome,
     client_cancelled_outcome,
@@ -17,6 +19,8 @@ from router_maestro.providers import (
     unexpected_eof_outcome,
 )
 from router_maestro.routing import get_router
+from router_maestro.routing.model_ref import qualify_model_id
+from router_maestro.server.protocols import client_error_response, unrepresented_option_error
 from router_maestro.server.schemas.gemini import (
     GeminiCandidate,
     GeminiContent,
@@ -79,20 +83,7 @@ def _maybe_enable_responses_api(request: ChatRequest, model: str) -> ChatRequest
     """
     if not is_experimental_responses_enabled():
         return request
-    return ChatRequest(
-        model=request.model,
-        messages=request.messages,
-        temperature=request.temperature,
-        max_tokens=request.max_tokens,
-        stream=request.stream,
-        tools=request.tools,
-        tool_choice=request.tool_choice,
-        thinking_budget=request.thinking_budget,
-        thinking_type=request.thinking_type,
-        reasoning_effort=request.reasoning_effort,
-        use_responses_api=True,
-        extra=request.extra,
-    )
+    return replace(request, use_responses_api=True, extra={})
 
 
 # ============================================================================
@@ -100,7 +91,7 @@ def _maybe_enable_responses_api(request: ChatRequest, model: str) -> ChatRequest
 # ============================================================================
 
 
-@router.post("/api/gemini/v1beta/models/{model_method}:generateContent")
+@router.post("/api/gemini/v1beta/models/{model_method:path}:generateContent")
 async def generate_content(
     model_method: str,
     request: GeminiGenerateContentRequest,
@@ -108,6 +99,8 @@ async def generate_content(
     """Handle Gemini generateContent (non-streaming) requests."""
     model = _extract_model_from_path(model_method)
     logger.info("Received Gemini generateContent request: model=%s", model)
+    if error := unrepresented_option_error(request):
+        return client_error_response(error, "gemini")
 
     # Handle test model
     if model == "test":
@@ -118,13 +111,21 @@ async def generate_content(
     chat_request = _maybe_enable_responses_api(chat_request, model)
 
     try:
-        response, _provider_name = await model_router.chat_completion(chat_request)
+        response, provider_name = await model_router.chat_completion(chat_request)
         estimated_tokens = _estimate_input_tokens(request)
         return translate_openai_to_gemini(
-            response, model, input_tokens=estimated_tokens
+            response,
+            (
+                response.selected_model.qualified_id
+                if response.selected_model is not None
+                else qualify_model_id(provider_name, response.model)
+            ),
+            input_tokens=estimated_tokens,
         ).model_dump(by_alias=True, exclude_none=True)
     except ProviderError as e:
         logger.error("Gemini generateContent request failed: %s", e)
+        if isinstance(e, RequestOptionError):
+            return client_error_response(e, "gemini")
         raise HTTPException(
             status_code=e.status_code,
             detail={
@@ -142,7 +143,7 @@ async def generate_content(
 # ============================================================================
 
 
-@router.post("/api/gemini/v1beta/models/{model_method}:streamGenerateContent")
+@router.post("/api/gemini/v1beta/models/{model_method:path}:streamGenerateContent")
 async def stream_generate_content(
     model_method: str,
     request: GeminiGenerateContentRequest,
@@ -150,6 +151,8 @@ async def stream_generate_content(
     """Handle Gemini streamGenerateContent (streaming) requests."""
     model = _extract_model_from_path(model_method)
     logger.info("Received Gemini streamGenerateContent request: model=%s", model)
+    if error := unrepresented_option_error(request):
+        return client_error_response(error, "gemini")
 
     # Handle test model
     if model == "test":
@@ -167,25 +170,24 @@ async def stream_generate_content(
     # )
     # Enable streaming, preserving every other ChatRequest field so reasoning
     # metadata and the experimental flag survive into the provider call.
-    chat_request = ChatRequest(
-        model=chat_request.model,
-        messages=chat_request.messages,
-        temperature=chat_request.temperature,
-        max_tokens=chat_request.max_tokens,
-        stream=True,
-        tools=chat_request.tools,
-        tool_choice=chat_request.tool_choice,
-        thinking_budget=chat_request.thinking_budget,
-        thinking_type=chat_request.thinking_type,
-        reasoning_effort=chat_request.reasoning_effort,
-        use_responses_api=chat_request.use_responses_api,
-        extra=chat_request.extra,
-    )
+    chat_request = replace(chat_request, stream=True, extra={})
     chat_request = _maybe_enable_responses_api(chat_request, model)
 
     estimated_tokens = _estimate_input_tokens(request)
+    try:
+        prepared_plan = await model_router.prepare_chat_completion_stream(chat_request)
+    except ProviderError as e:
+        if isinstance(e, RequestOptionError):
+            return client_error_response(e, "gemini")
+        raise HTTPException(status_code=e.status_code, detail=str(e)) from e
     return sse_streaming_response(
-        _stream_response(model_router, chat_request, model, estimated_tokens),
+        _stream_response(
+            model_router,
+            chat_request,
+            model,
+            estimated_tokens,
+            prepared_plan=prepared_plan,
+        ),
     )
 
 
@@ -194,12 +196,14 @@ async def stream_generate_content(
 # ============================================================================
 
 
-@router.post("/api/gemini/v1beta/models/{model_method}:countTokens")
+@router.post("/api/gemini/v1beta/models/{model_method:path}:countTokens")
 async def count_tokens(
     model_method: str,
     request: GeminiGenerateContentRequest,
 ):
     """Handle Gemini countTokens requests."""
+    if error := unrepresented_option_error(request):
+        return client_error_response(error, "gemini")
     model = _extract_model_from_path(model_method)
     logger.info("Received Gemini countTokens request: model=%s", model)
 
@@ -280,13 +284,27 @@ async def _stream_response(
     request: ChatRequest,
     original_model: str,
     estimated_input_tokens: int = 0,
+    *,
+    prepared_plan=None,
 ) -> AsyncGenerator[str, None]:
     """Stream Gemini-format SSE response from the upstream provider."""
     pipeline = None
     stream = None
     terminal_outcome: TerminalOutcome | None = None
     try:
-        stream, _provider_name = await model_router.chat_completion_stream(request)
+        if prepared_plan is None:
+            stream, provider_name = await model_router.chat_completion_stream(request)
+        else:
+            stream, provider_name = await model_router.chat_completion_stream(
+                request,
+                prepared_plan=prepared_plan,
+            )
+        selected_model = getattr(stream, "selected_model", None)
+        response_model = (
+            selected_model.qualified_id
+            if selected_model is not None
+            else qualify_model_id(provider_name, original_model)
+        )
 
         # Unified pipeline: guards + audit
         from router_maestro.pipeline import RequestPipeline
@@ -335,7 +353,7 @@ async def _stream_response(
                 "choices": [
                     {
                         "delta": {
-                            "content": (chunk.content if chunk.content else None),
+                            "content": (chunk.content or chunk.refusal or None),
                             "tool_calls": chunk.tool_calls,
                         },
                         "finish_reason": (
@@ -348,7 +366,7 @@ async def _stream_response(
                 "usage": chunk.usage,
             }
 
-            gemini_event = translate_openai_chunk_to_gemini(openai_chunk, state, original_model)
+            gemini_event = translate_openai_chunk_to_gemini(openai_chunk, state, response_model)
             if gemini_event is not None:
                 yield (
                     "data: "

@@ -1,6 +1,8 @@
 """Model router with priority-based selection and fallback."""
 
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
+from copy import deepcopy
+from dataclasses import replace
 from typing import TypeVar
 
 from router_maestro.auth import ApiKeyCredential, AuthManager
@@ -21,17 +23,47 @@ from router_maestro.providers import (
     OpenAICompatibleProvider,
     OpenAIProvider,
     ProviderError,
+    ProviderFailureKind,
+    RequestOptionError,
     ResponsesRequest,
     ResponsesResponse,
     ResponsesStreamChunk,
+    ResponseStatus,
+)
+from router_maestro.routing.attempts import (
+    AttemptLedger,
+    AttemptRecord,
+    failure_allows_fallback,
+)
+from router_maestro.routing.capabilities import (
+    CapabilitySupport,
+    Feature,
+    ModelCapabilities,
+    Operation,
+    RequestFeatures,
+)
+from router_maestro.routing.model_ref import ModelRef
+from router_maestro.routing.route_plan import (
+    NoCompatibleRouteError,
+    PreparedChatCompletion,
+    PreparedChatStream,
+    PreparedResponsesStream,
+    RouteCandidate,
+    RoutePlan,
 )
 from router_maestro.utils import get_logger
 from router_maestro.utils.async_iterators import close_async_iterator
 from router_maestro.utils.cache import TTLCache
 from router_maestro.utils.model_match import (
+    AmbiguousModelMatchError,
     fuzzy_match_model,
 )
 from router_maestro.utils.model_sort import sort_models
+from router_maestro.utils.responses_bridge import (
+    chat_request_to_responses_request,
+    responses_chunk_to_chat_chunk,
+    responses_response_to_chat_response,
+)
 
 logger = get_logger("routing")
 
@@ -52,11 +84,17 @@ ChunkT = TypeVar("ChunkT")
 class _PrimedStream(AsyncIterator[ChunkT]):
     """Own a primed stream and close its inner iterator even before iteration."""
 
-    def __init__(self, first_chunk: ChunkT | None, stream: AsyncIterator[ChunkT]) -> None:
+    def __init__(
+        self,
+        first_chunk: ChunkT | None,
+        stream: AsyncIterator[ChunkT],
+        selected_model: ModelRef | None = None,
+    ) -> None:
         self._first_chunk = first_chunk
         self._has_first_chunk = first_chunk is not None
         self._stream = stream
         self._closed = False
+        self.selected_model = selected_model
 
     def __aiter__(self) -> "_PrimedStream[ChunkT]":
         return self
@@ -223,6 +261,22 @@ class Router:
             return parts[0], parts[1]
         return "", model_key
 
+    @staticmethod
+    def _is_qualified_cache_entry(
+        key: str,
+        entry: tuple[str, ModelInfo],
+    ) -> bool:
+        """Return whether ``key`` is this entry's canonical public identity."""
+        provider_name, model = entry
+        return key == ModelRef(provider_name, model.id).qualified_id
+
+    def _is_explicit_model_id(self, model_id: str) -> bool:
+        """Distinguish public provider prefixes from slashes inside upstream IDs."""
+        if "/" not in model_id:
+            return False
+        entry = self._models_cache.get(model_id)
+        return entry is None or self._is_qualified_cache_entry(model_id, entry)
+
     async def _ensure_models_cache(self) -> None:
         """Ensure the models cache is populated and not expired."""
         # First ensure providers config is fresh
@@ -244,16 +298,51 @@ class Router:
                     await provider.ensure_token()
                     models = await provider.list_models()
                     for model in models:
-                        # Store by model_id only (without provider prefix)
-                        # If same model_id exists in multiple providers, first one wins
-                        if model.id not in self._models_cache:
-                            self._models_cache[model.id] = (provider_name, model)
-                        # Also store with provider prefix for explicit lookups
-                        full_key = f"{provider_name}/{model.id}"
-                        self._models_cache[full_key] = (provider_name, model)
+                        try:
+                            ref = (
+                                ModelRef.from_qualified_catalog_id(provider_name, model.id)
+                                if model.id_is_qualified
+                                else ModelRef.from_catalog_id(provider_name, model.id)
+                            )
+                        except ValueError:
+                            logger.warning(
+                                "model_catalog_entry_skipped provider=%s reason=provider_mismatch",
+                                provider_name,
+                            )
+                            continue
+                        normalized_model = replace(
+                            model,
+                            id=ref.upstream_id,
+                            provider=provider_name,
+                            id_is_qualified=False,
+                        )
+                        entry = (provider_name, normalized_model)
+                        # Canonical public identities always win over convenience
+                        # aliases when their strings collide. This can happen when
+                        # an upstream ID itself contains '/', for example
+                        # ``meta-llama/llama-3``.
+                        existing = self._models_cache.get(ref.qualified_id)
+                        if existing is None or not self._is_qualified_cache_entry(
+                            ref.qualified_id,
+                            existing,
+                        ):
+                            self._models_cache[ref.qualified_id] = entry
+
+                        # Keep a bare alias only when it does not shadow a
+                        # canonical provider/model identity. Duplicate aliases
+                        # retain the first catalog entry; RoutePlan later chooses
+                        # the provider by configured priority and capability.
+                        alias_entry = self._models_cache.get(ref.upstream_id)
+                        if alias_entry is None:
+                            self._models_cache[ref.upstream_id] = entry
                     logger.debug("Cached %d models from %s", len(models), provider_name)
                 except ProviderError as e:
-                    logger.warning("Failed to load models from %s: %s", provider_name, e)
+                    logger.warning(
+                        "model_catalog_failed provider=%s kind=%s retryable=%s",
+                        provider_name,
+                        e.kind.value,
+                        str(e.retryable).lower(),
+                    )
                     continue
 
         self._models_cache_ttl.set(True)
@@ -275,10 +364,20 @@ class Router:
             matching_keys: list[str] = []
             if key in self._models_cache:
                 matching_keys.append(key)
-            # For bare model names, also apply to provider-qualified entries
-            if "/" not in key:
+            entry_for_key = self._models_cache.get(key)
+            key_is_qualified = entry_for_key is not None and self._is_qualified_cache_entry(
+                key,
+                entry_for_key,
+            )
+            # For bare model names (including namespaced upstream IDs), also
+            # apply to every provider-qualified entry for that upstream ID.
+            if not key_is_qualified:
                 for cache_key in self._models_cache:
-                    if "/" in cache_key and cache_key.split("/", 1)[1] == key:
+                    cache_entry = self._models_cache[cache_key]
+                    if (
+                        self._is_qualified_cache_entry(cache_key, cache_entry)
+                        and cache_entry[1].id == key
+                    ):
                         matching_keys.append(cache_key)
             for cache_key in matching_keys:
                 pname, info = self._models_cache[cache_key]
@@ -295,17 +394,23 @@ class Router:
         """Get ModelInfo for a model, or None if not found."""
         await self._ensure_models_cache()
         entry = self._models_cache.get(model_id)
-        if entry:
-            return entry[1]
+        if entry and (
+            not self._is_explicit_model_id(model_id)
+            or self._is_qualified_cache_entry(model_id, entry)
+        ):
+            return deepcopy(entry[1])
 
         if model_id in self._fuzzy_cache:
             matched_key = self._fuzzy_cache[model_id]
             if matched_key is None:
                 return None
             entry = self._models_cache.get(matched_key)
-            return entry[1] if entry else None
+            return deepcopy(entry[1]) if entry else None
 
-        matched_key = fuzzy_match_model(model_id, self._models_cache)
+        try:
+            matched_key = fuzzy_match_model(model_id, self._models_cache)
+        except AmbiguousModelMatchError:
+            return None
         self._fuzzy_cache[model_id] = matched_key
         if matched_key is None:
             return None
@@ -313,7 +418,7 @@ class Router:
         entry = self._models_cache.get(matched_key)
         if entry:
             logger.debug("Fuzzy matched model info '%s' -> '%s'", model_id, matched_key)
-            return entry[1]
+            return deepcopy(entry[1])
         return None
 
     async def _resolve_provider(self, model_id: str) -> tuple[str, str, BaseProvider]:
@@ -333,7 +438,12 @@ class Router:
             result = await self._get_auto_route_model()
             if not result:
                 logger.error("No models available for auto-routing")
-                raise ProviderError("No models available for auto-routing", status_code=503)
+                raise ProviderError(
+                    "No models available for auto-routing",
+                    status_code=503,
+                    retryable=True,
+                    kind=ProviderFailureKind.UPSTREAM_STATUS,
+                )
             return result
 
         # Explicit model specified - find in cache
@@ -343,8 +453,775 @@ class Router:
             raise ProviderError(
                 f"Model '{model_id}' not found in any provider",
                 status_code=404,
+                kind=ProviderFailureKind.CLIENT_REQUEST,
             )
         return result
+
+    def _model_capabilities(
+        self,
+        model: ModelInfo,
+        provider: BaseProvider,
+    ) -> ModelCapabilities:
+        ref = ModelRef(provider=model.provider, upstream_id=model.id)
+
+        def support(value: bool | None) -> CapabilitySupport:
+            if value is True:
+                return CapabilitySupport.SUPPORTED
+            if value is False:
+                return CapabilitySupport.UNSUPPORTED
+            return CapabilitySupport.UNKNOWN
+
+        operations = {
+            operation: (
+                support(model.operation_capabilities.get(operation.value))
+                if provider.capabilities.supports(operation)
+                else CapabilitySupport.UNSUPPORTED
+            )
+            for operation in Operation
+        }
+        feature_values: dict[str, bool] = dict(model.feature_capabilities)
+        if Feature.VISION.value not in feature_values and model.supports_vision:
+            feature_values[Feature.VISION.value] = True
+        if Feature.REASONING.value not in feature_values:
+            if model.reasoning_effort_values is not None:
+                feature_values[Feature.REASONING.value] = bool(model.reasoning_effort_values)
+            elif model.supports_thinking:
+                feature_values[Feature.REASONING.value] = True
+        features = {feature: support(feature_values.get(feature.value)) for feature in Feature}
+        return ModelCapabilities(
+            model=ref,
+            operations=operations,
+            features=features,
+            reasoning_effort_values=(
+                tuple(model.reasoning_effort_values)
+                if model.reasoning_effort_values is not None
+                else None
+            ),
+            max_output_tokens=model.max_output_tokens,
+        )
+
+    def _route_candidate(
+        self,
+        provider_name: str,
+        model_id: str,
+        provider: BaseProvider,
+        operation: Operation,
+        features: RequestFeatures,
+    ) -> RouteCandidate | None:
+        entry = self._models_cache.get(f"{provider_name}/{model_id}")
+        if entry is None:
+            return None
+        model = entry[1]
+        capabilities = self._model_capabilities(model, provider)
+        support_operation = operation
+        bridge_operation = provider.capabilities.bridge_for(operation)
+        if (
+            features.responses_bridge
+            and bridge_operation is not None
+            and capabilities.operation(bridge_operation) is CapabilitySupport.SUPPORTED
+        ):
+            support_operation = bridge_operation
+        return RouteCandidate(
+            model=capabilities.model,
+            provider=provider,
+            capabilities=capabilities,
+            evaluated_operation=support_operation,
+            evaluated_features=features,
+            support=capabilities.support_for(support_operation, features),
+            requested_operation=operation,
+        )
+
+    def _configured_candidates(
+        self,
+        operation: Operation,
+        features: RequestFeatures,
+    ) -> list[RouteCandidate]:
+        candidates: list[RouteCandidate] = []
+        seen: set[ModelRef] = set()
+        for key in self._get_priorities_config().priorities:
+            provider_name, model_id = self._parse_model_key(key)
+            provider = self.providers.get(provider_name)
+            if provider is None or not provider.is_authenticated():
+                continue
+            candidate = self._route_candidate(
+                provider_name,
+                model_id,
+                provider,
+                operation,
+                features,
+            )
+            if candidate is None or candidate.model in seen:
+                continue
+            seen.add(candidate.model)
+            candidates.append(candidate)
+        return candidates
+
+    def _all_available_candidates(
+        self,
+        operation: Operation,
+        features: RequestFeatures,
+    ) -> list[RouteCandidate]:
+        candidates: list[RouteCandidate] = []
+        seen: set[ModelRef] = set()
+        for key, entry in self._models_cache.items():
+            provider_name, model = entry
+            if not self._is_qualified_cache_entry(key, entry):
+                continue
+            provider = self.providers.get(provider_name)
+            if provider is None or not provider.is_authenticated():
+                continue
+            candidate = self._route_candidate(
+                provider_name,
+                model.id,
+                provider,
+                operation,
+                features,
+            )
+            if candidate is None or candidate.model in seen:
+                continue
+            seen.add(candidate.model)
+            candidates.append(candidate)
+        return candidates
+
+    @staticmethod
+    def _rank_compatible(candidates: list[RouteCandidate]) -> list[RouteCandidate]:
+        supported = [
+            candidate
+            for candidate in candidates
+            if candidate.support is CapabilitySupport.SUPPORTED
+        ]
+        unknown = [
+            candidate for candidate in candidates if candidate.support is CapabilitySupport.UNKNOWN
+        ]
+        return [*supported, *unknown]
+
+    def _explicit_fallback_candidates(
+        self,
+        primary: RouteCandidate,
+        operation: Operation,
+        features: RequestFeatures,
+    ) -> list[RouteCandidate]:
+        fallback_config = self._get_priorities_config().fallback
+        if fallback_config.strategy is FallbackStrategy.NONE:
+            return []
+        if fallback_config.strategy is FallbackStrategy.SAME_MODEL:
+            candidates: list[RouteCandidate] = []
+            for provider_name, provider in self.providers.items():
+                if provider_name == primary.model.provider or not provider.is_authenticated():
+                    continue
+                candidate = self._route_candidate(
+                    provider_name,
+                    primary.model.upstream_id,
+                    provider,
+                    operation,
+                    features,
+                )
+                if candidate is not None:
+                    candidates.append(candidate)
+            return self._rank_compatible(candidates)
+
+        configured = self._configured_candidates(operation, features)
+        configured_refs = [candidate.model for candidate in configured]
+        if primary.model in configured_refs:
+            configured = configured[configured_refs.index(primary.model) + 1 :]
+        return self._rank_compatible(
+            [candidate for candidate in configured if candidate.model != primary.model]
+        )
+
+    def _build_route_plan(
+        self,
+        operation: Operation,
+        features: RequestFeatures,
+        primary: RouteCandidate,
+        candidates: list[RouteCandidate],
+        *,
+        explicit: bool,
+    ) -> RoutePlan:
+        """Freeze the ordered fallback pool and retry limit in one route plan."""
+        fallback = self._get_priorities_config().fallback
+        if fallback.strategy is FallbackStrategy.NONE:
+            pool: tuple[RouteCandidate, ...] = ()
+            return RoutePlan(
+                operation,
+                features,
+                primary,
+                (),
+                explicit,
+                fallback_pool=pool,
+                max_fallback_attempts=0,
+            )
+        compatible = self._rank_compatible(
+            [candidate for candidate in candidates if candidate.model != primary.model]
+        )
+        if fallback.strategy is FallbackStrategy.SAME_MODEL:
+            compatible = [
+                candidate
+                for candidate in compatible
+                if candidate.model.upstream_id == primary.model.upstream_id
+            ]
+        pool = tuple(compatible)
+        return RoutePlan(
+            operation,
+            features,
+            primary,
+            pool[: fallback.maxRetries],
+            explicit,
+            fallback_pool=pool,
+            max_fallback_attempts=fallback.maxRetries,
+        )
+
+    def _same_model_catalog_candidates(
+        self,
+        primary: RouteCandidate,
+        operation: Operation,
+        features: RequestFeatures,
+        configured: list[RouteCandidate],
+    ) -> list[RouteCandidate]:
+        ordered: list[RouteCandidate] = []
+        seen: set[ModelRef] = {primary.model}
+        for candidate in [
+            *configured,
+            *self._all_available_candidates(operation, features),
+        ]:
+            if candidate.model in seen or candidate.model.upstream_id != primary.model.upstream_id:
+                continue
+            seen.add(candidate.model)
+            ordered.append(candidate)
+        return ordered
+
+    async def plan_route(
+        self,
+        model_id: str,
+        operation: Operation,
+        features: RequestFeatures | None = None,
+    ) -> RoutePlan:
+        """Resolve one immutable, capability-aware execution plan."""
+        try:
+            if model_id != AUTO_ROUTE_MODEL:
+                ModelRef("model-alias", model_id)
+        except (TypeError, ValueError) as error:
+            raise ProviderError(
+                "Model ID must be a non-empty provider/model identity",
+                status_code=400,
+                retryable=False,
+                kind=ProviderFailureKind.CLIENT_REQUEST,
+                cause=error,
+            ) from error
+        await self._ensure_models_cache()
+        features = features or RequestFeatures()
+        explicit = self._is_explicit_model_id(model_id)
+        if explicit:
+            try:
+                provider_name, upstream_id = self._parse_model_key(model_id)
+                ModelRef(provider_name, upstream_id)
+            except (TypeError, ValueError) as error:
+                raise ProviderError(
+                    "Model ID must be a non-empty provider/model identity",
+                    status_code=400,
+                    retryable=False,
+                    kind=ProviderFailureKind.CLIENT_REQUEST,
+                    cause=error,
+                ) from error
+
+        if model_id != AUTO_ROUTE_MODEL and not explicit:
+            if model_id in self._models_cache:
+                upstream_id = model_id
+            else:
+                try:
+                    alias_key = fuzzy_match_model(model_id, self._models_cache)
+                except AmbiguousModelMatchError as error:
+                    raise ProviderError(
+                        f"Model alias '{model_id}' is ambiguous; use provider/model",
+                        status_code=400,
+                        kind=ProviderFailureKind.CLIENT_REQUEST,
+                        cause=error,
+                    ) from error
+                if alias_key is not None:
+                    # A fuzzy result may be a raw namespaced upstream alias
+                    # (for example ``meta-llama/llama-3``). The cache entry owns
+                    # its provenance; parsing the key would mistake the raw
+                    # namespace for a provider prefix and lose part of the ID.
+                    upstream_id = self._models_cache[alias_key][1].id
+                else:
+                    raise ProviderError(
+                        f"Model alias '{model_id}' not found in any provider",
+                        status_code=404,
+                        kind=ProviderFailureKind.CLIENT_REQUEST,
+                    )
+            ordered_alias_candidates = [
+                *self._configured_candidates(operation, features),
+                *self._all_available_candidates(operation, features),
+            ]
+            alias_candidates: list[RouteCandidate] = []
+            seen_aliases: set[ModelRef] = set()
+            for candidate in ordered_alias_candidates:
+                if candidate.model.upstream_id != upstream_id or candidate.model in seen_aliases:
+                    continue
+                seen_aliases.add(candidate.model)
+                alias_candidates.append(candidate)
+            ranked_aliases = self._rank_compatible(alias_candidates)
+            if ranked_aliases:
+                primary = ranked_aliases[0]
+                return self._build_route_plan(
+                    operation,
+                    features,
+                    primary,
+                    ranked_aliases[1:],
+                    explicit=False,
+                )
+            raise NoCompatibleRouteError(
+                f"No model matching alias '{model_id}' supports {operation.value}"
+            )
+
+        if explicit:
+            provider_name, upstream_id, provider = await self._resolve_provider(model_id)
+            primary = self._route_candidate(
+                provider_name,
+                upstream_id,
+                provider,
+                operation,
+                features,
+            )
+            if primary is None:
+                raise ProviderError(
+                    f"Model '{model_id}' not found",
+                    status_code=404,
+                    kind=ProviderFailureKind.CLIENT_REQUEST,
+                )
+            return self._build_route_plan(
+                operation,
+                features,
+                primary,
+                self._explicit_fallback_candidates(primary, operation, features),
+                explicit=True,
+            )
+
+        configured = self._configured_candidates(operation, features)
+        if not configured:
+            configured = self._all_available_candidates(operation, features)
+        ranked = self._rank_compatible(configured)
+        if not ranked:
+            raise NoCompatibleRouteError(f"No configured model supports {operation.value}")
+        primary = ranked[0]
+        fallback_candidates = ranked[1:]
+        if self._get_priorities_config().fallback.strategy is FallbackStrategy.SAME_MODEL:
+            fallback_candidates = self._same_model_catalog_candidates(
+                primary,
+                operation,
+                features,
+                fallback_candidates,
+            )
+        return self._build_route_plan(
+            operation,
+            features,
+            primary,
+            fallback_candidates,
+            explicit=False,
+        )
+
+    @staticmethod
+    def _validate_plan_primary(plan: RoutePlan) -> None:
+        if plan.primary.support is CapabilitySupport.UNSUPPORTED:
+            unsupported_feature = next(
+                (
+                    feature
+                    for feature in plan.features.required()
+                    if plan.primary.capabilities.feature(feature) is CapabilitySupport.UNSUPPORTED
+                ),
+                None,
+            )
+            if unsupported_feature is not None:
+                parameter = unsupported_feature.value
+                if unsupported_feature is Feature.REASONING:
+                    parameter = plan.features.reasoning_parameter or parameter
+                elif unsupported_feature is Feature.PARALLEL_TOOLS:
+                    parameter = "parallel_tool_calls"
+                raise RequestOptionError(
+                    f"Model '{plan.primary.model.qualified_id}' does not support "
+                    f"the requested {unsupported_feature.value} feature",
+                    provider=plan.primary.model.provider,
+                    model=plan.primary.model.upstream_id,
+                    parameter=parameter,
+                )
+            raise RequestOptionError(
+                f"Model '{plan.primary.model.qualified_id}' does not support "
+                f"{plan.operation.value}",
+                provider=plan.primary.model.provider,
+                model=plan.primary.model.upstream_id,
+                parameter=plan.operation.value,
+            )
+
+    def _plan_execution_candidates(
+        self,
+        plan: RoutePlan,
+        fallback: bool,
+    ) -> tuple[RouteCandidate, ...]:
+        self._validate_plan_primary(plan)
+        if not fallback:
+            return (plan.primary,)
+        return plan.candidates
+
+    def _chat_request_for_candidate(
+        self,
+        request: ChatRequest,
+        candidate: RouteCandidate,
+    ) -> ChatRequest | ResponsesRequest:
+        """Build the candidate request selected by frozen operation provenance."""
+        chat_request = self._create_request_with_model(request, candidate.model.upstream_id)
+        if candidate.evaluated_operation in {
+            Operation.RESPONSES,
+            Operation.RESPONSES_STREAM,
+        }:
+            return chat_request_to_responses_request(chat_request)
+        return replace(chat_request, use_responses_api=False, extra={})
+
+    def _validate_chat_candidate(
+        self,
+        request: ChatRequest,
+        candidate: RouteCandidate,
+        *,
+        stream: bool,
+    ) -> None:
+        candidate_request = self._chat_request_for_candidate(request, candidate)
+        if isinstance(candidate_request, ResponsesRequest):
+            candidate.provider.validate_responses_request(candidate_request)
+            return
+        candidate.provider.validate_chat_request(candidate_request, stream=stream)
+
+    async def _execute_chat_plan_nonstream(
+        self,
+        plan: RoutePlan,
+        request: ChatRequest,
+        fallback: bool,
+        request_for_candidate: Callable[[ModelRef], ChatRequest] | None = None,
+    ) -> tuple[ChatResponse, str]:
+        """Execute a Chat plan using each candidate's frozen transport operation."""
+        candidates = self._plan_execution_candidates(plan, fallback)
+
+        async def attempt(candidate: RouteCandidate) -> ChatResponse:
+            source_request = (
+                request_for_candidate(candidate.model) if request_for_candidate else request
+            )
+            candidate_request = self._chat_request_for_candidate(source_request, candidate)
+            await candidate.provider.ensure_token()
+            if isinstance(candidate_request, ResponsesRequest):
+                response = await candidate.provider.responses_completion(candidate_request)
+                return responses_response_to_chat_response(
+                    response,
+                    candidate.model.upstream_id,
+                    provider=candidate.model.provider,
+                )
+            return await candidate.provider.chat_completion(candidate_request)
+
+        return await self._execute_attempts(plan, candidates, attempt)
+
+    async def _execute_chat_plan_stream(
+        self,
+        plan: RoutePlan,
+        request: ChatRequest,
+        fallback: bool,
+        request_for_candidate: Callable[[ModelRef], ChatRequest] | None = None,
+    ) -> tuple[AsyncIterator[ChatStreamChunk], str]:
+        """Open a Chat stream using each candidate's frozen transport operation."""
+
+        def open_stream(
+            provider: BaseProvider,
+            candidate_request: ChatRequest | ResponsesRequest,
+        ) -> AsyncIterator[ChatStreamChunk]:
+            if isinstance(candidate_request, ChatRequest):
+                return provider.chat_completion_stream(candidate_request)
+
+            async def bridge() -> AsyncIterator[ChatStreamChunk]:
+                stream = provider.responses_completion_stream(candidate_request)
+                emitted_tool_call = False
+                try:
+                    async for response_chunk in stream:
+                        if response_chunk.tool_call is not None:
+                            emitted_tool_call = True
+                        chat_chunk = responses_chunk_to_chat_chunk(response_chunk)
+                        terminal_outcome = response_chunk.terminal_outcome
+                        can_upgrade_tool_finish = terminal_outcome is None or (
+                            terminal_outcome.response_status is ResponseStatus.COMPLETED
+                        )
+                        if (
+                            emitted_tool_call
+                            and can_upgrade_tool_finish
+                            and chat_chunk.finish_reason == "stop"
+                        ):
+                            chat_chunk.finish_reason = "tool_calls"
+                        yield chat_chunk
+                finally:
+                    await close_async_iterator(stream)
+
+            return bridge()
+
+        candidates = self._plan_execution_candidates(plan, fallback)
+
+        async def attempt(candidate: RouteCandidate) -> AsyncIterator[ChatStreamChunk]:
+            source_request = (
+                request_for_candidate(candidate.model) if request_for_candidate else request
+            )
+            candidate_request = self._chat_request_for_candidate(source_request, candidate)
+            await candidate.provider.ensure_token()
+            stream = open_stream(candidate.provider, candidate_request)
+            wrapped = self._wrap_stream_errors(
+                stream,
+                candidate.model.provider,
+                lambda message: message,
+            )
+            first_chunk = await anext(wrapped, None)
+            if first_chunk is None:
+                cause = ValueError("upstream stream ended before a canonical chunk")
+                raise ProviderError(
+                    f"{candidate.model.provider} returned an empty upstream stream",
+                    status_code=502,
+                    retryable=True,
+                    kind=ProviderFailureKind.UPSTREAM_PROTOCOL,
+                    upstream_status_code=200,
+                    provider=candidate.model.provider,
+                    model=candidate.model.upstream_id,
+                    cause=cause,
+                ) from cause
+            return self._chain_first_chunk(
+                first_chunk,
+                wrapped,
+                selected_model=candidate.model,
+            )
+
+        return await self._execute_attempts(plan, candidates, attempt)
+
+    async def _execute_plan_nonstream(
+        self,
+        plan: RoutePlan,
+        request: RequestT,
+        fallback: bool,
+        build_request: Callable[[RequestT, str], RequestT],
+        call: Callable[[BaseProvider, RequestT], Awaitable[ResponseT]],
+    ) -> tuple[ResponseT, str]:
+        """Execute a non-stream request with the shared pre-commit attempt policy."""
+        candidates = self._plan_execution_candidates(plan, fallback)
+
+        async def attempt(candidate: RouteCandidate) -> ResponseT:
+            candidate_request = build_request(request, candidate.model.upstream_id)
+            await candidate.provider.ensure_token()
+            return await call(candidate.provider, candidate_request)
+
+        return await self._execute_attempts(
+            plan,
+            candidates,
+            attempt,
+        )
+
+    @staticmethod
+    async def execute_plan_nonstream(
+        plan: RoutePlan,
+        call: Callable[[RouteCandidate], Awaitable[ResponseT]],
+        *,
+        fallback: bool = True,
+    ) -> tuple[ResponseT, str]:
+        """Execute an existing plan while keeping protocol transport at the caller."""
+        Router._validate_plan_primary(plan)
+        candidates = plan.candidates if fallback else (plan.primary,)
+        return await Router._execute_attempts(plan, candidates, call)
+
+    @staticmethod
+    async def execute_plan_stream(
+        plan: RoutePlan,
+        call: Callable[[RouteCandidate], AsyncIterator[ChunkT]],
+        *,
+        fallback: bool = True,
+        log_prefix: str = "",
+    ) -> tuple[AsyncIterator[ChunkT], str]:
+        """Prime a route-owned stream before selecting one candidate."""
+        Router._validate_plan_primary(plan)
+        candidates = plan.candidates if fallback else (plan.primary,)
+
+        async def attempt(candidate: RouteCandidate) -> AsyncIterator[ChunkT]:
+            stream = call(candidate)
+            wrapped = Router._wrap_stream_errors(
+                stream,
+                candidate.model.provider,
+                lambda message: f"{log_prefix} {message}".strip(),
+            )
+            first_chunk = await anext(wrapped, None)
+            if first_chunk is None:
+                cause = ValueError("upstream stream ended before a canonical frame")
+                raise ProviderError(
+                    f"{candidate.model.provider} returned an empty upstream stream",
+                    status_code=502,
+                    retryable=True,
+                    kind=ProviderFailureKind.UPSTREAM_PROTOCOL,
+                    upstream_status_code=200,
+                    provider=candidate.model.provider,
+                    model=candidate.model.upstream_id,
+                    cause=cause,
+                ) from cause
+            return _PrimedStream(first_chunk, wrapped, selected_model=candidate.model)
+
+        return await Router._execute_attempts(
+            plan,
+            candidates,
+            attempt,
+            log_prefix,
+            success_event="route_attempt_selected",
+        )
+
+    async def _execute_plan_stream(
+        self,
+        plan: RoutePlan,
+        request: RequestT,
+        fallback: bool,
+        build_request: Callable[[RequestT, str], RequestT],
+        call: Callable[[BaseProvider, RequestT], AsyncIterator[ChunkT]],
+        log_prefix: str,
+    ) -> tuple[AsyncIterator[ChunkT], str]:
+        """Open and prime a stream with the shared pre-commit attempt policy."""
+        candidates = self._plan_execution_candidates(plan, fallback)
+        return await self._execute_stream_attempts(
+            plan=plan,
+            candidates=candidates,
+            request=request,
+            build_request=build_request,
+            call_stream=call,
+            log_prefix=log_prefix,
+        )
+
+    @staticmethod
+    async def _execute_attempts(
+        plan: RoutePlan,
+        candidates: tuple[RouteCandidate, ...],
+        attempt: Callable[[RouteCandidate], Awaitable[ResponseT]],
+        log_prefix: str = "",
+        success_event: str | None = None,
+    ) -> tuple[ResponseT, str]:
+        """Execute planned candidates using one failure and stop policy."""
+        if not candidates:
+            raise ProviderError(
+                "No route candidates available",
+                status_code=503,
+                retryable=True,
+                kind=ProviderFailureKind.UPSTREAM_STATUS,
+            )
+
+        ledger = AttemptLedger()
+        prefix = f"{log_prefix} " if log_prefix else ""
+        for index, candidate in enumerate(candidates, start=1):
+            try:
+                result = await attempt(candidate)
+            except ProviderError as error:
+                record = AttemptRecord.from_failure(candidate, plan.operation, error)
+                ledger.record(record)
+                allows_fallback = failure_allows_fallback(plan, candidate, error)
+                has_next = index < len(candidates)
+                should_fallback = allows_fallback and has_next
+                if should_fallback:
+                    decision = "fallback"
+                elif allows_fallback:
+                    decision = "exhausted"
+                else:
+                    decision = "stop"
+                logger.warning(
+                    "%sroute_attempt_failed attempt=%d provider=%s model=%s "
+                    "operation=%s kind=%s downstream_status=%d upstream_status=%s "
+                    "retryable=%s decision=%s",
+                    prefix,
+                    index,
+                    record.provider,
+                    record.model.qualified_id,
+                    record.operation.value,
+                    record.failure_kind.value,
+                    record.downstream_status_code,
+                    record.upstream_status_code,
+                    str(record.retryable).lower(),
+                    decision,
+                )
+                if should_fallback:
+                    continue
+                routed_error = error.with_attempts(ledger.snapshot())
+                raise routed_error from error
+
+            event = success_event or (
+                "route_attempt_selected"
+                if plan.operation in {Operation.CHAT_STREAM, Operation.RESPONSES_STREAM}
+                else "route_attempt_succeeded"
+            )
+            logger.info(
+                "%s%s attempt=%d provider=%s model=%s operation=%s",
+                prefix,
+                event,
+                index,
+                candidate.model.provider,
+                candidate.model.qualified_id,
+                plan.operation.value,
+            )
+            if isinstance(result, (ChatResponse, ResponsesResponse)):
+                result = replace(result, selected_model=candidate.model)
+            return result, candidate.model.provider
+
+        raise AssertionError("route attempt loop ended without a result")
+
+    async def _execute_stream_attempts(
+        self,
+        plan: RoutePlan,
+        candidates: tuple[RouteCandidate, ...],
+        request: RequestT,
+        build_request: Callable[[RequestT, str], RequestT],
+        call_stream: Callable[[BaseProvider, RequestT], AsyncIterator[ChunkT]],
+        log_prefix: str,
+    ) -> tuple[AsyncIterator[ChunkT], str]:
+        """Prime each candidate before committing the selected stream."""
+
+        async def attempt(candidate: RouteCandidate) -> AsyncIterator[ChunkT]:
+            candidate_request = build_request(request, candidate.model.upstream_id)
+            await candidate.provider.ensure_token()
+            stream = call_stream(candidate.provider, candidate_request)
+            wrapped = self._wrap_stream_errors(
+                stream,
+                candidate.model.provider,
+                lambda message: f"{log_prefix} {message}".strip(),
+            )
+            first_chunk = await anext(wrapped, None)
+            if first_chunk is None:
+                cause = ValueError("upstream stream ended before a canonical chunk")
+                raise ProviderError(
+                    f"{candidate.model.provider} returned an empty upstream stream",
+                    status_code=502,
+                    retryable=True,
+                    kind=ProviderFailureKind.UPSTREAM_PROTOCOL,
+                    upstream_status_code=200,
+                    provider=candidate.model.provider,
+                    model=candidate.model.upstream_id,
+                    cause=cause,
+                ) from cause
+            return self._chain_first_chunk(
+                first_chunk,
+                wrapped,
+                selected_model=candidate.model,
+            )
+
+        return await self._execute_attempts(
+            plan,
+            candidates,
+            attempt,
+            log_prefix,
+        )
+
+    async def _plan_completion_route(
+        self,
+        model_id: str,
+        operation: Operation,
+        features: RequestFeatures,
+    ) -> RoutePlan:
+        try:
+            return await self.plan_route(model_id, operation, features)
+        except NoCompatibleRouteError as error:
+            raise ProviderError(
+                str(error),
+                status_code=400,
+                retryable=False,
+                kind=ProviderFailureKind.CLIENT_REQUEST,
+                cause=error,
+            ) from error
 
     def _create_request_with_model(
         self, original_request: ChatRequest, model_id: str
@@ -358,19 +1235,17 @@ class Router:
         Returns:
             New ChatRequest with updated model
         """
-        return ChatRequest(
+        return replace(
+            original_request,
             model=model_id,
-            messages=original_request.messages,
-            temperature=original_request.temperature,
-            max_tokens=original_request.max_tokens,
-            stream=original_request.stream,
-            tools=original_request.tools,
-            tool_choice=original_request.tool_choice,
-            thinking_budget=original_request.thinking_budget,
-            thinking_type=original_request.thinking_type,
-            reasoning_effort=original_request.reasoning_effort,
-            use_responses_api=original_request.use_responses_api,
-            extra=original_request.extra,
+            messages=deepcopy(original_request.messages),
+            tools=deepcopy(original_request.tools),
+            tool_choice=deepcopy(original_request.tool_choice),
+            stop=deepcopy(original_request.stop),
+            stop_sequences=deepcopy(original_request.stop_sequences),
+            metadata=deepcopy(original_request.metadata),
+            provider_extensions=deepcopy(original_request.provider_extensions),
+            extra={},
         )
 
     async def _get_auto_route_model(self) -> tuple[str, str, BaseProvider] | None:
@@ -394,12 +1269,14 @@ class Router:
                         return provider_name, model_id, provider
 
         # Fallback: return first available model from any provider
-        for model_id, (provider_name, _) in self._models_cache.items():
-            if "/" not in model_id:  # Skip full keys, only use simple model_ids
-                provider = self.providers.get(provider_name)
-                if provider and provider.is_authenticated():
-                    logger.debug("Auto-route fallback: %s/%s", provider_name, model_id)
-                    return provider_name, model_id, provider
+        for key, entry in self._models_cache.items():
+            provider_name, model = entry
+            if not self._is_qualified_cache_entry(key, entry):
+                continue
+            provider = self.providers.get(provider_name)
+            if provider and provider.is_authenticated():
+                logger.debug("Auto-route fallback: %s", key)
+                return provider_name, model.id, provider
 
         return None
 
@@ -417,7 +1294,7 @@ class Router:
         await self._ensure_models_cache()
 
         # If model_id includes provider prefix (e.g., "github-copilot/gpt-4o")
-        if "/" in model_id:
+        if self._is_explicit_model_id(model_id):
             provider_name, actual_model_id = self._parse_model_key(model_id)
             if provider_name in self.providers:
                 provider = self.providers[provider_name]
@@ -429,10 +1306,10 @@ class Router:
 
         # Simple model_id (e.g., "gpt-4o") - look up in cache
         if model_id in self._models_cache:
-            provider_name, _ = self._models_cache[model_id]
+            provider_name, model = self._models_cache[model_id]
             provider = self.providers.get(provider_name)
             if provider and provider.is_authenticated():
-                return provider_name, model_id, provider
+                return provider_name, model.id, provider
 
         # Check fuzzy cache first
         if model_id in self._fuzzy_cache:
@@ -444,10 +1321,18 @@ class Router:
                 provider = self.providers.get(provider_name)
                 if provider and provider.is_authenticated():
                     logger.debug("Fuzzy cache hit: '%s' -> '%s'", model_id, matched_key)
-                    return provider_name, self._parse_model_key(matched_key)[1], provider
+                    return provider_name, self._models_cache[matched_key][1].id, provider
 
         # Fuzzy matching fallback
-        matched_key = fuzzy_match_model(model_id, self._models_cache)
+        try:
+            matched_key = fuzzy_match_model(model_id, self._models_cache)
+        except AmbiguousModelMatchError as error:
+            raise ProviderError(
+                f"Model alias '{model_id}' is ambiguous; use provider/model",
+                status_code=400,
+                kind=ProviderFailureKind.CLIENT_REQUEST,
+                cause=error,
+            ) from error
         self._fuzzy_cache[model_id] = matched_key  # Cache result (including None)
         if matched_key is not None:
             provider_name, _ = self._models_cache[matched_key]
@@ -459,90 +1344,16 @@ class Router:
                     matched_key,
                     provider_name,
                 )
-                return provider_name, self._parse_model_key(matched_key)[1], provider
+                return provider_name, self._models_cache[matched_key][1].id, provider
 
         return None
-
-    def _get_fallback_candidates(
-        self,
-        current_provider: str,
-        current_model: str,
-        strategy: FallbackStrategy,
-    ) -> list[tuple[str, str, BaseProvider]]:
-        """Get ordered list of fallback candidates based on strategy.
-
-        Args:
-            current_provider: The provider that just failed
-            current_model: The model that was requested
-            strategy: The fallback strategy to use
-
-        Returns:
-            List of (provider_name, model_id, provider) tuples to try
-        """
-        if strategy == FallbackStrategy.NONE:
-            return []
-
-        candidates: list[tuple[str, str, BaseProvider]] = []
-        current_key = f"{current_provider}/{current_model}"
-
-        if strategy == FallbackStrategy.PRIORITY:
-            # Follow the priorities list order, starting after current
-            priorities_config = self._get_priorities_config()
-            found_current = False
-
-            for priority_key in priorities_config.priorities:
-                if priority_key == current_key:
-                    found_current = True
-                    continue
-
-                if found_current:
-                    provider_name, model_id = self._parse_model_key(priority_key)
-                    if provider_name in self.providers:
-                        provider = self.providers[provider_name]
-                        if provider.is_authenticated():
-                            if priority_key in self._models_cache:
-                                candidates.append((provider_name, model_id, provider))
-
-        elif strategy == FallbackStrategy.SAME_MODEL:
-            # Only try other providers that have the same model
-            for other_name, other_provider in self.providers.items():
-                if other_name == current_provider:
-                    continue
-                if not other_provider.is_authenticated():
-                    continue
-                other_key = f"{other_name}/{current_model}"
-                if other_key in self._models_cache:
-                    candidates.append((other_name, current_model, other_provider))
-
-        return candidates
-
-    async def _execute_with_fallback(
-        self,
-        request: ChatRequest,
-        provider_name: str,
-        actual_model_id: str,
-        provider: BaseProvider,
-        fallback: bool,
-        is_stream: bool,
-    ) -> tuple[ChatResponse | AsyncIterator[ChatStreamChunk], str]:
-        """Execute request with fallback support."""
-        return await self._execute_with_fallback_common(
-            request=request,
-            provider_name=provider_name,
-            actual_model_id=actual_model_id,
-            provider=provider,
-            fallback=fallback,
-            is_stream=is_stream,
-            build_request=self._create_request_with_model,
-            call_nonstream=lambda prov, req: prov.chat_completion(req),
-            call_stream=lambda prov, req: prov.chat_completion_stream(req),
-            log_prefix="",
-        )
 
     async def chat_completion(
         self,
         request: ChatRequest,
         fallback: bool = True,
+        *,
+        prepared_plan: PreparedChatCompletion | None = None,
     ) -> tuple[ChatResponse, str]:
         """Route a chat completion request.
 
@@ -556,18 +1367,147 @@ class Router:
         Raises:
             ProviderError: If model not found or all providers fail
         """
-        provider_name, actual_model_id, provider = await self._resolve_provider(request.model)
-        logger.info("Routing request to %s/%s", provider_name, actual_model_id)
-
-        result, used_provider = await self._execute_with_fallback(
-            request, provider_name, actual_model_id, provider, fallback, is_stream=False
+        request = deepcopy(request)
+        prepared = prepared_plan or await self.prepare_chat_completion(
+            request,
+            fallback=fallback,
         )
-        return result, used_provider  # type: ignore
+        if not isinstance(prepared, PreparedChatCompletion) or not prepared.matches(request):
+            raise ProviderError(
+                "Prepared Chat completion does not match the current request",
+                status_code=400,
+                retryable=False,
+                kind=ProviderFailureKind.CLIENT_REQUEST,
+            )
+        plan = prepared.plan
+        execution_request = prepared.request_for_execution()
+        logger.info("Routing request to %s", plan.primary.model.qualified_id)
+        result, used_provider = await self._execute_chat_plan_nonstream(
+            plan,
+            execution_request,
+            fallback,
+            prepared.request_for_execution,
+        )
+        return result, used_provider
+
+    async def plan_chat_completion(
+        self,
+        request: ChatRequest,
+        *,
+        stream: bool,
+    ) -> RoutePlan:
+        """Plan Chat once so a boundary can preprocess against the same candidate."""
+        request = deepcopy(request)
+        operation = Operation.CHAT_STREAM if stream else Operation.CHAT
+        return await self._plan_completion_route(
+            request.model,
+            operation,
+            RequestFeatures.for_chat(request),
+        )
+
+    def prepare_planned_chat_completion(
+        self,
+        plan: RoutePlan,
+        request: ChatRequest,
+        *,
+        fallback: bool = True,
+        candidate_requests: Mapping[ModelRef, ChatRequest] | None = None,
+    ) -> PreparedChatCompletion | PreparedChatStream:
+        """Prevalidate and bind a transformed request to its existing Chat plan."""
+        request = deepcopy(request)
+        candidate_requests = {
+            model: deepcopy(candidate_request)
+            for model, candidate_request in (candidate_requests or {}).items()
+        }
+        if candidate_requests and candidate_requests.get(plan.primary.model) != request:
+            raise ProviderError(
+                "Primary candidate request does not match the planned Chat request",
+                status_code=400,
+                retryable=False,
+                kind=ProviderFailureKind.CLIENT_REQUEST,
+            )
+
+        def request_for(candidate: RouteCandidate) -> ChatRequest:
+            return candidate_requests.get(candidate.model, request)
+
+        expected_operation = Operation.CHAT_STREAM if request.stream else Operation.CHAT
+        if plan.operation is not expected_operation:
+            raise ProviderError(
+                "Planned Chat operation does not match the current request",
+                status_code=400,
+                retryable=False,
+                kind=ProviderFailureKind.CLIENT_REQUEST,
+            )
+
+        def validate_client_features(
+            candidate: RouteCandidate,
+            candidate_request: ChatRequest,
+        ) -> None:
+            transformed_features = RequestFeatures.for_chat(candidate_request)
+            client_feature_drift = (
+                transformed_features.tools != plan.features.tools
+                or transformed_features.vision != plan.features.vision
+                or transformed_features.parallel_tools != plan.features.parallel_tools
+                or transformed_features.responses_bridge != plan.features.responses_bridge
+            )
+            if client_feature_drift:
+                raise ProviderError(
+                    "Planned Chat features do not match the current request",
+                    status_code=400,
+                    retryable=False,
+                    kind=ProviderFailureKind.CLIENT_REQUEST,
+                )
+
+            reasoning_drift = plan.features.reasoning and not transformed_features.reasoning
+            unscoped_reasoning_enhancement = (
+                transformed_features.reasoning
+                and not plan.features.reasoning
+                and candidate.model not in candidate_requests
+            )
+            if reasoning_drift or unscoped_reasoning_enhancement:
+                raise RequestOptionError(
+                    "Planned Chat features do not match the current request",
+                    provider=candidate.model.provider,
+                    model=candidate.model.upstream_id,
+                    parameter=plan.features.reasoning_parameter or "reasoning",
+                )
+
+        def validate_candidate(candidate: RouteCandidate) -> None:
+            candidate_request = request_for(candidate)
+            validate_client_features(candidate, candidate_request)
+            self._validate_chat_candidate(
+                candidate_request,
+                candidate,
+                stream=candidate_request.stream,
+            )
+
+        validated = self.prevalidate_plan(
+            plan,
+            validate_candidate,
+            fallback=fallback,
+        )
+        if request.stream:
+            return PreparedChatStream.capture(validated, request, candidate_requests)
+        return PreparedChatCompletion.capture(validated, request, candidate_requests)
+
+    async def prepare_chat_completion(
+        self,
+        request: ChatRequest,
+        *,
+        fallback: bool = True,
+    ) -> PreparedChatCompletion:
+        request = deepcopy(request)
+        plan = await self.plan_chat_completion(request, stream=False)
+        prepared = self.prepare_planned_chat_completion(plan, request, fallback=fallback)
+        assert isinstance(prepared, PreparedChatCompletion)
+        return prepared
 
     async def chat_completion_stream(
         self,
         request: ChatRequest,
         fallback: bool = True,
+        *,
+        prepared_plan: PreparedChatStream | None = None,
     ) -> tuple[AsyncIterator[ChatStreamChunk], str]:
         """Route a streaming chat completion request.
 
@@ -581,13 +1521,84 @@ class Router:
         Raises:
             ProviderError: If model not found or all providers fail
         """
-        provider_name, actual_model_id, provider = await self._resolve_provider(request.model)
-        logger.info("Routing stream request to %s/%s", provider_name, actual_model_id)
-
-        result, used_provider = await self._execute_with_fallback(
-            request, provider_name, actual_model_id, provider, fallback, is_stream=True
+        request = deepcopy(request)
+        prepared = prepared_plan or await self.prepare_chat_completion_stream(
+            request, fallback=fallback
         )
-        return result, used_provider  # type: ignore
+        if not isinstance(prepared, PreparedChatStream) or not prepared.matches(request):
+            raise ProviderError(
+                "Prepared Chat stream does not match the current request",
+                status_code=400,
+                retryable=False,
+                kind=ProviderFailureKind.CLIENT_REQUEST,
+            )
+        plan = prepared.plan
+        execution_request = prepared.request_for_execution()
+        logger.info("Routing stream request to %s", plan.primary.model.qualified_id)
+        return await self._execute_chat_plan_stream(
+            plan,
+            execution_request,
+            fallback,
+            prepared.request_for_execution,
+        )
+
+    async def prepare_chat_completion_stream(
+        self,
+        request: ChatRequest,
+        *,
+        fallback: bool = True,
+    ) -> PreparedChatStream:
+        """Plan and validate a chat stream once, before the response commits to SSE."""
+        request = deepcopy(request)
+        plan = await self.plan_chat_completion(request, stream=True)
+        prepared = self.prepare_planned_chat_completion(plan, request, fallback=fallback)
+        assert isinstance(prepared, PreparedChatStream)
+        return prepared
+
+    @staticmethod
+    def prevalidate_plan(
+        plan: RoutePlan,
+        validate: Callable[[RouteCandidate], None],
+        *,
+        fallback: bool = True,
+    ) -> RoutePlan:
+        """Validate the primary and remove only option-incompatible fallbacks."""
+        Router._validate_plan_primary(plan)
+        validate(plan.primary)
+        if not fallback:
+            return replace(
+                plan,
+                fallbacks=(),
+                fallback_pool=(),
+                max_fallback_attempts=0,
+            )
+        fallbacks: list[RouteCandidate] = []
+        for candidate in plan.prevalidation_fallbacks:
+            if len(fallbacks) >= plan.fallback_limit:
+                break
+            try:
+                validate(candidate)
+            except RequestOptionError:
+                continue
+            fallbacks.append(candidate)
+        if tuple(fallbacks) == plan.fallbacks:
+            return plan
+        return replace(plan, fallbacks=tuple(fallbacks))
+
+    _prevalidate_plan = prevalidate_plan
+
+    async def validate_chat_request(self, request: ChatRequest, *, stream: bool) -> None:
+        """Validate the primary planned adapter without starting upstream I/O."""
+        request = deepcopy(request)
+        operation = Operation.CHAT_STREAM if stream else Operation.CHAT
+        plan = await self._plan_completion_route(
+            request.model,
+            operation,
+            RequestFeatures.for_chat(request),
+        )
+        self._validate_plan_primary(plan)
+        candidate = plan.primary
+        self._validate_chat_candidate(request, candidate, stream=stream)
 
     def _create_responses_request_with_model(
         self, original_request: ResponsesRequest, model_id: str
@@ -603,178 +1614,33 @@ class Router:
         """
         return ResponsesRequest(
             model=model_id,
-            input=original_request.input,
+            input=deepcopy(original_request.input),
             stream=original_request.stream,
             instructions=original_request.instructions,
             temperature=original_request.temperature,
             max_output_tokens=original_request.max_output_tokens,
-            tools=original_request.tools,
-            tool_choice=original_request.tool_choice,
+            tools=deepcopy(original_request.tools),
+            tool_choice=deepcopy(original_request.tool_choice),
             parallel_tool_calls=original_request.parallel_tool_calls,
             reasoning_effort=original_request.reasoning_effort,
+            top_p=original_request.top_p,
+            metadata=deepcopy(original_request.metadata),
+            service_tier=original_request.service_tier,
+            provider_extensions=deepcopy(original_request.provider_extensions),
         )
-
-    async def _execute_responses_with_fallback(
-        self,
-        request: ResponsesRequest,
-        provider_name: str,
-        actual_model_id: str,
-        provider: BaseProvider,
-        fallback: bool,
-        is_stream: bool,
-    ) -> tuple[ResponsesResponse | AsyncIterator[ResponsesStreamChunk], str]:
-        """Execute Responses API request with fallback support."""
-        return await self._execute_with_fallback_common(
-            request=request,
-            provider_name=provider_name,
-            actual_model_id=actual_model_id,
-            provider=provider,
-            fallback=fallback,
-            is_stream=is_stream,
-            build_request=self._create_responses_request_with_model,
-            call_nonstream=lambda prov, req: prov.responses_completion(req),
-            call_stream=lambda prov, req: prov.responses_completion_stream(req),
-            log_prefix="Responses",
-        )
-
-    async def _execute_with_fallback_common(
-        self,
-        request: RequestT,
-        provider_name: str,
-        actual_model_id: str,
-        provider: BaseProvider,
-        fallback: bool,
-        is_stream: bool,
-        build_request: Callable[[RequestT, str], RequestT],
-        call_nonstream: Callable[[BaseProvider, RequestT], Awaitable[ResponseT]],
-        call_stream: Callable[[BaseProvider, RequestT], AsyncIterator[ChunkT]],
-        log_prefix: str,
-    ) -> tuple[ResponseT | AsyncIterator[ChunkT], str]:
-        """Execute request with fallback support."""
-
-        def _with_prefix(message: str) -> str:
-            return f"{log_prefix} {message}".strip()
-
-        actual_request = build_request(request, actual_model_id)
-
-        if is_stream and fallback:
-            priorities_config = self._get_priorities_config()
-            fallback_config = priorities_config.fallback
-            if fallback_config.strategy != FallbackStrategy.NONE:
-                candidates = self._get_fallback_candidates(
-                    provider_name, actual_model_id, fallback_config.strategy
-                )[: fallback_config.maxRetries]
-                return await self._open_stream_with_fallback(
-                    candidates=[(provider_name, actual_model_id, provider), *candidates],
-                    request=request,
-                    build_request=build_request,
-                    call_stream=call_stream,
-                    log_prefix=log_prefix,
-                )
-
-        try:
-            await provider.ensure_token()
-            if is_stream:
-                stream = call_stream(provider, actual_request)
-                stream = self._wrap_stream_errors(stream, provider_name, _with_prefix)
-                logger.info(_with_prefix("stream request routed to %s"), provider_name)
-                return stream, provider_name
-            response = await call_nonstream(provider, actual_request)
-            logger.info(_with_prefix("request completed via %s"), provider_name)
-            return response, provider_name
-        except ProviderError as e:
-            logger.warning(_with_prefix("provider %s failed: %s"), provider_name, e)
-            if not fallback or not e.retryable:
-                raise
-
-            priorities_config = self._get_priorities_config()
-            fallback_config = priorities_config.fallback
-
-            if fallback_config.strategy == FallbackStrategy.NONE:
-                raise
-
-            candidates = self._get_fallback_candidates(
-                provider_name, actual_model_id, fallback_config.strategy
-            )
-
-            for i, (other_name, other_model_id, other_provider) in enumerate(candidates):
-                if i >= fallback_config.maxRetries:
-                    break
-
-                logger.info(_with_prefix("trying fallback: %s/%s"), other_name, other_model_id)
-                fallback_request = build_request(request, other_model_id)
-
-                try:
-                    await other_provider.ensure_token()
-                    if is_stream:
-                        stream = call_stream(other_provider, fallback_request)
-                        stream = self._wrap_stream_errors(stream, other_name, _with_prefix)
-                        logger.info(_with_prefix("stream fallback succeeded via %s"), other_name)
-                        return stream, other_name
-                    response = await call_nonstream(other_provider, fallback_request)
-                    logger.info(_with_prefix("fallback succeeded via %s"), other_name)
-                    return response, other_name
-                except ProviderError as fallback_error:
-                    logger.warning(
-                        _with_prefix("fallback %s failed: %s"), other_name, fallback_error
-                    )
-                    continue
-            raise
-
-    async def _open_stream_with_fallback(
-        self,
-        candidates: list[tuple[str, str, BaseProvider]],
-        request: RequestT,
-        build_request: Callable[[RequestT, str], RequestT],
-        call_stream: Callable[[BaseProvider, RequestT], AsyncIterator[ChunkT]],
-        log_prefix: str,
-    ) -> tuple[AsyncIterator[ChunkT], str]:
-        """Open a stream and retry fallback providers before the first chunk."""
-
-        def _with_prefix(message: str) -> str:
-            return f"{log_prefix} {message}".strip()
-
-        last_error: ProviderError | None = None
-
-        for index, (candidate_name, candidate_model, candidate_provider) in enumerate(candidates):
-            if index > 0:
-                logger.info(_with_prefix("trying fallback: %s/%s"), candidate_name, candidate_model)
-
-            candidate_request = build_request(request, candidate_model)
-            try:
-                await candidate_provider.ensure_token()
-                stream = call_stream(candidate_provider, candidate_request)
-                stream = self._wrap_stream_errors(stream, candidate_name, _with_prefix)
-                first_chunk = await anext(stream, None)
-            except ProviderError as error:
-                logger.warning(_with_prefix("provider %s failed: %s"), candidate_name, error)
-                if not error.retryable:
-                    raise
-                last_error = error
-                continue
-
-            if index > 0:
-                logger.info(_with_prefix("stream fallback succeeded via %s"), candidate_name)
-            else:
-                logger.info(_with_prefix("stream request routed to %s"), candidate_name)
-
-            return self._chain_first_chunk(
-                first_chunk,
-                stream,
-            ), candidate_name
-
-        if last_error is not None:
-            raise last_error
-        raise ProviderError("No stream fallback candidates available", status_code=503)
 
     def _chain_first_chunk(
-        self, first_chunk: ChunkT | None, stream: AsyncIterator[ChunkT]
+        self,
+        first_chunk: ChunkT | None,
+        stream: AsyncIterator[ChunkT],
+        *,
+        selected_model: ModelRef | None = None,
     ) -> AsyncIterator[ChunkT]:
         """Yield a primed first chunk followed by the rest of the stream."""
-        return _PrimedStream(first_chunk, stream)
+        return _PrimedStream(first_chunk, stream, selected_model=selected_model)
 
+    @staticmethod
     async def _wrap_stream_errors(
-        self,
         stream: AsyncIterator[ChunkT],
         provider_name: str,
         format_message: Callable[[str], str],
@@ -784,7 +1650,12 @@ class Router:
             async for chunk in stream:
                 yield chunk
         except ProviderError as error:
-            logger.warning(format_message("stream provider %s failed: %s"), provider_name, error)
+            logger.warning(
+                format_message("stream_provider_failed provider=%s kind=%s retryable=%s"),
+                provider_name,
+                error.kind.value,
+                str(error.retryable).lower(),
+            )
             raise
         finally:
             await close_async_iterator(stream)
@@ -806,18 +1677,38 @@ class Router:
         Raises:
             ProviderError: If model not found or all providers fail
         """
-        provider_name, actual_model_id, provider = await self._resolve_provider(request.model)
-        logger.info("Routing responses request to %s/%s", provider_name, actual_model_id)
-
-        result, used_provider = await self._execute_responses_with_fallback(
-            request, provider_name, actual_model_id, provider, fallback, is_stream=False
+        request = deepcopy(request)
+        plan = await self._plan_completion_route(
+            request.model,
+            Operation.RESPONSES,
+            RequestFeatures.for_responses(request),
         )
-        return result, used_provider  # type: ignore
+        plan = self.prevalidate_plan(
+            plan,
+            lambda candidate: candidate.provider.validate_responses_request(
+                self._create_responses_request_with_model(
+                    request,
+                    candidate.model.upstream_id,
+                )
+            ),
+            fallback=fallback,
+        )
+        logger.info("Routing responses request to %s", plan.primary.model.qualified_id)
+        result, used_provider = await self._execute_plan_nonstream(
+            plan,
+            request,
+            fallback,
+            self._create_responses_request_with_model,
+            lambda provider, candidate_request: provider.responses_completion(candidate_request),
+        )
+        return result, used_provider
 
     async def responses_completion_stream(
         self,
         request: ResponsesRequest,
         fallback: bool = True,
+        *,
+        prepared_plan: PreparedResponsesStream | None = None,
     ) -> tuple[AsyncIterator[ResponsesStreamChunk], str]:
         """Route a streaming Responses API completion request.
 
@@ -831,13 +1722,72 @@ class Router:
         Raises:
             ProviderError: If model not found or all providers fail
         """
-        provider_name, actual_model_id, provider = await self._resolve_provider(request.model)
-        logger.info("Routing responses stream request to %s/%s", provider_name, actual_model_id)
-
-        result, used_provider = await self._execute_responses_with_fallback(
-            request, provider_name, actual_model_id, provider, fallback, is_stream=True
+        request = deepcopy(request)
+        prepared = prepared_plan or await self.prepare_responses_completion_stream(
+            request, fallback=fallback
         )
-        return result, used_provider  # type: ignore
+        if not isinstance(prepared, PreparedResponsesStream) or not prepared.matches(request):
+            raise ProviderError(
+                "Prepared Responses stream does not match the current request",
+                status_code=400,
+                retryable=False,
+                kind=ProviderFailureKind.CLIENT_REQUEST,
+            )
+        plan = prepared.plan
+        execution_request = prepared.request_for_execution()
+        logger.info("Routing responses stream request to %s", plan.primary.model.qualified_id)
+        return await self._execute_plan_stream(
+            plan,
+            execution_request,
+            fallback,
+            self._create_responses_request_with_model,
+            lambda provider, candidate_request: provider.responses_completion_stream(
+                candidate_request
+            ),
+            "Responses",
+        )
+
+    async def prepare_responses_completion_stream(
+        self,
+        request: ResponsesRequest,
+        *,
+        fallback: bool = True,
+    ) -> PreparedResponsesStream:
+        """Plan and validate a Responses stream once, before committing to SSE."""
+        request = deepcopy(request)
+        plan = await self._plan_completion_route(
+            request.model,
+            Operation.RESPONSES_STREAM,
+            RequestFeatures.for_responses(request),
+        )
+        plan = self.prevalidate_plan(
+            plan,
+            lambda candidate: candidate.provider.validate_responses_request(
+                self._create_responses_request_with_model(
+                    request,
+                    candidate.model.upstream_id,
+                )
+            ),
+            fallback=fallback,
+        )
+        return PreparedResponsesStream.capture(plan, request)
+
+    async def validate_responses_request(self, request: ResponsesRequest) -> None:
+        """Validate the primary planned Responses adapter without starting I/O."""
+        request = deepcopy(request)
+        operation = Operation.RESPONSES_STREAM if request.stream else Operation.RESPONSES
+        plan = await self._plan_completion_route(
+            request.model,
+            operation,
+            RequestFeatures.for_responses(request),
+        )
+        self._validate_plan_primary(plan)
+        candidate = plan.primary
+        candidate_request = self._create_responses_request_with_model(
+            request,
+            candidate.model.upstream_id,
+        )
+        candidate.provider.validate_responses_request(candidate_request)
 
     async def list_models(self) -> list[ModelInfo]:
         """List all available models from all authenticated providers.
@@ -855,9 +1805,10 @@ class Router:
 
         # Collect all models with their full keys
         all_models: dict[str, ModelInfo] = {}
-        for key, (_, model_info) in self._models_cache.items():
-            # Only include full keys (provider/model)
-            if "/" in key:
+        for key, entry in self._models_cache.items():
+            _provider_name, model_info = entry
+            # Only include canonical public keys, not convenience aliases.
+            if self._is_qualified_cache_entry(key, entry):
                 all_models[key] = model_info
 
         # Add prioritized models first
@@ -871,7 +1822,7 @@ class Router:
         models.extend(sort_models(remaining))
 
         logger.debug("Listed %d models", len(models))
-        return models
+        return deepcopy(models)
 
     def invalidate_cache(self) -> None:
         """Invalidate all caches to force refresh."""

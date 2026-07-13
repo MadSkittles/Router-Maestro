@@ -1,5 +1,8 @@
 """Tests for configuration modules."""
 
+import pytest
+from pydantic import ValidationError
+
 from router_maestro.config import (
     FallbackConfig,
     FallbackStrategy,
@@ -93,6 +96,27 @@ class TestProvidersConfig:
         )
         assert "custom" in config.providers
         assert config.providers["custom"].baseURL == "https://api.example.com/v1"
+
+    @pytest.mark.parametrize("provider_name", ["", "   ", "team/p"])
+    def test_rejects_provider_names_outside_public_identity_domain(self, provider_name):
+        with pytest.raises(ValidationError):
+            ProvidersConfig(
+                providers={
+                    provider_name: {
+                        "baseURL": "https://api.example.com/v1",
+                        "models": {"model": {"name": "Model"}},
+                    }
+                }
+            )
+
+    def test_rejects_case_insensitive_duplicate_provider_names(self):
+        provider = {
+            "baseURL": "https://api.example.com/v1",
+            "models": {"model": {"name": "Model"}},
+        }
+
+        with pytest.raises(ValidationError, match="case-insensitive"):
+            ProvidersConfig(providers={"foo": provider, "FOO": provider})
 
 
 class TestContextConfig:

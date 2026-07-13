@@ -2,7 +2,9 @@
 
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+
+from router_maestro.routing.model_ref import validate_provider_id
 
 
 class ModelConfig(BaseModel):
@@ -27,6 +29,26 @@ class ProvidersConfig(BaseModel):
         default_factory=dict,
         description="Custom provider configurations (not including built-in providers)",
     )
+
+    @field_validator("providers")
+    @classmethod
+    def validate_provider_names(
+        cls,
+        providers: dict[str, CustomProviderConfig],
+    ) -> dict[str, CustomProviderConfig]:
+        """Reject names that cannot round-trip through public model IDs."""
+        canonical_names: dict[str, str] = {}
+        for provider_name in providers:
+            validate_provider_id(provider_name)
+            canonical_name = provider_name.casefold()
+            duplicate = canonical_names.get(canonical_name)
+            if duplicate is not None:
+                raise ValueError(
+                    "provider names must be unique case-insensitively: "
+                    f"'{duplicate}' conflicts with '{provider_name}'"
+                )
+            canonical_names[canonical_name] = provider_name
+        return providers
 
     @classmethod
     def get_default(cls) -> "ProvidersConfig":

@@ -1,5 +1,8 @@
 """Tests for per-model reasoning dispatch on Copilot's chat endpoint."""
 
+import pytest
+
+from router_maestro.providers.base import ProviderError, ProviderFailureKind
 from router_maestro.providers.copilot import apply_copilot_chat_reasoning
 
 
@@ -56,14 +59,15 @@ def test_claude_46_explicit_effort_wins_and_xhigh_clamped():
     assert "thinking_budget" not in p
 
 
-def test_claude_46_thinking_requested_with_tiny_budget_defaults_to_high():
-    """Client asked for thinking but budget too small to map — be aggressive."""
+def test_claude_46_tiny_budget_rejects_instead_of_defaulting_upward():
+    """A tiny budget has no downward effort tier and cannot become high."""
     p = _base_payload()
-    apply_copilot_chat_reasoning(p, "claude-opus-4.6", 100, None)
-    assert p.get("reasoning_effort") == "high"
+    with pytest.raises(ProviderError) as caught:
+        apply_copilot_chat_reasoning(p, "claude-opus-4.6", 100, None)
+    assert caught.value.parameter == "thinking_budget"
 
 
-def test_claude_old_models_send_no_reasoning_field():
+def test_claude_old_models_reject_explicit_reasoning():
     for model in (
         "claude-opus-4.5",
         "claude-sonnet-4.5",
@@ -71,9 +75,10 @@ def test_claude_old_models_send_no_reasoning_field():
         "claude-haiku-4.5",
     ):
         p = _base_payload()
-        apply_copilot_chat_reasoning(p, model, 16000, "high")
-        assert "thinking_budget" not in p, model
-        assert "reasoning_effort" not in p, model
+        with pytest.raises(ProviderError) as caught:
+            apply_copilot_chat_reasoning(p, model, 16000, "high")
+        assert caught.value.kind is ProviderFailureKind.CLIENT_REQUEST
+        assert caught.value.parameter == "reasoning_effort"
 
 
 def test_claude_47_dated_alias_still_supports_reasoning():
@@ -125,18 +130,30 @@ def test_gpt5_2_keeps_max_tokens():
     assert "max_completion_tokens" not in p
 
 
-def test_gpt4o_omits_both_fields():
+def test_gpt4o_rejects_explicit_reasoning():
     p = _base_payload()
-    apply_copilot_chat_reasoning(p, "gpt-4o", 8192, "medium")
-    assert "thinking_budget" not in p
-    assert "reasoning_effort" not in p
+    with pytest.raises(ProviderError) as caught:
+        apply_copilot_chat_reasoning(p, "gpt-4o", 8192, "medium")
+    assert caught.value.kind is ProviderFailureKind.CLIENT_REQUEST
 
 
-def test_gemini_omits_both_fields():
+def test_gemini_rejects_explicit_reasoning():
     p = _base_payload()
-    apply_copilot_chat_reasoning(p, "gemini-2.5-pro", 8192, "medium")
-    assert "thinking_budget" not in p
-    assert "reasoning_effort" not in p
+    with pytest.raises(ProviderError) as caught:
+        apply_copilot_chat_reasoning(p, "gemini-2.5-pro", 8192, "medium")
+    assert caught.value.kind is ProviderFailureKind.CLIENT_REQUEST
+
+
+@pytest.mark.parametrize(
+    "model",
+    ["gemini-3.2-pro", "claude-sonnet-5", "mai-code-1-flash-picker"],
+)
+def test_new_reasoning_families_remain_observable_when_catalog_is_cold(model):
+    payload = {}
+
+    apply_copilot_chat_reasoning(payload, model, None, "low")
+
+    assert payload["reasoning_effort"] == "low"
 
 
 def test_no_reasoning_inputs_emits_nothing():
@@ -178,13 +195,15 @@ def test_catalog_overrides_hardcoded_clamp():
     assert p.get("reasoning_effort") == "high"
 
 
-def test_catalog_picks_next_higher_when_desired_missing():
-    """Desired 'low' but catalog only offers ['medium','high'] → pick medium."""
+def test_catalog_rejects_when_only_higher_tiers_are_available():
+    """Desired low cannot silently become medium or high."""
     p = _base_payload()
-    apply_copilot_chat_reasoning(
-        p, "claude-opus-4.7", None, "low", catalog_effort_values=["medium", "high"]
-    )
-    assert p.get("reasoning_effort") == "medium"
+    with pytest.raises(ProviderError) as caught:
+        apply_copilot_chat_reasoning(
+            p, "claude-opus-4.7", None, "low", catalog_effort_values=["medium", "high"]
+        )
+    assert caught.value.kind is ProviderFailureKind.CLIENT_REQUEST
+    assert caught.value.parameter == "reasoning_effort"
 
 
 def test_catalog_falls_back_lower_when_no_higher_available():
@@ -196,11 +215,36 @@ def test_catalog_falls_back_lower_when_no_higher_available():
     assert p.get("reasoning_effort") == "medium"
 
 
-def test_catalog_empty_list_means_no_reasoning():
-    """Catalog explicitly says no reasoning_effort → emit nothing."""
+def test_catalog_empty_list_rejects_explicit_reasoning():
+    """Catalog explicitly says no reasoning_effort → return a client error."""
     p = _base_payload()
-    apply_copilot_chat_reasoning(p, "claude-haiku-4.5", 16000, "high", catalog_effort_values=[])
-    assert "reasoning_effort" not in p
+    with pytest.raises(ProviderError) as caught:
+        apply_copilot_chat_reasoning(p, "claude-haiku-4.5", 16000, "high", catalog_effort_values=[])
+    assert caught.value.kind is ProviderFailureKind.CLIENT_REQUEST
+
+
+def test_catalog_empty_list_rejects_budget_only_request() -> None:
+    p = _base_payload()
+
+    with pytest.raises(ProviderError) as caught:
+        apply_copilot_chat_reasoning(
+            p,
+            "claude-haiku-4.5",
+            16000,
+            None,
+            catalog_effort_values=[],
+        )
+
+    assert caught.value.parameter == "thinking_budget"
+
+
+def test_known_unsupported_model_rejects_budget_only_request() -> None:
+    p = _base_payload()
+
+    with pytest.raises(ProviderError) as caught:
+        apply_copilot_chat_reasoning(p, "gpt-4o", 8192, None)
+
+    assert caught.value.parameter == "thinking_budget"
 
 
 def test_catalog_preserves_xhigh_for_gpt5():
@@ -247,10 +291,8 @@ def test_catalog_passes_max_through_when_advertised():
     assert p.get("reasoning_effort") == "max"
 
 
-def test_catalog_promotes_xhigh_to_max_when_only_max_higher():
-    """opus-4.6 catalog is ['low','medium','high','max'] (no xhigh).
-    A request for 'xhigh' should promote up to 'max', not down to 'high'.
-    """
+def test_catalog_substitutes_xhigh_down_to_high_not_up_to_max():
+    """A missing xhigh tier must map down to high, never upward to max."""
     p = _base_payload()
     apply_copilot_chat_reasoning(
         p,
@@ -259,7 +301,7 @@ def test_catalog_promotes_xhigh_to_max_when_only_max_higher():
         "xhigh",
         catalog_effort_values=["low", "medium", "high", "max"],
     )
-    assert p.get("reasoning_effort") == "max"
+    assert p.get("reasoning_effort") == "high"
 
 
 def test_catalog_thinking_only_aims_at_catalog_top_tier():
@@ -289,14 +331,15 @@ def test_catalog_thinking_only_aims_at_catalog_top_tier():
     assert "reasoning_effort" not in p
 
 
-def test_catalog_thinking_budget_zero_picks_top_tier():
-    """budget=1 → no effort derived → catalog-top selected (max)."""
+def test_catalog_tiny_thinking_budget_rejects_instead_of_picking_upward():
+    """budget=1 has no representable downward tier and must be rejected."""
     p = _base_payload()
-    apply_copilot_chat_reasoning(
-        p,
-        "claude-opus-4.8",
-        1,  # too small to map but client opted into thinking
-        None,
-        catalog_effort_values=["low", "medium", "high", "xhigh", "max"],
-    )
-    assert p.get("reasoning_effort") == "max"
+    with pytest.raises(ProviderError) as caught:
+        apply_copilot_chat_reasoning(
+            p,
+            "claude-opus-4.8",
+            1,
+            None,
+            catalog_effort_values=["low", "medium", "high", "xhigh", "max"],
+        )
+    assert caught.value.parameter == "thinking_budget"

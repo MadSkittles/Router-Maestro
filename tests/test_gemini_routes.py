@@ -245,19 +245,42 @@ class TestTranslateGeminiToOpenAI:
         assert result.temperature == 0.7
         assert result.max_tokens == 8192
 
-    def test_generation_config_preserves_supported_extra_options(self):
+    def test_generation_config_preserves_typed_options(self):
         request = GeminiGenerateContentRequest(
             contents=[GeminiContent(role="user", parts=[GeminiPart(text="Hi")])],
             generation_config=GeminiGenerationConfig(
                 top_p=0.8,
+                top_k=32,
                 stop_sequences=["END", "STOP"],
+                candidate_count=2,
+                response_mime_type="application/json",
             ),
         )
 
         result = translate_gemini_to_openai(request, "model")
 
-        assert result.extra["top_p"] == 0.8
-        assert result.extra["stop"] == ["END", "STOP"]
+        assert result.top_p == 0.8
+        assert result.top_k == 32
+        assert result.stop_sequences == ["END", "STOP"]
+        assert result.candidate_count == 2
+        assert result.response_mime_type == "application/json"
+        assert result.extra == {}
+
+    def test_empty_stop_sequences_preserve_explicit_presence(self):
+        request = GeminiGenerateContentRequest.model_validate(
+            {"generationConfig": {"stopSequences": []}}
+        )
+
+        assert request.generation_config is not None
+        assert request.generation_config.stop_sequences == []
+        assert translate_gemini_to_openai(request, "model").stop_sequences == []
+
+    def test_omitted_stop_sequences_remain_unspecified(self):
+        request = GeminiGenerateContentRequest.model_validate({"generationConfig": {}})
+
+        assert request.generation_config is not None
+        assert request.generation_config.stop_sequences is None
+        assert translate_gemini_to_openai(request, "model").stop_sequences is None
 
     def test_function_call_in_model_content(self):
         request = GeminiGenerateContentRequest(
@@ -366,12 +389,12 @@ class TestTranslateGeminiToOpenAI:
         result = translate_gemini_to_openai(request, "model")
         assert result.messages == []
 
-    def test_default_temperature(self):
+    def test_omitted_temperature_remains_unspecified(self):
         request = GeminiGenerateContentRequest(
             contents=[GeminiContent(role="user", parts=[GeminiPart(text="Hi")])]
         )
         result = translate_gemini_to_openai(request, "model")
-        assert result.temperature == 1.0
+        assert result.temperature is None
 
 
 # ============================================================================
@@ -653,6 +676,44 @@ class TestGenerateContentEndpoint:
         assert text == "Hello! How can I help?"
         assert data["candidates"][0]["finishReason"] == "STOP"
 
+    def test_generate_content_preserves_qualified_model_identity(self, client, mock_router):
+        with patch(
+            "router_maestro.server.routes.gemini.get_router",
+            return_value=mock_router,
+        ):
+            response = client.post(
+                "/api/gemini/v1beta/models/github-copilot/shared-model:generateContent",
+                json={"contents": [{"role": "user", "parts": [{"text": "Hello"}]}]},
+            )
+
+        assert response.status_code == 200
+        routed_request = mock_router.chat_completion.await_args.args[0]
+        assert routed_request.model == "github-copilot/shared-model"
+        assert response.json()["modelVersion"] == "github-copilot/gemini-2.5-pro"
+
+    @pytest.mark.parametrize("upstream_model", ["shared-model", "second/shared-model"])
+    def test_generate_content_uses_actual_provider_identity_once(
+        self,
+        client,
+        upstream_model,
+    ):
+        mock = AsyncMock()
+        mock.chat_completion = AsyncMock(
+            return_value=(
+                ChatResponse(content="ok", model=upstream_model, finish_reason="stop"),
+                "second",
+            )
+        )
+
+        with patch("router_maestro.server.routes.gemini.get_router", return_value=mock):
+            response = client.post(
+                "/api/gemini/v1beta/models/router-maestro:generateContent",
+                json={"contents": [{"role": "user", "parts": [{"text": "Hello"}]}]},
+            )
+
+        assert response.status_code == 200
+        assert response.json()["modelVersion"] == "second/shared-model"
+
     def test_generate_content_with_system_instruction(self, client, mock_router):
         """Test generateContent with system instruction."""
         with patch(
@@ -681,10 +742,15 @@ class TestGenerateContentEndpoint:
                     "generationConfig": {
                         "temperature": 0.5,
                         "maxOutputTokens": 1024,
+                        "frequencyPenalty": 0.3,
+                        "presencePenalty": -0.1,
                     },
                 },
             )
         assert response.status_code == 200
+        routed_request = mock_router.chat_completion.await_args.args[0]
+        assert routed_request.frequency_penalty == 0.3
+        assert routed_request.presence_penalty == -0.1
 
     def test_generate_content_provider_error(self, client):
         """Test generateContent returns error on provider failure."""
@@ -763,6 +829,38 @@ class TestStreamGenerateContentEndpoint:
         events = _parse_sse_events(response.text)
         assert len(events) >= 2
 
+    def test_stream_generate_content_preserves_qualified_model_identity(self, client):
+        mock = AsyncMock()
+        prepared = object()
+        mock.prepare_chat_completion_stream = AsyncMock(return_value=prepared)
+
+        with (
+            patch(
+                "router_maestro.server.routes.gemini.get_router",
+                return_value=mock,
+            ),
+            patch(
+                "router_maestro.server.routes.gemini.sse_streaming_response",
+                return_value={"stream": "prepared"},
+            ),
+        ):
+            response = client.post(
+                "/api/gemini/v1beta/models/second/shared-model:streamGenerateContent",
+                json={
+                    "contents": [{"role": "user", "parts": [{"text": "Hi"}]}],
+                    "generationConfig": {
+                        "frequencyPenalty": 0.3,
+                        "presencePenalty": -0.1,
+                    },
+                },
+            )
+
+        assert response.status_code == 200
+        routed_request = mock.prepare_chat_completion_stream.await_args.args[0]
+        assert routed_request.model == "second/shared-model"
+        assert routed_request.frequency_penalty == 0.3
+        assert routed_request.presence_penalty == -0.1
+
 
 class TestCountTokensEndpoint:
     """Integration tests for the countTokens endpoint."""
@@ -794,6 +892,15 @@ class TestCountTokensEndpoint:
         assert response.status_code == 200
         data = response.json()
         assert "totalTokens" in data
+
+    def test_count_tokens_accepts_qualified_model_path(self, client):
+        response = client.post(
+            "/api/gemini/v1beta/models/github-copilot/shared-model:countTokens",
+            json={"contents": [{"role": "user", "parts": [{"text": "Hello"}]}]},
+        )
+
+        assert response.status_code == 200
+        assert response.json()["totalTokens"] > 0
 
 
 # ============================================================================

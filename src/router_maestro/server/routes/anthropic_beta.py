@@ -8,15 +8,23 @@ translation-based handler transparently.
 
 import asyncio
 import json
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, AsyncIterator
+from copy import deepcopy
+from dataclasses import dataclass, replace
 
 from fastapi import APIRouter, HTTPException
 from fastapi import Request as FastAPIRequest
 from fastapi.responses import JSONResponse
+from pydantic import ValidationError
 
-from router_maestro.providers import ProviderError
+from router_maestro.providers import ProviderError, ProviderFailureKind, RequestOptionError
 from router_maestro.providers.copilot import CopilotProvider
 from router_maestro.routing import get_router
+from router_maestro.routing.capabilities import CapabilitySupport, Operation, RequestFeatures
+from router_maestro.routing.model_ref import qualify_model_id
+from router_maestro.routing.route_plan import NoCompatibleRouteError, RouteCandidate, RoutePlan
+from router_maestro.routing.router import Router
+from router_maestro.server.protocols.errors import client_error_response
 from router_maestro.server.routes.anthropic import (
     ANTHROPIC_PING_FRAME,
 )
@@ -25,6 +33,7 @@ from router_maestro.server.routes.anthropic import (
 )
 from router_maestro.server.streaming import sse_streaming_response
 from router_maestro.utils import get_logger
+from router_maestro.utils.async_iterators import close_async_iterator
 from router_maestro.utils.context_window import resolve_thinking_budget
 from router_maestro.utils.reasoning import VALID_EFFORTS, pick_closest_effort
 
@@ -38,9 +47,22 @@ COPILOT_COUNT_TOKENS_PATH = "/v1/messages/count_tokens"
 _STRIP_RESPONSE_KEYS = frozenset({"copilot_usage", "stop_details"})
 _STRIP_STREAM_MESSAGE_STOP_KEYS = frozenset({"copilot_usage", "amazon-bedrock-invocationMetrics"})
 _THINKING_TYPES = frozenset({"enabled", "adaptive", "disabled"})
+_ANTHROPIC_SSE_EVENTS = frozenset(
+    {
+        "message_start",
+        "content_block_start",
+        "content_block_delta",
+        "content_block_stop",
+        "message_delta",
+        "message_stop",
+        "ping",
+        "error",
+    }
+)
 
-# Fields the Copilot native Anthropic endpoint accepts. Anything not in this
-# set is stripped before forwarding — Copilot returns 400 on unknown fields.
+# Top-level Messages fields whose semantics Router-Maestro represents on the
+# beta endpoint. Nested message/content payloads remain forward-compatible and
+# are deliberately outside this shallow request-option gate.
 _COPILOT_ACCEPTED_FIELDS = frozenset(
     {
         "model",
@@ -59,6 +81,53 @@ _COPILOT_ACCEPTED_FIELDS = frozenset(
         "output_config",
     }
 )
+
+
+@dataclass(frozen=True, slots=True)
+class _ResolvedModel:
+    provider_name: str
+    actual_model: str
+    copilot_provider: CopilotProvider | None
+
+
+@dataclass(frozen=True, slots=True)
+class _NativeModelResolution:
+    model: _ResolvedModel
+    support: CapabilitySupport
+    plan: RoutePlan | None = None
+
+
+class _NativeUpstreamStatusError(ProviderError):
+    """Typed native status failure retaining its response only for route encoding."""
+
+    def __init__(self, response, *, provider: str, model: str) -> None:
+        status_code = response.status_code
+        if status_code in (401, 403):
+            kind = ProviderFailureKind.AUTHENTICATION
+        elif status_code in (429, 529):
+            kind = ProviderFailureKind.RATE_LIMIT
+        else:
+            kind = ProviderFailureKind.UPSTREAM_STATUS
+        super().__init__(
+            f"Native Anthropic upstream returned {status_code}",
+            status_code=status_code,
+            retryable=status_code in (429, 500, 502, 503, 504, 529),
+            kind=kind,
+            upstream_status_code=status_code,
+            provider=provider,
+            model=model,
+        )
+        self.response = response
+
+
+def _raise_for_native_status(response, candidate: RouteCandidate) -> None:
+    """Normalize a native non-success status without retaining body in the ledger."""
+    if response.status_code >= 400:
+        raise _NativeUpstreamStatusError(
+            response,
+            provider=candidate.model.provider,
+            model=candidate.model.upstream_id,
+        )
 
 
 def _is_native_eligible(provider_name: str, actual_model: str) -> bool:
@@ -85,6 +154,88 @@ def _sanitize_output_config(body: dict) -> str | None:
     return effort
 
 
+def _validate_beta_request_options(body: dict) -> None:
+    """Reject unrepresented beta Messages options before transport selection."""
+    unsupported_fields = sorted(set(body) - _COPILOT_ACCEPTED_FIELDS)
+    if unsupported_fields:
+        parameter = unsupported_fields[0]
+        raise RequestOptionError(
+            f"{parameter} is not supported by the beta Anthropic endpoint",
+            parameter=parameter,
+        )
+
+    if "output_config" in body:
+        output_config = body["output_config"]
+        if not isinstance(output_config, dict):
+            raise RequestOptionError(
+                "output_config must be an object",
+                parameter="output_config",
+            )
+
+        unsupported_fields = sorted(set(output_config) - {"effort"})
+        if unsupported_fields:
+            parameter = f"output_config.{unsupported_fields[0]}"
+            raise RequestOptionError(
+                f"{parameter} is not supported by the native Anthropic transport",
+                parameter=parameter,
+            )
+
+        effort = output_config.get("effort")
+        if effort not in VALID_EFFORTS:
+            raise RequestOptionError(
+                "output_config.effort must be one of " + ", ".join(VALID_EFFORTS),
+                parameter="output_config.effort",
+            )
+
+
+def _validate_native_request_options(body: dict) -> None:
+    """Reject explicit options that the native Copilot transport cannot preserve."""
+    _validate_beta_request_options(body)
+
+    if "temperature" in body and "top_p" in body:
+        raise RequestOptionError(
+            "top_p cannot be combined with temperature on the native Anthropic transport",
+            parameter="top_p",
+        )
+
+
+def _resolve_native_effort(
+    effort: str,
+    allowed: tuple[str, ...] | list[str] | None,
+    *,
+    provider: str | None = None,
+    model: str | None = None,
+) -> str:
+    """Resolve a native effort exactly or downward, preserving unknown catalogs."""
+    if allowed is None:
+        return effort
+    mapped_effort = pick_closest_effort(effort, list(allowed))
+    if mapped_effort is None:
+        raise RequestOptionError(
+            "output_config.effort has no supported tier at or below the requested tier",
+            parameter="output_config.effort",
+            provider=provider,
+            model=model,
+        )
+    return mapped_effort
+
+
+def _validate_native_candidate_options(body: dict, candidate: RouteCandidate) -> None:
+    """Validate model-specific native options without starting transport work."""
+    output_config = body.get("output_config")
+    if not isinstance(output_config, dict):
+        return
+    effort = output_config.get("effort")
+    if not isinstance(effort, str) or effort not in VALID_EFFORTS:
+        return
+    _resolve_native_effort(
+        effort,
+        candidate.capabilities.reasoning_effort_values,
+        provider=candidate.model.provider,
+        model=candidate.model.upstream_id,
+    )
+
+
 def _invalid_request(message: str) -> JSONResponse:
     """Return an Anthropic-native invalid request response."""
     return JSONResponse(
@@ -99,11 +250,39 @@ def _invalid_request(message: str) -> JSONResponse:
     )
 
 
-def _validate_native_thinking(body: dict) -> JSONResponse | None:
-    """Validate raw token limits before native thinking-budget resolution."""
+def _validate_explicit_requested_features(plan: RoutePlan | None) -> JSONResponse | None:
+    """Reject an explicit model's known feature mismatch independently of transport."""
+    if plan is None or not plan.explicit:
+        return None
+    candidate = plan.primary
+    unsupported = next(
+        (
+            feature
+            for feature in plan.features.required()
+            if candidate.capabilities.feature(feature) is CapabilitySupport.UNSUPPORTED
+        ),
+        None,
+    )
+    if unsupported is None:
+        return None
+    return _invalid_request(
+        f"Model '{candidate.model.qualified_id}' does not support "
+        f"the requested {unsupported.value} feature"
+    )
+
+
+def _validate_native_thinking(
+    body: dict,
+    *,
+    validate_max_tokens: bool = True,
+) -> JSONResponse | None:
+    """Validate raw thinking before either native execution or standard fallback."""
     max_tokens = body.get("max_tokens")
-    if "max_tokens" in body and (
-        not isinstance(max_tokens, int) or isinstance(max_tokens, bool) or max_tokens <= 0
+    max_tokens_is_integer = isinstance(max_tokens, int) and not isinstance(max_tokens, bool)
+    if (
+        validate_max_tokens
+        and "max_tokens" in body
+        and (not isinstance(max_tokens, int) or isinstance(max_tokens, bool) or max_tokens <= 0)
     ):
         return _invalid_request("max_tokens must be a positive integer")
 
@@ -125,9 +304,20 @@ def _validate_native_thinking(body: dict) -> JSONResponse | None:
     if not isinstance(budget, int) or isinstance(budget, bool) or budget <= 0:
         return _invalid_request("thinking.budget_tokens must be a positive integer")
 
-    if max_tokens is not None and budget >= max_tokens:
+    if max_tokens_is_integer and budget >= max_tokens:
         return _invalid_request("thinking.budget_tokens must be less than max_tokens")
 
+    return None
+
+
+def _validate_canonical_thinking_budget(body: dict, max_tokens: int) -> JSONResponse | None:
+    """Validate a strict raw budget against the schema-coerced token limit."""
+    thinking = body.get("thinking")
+    if not isinstance(thinking, dict) or "budget_tokens" not in thinking:
+        return None
+    budget = thinking["budget_tokens"]
+    if isinstance(budget, int) and not isinstance(budget, bool) and budget >= max_tokens:
+        return _invalid_request("thinking.budget_tokens must be less than max_tokens")
     return None
 
 
@@ -169,7 +359,104 @@ def _strip_response(data: dict) -> dict:
     return data
 
 
-def _apply_thinking_budget_native(body: dict, actual_model: str) -> dict:
+def _is_token_count(value) -> bool:
+    """Whether a protocol token count is an exact non-negative integer."""
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+
+def _validate_nullable_string(value, field: str) -> None:
+    """Validate a nullable protocol string without echoing its value."""
+    if value is not None and not isinstance(value, str):
+        raise TypeError(f"{field} must be a string or null")
+
+
+def _validate_usage(usage: dict, *, required_fields: tuple[str, ...] = ()) -> None:
+    """Validate stable token-count fields while allowing future usage metadata."""
+    token_fields = {
+        "input_tokens",
+        "output_tokens",
+        "cache_creation_input_tokens",
+        "cache_read_input_tokens",
+    }
+    for field in required_fields:
+        if field not in usage:
+            raise TypeError(f"usage {field} is required")
+    for field in token_fields & usage.keys():
+        if not _is_token_count(usage[field]):
+            raise TypeError(f"usage {field} must be a non-negative integer")
+
+
+def _validate_content_block(block: object) -> None:
+    """Validate the stable fields of known Anthropic response content blocks."""
+    if not isinstance(block, dict):
+        raise TypeError("content block must be an object")
+    block_type = block.get("type")
+    if not isinstance(block_type, str) or not block_type:
+        raise TypeError("content block type must be a non-empty string")
+    if block_type == "text":
+        if not isinstance(block.get("text"), str):
+            raise TypeError("text block text must be a string")
+    elif block_type == "thinking":
+        if not isinstance(block.get("thinking"), str):
+            raise TypeError("thinking block thinking must be a string")
+        _validate_nullable_string(block.get("signature"), "thinking signature")
+    elif block_type == "redacted_thinking":
+        if not isinstance(block.get("data"), str):
+            raise TypeError("redacted thinking data must be a string")
+    elif block_type == "tool_use" and (
+        not isinstance(block.get("id"), str)
+        or not isinstance(block.get("name"), str)
+        or not isinstance(block.get("input"), dict)
+    ):
+        raise TypeError("tool use block is malformed")
+
+
+def _parse_native_message_response(response, *, provider: str, model: str) -> dict:
+    """Parse and minimally validate a successful native Messages response."""
+    try:
+        data = response.json()
+        if not isinstance(data, dict):
+            raise TypeError("native Messages response must be an object")
+        required = {
+            "id": str,
+            "type": str,
+            "role": str,
+            "content": list,
+            "model": str,
+            "usage": dict,
+        }
+        for field, expected_type in required.items():
+            if not isinstance(data.get(field), expected_type):
+                raise TypeError(f"native Messages response has invalid {field}")
+        if data["type"] != "message" or data["role"] != "assistant":
+            raise ValueError("native Messages response has invalid discriminator")
+        for block in data["content"]:
+            _validate_content_block(block)
+        _validate_usage(
+            data["usage"],
+            required_fields=("input_tokens", "output_tokens"),
+        )
+        _validate_nullable_string(data.get("stop_reason"), "stop_reason")
+        _validate_nullable_string(data.get("stop_sequence"), "stop_sequence")
+    except (json.JSONDecodeError, KeyError, TypeError, ValueError) as error:
+        raise ProviderError(
+            "Native Anthropic upstream returned a malformed response",
+            status_code=502,
+            retryable=True,
+            kind=ProviderFailureKind.UPSTREAM_PROTOCOL,
+            upstream_status_code=200,
+            provider=provider,
+            model=model,
+            cause=error,
+        ) from error
+    return data
+
+
+def _apply_thinking_budget_native(
+    body: dict,
+    actual_model: str,
+    reasoning_effort_values: tuple[str, ...] | list[str] | None = None,
+) -> dict:
     """Apply effort precedence or the server budget fallback to a raw body.
 
     Explicit ``output_config.effort`` removes an adaptive thinking budget.
@@ -181,20 +468,15 @@ def _apply_thinking_budget_native(body: dict, actual_model: str) -> dict:
 
     model_router = None
     model_info = None
+
     if effort is not None:
-        model_router = get_router()
-        if hasattr(model_router, "_models_cache"):
-            cache_entry = model_router._models_cache.get(actual_model)
-            if cache_entry:
-                _, model_info = cache_entry
-        if model_info is not None and model_info.reasoning_effort_values is not None:
-            mapped_effort = pick_closest_effort(effort, model_info.reasoning_effort_values)
-            if mapped_effort is None:
-                body.pop("output_config", None)
-                effort = None
-            else:
-                body["output_config"] = {"effort": mapped_effort}
-                effort = mapped_effort
+        effort = _resolve_native_effort(
+            effort,
+            reasoning_effort_values,
+            provider="github-copilot",
+            model=actual_model,
+        )
+        body["output_config"] = {"effort": effort}
 
     if isinstance(client_thinking, dict) and client_thinking.get("type") == "adaptive":
         thinking = dict(client_thinking)
@@ -284,7 +566,7 @@ def _apply_thinking_budget_native(body: dict, actual_model: str) -> dict:
     return body
 
 
-async def _resolve_model(model: str) -> tuple[str, str, CopilotProvider | None]:
+async def _resolve_model(model: str) -> _ResolvedModel:
     """Resolve model to (provider_name, actual_model_id, provider_if_copilot).
 
     Returns (provider_name, actual_model, None) for non-Copilot providers.
@@ -296,8 +578,169 @@ async def _resolve_model(model: str) -> tuple[str, str, CopilotProvider | None]:
     except ProviderError as e:
         raise HTTPException(status_code=e.status_code or 404, detail=str(e))
     if isinstance(provider, CopilotProvider):
-        return provider_name, actual_model, provider
-    return provider_name, actual_model, None
+        return _ResolvedModel(provider_name, actual_model, provider)
+    return _ResolvedModel(provider_name, actual_model, None)
+
+
+async def _resolve_native_model(
+    model: str,
+    features: RequestFeatures,
+) -> _NativeModelResolution:
+    """Resolve native Anthropic planning while preserving safe standard fallback."""
+    try:
+        plan = await get_router().plan_route(
+            model,
+            Operation.NATIVE_ANTHROPIC,
+            features,
+        )
+    except NoCompatibleRouteError:
+        return _NativeModelResolution(
+            model=await _resolve_model(model),
+            support=CapabilitySupport.UNSUPPORTED,
+        )
+    except ProviderError as e:
+        raise HTTPException(status_code=e.status_code or 404, detail=str(e)) from e
+
+    candidate = plan.primary
+    provider = candidate.provider
+    return _NativeModelResolution(
+        model=_ResolvedModel(
+            provider_name=candidate.model.provider,
+            actual_model=candidate.model.upstream_id,
+            copilot_provider=(provider if isinstance(provider, CopilotProvider) else None),
+        ),
+        support=candidate.support,
+        plan=plan,
+    )
+
+
+def _native_payload_for_candidate(body: dict, candidate: RouteCandidate) -> dict:
+    """Build one candidate-owned native Anthropic payload."""
+    payload = deepcopy(body)
+    payload = _apply_thinking_budget_native(
+        payload,
+        candidate.model.upstream_id,
+        candidate.capabilities.reasoning_effort_values,
+    )
+    payload["model"] = candidate.model.upstream_id
+    return payload
+
+
+async def _send_native_nonstream(candidate: RouteCandidate, body: dict):
+    """Send one native Anthropic attempt without moving wire concerns into Router."""
+    provider = candidate.provider
+    if not isinstance(provider, CopilotProvider):
+        raise ProviderError(
+            "Provider does not support native Anthropic transport",
+            status_code=501,
+            retryable=False,
+            kind=ProviderFailureKind.UNSUPPORTED_OPERATION,
+            provider=candidate.model.provider,
+            model=candidate.model.upstream_id,
+        )
+    payload = _native_payload_for_candidate(body, candidate)
+    await provider.ensure_token()
+    response = await provider._send_with_auth_retry(
+        "POST",
+        COPILOT_MESSAGES_PATH,
+        json=payload,
+        model=candidate.model.upstream_id,
+    )
+    if response.status_code == 400 and _is_signature_error(response.text):
+        logger.info("Signature rejected by upstream, stripping thinking blocks and retrying")
+        _strip_history_thinking_blocks(payload)
+        response = await provider._send_with_auth_retry(
+            "POST",
+            COPILOT_MESSAGES_PATH,
+            json=payload,
+            model=candidate.model.upstream_id,
+        )
+    _raise_for_native_status(response, candidate)
+    data = _parse_native_message_response(
+        response,
+        provider=candidate.model.provider,
+        model=candidate.model.upstream_id,
+    )
+    # The frozen candidate owns public identity. Upstream ``model`` strings do
+    # not carry enough provenance to distinguish an already-qualified ID from
+    # a raw namespaced ID beginning with the provider name.
+    data["model"] = candidate.model.qualified_id
+    return response, data
+
+
+async def _stream_native_candidate(
+    candidate: RouteCandidate,
+    body: dict,
+) -> AsyncGenerator[str, None]:
+    """Open one candidate's native stream and surface pre-commit typed failures."""
+    provider = candidate.provider
+    if not isinstance(provider, CopilotProvider):
+        raise ProviderError(
+            "Provider does not support native Anthropic transport",
+            status_code=501,
+            retryable=False,
+            kind=ProviderFailureKind.UNSUPPORTED_OPERATION,
+            provider=candidate.model.provider,
+            model=candidate.model.upstream_id,
+        )
+    payload = _native_payload_for_candidate(body, candidate)
+    await provider.ensure_token()
+    stream = _stream_passthrough(provider, payload, raise_provider_errors=True)
+    try:
+        try:
+            async for frame in stream:
+                yield _qualify_native_stream_frame(frame, candidate.model.qualified_id)
+        except ProviderError as error:
+            if error.kind is not ProviderFailureKind.UPSTREAM_PROTOCOL or error.provider:
+                raise
+            raise ProviderError(
+                error.safe_message,
+                status_code=error.status_code,
+                retryable=error.retryable,
+                kind=error.kind,
+                upstream_status_code=error.upstream_status_code,
+                provider=candidate.model.provider,
+                model=candidate.model.upstream_id,
+                cause=error.cause,
+            ) from error
+    finally:
+        await close_async_iterator(stream)
+
+
+async def _encode_native_stream_errors(
+    stream: AsyncIterator[str],
+) -> AsyncGenerator[str, None]:
+    """Encode a post-commit native provider failure in the active SSE response."""
+    try:
+        async for frame in stream:
+            yield frame
+    except ProviderError as error:
+        yield _sse_error_event(error.safe_message)
+    finally:
+        await close_async_iterator(stream)
+
+
+def _qualify_native_stream_frame(frame: str, qualified_model: str) -> str:
+    """Rewrite one native message_start frame with the selected public model ID."""
+    event_type: str | None = None
+    data: dict | None = None
+    for line in frame.splitlines():
+        if line.startswith("event: "):
+            event_type = line.removeprefix("event: ")
+        elif line.startswith("data: "):
+            try:
+                parsed = json.loads(line.removeprefix("data: "))
+            except json.JSONDecodeError:
+                return frame
+            if isinstance(parsed, dict):
+                data = parsed
+    if event_type != "message_start" or data is None:
+        return frame
+    message = data.get("message")
+    if not isinstance(message, dict):
+        return frame
+    message["model"] = qualified_model
+    return f"event: message_start\ndata: {json.dumps(data)}\n\n"
 
 
 @router.post("/api/anthropic/beta/v1/messages")
@@ -313,35 +756,92 @@ async def beta_messages(raw_request: FastAPIRequest):
     if not model:
         raise HTTPException(status_code=400, detail="'model' field is required")
 
+    try:
+        _validate_beta_request_options(body)
+    except RequestOptionError as error:
+        return client_error_response(error, "anthropic")
+
     stream = body.get("stream", False)
     thinking = body.get("thinking")
+    thinking_type = thinking.get("type") if isinstance(thinking, dict) else None
+    thinking_budget = thinking.get("budget_tokens") if isinstance(thinking, dict) else None
+    output_config = body.get("output_config")
+    output_effort = output_config.get("effort") if isinstance(output_config, dict) else None
+    features = RequestFeatures.for_anthropic_native(body)
 
     # Debug: log all top-level keys to identify fields Copilot might reject
     logger.debug("Beta request body keys: %s", sorted(body.keys()))
     logger.info(
         "Received beta Anthropic request: model=%s, stream=%s, max_tokens=%s, "
-        "thinking=%s, output_config=%s",
+        "thinking_type=%s, thinking_budget=%s, output_effort=%s",
         model,
         stream,
         body.get("max_tokens"),
-        thinking,
-        body.get("output_config"),
+        thinking_type,
+        thinking_budget,
+        output_effort,
     )
 
     # Resolve provider and check native eligibility
-    provider_name, actual_model, copilot_provider = await _resolve_model(model)
+    native_resolution = await _resolve_native_model(model, features)
+    provider_name = native_resolution.model.provider_name
+    actual_model = native_resolution.model.actual_model
+    copilot_provider = native_resolution.model.copilot_provider
+    native_support = native_resolution.support
+    operation_support = (
+        native_resolution.plan.primary.capabilities.operation(Operation.NATIVE_ANTHROPIC)
+        if native_resolution.plan is not None
+        else native_support
+    )
 
-    if not _is_native_eligible(provider_name, actual_model) or copilot_provider is None:
+    uses_native_transport = (
+        copilot_provider is not None and native_support is not CapabilitySupport.UNSUPPORTED
+    )
+    validation_error = _validate_native_thinking(
+        body,
+        validate_max_tokens=uses_native_transport,
+    )
+    if validation_error is not None:
+        return validation_error
+
+    if copilot_provider is None or operation_support is CapabilitySupport.UNSUPPORTED:
+        feature_error = _validate_explicit_requested_features(native_resolution.plan)
+        if feature_error is not None:
+            return feature_error
         logger.info(
             "Beta route falling back to standard path: model=%s, provider=%s",
             model,
             provider_name,
         )
-        # Delegate to the standard translation-based handler
+        # The standard handler adapts an explicit selection through a translated
+        # transport while preserving that model; this is not model fallback.
+        parsed_request = await _parse_as_anthropic_request(body_bytes)
+        if isinstance(parsed_request, JSONResponse):
+            return parsed_request
+        canonical_error = _validate_canonical_thinking_budget(body, parsed_request.max_tokens)
+        if canonical_error is not None:
+            return canonical_error
         return await standard_messages(
-            request=await _parse_as_anthropic_request(body_bytes),
+            request=parsed_request,
             raw_request=raw_request,
         )
+
+    if native_support is CapabilitySupport.UNSUPPORTED:
+        try:
+            Router._validate_plan_primary(native_resolution.plan)
+        except ProviderError as error:
+            return _invalid_request(error.safe_message)
+
+    try:
+        _validate_native_request_options(body)
+        if native_resolution.plan is not None:
+            validated_plan = Router.prevalidate_plan(
+                native_resolution.plan,
+                lambda candidate: _validate_native_candidate_options(body, candidate),
+            )
+            native_resolution = replace(native_resolution, plan=validated_plan)
+    except RequestOptionError as error:
+        return client_error_response(error, "anthropic")
 
     logger.info(
         "Beta route using native passthrough: model=%s -> %s, stream=%s",
@@ -350,74 +850,128 @@ async def beta_messages(raw_request: FastAPIRequest):
         stream,
     )
 
-    validation_error = _validate_native_thinking(body)
-    if validation_error is not None:
-        return validation_error
-
     # Sanitize before the budget helper so unsupported output_config siblings
     # cannot survive even if the helper is replaced by an integration hook.
     _sanitize_output_config(body)
 
-    # Apply budget fallback only when effort is absent.
-    body = _apply_thinking_budget_native(body, actual_model)
+    # Plan execution normalizes a candidate-owned copy for each model. The
+    # legacy plan-less compatibility path still normalizes the resolved model once.
+    if native_resolution.plan is None:
+        try:
+            body = _apply_thinking_budget_native(body, actual_model)
+        except RequestOptionError as error:
+            return client_error_response(error, "anthropic")
+        body["model"] = actual_model
 
-    # Replace model with the resolved catalog name
-    body["model"] = actual_model
-
-    # Copilot's native endpoint rejects temperature + top_p together;
-    # drop top_p when both are present (temperature takes priority).
-    if "temperature" in body and "top_p" in body:
-        logger.debug("Stripping top_p (temperature also present)")
-        del body["top_p"]
-
-    # Strip fields the Copilot native endpoint doesn't accept.
+    # Defense in depth for fields introduced by internal transformations. Raw
+    # client options have already passed the shallow beta option gate above.
     unknown = set(body.keys()) - _COPILOT_ACCEPTED_FIELDS
     if unknown:
         logger.debug("Stripping unknown fields before passthrough: %s", unknown)
         for key in unknown:
             del body[key]
 
-    # Ensure Copilot token is fresh
-    await copilot_provider.ensure_token()
+    # Legacy test/integration hooks may still return a resolution without a plan.
+    # Real native routing always executes the immutable plan below.
+    if native_resolution.plan is None:
+        await copilot_provider.ensure_token()
 
     if stream:
+        if native_resolution.plan is not None:
+            try:
+                selected_stream, _used_provider = await Router.execute_plan_stream(
+                    native_resolution.plan,
+                    lambda candidate: _stream_native_candidate(candidate, body),
+                    log_prefix="Beta native",
+                )
+            except ProviderError as e:
+                logger.error(
+                    "beta_native_stream_open_failed kind=%s retryable=%s",
+                    e.kind.value,
+                    str(e.retryable).lower(),
+                )
+                return JSONResponse(
+                    status_code=e.status_code or 502,
+                    content={
+                        "type": "error",
+                        "error": {
+                            "type": "api_error",
+                            "message": e.safe_message,
+                        },
+                    },
+                )
+            return sse_streaming_response(
+                _encode_native_stream_errors(selected_stream),
+                keepalive_frame=ANTHROPIC_PING_FRAME,
+            )
         return sse_streaming_response(
             _stream_passthrough(copilot_provider, body),
             keepalive_frame=ANTHROPIC_PING_FRAME,
         )
 
-    # Non-streaming passthrough — try-forward with signature retry
-    try:
-        response = await copilot_provider._send_with_auth_retry(
-            "POST",
-            COPILOT_MESSAGES_PATH,
-            json=body,
-        )
-    except ProviderError as e:
-        logger.error("Beta passthrough request failed: %s", e)
-        raise HTTPException(status_code=e.status_code or 502, detail=str(e))
-
-    # If Copilot rejects a thinking signature, strip history thinking blocks
-    # and retry once — this handles the standard→beta route transition case.
-    if response.status_code == 400 and _is_signature_error(response.text):
-        logger.info("Signature rejected by upstream, stripping thinking blocks and retrying")
-        _strip_history_thinking_blocks(body)
+    # Non-streaming passthrough — consume the frozen native RoutePlan when present.
+    if native_resolution.plan is not None:
+        try:
+            result, used_provider = await Router.execute_plan_nonstream(
+                native_resolution.plan,
+                lambda candidate: _send_native_nonstream(candidate, body),
+            )
+            response, data = result
+            model_is_qualified = True
+        except ProviderError as e:
+            logger.error(
+                "beta_native_request_failed kind=%s retryable=%s",
+                e.kind.value,
+                str(e.retryable).lower(),
+            )
+            if isinstance(e, _NativeUpstreamStatusError):
+                try:
+                    error_body = e.response.json()
+                except Exception:
+                    error_body = {"error": {"type": "api_error", "message": e.response.text}}
+                return JSONResponse(content=error_body, status_code=e.status_code)
+            raise HTTPException(status_code=e.status_code or 502, detail=str(e))
+    else:
         try:
             response = await copilot_provider._send_with_auth_retry(
                 "POST",
                 COPILOT_MESSAGES_PATH,
                 json=body,
+                model=body.get("model"),
             )
         except ProviderError as e:
-            logger.error("Beta passthrough retry failed: %s", e)
+            logger.error(
+                "beta_native_request_failed kind=%s retryable=%s",
+                e.kind.value,
+                str(e.retryable).lower(),
+            )
             raise HTTPException(status_code=e.status_code or 502, detail=str(e))
+
+        # Preserve the legacy signature retry for plan-less test/integration hooks.
+        if response.status_code == 400 and _is_signature_error(response.text):
+            logger.info("Signature rejected by upstream, stripping thinking blocks and retrying")
+            _strip_history_thinking_blocks(body)
+            try:
+                response = await copilot_provider._send_with_auth_retry(
+                    "POST",
+                    COPILOT_MESSAGES_PATH,
+                    json=body,
+                    model=body.get("model"),
+                )
+            except ProviderError as e:
+                logger.error(
+                    "beta_native_retry_failed kind=%s retryable=%s",
+                    e.kind.value,
+                    str(e.retryable).lower(),
+                )
+                raise HTTPException(status_code=e.status_code or 502, detail=str(e))
 
     if response.status_code >= 400:
         logger.warning(
-            "Upstream returned %d for model=%s: %s",
+            "native_upstream_status status=%d model=%s body_bytes=%d",
             response.status_code,
             actual_model,
-            response.text[:200],
+            len(response.text.encode("utf-8", errors="replace")),
         )
         # Forward upstream error verbatim (already Anthropic format)
         try:
@@ -426,7 +980,19 @@ async def beta_messages(raw_request: FastAPIRequest):
             error_body = {"error": {"type": "api_error", "message": response.text}}
         return JSONResponse(content=error_body, status_code=response.status_code)
 
-    data = response.json()
+    if native_resolution.plan is None:
+        try:
+            data = _parse_native_message_response(
+                response,
+                provider=provider_name,
+                model=actual_model,
+            )
+        except ProviderError as error:
+            raise HTTPException(status_code=502, detail=error.safe_message) from error
+        used_provider = provider_name
+        model_is_qualified = False
+    if not model_is_qualified:
+        data["model"] = qualify_model_id(used_provider, data["model"])
     _strip_response(data)
 
     usage = data.get("usage", {})
@@ -457,7 +1023,10 @@ async def beta_count_tokens(raw_request: FastAPIRequest):
     if not model:
         raise HTTPException(status_code=400, detail="'model' field is required")
 
-    provider_name, actual_model, copilot_provider = await _resolve_model(model)
+    resolution = await _resolve_model(model)
+    provider_name = resolution.provider_name
+    actual_model = resolution.actual_model
+    copilot_provider = resolution.copilot_provider
 
     if not _is_native_eligible(provider_name, actual_model) or copilot_provider is None:
         logger.info(
@@ -480,9 +1049,14 @@ async def beta_count_tokens(raw_request: FastAPIRequest):
             "POST",
             COPILOT_COUNT_TOKENS_PATH,
             json=body,
+            model=actual_model,
         )
     except ProviderError as e:
-        logger.error("Beta count_tokens failed: %s", e)
+        logger.error(
+            "beta_count_tokens_failed kind=%s retryable=%s",
+            e.kind.value,
+            str(e.retryable).lower(),
+        )
         raise HTTPException(status_code=e.status_code or 502, detail=str(e))
 
     if response.status_code >= 400:
@@ -509,6 +1083,8 @@ async def beta_count_tokens(raw_request: FastAPIRequest):
 async def _stream_passthrough(
     provider: CopilotProvider,
     payload: dict,
+    *,
+    raise_provider_errors: bool = False,
 ) -> AsyncGenerator[str, None]:
     """Stream SSE events from Copilot's native Anthropic endpoint.
 
@@ -532,6 +1108,7 @@ async def _stream_passthrough(
             COPILOT_MESSAGES_PATH,
             json=payload,
             headers_kwargs={},
+            model=payload.get("model"),
         ) as response:
             if response.status_code == 400:
                 error_text = (await response.aread()).decode()
@@ -542,11 +1119,23 @@ async def _stream_passthrough(
                     _strip_history_thinking_blocks(payload)
                     # Fall through to retry below
                 else:
+                    if raise_provider_errors:
+                        raise _NativeUpstreamStatusError(
+                            response,
+                            provider=provider.name,
+                            model=payload.get("model", ""),
+                        )
                     msg = f"Upstream error ({response.status_code}): {error_text[:200]}"
                     yield _sse_error_event(msg)
                     return
             elif response.status_code >= 400:
                 error_text = (await response.aread()).decode()
+                if raise_provider_errors:
+                    raise _NativeUpstreamStatusError(
+                        response,
+                        provider=provider.name,
+                        model=payload.get("model", ""),
+                    )
                 msg = f"Upstream error ({response.status_code}): {error_text[:200]}"
                 yield _sse_error_event(msg)
                 return
@@ -561,9 +1150,16 @@ async def _stream_passthrough(
             COPILOT_MESSAGES_PATH,
             json=payload,
             headers_kwargs={},
+            model=payload.get("model"),
         ) as response:
             if response.status_code >= 400:
                 error_text = (await response.aread()).decode()
+                if raise_provider_errors:
+                    raise _NativeUpstreamStatusError(
+                        response,
+                        provider=provider.name,
+                        model=payload.get("model", ""),
+                    )
                 msg = f"Upstream error ({response.status_code}): {error_text[:200]}"
                 yield _sse_error_event(msg)
                 return
@@ -572,6 +1168,8 @@ async def _stream_passthrough(
                 yield frame
 
     except ProviderError as e:
+        if raise_provider_errors:
+            raise
         yield _sse_error_event(str(e))
     except asyncio.CancelledError:
         logger.info("Beta anthropic stream cancelled by client")
@@ -585,6 +1183,7 @@ async def _iter_sse_frames(response, *, leak_guard=None) -> AsyncGenerator[str, 
     """Iterate SSE frames from a response, filtering copilot-internal events."""
     current_event: str | None = None
     data_buffer: str = ""
+    terminal_received = False
 
     async for line in response.aiter_lines():
         if line.startswith("event: "):
@@ -593,9 +1192,15 @@ async def _iter_sse_frames(response, *, leak_guard=None) -> AsyncGenerator[str, 
             data_buffer = line[6:]
         elif line == "":
             if current_event and data_buffer:
+                cleaned = _clean_stream_frame(current_event, data_buffer)
+                if cleaned is None:
+                    current_event = None
+                    data_buffer = ""
+                    continue
+
                 # Check leak guard before yielding
                 if leak_guard:
-                    abort_reason = leak_guard.feed_frame(current_event, data_buffer)
+                    abort_reason = leak_guard.feed_frame(current_event, cleaned)
                     if abort_reason:
                         error_event = {
                             "type": "error",
@@ -604,16 +1209,117 @@ async def _iter_sse_frames(response, *, leak_guard=None) -> AsyncGenerator[str, 
                                 "message": "Overloaded: please retry this request",
                             },
                         }
+                        terminal_received = True
                         yield f"event: error\ndata: {json.dumps(error_event)}\n\n"
                         return
 
-                cleaned = _clean_stream_frame(current_event, data_buffer)
-                if cleaned is not None:
-                    yield f"event: {current_event}\ndata: {cleaned}\n\n"
+                if current_event in {"message_stop", "error"}:
+                    terminal_received = True
+                yield f"event: {current_event}\ndata: {cleaned}\n\n"
+                if terminal_received:
+                    return
             elif current_event and not data_buffer:
-                yield f"event: {current_event}\ndata: \n\n"
+                _raise_native_stream_protocol_error(ValueError("SSE event is missing data"))
             current_event = None
             data_buffer = ""
+
+    if current_event is not None or data_buffer:
+        _raise_native_stream_protocol_error(ValueError("truncated upstream SSE frame"))
+    if not terminal_received:
+        _raise_native_stream_protocol_error(
+            ValueError("upstream SSE ended before a terminal event")
+        )
+
+
+def _raise_native_stream_protocol_error(cause: BaseException) -> None:
+    """Raise a safe retryable failure for malformed native Anthropic SSE."""
+    raise ProviderError(
+        "Native Anthropic upstream returned a malformed stream",
+        status_code=502,
+        retryable=True,
+        kind=ProviderFailureKind.UPSTREAM_PROTOCOL,
+        upstream_status_code=200,
+        cause=cause,
+    ) from cause
+
+
+def _validate_native_stream_event_shape(event_type: str, data: dict) -> None:
+    """Validate only the stable minimum shape of a known Anthropic SSE event."""
+
+    def valid_index(value) -> bool:
+        return isinstance(value, int) and not isinstance(value, bool)
+
+    if event_type == "message_start":
+        message = data.get("message")
+        if not isinstance(message, dict):
+            _raise_native_stream_protocol_error(ValueError("invalid message_start message"))
+        if message.get("type") != "message":
+            _raise_native_stream_protocol_error(ValueError("invalid message_start type"))
+        if not isinstance(message.get("id"), str) or not message["id"]:
+            _raise_native_stream_protocol_error(ValueError("invalid message_start id"))
+        if not isinstance(message.get("model"), str) or not message["model"]:
+            _raise_native_stream_protocol_error(ValueError("invalid message_start model"))
+        if message.get("role") != "assistant":
+            _raise_native_stream_protocol_error(ValueError("invalid message_start role"))
+        if not isinstance(message.get("content"), list):
+            _raise_native_stream_protocol_error(ValueError("invalid message_start content"))
+        usage = message.get("usage")
+        if not isinstance(usage, dict):
+            _raise_native_stream_protocol_error(ValueError("invalid message_start usage"))
+        try:
+            for block in message["content"]:
+                _validate_content_block(block)
+            _validate_usage(usage, required_fields=("input_tokens",))
+            _validate_nullable_string(message.get("stop_reason"), "message_start stop_reason")
+            _validate_nullable_string(message.get("stop_sequence"), "message_start stop_sequence")
+        except (KeyError, TypeError, ValueError) as error:
+            _raise_native_stream_protocol_error(error)
+    elif event_type == "content_block_start":
+        if not valid_index(data.get("index")):
+            _raise_native_stream_protocol_error(ValueError("invalid content_block_start"))
+        try:
+            _validate_content_block(data.get("content_block"))
+        except (TypeError, ValueError) as error:
+            _raise_native_stream_protocol_error(error)
+    elif event_type == "content_block_delta":
+        delta = data.get("delta")
+        if not valid_index(data.get("index")) or not isinstance(delta, dict):
+            _raise_native_stream_protocol_error(ValueError("invalid content_block_delta"))
+        delta_type = delta.get("type")
+        if not isinstance(delta_type, str) or not delta_type:
+            _raise_native_stream_protocol_error(ValueError("invalid content delta type"))
+        field_by_type = {
+            "text_delta": "text",
+            "thinking_delta": "thinking",
+            "signature_delta": "signature",
+            "input_json_delta": "partial_json",
+        }
+        field = field_by_type.get(delta_type)
+        if field is not None and not isinstance(delta.get(field), str):
+            _raise_native_stream_protocol_error(TypeError(f"{delta_type} {field} must be a string"))
+    elif event_type == "content_block_stop":
+        if not valid_index(data.get("index")):
+            _raise_native_stream_protocol_error(ValueError("invalid content_block_stop"))
+    elif event_type == "message_delta":
+        delta = data.get("delta")
+        usage = data.get("usage")
+        if not isinstance(delta, dict) or not isinstance(usage, dict):
+            _raise_native_stream_protocol_error(ValueError("invalid message_delta"))
+        try:
+            _validate_nullable_string(delta.get("stop_reason"), "message_delta stop_reason")
+            _validate_nullable_string(delta.get("stop_sequence"), "message_delta stop_sequence")
+            _validate_usage(usage, required_fields=("output_tokens",))
+        except (KeyError, TypeError, ValueError) as error:
+            _raise_native_stream_protocol_error(error)
+    elif event_type == "error":
+        error = data.get("error")
+        if (
+            not isinstance(error, dict)
+            or not isinstance(error.get("type"), str)
+            or not error["type"]
+            or not isinstance(error.get("message"), str)
+        ):
+            _raise_native_stream_protocol_error(ValueError("invalid error event"))
 
 
 def _clean_stream_frame(event_type: str, data_str: str) -> str | None:
@@ -625,29 +1331,31 @@ def _clean_stream_frame(event_type: str, data_str: str) -> str | None:
     if event_type == "copilot_usage":
         return None
 
+    if event_type not in _ANTHROPIC_SSE_EVENTS:
+        _raise_native_stream_protocol_error(ValueError("unknown Anthropic SSE event"))
+
+    try:
+        data = json.loads(data_str)
+    except (json.JSONDecodeError, TypeError) as error:
+        _raise_native_stream_protocol_error(error)
+    if not isinstance(data, dict) or data.get("type") != event_type:
+        _raise_native_stream_protocol_error(ValueError("Anthropic SSE discriminator mismatch"))
+    _validate_native_stream_event_shape(event_type, data)
+
     # For message_start, strip copilot fields from nested message
     if event_type == "message_start":
-        try:
-            data = json.loads(data_str)
-            msg = data.get("message")
-            if isinstance(msg, dict):
-                for key in _STRIP_RESPONSE_KEYS:
-                    msg.pop(key, None)
-            return json.dumps(data)
-        except (json.JSONDecodeError, TypeError):
-            return data_str
+        msg = data.get("message")
+        for key in _STRIP_RESPONSE_KEYS:
+            msg.pop(key, None)
+        return json.dumps(data)
 
     # For message_stop, strip bedrock metrics
     if event_type == "message_stop":
-        try:
-            data = json.loads(data_str)
-            for key in _STRIP_STREAM_MESSAGE_STOP_KEYS:
-                data.pop(key, None)
-            return json.dumps(data)
-        except (json.JSONDecodeError, TypeError):
-            return data_str
+        for key in _STRIP_STREAM_MESSAGE_STOP_KEYS:
+            data.pop(key, None)
+        return json.dumps(data)
 
-    return data_str
+    return json.dumps(data)
 
 
 def _sse_error_event(message: str) -> str:
@@ -667,4 +1375,13 @@ async def _parse_as_anthropic_request(body_bytes: bytes):
     from router_maestro.server.schemas.anthropic import AnthropicMessagesRequest
 
     body = json.loads(body_bytes)
-    return AnthropicMessagesRequest.model_validate(body)
+    try:
+        return AnthropicMessagesRequest.model_validate(body)
+    except ValidationError as error:
+        errors = error.errors(include_input=False, include_url=False)
+        if not errors:
+            return _invalid_request("Invalid request body")
+        first = errors[0]
+        location = ".".join(str(part) for part in first.get("loc", ()))
+        message = str(first.get("msg", "Invalid value"))
+        return _invalid_request(f"{location}: {message}" if location else message)

@@ -16,6 +16,7 @@ from rich.table import Table
 
 from router_maestro.cli.client import ServerNotRunningError, get_admin_client
 from router_maestro.config.server import get_current_context_api_key
+from router_maestro.routing.model_ref import qualify_model_id
 
 app = typer.Typer(invoke_without_command=True)
 console = Console()
@@ -178,7 +179,7 @@ def _display_models(models: list[dict]) -> None:
     table.add_column("Model Key", style="green")
     table.add_column("Name", style="white")
     for i, model in enumerate(models, 1):
-        key = model.get("display_key", f"{model['provider']}/{model['id']}")
+        key = model.get("display_key", _model_key(model))
         table.add_row(str(i), key, model["name"])
     console.print(table)
 
@@ -195,17 +196,18 @@ def _maybe_inject_opus_1m(models: list[dict]) -> list[dict]:
 
     Returns a new list (never mutates the input).
     """
-    available_keys = {f"{m['provider']}/{m['id']}" for m in models}
+    models_by_key = {_model_key(model): model for model in models}
     injected: list[dict] = []
     for source_model, native_key, bare_id, display_name in _INJECTABLE_1M_VARIANTS:
-        if source_model in available_keys:
+        source = models_by_key.get(source_model)
+        if source is not None and (_upstream_context_window(source) or 0) >= 1_000_000:
             injected.append(
                 {
                     "provider": "github-copilot",
                     "id": bare_id,
                     "name": display_name,
                     "display_key": native_key,
-                    "custom_key": native_key,
+                    "wire_key": qualify_model_id("github-copilot", native_key),
                 }
             )
     if not injected:
@@ -239,9 +241,19 @@ def _select_model_dict(models: list[dict], prompt: str, default: str = "0") -> d
 
 def _model_key(model: dict) -> str:
     """Resolve the wire model key for a model dict from the CLI's model list."""
+    if "wire_key" in model:
+        return model["wire_key"]
     if "custom_key" in model:
         return model["custom_key"]
-    return f"{model['provider']}/{model['id']}"
+    return qualify_model_id(model["provider"], model["id"])
+
+
+def _bare_upstream_model_id(model: dict) -> str:
+    """Return the upstream ID from qualified server or legacy bare model entries."""
+    provider = model.get("provider", "")
+    model_id = model.get("id", "")
+    prefix = f"{provider}/"
+    return model_id[len(prefix) :] if provider and model_id.startswith(prefix) else model_id
 
 
 # Claude Code recognizes 1M context windows natively for these model keys (the
@@ -271,7 +283,7 @@ def _prompt_endpoint_mode(model: dict | None) -> bool:
     if model is None:
         return False
     provider = model.get("provider", "")
-    model_id = model.get("id", "")
+    model_id = _bare_upstream_model_id(model)
     if provider != "github-copilot" or not model_id.lower().startswith("claude-"):
         return False
 
@@ -306,7 +318,8 @@ def _prompt_auto_compact_window(model: dict | None) -> int | None:
     if model is None:
         return None
     model_key = _model_key(model)
-    is_native_1m = model_key in _CLAUDE_CODE_NATIVE_1M_KEYS
+    native_key = model.get("display_key", model_key)
+    is_native_1m = native_key in _CLAUDE_CODE_NATIVE_1M_KEYS
 
     upstream = _upstream_context_window(model)
     default_value = 1_000_000 if is_native_1m else _CLAUDE_CODE_DEFAULT_AUTO_COMPACT_WINDOW
@@ -523,7 +536,8 @@ def codex_config() -> None:
 
     # Select model
     console.print("\n[bold]Step 2: Select model[/bold]")
-    selected_model = _select_model(models, "Enter number (or 0 for auto-routing)")
+    selected_model_dict = _select_model_dict(models, "Enter number (or 0 for auto-routing)")
+    selected_model = _model_key(selected_model_dict) if selected_model_dict else "router-maestro"
 
     # Step 4: Generate config
     client = get_admin_client()
@@ -644,7 +658,8 @@ def gemini_cli_config() -> None:
     models = _fetch_and_display_models()
 
     console.print("\n[bold]Step 2: Select model[/bold]")
-    selected_model = _select_model(models, "Enter number (or 0 for auto-routing)")
+    selected_model_dict = _select_model_dict(models, "Enter number (or 0 for auto-routing)")
+    selected_model = _model_key(selected_model_dict) if selected_model_dict else "router-maestro"
 
     # Step 4: Generate config
     auth_key = get_current_context_api_key() or "router-maestro"
@@ -657,9 +672,9 @@ def gemini_cli_config() -> None:
     # Load existing .env to preserve other variables
     existing_env = _parse_env_file(env_path)
 
-    # Strip provider prefix (e.g. "github-copilot/gemini-2.5-pro" -> "gemini-2.5-pro")
-    # Gemini CLI puts model name in URL path, so "/" would break routing
-    model_name = selected_model.split("/", 1)[-1] if "/" in selected_model else selected_model
+    # Router-Maestro's Gemini path converter accepts the provider-qualified public
+    # ID, preserving an unambiguous selection when providers share an upstream ID.
+    model_name = selected_model
 
     # Set Gemini CLI variables
     existing_env["GOOGLE_GEMINI_BASE_URL"] = gemini_url

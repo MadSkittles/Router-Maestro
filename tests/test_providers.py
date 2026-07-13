@@ -323,7 +323,7 @@ class TestChatRequest:
         )
         assert request.model == "gpt-4o"
         assert len(request.messages) == 1
-        assert request.temperature == 1.0
+        assert request.temperature is None
         assert request.stream is False
 
     def test_request_with_options(self):

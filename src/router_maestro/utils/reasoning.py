@@ -1,6 +1,7 @@
 """Reasoning effort ↔ thinking budget mapping.
 
-OpenAI-style ``reasoning_effort`` (``"low"``/``"medium"``/``"high"``) and
+OpenAI-style ``reasoning_effort`` (``"minimal"``/``"low"``/``"medium"``/
+``"high"``) and
 Anthropic-style ``thinking.budget_tokens`` (integer) are normalised through
 this module so that every entry-route and every provider speaks the same
 language.
@@ -12,6 +13,9 @@ the highest tier the upstream supports.
 
 from __future__ import annotations
 
+# ``minimal`` is an explicit upstream tier, but there is no documented token
+# budget equivalent. Keep the ordinal request domain separate from this partial
+# budget mapping so a small Anthropic budget is never guessed to mean minimal.
 EFFORT_TO_BUDGET: dict[str, int] = {
     "low": 1024,
     "medium": 4096,
@@ -20,40 +24,29 @@ EFFORT_TO_BUDGET: dict[str, int] = {
     "max": 32768,
 }
 
-VALID_EFFORTS: tuple[str, ...] = ("low", "medium", "high", "xhigh", "max")
+EFFORT_ORDER: tuple[str, ...] = ("minimal", "low", "medium", "high", "xhigh", "max")
+VALID_EFFORTS: tuple[str, ...] = EFFORT_ORDER
 
 # Effort tiers eligible for transparent variant rewriting (e.g. claude-opus-4.7
 # → claude-opus-4.7-high). low/medium are passed through as reasoning_effort.
 VARIANT_EFFORTS: tuple[str, ...] = ("high", "xhigh", "max")
 
 # Effort levels that vanilla OpenAI / Copilot upstreams accept directly.
-UPSTREAM_NATIVE_EFFORTS: tuple[str, ...] = ("low", "medium", "high")
+UPSTREAM_NATIVE_EFFORTS: tuple[str, ...] = ("minimal", "low", "medium", "high")
 
 
 def pick_closest_effort(desired: str, allowed: list[str]) -> str | None:
-    """Pick the closest catalog-supported effort, preferring the next higher tier."""
-    if not allowed:
+    """Pick the highest catalog-supported effort that does not exceed desired."""
+    if desired not in EFFORT_ORDER:
         return None
-    if desired in allowed:
+    valid_allowed = [value for value in allowed if value in EFFORT_ORDER]
+    if desired in valid_allowed:
         return desired
-    try:
-        target = VALID_EFFORTS.index(desired)
-    except ValueError:
-        return max(
-            allowed,
-            key=lambda value: VALID_EFFORTS.index(value) if value in VALID_EFFORTS else -1,
-        )
-    higher = [
-        value for value in allowed if value in VALID_EFFORTS and VALID_EFFORTS.index(value) > target
-    ]
-    if higher:
-        return min(higher, key=VALID_EFFORTS.index)
-    lower = [
-        value for value in allowed if value in VALID_EFFORTS and VALID_EFFORTS.index(value) < target
-    ]
+    target = EFFORT_ORDER.index(desired)
+    lower = [value for value in valid_allowed if EFFORT_ORDER.index(value) < target]
     if lower:
-        return max(lower, key=VALID_EFFORTS.index)
-    return allowed[0]
+        return max(lower, key=EFFORT_ORDER.index)
+    return None
 
 
 def effort_to_budget(effort: str | None) -> int | None:
@@ -79,7 +72,7 @@ def budget_to_effort(budget: int | None) -> str | None:
 
 
 def downgrade_for_upstream(effort: str | None) -> str | None:
-    """Map ``xhigh``/``max`` → ``high`` for upstreams that reject extensions."""
+    """Preserve native tiers and map ``xhigh``/``max`` to ``high``."""
     if effort is None:
         return None
     if effort in UPSTREAM_NATIVE_EFFORTS:

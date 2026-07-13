@@ -20,23 +20,42 @@ Router-Maestro acts as a proxy that gives you access to models from multiple pro
 - **Gemini API compatibility**: Gemini REST API format (`/api/gemini/v1beta/...`) for Gemini CLI/SDK
 - **Cross-provider translation**: Seamlessly route OpenAI requests to Anthropic providers and vice versa
 - **Intelligent routing**: Priority-based model selection with automatic fallback on failure
-- **Fuzzy model matching**: No need to type exact model IDs. Subagents, agent teams, and tools that hardcode model names (e.g. `opus-4-6`, `claude-sonnet-4.5`) are resolved automatically to the correct provider model
+- **Deterministic model matching**: Public model IDs are provider-qualified, while convenient bare aliases (for example, `opus-4-6`) are matched by score and routed according to the configured priorities
 - **CLI management**: Full command-line interface for configuration and server control
 - **Docker ready**: Production-ready Docker images with Traefik integration
 - **Configuration hot-reload**: Auto-reload config files every 5 minutes without server restart
 
 ### Advanced
 
-- **1M context support**: Activate Opus 4.6, Opus 4.7, Opus 4.8, *or* Sonnet 4.6 with a 1M context window via GitHub Copilot — just select `claude-opus-4-6[1m]`, `claude-opus-4-7[1m]`, `claude-opus-4-8[1m]`, or `claude-sonnet-4-6[1m]` during `config claude-code` setup. For 4.6 / 4.7 the `[1m]` beta header is auto-mapped to a dedicated Copilot variant (`claude-opus-4.6-1m` / `claude-opus-4.7-1m-internal`); for 4.8 and Sonnet 4.6 the base catalog entry already advertises 1M, so the synthetic `[1m]` key just raises Claude Code's auto-compact threshold (`CLAUDE_CODE_AUTO_COMPACT_WINDOW`) to 1M.
-- **Transparent reasoning-tier routing**: Requests for `claude-opus-4.7` with `reasoning_effort: "high"` or `"xhigh"` (or an Anthropic-style `thinking.budget_tokens` ≥ 8192) are auto-rewritten to the dedicated Copilot variants `claude-opus-4.7-high` / `claude-opus-4.7-xhigh` — no client changes needed. The newly-opened `reasoning_effort: "max"` tier (Opus 4.6 / 4.7 / 4.8 on Copilot) is also passed through verbatim when the model catalog advertises it.
+- **1M context support**: Activate a catalog model whose base entry advertises a
+  1M context window by selecting its synthetic `[1m]` key during
+  `config claude-code` setup. The wizard displays Claude Code's native `[1m]`
+  key but writes it with the `github-copilot/` provider scope, so it maps to the
+  same base Copilot model even when another provider exposes the same upstream
+  ID. It also raises Claude Code's auto-compact threshold
+  (`CLAUDE_CODE_AUTO_COMPACT_WINDOW`) to 1M; Router-Maestro does not rewrite it
+  to a dedicated `-1m` model suffix.
+- **Capability-aware reasoning tiers**: `reasoning_effort` and Anthropic
+  thinking controls stay on the selected base model. The ordered effort ladder
+  is `minimal < low < medium < high < xhigh < max`. An advertised exact tier is
+  passed through; otherwise Router-Maestro may substitute only the highest
+  supported tier no greater than the request, or reject it when no such tier
+  exists. Unknown tiers are rejected. `minimal` has no implicit token-budget
+  equivalent, so a small `thinking.budget_tokens` value is not guessed to mean
+  `minimal`. Copilot's known catalog-only `none` sentinel is preserved as model
+  capability metadata, but it is not a client request tier, budget mapping, or
+  downward-substitution target. Effort does not route through `-high` or
+  `-xhigh` model suffixes.
 - **Anthropic adaptive effort passthrough**: `output_config.effort` is preserved
   across standard and beta-native Anthropic routes. Explicit effort replaces
   an adaptive thinking budget, while manual `thinking.type="enabled"` retains
   its protocol-required `budget_tokens` when `budget_tokens < max_tokens`.
   Omitting `budget_tokens` uses the configured server default. The beta-native
   route rejects present token limits unless they are positive, non-boolean
-  integers. Copilot-native requests map effort to the closest tier advertised
-  by each model's live catalog.
+  integers. If an exact reasoning tier is unavailable, Router-Maestro may use
+  the highest advertised tier that does not exceed the request. It never
+  silently raises reasoning effort, cost, or latency; a request with no valid
+  lower tier is rejected.
 
 ## Table of Contents
 
@@ -169,6 +188,22 @@ Models are identified using the format `{provider}/{model-id}`:
 | `openai/gpt-4-turbo` | GPT-4 Turbo via OpenAI |
 | `anthropic/claude-3-5-sonnet` | Claude 3.5 Sonnet via Anthropic |
 
+Model-list endpoints and successful response `model` fields use this qualified
+form. The response value identifies the candidate that actually executed the
+request, so it can change after a permitted fallback without becoming
+ambiguous. Qualification uses catalog provenance rather than guessing from the
+text of an upstream ID. A raw upstream ID may itself contain `/` and remains the
+complete suffix: provider `openrouter` plus raw ID `openrouter/auto` is exposed
+as `openrouter/openrouter/auto`. Only a catalog value explicitly marked as an
+already-public ID is decoded once.
+
+Bare model IDs and fuzzy aliases remain valid input conveniences, but they do
+not select or lock a provider. This includes an exact raw alias that contains a
+slash. Use the complete public `provider/model-id` returned by a model-list
+endpoint when provider identity matters. Other slash-containing inputs are
+treated as provider-scoped; an unknown provider prefix returns `404` instead of
+falling back to a cross-provider fuzzy match.
+
 **Fuzzy matching**: You don't need to type exact model IDs. Router-Maestro will fuzzy-match common variations:
 
 | You type              | Resolves to                      |
@@ -178,7 +213,10 @@ Models are identified using the format `{provider}/{model-id}`:
 | `claude-sonnet-4.5`   | `claude-sonnet-4-5-20250929`     |
 | `anthropic/sonnet-4-5`| Sonnet 4.5 via Anthropic only    |
 
-When multiple versions match, the newest (by date suffix) is selected automatically.
+The highest-confidence fuzzy match wins. A date/version suffix is used only to
+break ties within the same normalized model family. Low-confidence or
+effectively tied cross-family matches are rejected as ambiguous instead of
+being resolved by an unrelated model's newer date.
 
 ### Auto-Routing
 
@@ -203,7 +241,9 @@ router-maestro model priority add github-copilot/gpt-4o --position 2
 router-maestro model priority list
 ```
 
-**Fallback** triggers when a request fails with a retryable error (429, 5xx):
+**Fallback** triggers only after a retryable execution failure, such as a
+transport error, rate limit, retryable upstream status, or malformed upstream
+response before a streaming response is committed:
 
 | Strategy     | Behavior                             |
 | ------------ | ------------------------------------ |
@@ -220,6 +260,14 @@ Configure in `~/.config/router-maestro/priorities.json`:
 }
 ```
 
+An explicit `provider/model-id` remains the primary candidate. If it is absent
+from the priority list, the configured priorities are still eligible after a
+retryable execution failure, with the primary removed from duplicates. Static
+capability mismatches and invalid or unsupported request options return the
+entry protocol's native `400` response and do not switch models. Once a stream
+has emitted its first provider chunk, a later failure is surfaced in that same
+stream and Router-Maestro never replays the request on another candidate.
+
 ### Cross-Provider Translation
 
 Router-Maestro automatically translates between OpenAI and Anthropic formats:
@@ -231,6 +279,44 @@ POST /v1/messages  {"model": "openai/gpt-4o", ...}
 # Use OpenAI API with Anthropic provider
 POST /api/openai/v1/chat/completions  {"model": "anthropic/claude-3-5-sonnet", ...}
 ```
+
+Accepted semantic options are either preserved, translated, or rejected; they
+are not silently dropped. Unsupported options use the client's native error
+shape (OpenAI, Anthropic, or Gemini) with HTTP `400`. Reasoning-tier
+substitution is downward-only across the ordered
+`minimal < low < medium < high < xhigh < max` ladder. Unknown tier names are
+rejected, and `minimal` is never inferred from a token budget because no
+documented budget equivalent exists.
+
+Omitted temperature remains omitted through Chat, Responses, and Gemini
+translation. An explicit value, including `1.0`, remains explicit. Copilot's
+Chat transport accepts the explicit value, while Copilot's Responses transport
+rejects every explicit temperature with an OpenAI-native HTTP `400` before
+provider I/O. OpenAI Responses reasoning currently represents only
+`reasoning.effort`; `reasoning.summary` and other sibling fields are rejected
+with their exact parameter path instead of being ignored.
+
+The beta Anthropic endpoint uses Copilot's native Anthropic transport when the
+selected model advertises it. If that transport is unavailable, the same
+selected model is adapted through the standard translated path. This is a
+transport adaptation, not permission to choose a different model; model
+fallback still requires a retryable execution failure.
+
+For standard Anthropic thinking requests, budget and reasoning validation use
+the capability and output-token snapshot of the same frozen route candidate
+that will execute the request. Validation never consults a different provider's
+same-named catalog entry and then silently changes candidates.
+
+OpenAI Chat and Responses preserve refusals as typed `refusal` data, including
+streaming deltas and assistant history. Anthropic and Gemini do not expose an
+equivalent refusal wire type, so only those protocol boundaries map refusal
+content to text.
+
+For OpenAI Chat streaming, `stream_options: {"include_usage": true}` emits a
+final usage-only chunk with `choices: []` immediately before `[DONE]`.
+Explicit `false` suppresses downstream usage; omitting `stream_options` keeps
+Router-Maestro's legacy streaming shape. Invalid stream options are rejected
+with an OpenAI-native `400` before the provider call.
 
 ### Contexts
 
@@ -318,6 +404,10 @@ curl http://localhost:8080/api/openai/v1/chat/completions \
 # List models
 GET /api/openai/v1/models
 ```
+
+The list `id` and every successful Chat/Responses response `model` are
+provider-qualified (`provider/model-id`). A fallback response reports the
+candidate that actually served it.
 
 ### Anthropic-Compatible
 

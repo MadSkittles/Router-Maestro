@@ -3,7 +3,7 @@
 import httpx
 
 from router_maestro.auth import AuthManager, AuthType
-from router_maestro.providers.base import ModelInfo, ProviderError
+from router_maestro.providers.base import ModelInfo, ProviderError, ProviderFailureKind
 from router_maestro.providers.openai_base import OpenAIChatProvider
 from router_maestro.utils import get_logger
 
@@ -31,7 +31,12 @@ class OpenAIProvider(OpenAIChatProvider):
         cred = self.auth_manager.get_credential("openai")
         if not cred or cred.type != AuthType.API_KEY:
             logger.error("Not authenticated with OpenAI")
-            raise ProviderError("Not authenticated with OpenAI", status_code=401)
+            raise ProviderError(
+                "Not authenticated with OpenAI",
+                status_code=401,
+                kind=ProviderFailureKind.AUTHENTICATION,
+                provider=self.name,
+            )
         return cred.key
 
     def _get_headers(self) -> dict[str, str]:
@@ -52,11 +57,10 @@ class OpenAIProvider(OpenAIChatProvider):
                     timeout=30.0,
                 )
                 response.raise_for_status()
-                data = response.json()
+                model_ids = self._parse_model_catalog(response)
 
                 models = []
-                for model in data.get("data", []):
-                    model_id = model["id"]
+                for model_id in model_ids:
                     # Filter to chat models
                     if any(x in model_id for x in ["gpt-", "o1-", "o3-"]):
                         models.append(
@@ -69,7 +73,14 @@ class OpenAIProvider(OpenAIChatProvider):
                 logger.info("Fetched %d OpenAI models", len(models))
                 return models
             except httpx.HTTPError as e:
-                logger.warning("Failed to list OpenAI models, using defaults: %s", e)
+                status_code = (
+                    e.response.status_code if isinstance(e, httpx.HTTPStatusError) else None
+                )
+                logger.warning(
+                    "Failed to list OpenAI models, using defaults (%s, status=%s)",
+                    type(e).__name__,
+                    status_code,
+                )
                 # Return default models on error
                 return [
                     ModelInfo(id="gpt-4o", name="GPT-4o", provider=self.name),

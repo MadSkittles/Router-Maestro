@@ -15,10 +15,11 @@ from integration_tests.conftest import (
     assert_tool_call_name,
     event_payloads,
     openai_chat_tool_payload,
-    openai_chat_usage_payload,
     openai_responses_payload,
     openai_responses_tool_payload,
     parse_sse_events,
+    post_openai_chat_compat_probe,
+    stream_openai_chat_compat_probe,
 )
 
 
@@ -27,15 +28,12 @@ def test_openai_chat_completion_non_streaming_returns_usage(
     chat_model: str,
 ):
     """OpenAI Chat non-streaming should route to GHC and return usage."""
-    response = client.post(
-        "/api/openai/v1/chat/completions",
-        json=openai_chat_usage_payload(chat_model),
-    )
+    response = post_openai_chat_compat_probe(client, chat_model)
     assert_http_success(response)
     data = response.json()
 
     assert data["object"] == "chat.completion"
-    assert data["model"]
+    assert data["model"] == chat_model
     assert len(data["choices"]) == 1
     message = data["choices"][0]["message"]
     assert message["role"] == "assistant"
@@ -48,10 +46,9 @@ def test_openai_chat_completion_streaming_returns_chunks_and_done(
     chat_model: str,
 ):
     """OpenAI Chat streaming should return SSE chunks and the [DONE] sentinel."""
-    with client.stream(
-        "POST",
-        "/api/openai/v1/chat/completions",
-        json=openai_chat_usage_payload(chat_model, stream=True),
+    with stream_openai_chat_compat_probe(
+        client,
+        chat_model,
         timeout=180.0,
     ) as response:
         assert_http_success(response)
@@ -59,6 +56,7 @@ def test_openai_chat_completion_streaming_returns_chunks_and_done(
 
     payloads = event_payloads(events)
     assert events[-1][1] == "[DONE]"
+    assert all(payload.get("model") == chat_model for payload in payloads)
     assert any(payload.get("object") == "chat.completion.chunk" for payload in payloads)
     assert any(
         choice.get("delta", {}).get("role") == "assistant"
@@ -134,6 +132,7 @@ def test_openai_responses_non_streaming_returns_output_and_usage(
     data = response.json()
 
     assert data["object"] == "response"
+    assert data["model"] == responses_model
     assert data["status"] == "completed"
     message_items = [item for item in data["output"] if item.get("type") == "message"]
     reasoning_items = [item for item in data["output"] if item.get("type") == "reasoning"]
@@ -163,7 +162,10 @@ def test_openai_responses_streaming_returns_lifecycle_events(
     assert "response.created" in event_names
     assert "response.in_progress" in event_names
     assert "response.completed" in event_names
+    created = next(payload for name, payload in events if name == "response.created")
     completed = next(payload for name, payload in events if name == "response.completed")
+    assert created["response"]["model"] == responses_model
+    assert completed["response"]["model"] == responses_model
     assert completed["response"]["status"] == "completed"
     usage = completed["response"].get("usage")
     if usage:

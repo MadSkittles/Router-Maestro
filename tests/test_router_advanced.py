@@ -2,17 +2,20 @@
 
 import pytest
 
-from router_maestro.config import FallbackStrategy, PrioritiesConfig
+from router_maestro.config import PrioritiesConfig
 from router_maestro.providers import (
     ChatRequest,
     ChatResponse,
     Message,
     ModelInfo,
     ProviderError,
+    ProviderFailureKind,
     ResponsesRequest,
     ResponsesResponse,
 )
 from router_maestro.providers.base import BaseProvider
+from router_maestro.routing.capabilities import Operation, ProviderCapabilities
+from router_maestro.routing.model_ref import ModelRef, qualify_model_id
 from router_maestro.routing.router import (
     AUTO_ROUTE_MODEL,
     CACHE_TTL_SECONDS,
@@ -47,6 +50,19 @@ class MockProvider(BaseProvider):
 
     def is_authenticated(self) -> bool:
         return self._authenticated
+
+    @property
+    def capabilities(self) -> ProviderCapabilities:
+        return ProviderCapabilities(
+            operations=frozenset(
+                {
+                    Operation.CHAT,
+                    Operation.CHAT_STREAM,
+                    Operation.RESPONSES,
+                    Operation.RESPONSES_STREAM,
+                }
+            )
+        )
 
     async def ensure_token(self) -> None:
         pass
@@ -186,6 +202,259 @@ class TestRouterCacheManagement:
         assert "test-provider/model-2" in router_with_mock._models_cache
 
     @pytest.mark.asyncio
+    async def test_qualified_catalog_id_is_normalized_once_and_round_trips(self, router_with_mock):
+        qualified = ModelInfo(
+            id="p/m",
+            name="Qualified",
+            provider="p",
+            id_is_qualified=True,
+        )
+        duplicate_bare = ModelInfo(id="m", name="Bare duplicate", provider="p")
+        provider = MockProvider(name="p", models=[qualified, duplicate_bare])
+        router_with_mock.providers = {"p": provider}
+        _mark_providers_fresh(router_with_mock)
+        _set_priorities(router_with_mock, PrioritiesConfig(priorities=[]))
+
+        await router_with_mock._ensure_models_cache()
+
+        assert set(router_with_mock._models_cache) == {"m", "p/m"}
+        assert "p/p/m" not in router_with_mock._models_cache
+        assert router_with_mock._models_cache["m"] is router_with_mock._models_cache["p/m"]
+        cached_model = router_with_mock._models_cache["p/m"][1]
+        assert cached_model.id == "m"
+        assert cached_model is not qualified
+        assert qualified.id == "p/m"
+
+        public_models = await router_with_mock.list_models()
+        assert [(model.provider, model.id) for model in public_models] == [("p", "m")]
+        public_id = qualify_model_id(public_models[0].provider, public_models[0].id)
+        assert public_id == "p/m"
+
+        response, provider_name = await router_with_mock.chat_completion(
+            ChatRequest(model=public_id, messages=[Message(role="user", content="hello")]),
+            fallback=False,
+        )
+        assert provider_name == "p"
+        assert response.model == "m"
+
+    @pytest.mark.asyncio
+    async def test_namespaced_upstream_catalog_id_round_trips_without_hiding_valid_sibling(
+        self, router_with_mock
+    ):
+        namespaced = ModelInfo(id="q/foreign", name="Foreign", provider="p")
+        valid = ModelInfo(id="local", name="Local", provider="p")
+        router_with_mock.providers = {
+            "p": MockProvider(name="p", models=[namespaced, valid]),
+        }
+        _mark_providers_fresh(router_with_mock)
+        _set_priorities(router_with_mock, PrioritiesConfig(priorities=[]))
+
+        await router_with_mock._ensure_models_cache()
+
+        assert set(router_with_mock._models_cache) == {
+            "q/foreign",
+            "p/q/foreign",
+            "local",
+            "p/local",
+        }
+        response, provider_name = await router_with_mock.chat_completion(
+            ChatRequest(
+                model="p/q/foreign",
+                messages=[Message(role="user", content="hello")],
+            ),
+            fallback=False,
+        )
+
+        assert provider_name == "p"
+        assert response.model == "q/foreign"
+        listed = await router_with_mock.list_models()
+        assert len(listed) == 2
+        assert {(model.provider, model.id) for model in listed} == {
+            ("p", "local"),
+            ("p", "q/foreign"),
+        }
+
+    @pytest.mark.asyncio
+    async def test_upstream_id_starting_with_provider_name_has_unambiguous_public_id(
+        self, router_with_mock
+    ):
+        upstream = ModelInfo(id="p/auto", name="Provider-namespaced", provider="p")
+        router_with_mock.providers = {"p": MockProvider(name="p", models=[upstream])}
+        _mark_providers_fresh(router_with_mock)
+        _set_priorities(router_with_mock, PrioritiesConfig(priorities=[]))
+
+        await router_with_mock._ensure_models_cache()
+
+        listed = await router_with_mock.list_models()
+        assert [(model.provider, model.id) for model in listed] == [("p", "p/auto")]
+        plan = await router_with_mock.plan_route("p/p/auto", Operation.CHAT)
+        assert plan.primary.model == ModelRef("p", "p/auto")
+
+    @pytest.mark.asyncio
+    async def test_exact_slash_alias_stays_bare_when_namespace_is_a_provider(
+        self, router_with_mock
+    ):
+        upstream_id = "openrouter/auto"
+        openrouter_model = ModelInfo(id=upstream_id, name="Auto", provider="openrouter")
+        preferred_model = ModelInfo(id=upstream_id, name="Auto", provider="preferred")
+        router_with_mock.providers = {
+            "openrouter": MockProvider(name="openrouter", models=[openrouter_model]),
+            "preferred": MockProvider(name="preferred", models=[preferred_model]),
+        }
+        _mark_providers_fresh(router_with_mock)
+        _set_priorities(
+            router_with_mock,
+            PrioritiesConfig(
+                priorities=[
+                    "preferred/openrouter/auto",
+                    "openrouter/openrouter/auto",
+                ]
+            ),
+        )
+
+        plan = await router_with_mock.plan_route(upstream_id, Operation.CHAT)
+
+        assert plan.explicit is False
+        assert plan.primary.model == ModelRef("preferred", upstream_id)
+
+    @pytest.mark.asyncio
+    async def test_slashless_fuzzy_alias_preserves_raw_upstream_namespace(
+        self,
+        router_with_mock,
+    ):
+        upstream_id = "meta-llama/llama-3.1-8b-instruct"
+        model = ModelInfo(id=upstream_id, name="Llama 3.1 8B", provider="openrouter")
+        router_with_mock.providers = {
+            "openrouter": MockProvider(name="openrouter", models=[model]),
+        }
+        _mark_providers_fresh(router_with_mock)
+        _set_priorities(
+            router_with_mock,
+            PrioritiesConfig(priorities=[f"openrouter/{upstream_id}"]),
+        )
+
+        plan = await router_with_mock.plan_route("llama 3.1 8b instruct", Operation.CHAT)
+
+        assert plan.explicit is False
+        assert plan.primary.model == ModelRef("openrouter", upstream_id)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "malformed_id",
+        ["", "   ", "p/", "p/   "],
+        ids=["empty", "whitespace", "empty-qualified", "whitespace-qualified"],
+    )
+    async def test_malformed_catalog_identity_is_skipped_without_hiding_healthy_sibling(
+        self,
+        router_with_mock,
+        malformed_id: str,
+    ):
+        malformed = ModelInfo(id=malformed_id, name="Malformed", provider="p")
+        healthy = ModelInfo(id="healthy", name="Healthy", provider="p")
+        router_with_mock.providers = {
+            "p": MockProvider(name="p", models=[malformed, healthy]),
+        }
+        _mark_providers_fresh(router_with_mock)
+        _set_priorities(router_with_mock, PrioritiesConfig(priorities=[]))
+
+        await router_with_mock._ensure_models_cache()
+
+        assert set(router_with_mock._models_cache) == {"healthy", "p/healthy"}
+        assert [(model.provider, model.id) for model in await router_with_mock.list_models()] == [
+            ("p", "healthy")
+        ]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "model_id",
+        ["", "   ", "p/", "p/   "],
+        ids=["empty", "whitespace", "empty-qualified", "whitespace-qualified"],
+    )
+    async def test_empty_explicit_model_is_typed_client_error(
+        self,
+        router_with_mock,
+        model_id: str,
+    ):
+        router_with_mock.providers = {
+            "p": MockProvider(
+                name="p",
+                models=[ModelInfo(id="healthy", name="Healthy", provider="p")],
+            )
+        }
+        _mark_providers_fresh(router_with_mock)
+        _set_priorities(router_with_mock, PrioritiesConfig(priorities=[]))
+
+        with pytest.raises(ProviderError) as exc_info:
+            await router_with_mock.plan_route(model_id, Operation.CHAT)
+
+        assert exc_info.value.kind is ProviderFailureKind.CLIENT_REQUEST
+        assert exc_info.value.status_code == 400
+
+    @pytest.mark.asyncio
+    async def test_invalid_provider_identity_is_isolated_from_healthy_provider(
+        self,
+        router_with_mock,
+    ):
+        class InvalidProvider(MockProvider):
+            listed = False
+
+            async def list_models(self) -> list[ModelInfo]:
+                self.listed = True
+                return await super().list_models()
+
+        invalid = InvalidProvider(
+            name="team/p",
+            models=[ModelInfo(id="model", name="Invalid", provider="team/p")],
+        )
+        healthy = MockProvider(
+            name="healthy",
+            models=[ModelInfo(id="model", name="Healthy", provider="healthy")],
+        )
+        router_with_mock.providers = {invalid.name: invalid, healthy.name: healthy}
+        _mark_providers_fresh(router_with_mock)
+        _set_priorities(router_with_mock, PrioritiesConfig(priorities=[]))
+
+        await router_with_mock._ensure_models_cache()
+
+        assert set(router_with_mock._models_cache) == {"model", "healthy/model"}
+        assert [(model.provider, model.id) for model in await router_with_mock.list_models()] == [
+            ("healthy", "model")
+        ]
+        # Runtime registries can still be populated programmatically, bypassing
+        # ProvidersConfig validation. Router must isolate their catalog entries
+        # without hiding healthy providers, even after the catalog was queried.
+        assert invalid.listed is True
+
+    @pytest.mark.asyncio
+    async def test_public_model_results_are_deep_defensive_copies(self, router_with_mock):
+        catalog_model = ModelInfo(
+            id="m",
+            name="Model",
+            provider="p",
+            reasoning_effort_values=["low"],
+            operation_capabilities={Operation.CHAT.value: True},
+            feature_capabilities={"tools": True},
+        )
+        router_with_mock.providers = {"p": MockProvider(name="p", models=[catalog_model])}
+        _mark_providers_fresh(router_with_mock)
+        _set_priorities(router_with_mock, PrioritiesConfig(priorities=[]))
+
+        listed = (await router_with_mock.list_models())[0]
+        looked_up = await router_with_mock.get_model_info("p/m")
+        assert looked_up is not None
+        listed.id = "changed"
+        listed.reasoning_effort_values.append("high")
+        listed.operation_capabilities[Operation.CHAT.value] = False
+        looked_up.feature_capabilities["tools"] = False
+
+        plan = await router_with_mock.plan_route("p/m", Operation.CHAT)
+        cached = router_with_mock._models_cache["p/m"][1]
+        assert plan.primary.model.qualified_id == "p/m"
+        assert cached.reasoning_effort_values == ["low"]
+        assert cached.operation_capabilities == {Operation.CHAT.value: True}
+        assert cached.feature_capabilities == {"tools": True}
+
+    @pytest.mark.asyncio
     async def test_cache_skips_unauthenticated_providers(self, router_with_mock):
         """Test that cache skips unauthenticated providers."""
         unauth_provider = MockProvider(name="unauth", authenticated=False)
@@ -295,7 +564,8 @@ class TestRouterModelResolutionAsync:
 
         result = await router.get_model_info("claude-opus-4-6")
 
-        assert result is opus
+        assert result == opus
+        assert result is not opus
         assert result.max_output_tokens == 64000
 
     @pytest.mark.asyncio
@@ -418,6 +688,53 @@ class TestRouterResponsesAPI:
         assert len(chunks) == 2
 
 
+class TestRouterResponseOwnership:
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("protocol", ["chat", "responses"])
+    async def test_router_does_not_mutate_provider_owned_response(self, protocol):
+        provider_response = (
+            ChatResponse(content="cached", model="shared-model")
+            if protocol == "chat"
+            else ResponsesResponse(content="cached", model="shared-model")
+        )
+
+        class SingletonProvider(MockProvider):
+            async def chat_completion(self, request: ChatRequest) -> ChatResponse:
+                return provider_response
+
+            async def responses_completion(self, request: ResponsesRequest) -> ResponsesResponse:
+                return provider_response
+
+        model = ModelInfo(id="shared-model", name="Shared", provider="singleton")
+        provider = SingletonProvider(name="singleton", models=[model])
+        router = Router.__new__(Router)
+        router.providers = {"singleton": provider}
+        _init_router_empty(router)
+        router._models_cache = {
+            "shared-model": ("singleton", model),
+            "singleton/shared-model": ("singleton", model),
+        }
+        _mark_models_cached(router)
+        _mark_providers_fresh(router)
+        _set_priorities(router, PrioritiesConfig(priorities=[]))
+
+        if protocol == "chat":
+            routed, _provider_name = await router.chat_completion(
+                ChatRequest(
+                    model="singleton/shared-model",
+                    messages=[Message(role="user", content="Hello")],
+                )
+            )
+        else:
+            routed, _provider_name = await router.responses_completion(
+                ResponsesRequest(model="singleton/shared-model", input="Hello")
+            )
+
+        assert routed is not provider_response
+        assert routed.selected_model == ModelRef("singleton", "shared-model")
+        assert provider_response.selected_model is None
+
+
 class TestRouterFallback:
     """Tests for Router fallback behavior."""
 
@@ -460,34 +777,6 @@ class TestRouterFallback:
         )
         return router, primary, secondary
 
-    def test_get_fallback_candidates_priority(self, router_with_fallback):
-        """Test getting fallback candidates with priority strategy."""
-        router, _, _ = router_with_fallback
-        candidates = router._get_fallback_candidates(
-            "primary", "model-1", FallbackStrategy.PRIORITY
-        )
-
-        assert len(candidates) == 1
-        assert candidates[0][0] == "secondary"
-        assert candidates[0][1] == "model-1"
-
-    def test_get_fallback_candidates_same_model(self, router_with_fallback):
-        """Test getting fallback candidates with same-model strategy."""
-        router, _, _ = router_with_fallback
-        candidates = router._get_fallback_candidates(
-            "primary", "model-1", FallbackStrategy.SAME_MODEL
-        )
-
-        assert len(candidates) == 1
-        assert candidates[0][0] == "secondary"
-
-    def test_get_fallback_candidates_none(self, router_with_fallback):
-        """Test getting fallback candidates with none strategy."""
-        router, _, _ = router_with_fallback
-        candidates = router._get_fallback_candidates("primary", "model-1", FallbackStrategy.NONE)
-
-        assert len(candidates) == 0
-
     @pytest.mark.asyncio
     async def test_chat_stream_falls_back_when_primary_fails_before_first_chunk(
         self, router_with_fallback
@@ -504,6 +793,7 @@ class TestRouterFallback:
         chunks = [chunk async for chunk in stream]
 
         assert provider_name == "secondary"
+        assert stream.selected_model == ModelRef("secondary", "model-1")
         assert primary._request_count == 1
         assert secondary._request_count == 1
         assert chunks[0].content == "Hello "
@@ -520,6 +810,7 @@ class TestRouterFallback:
         chunks = [chunk async for chunk in stream]
 
         assert provider_name == "secondary"
+        assert stream.selected_model == ModelRef("secondary", "model-1")
         assert primary._request_count == 1
         assert secondary._request_count == 1
         assert chunks[0].content == "Hello "
@@ -581,6 +872,500 @@ class TestRouterListModels:
         # Priority is model-b first
         assert models[0].id == "model-b"
         assert models[1].id == "model-a"
+
+    @pytest.mark.asyncio
+    async def test_duplicate_upstream_ids_list_and_route_with_qualified_identity(self):
+        router = Router.__new__(Router)
+        first = MockProvider(
+            name="first",
+            models=[ModelInfo(id="shared-model", name="Shared", provider="first")],
+        )
+        second = MockProvider(
+            name="second",
+            models=[ModelInfo(id="shared-model", name="Shared", provider="second")],
+        )
+        router.providers = {"first": first, "second": second}
+        _init_router_empty(router)
+        router._models_cache = {
+            "shared-model": ("first", first._models[0]),
+            "first/shared-model": ("first", first._models[0]),
+            "second/shared-model": ("second", second._models[0]),
+        }
+        _mark_models_cached(router)
+        _mark_providers_fresh(router)
+        _set_priorities(router, PrioritiesConfig(priorities=[]))
+
+        models = await router.list_models()
+        assert {(model.provider, model.id) for model in models} == {
+            ("first", "shared-model"),
+            ("second", "shared-model"),
+        }
+
+        for public_id in ("first/shared-model", "second/shared-model"):
+            plan = await router.plan_route(public_id, Operation.CHAT)
+            assert plan.primary.model.qualified_id == public_id
+
+    @pytest.mark.asyncio
+    async def test_duplicate_bare_upstream_id_is_resolved_by_route_priority(self):
+        router = Router.__new__(Router)
+        first = MockProvider(
+            name="first",
+            models=[ModelInfo(id="shared-model", name="Shared", provider="first")],
+        )
+        second = MockProvider(
+            name="second",
+            models=[ModelInfo(id="shared-model", name="Shared", provider="second")],
+        )
+        router.providers = {"first": first, "second": second}
+        _init_router_empty(router)
+        router._models_cache = {
+            "shared-model": ("first", first._models[0]),
+            "first/shared-model": ("first", first._models[0]),
+            "second/shared-model": ("second", second._models[0]),
+        }
+        _mark_models_cached(router)
+        _mark_providers_fresh(router)
+        _set_priorities(
+            router,
+            PrioritiesConfig(priorities=["second/shared-model", "first/shared-model"]),
+        )
+
+        plan = await router.plan_route("shared-model", Operation.CHAT)
+
+        assert plan.primary.model.qualified_id == "second/shared-model"
+        assert [candidate.model.qualified_id for candidate in plan.candidates] == [
+            "second/shared-model",
+            "first/shared-model",
+        ]
+        assert plan.explicit is False
+
+    @pytest.mark.asyncio
+    async def test_bare_alias_unknown_runtime_unsupported_advances_to_next_provider(self):
+        class UnsupportedProvider(MockProvider):
+            async def chat_completion(self, request: ChatRequest) -> ChatResponse:
+                self._request_count += 1
+                raise ProviderError(
+                    "chat is unsupported",
+                    status_code=400,
+                    retryable=False,
+                    kind=ProviderFailureKind.UNSUPPORTED_OPERATION,
+                )
+
+        first_model = ModelInfo(id="shared-model", name="Shared", provider="first")
+        second_model = ModelInfo(id="shared-model", name="Shared", provider="second")
+        first = UnsupportedProvider(name="first", models=[first_model])
+        second = MockProvider(name="second", models=[second_model])
+        router = Router.__new__(Router)
+        router.providers = {"first": first, "second": second}
+        _init_router_empty(router)
+        router._models_cache = {
+            "shared-model": ("first", first_model),
+            "first/shared-model": ("first", first_model),
+            "second/shared-model": ("second", second_model),
+        }
+        _mark_models_cached(router)
+        _mark_providers_fresh(router)
+        _set_priorities(
+            router,
+            PrioritiesConfig(priorities=["first/shared-model", "second/shared-model"]),
+        )
+
+        response, provider_name = await router.chat_completion(
+            ChatRequest(
+                model="shared-model",
+                messages=[Message(role="user", content="Hello")],
+            )
+        )
+
+        assert provider_name == "second"
+        assert response.model == "shared-model"
+        assert first._request_count == 1
+        assert second._request_count == 1
+
+    @pytest.mark.asyncio
+    async def test_unknown_bare_alias_returns_404_without_auto_routing_unrelated_model(self):
+        unrelated_model = ModelInfo(
+            id="unrelated-model",
+            name="Unrelated",
+            provider="unrelated",
+            operation_capabilities={Operation.CHAT.value: True},
+        )
+        unrelated = MockProvider(name="unrelated", models=[unrelated_model])
+        router = Router.__new__(Router)
+        router.providers = {"unrelated": unrelated}
+        _init_router_empty(router)
+        router._models_cache = {
+            "unrelated-model": ("unrelated", unrelated_model),
+            "unrelated/unrelated-model": ("unrelated", unrelated_model),
+        }
+        _mark_models_cached(router)
+        _mark_providers_fresh(router)
+        _set_priorities(
+            router,
+            PrioritiesConfig(priorities=["unrelated/unrelated-model"]),
+        )
+
+        with pytest.raises(ProviderError) as exc_info:
+            await router.chat_completion(
+                ChatRequest(
+                    model="missing-alias-xyz",
+                    messages=[Message(role="user", content="Hello")],
+                )
+            )
+
+        assert exc_info.value.status_code == 404
+        assert exc_info.value.kind is ProviderFailureKind.CLIENT_REQUEST
+        assert unrelated._request_count == 0
+
+    @pytest.mark.asyncio
+    async def test_static_unsupported_bare_alias_returns_400_without_unrelated_substitution(self):
+        first_model = ModelInfo(
+            id="shared-model",
+            name="Shared",
+            provider="first",
+            operation_capabilities={Operation.CHAT.value: False},
+        )
+        second_model = ModelInfo(
+            id="shared-model",
+            name="Shared",
+            provider="second",
+            operation_capabilities={Operation.CHAT.value: False},
+        )
+        unrelated_model = ModelInfo(
+            id="unrelated-model",
+            name="Unrelated",
+            provider="unrelated",
+            operation_capabilities={Operation.CHAT.value: True},
+        )
+        first = MockProvider(name="first", models=[first_model])
+        second = MockProvider(name="second", models=[second_model])
+        unrelated = MockProvider(name="unrelated", models=[unrelated_model])
+        router = Router.__new__(Router)
+        router.providers = {"first": first, "second": second, "unrelated": unrelated}
+        _init_router_empty(router)
+        router._models_cache = {
+            "shared-model": ("first", first_model),
+            "first/shared-model": ("first", first_model),
+            "second/shared-model": ("second", second_model),
+            "unrelated-model": ("unrelated", unrelated_model),
+            "unrelated/unrelated-model": ("unrelated", unrelated_model),
+        }
+        _mark_models_cached(router)
+        _mark_providers_fresh(router)
+        _set_priorities(
+            router,
+            PrioritiesConfig(
+                priorities=[
+                    "first/shared-model",
+                    "second/shared-model",
+                    "unrelated/unrelated-model",
+                ]
+            ),
+        )
+
+        with pytest.raises(ProviderError) as exc_info:
+            await router.chat_completion(
+                ChatRequest(
+                    model="shared-model",
+                    messages=[Message(role="user", content="Hello")],
+                )
+            )
+
+        assert exc_info.value.status_code == 400
+        assert exc_info.value.kind is ProviderFailureKind.CLIENT_REQUEST
+        assert first._request_count == 0
+        assert second._request_count == 0
+        assert unrelated._request_count == 0
+
+    @pytest.mark.asyncio
+    async def test_provider_qualified_unknown_runtime_unsupported_does_not_switch(self):
+        class UnsupportedProvider(MockProvider):
+            async def chat_completion(self, request: ChatRequest) -> ChatResponse:
+                self._request_count += 1
+                raise ProviderError(
+                    "chat is unsupported",
+                    status_code=400,
+                    retryable=False,
+                    kind=ProviderFailureKind.UNSUPPORTED_OPERATION,
+                )
+
+        first_model = ModelInfo(id="shared-model", name="Shared", provider="first")
+        second_model = ModelInfo(id="shared-model", name="Shared", provider="second")
+        first = UnsupportedProvider(name="first", models=[first_model])
+        second = MockProvider(name="second", models=[second_model])
+        router = Router.__new__(Router)
+        router.providers = {"first": first, "second": second}
+        _init_router_empty(router)
+        router._models_cache = {
+            "shared-model": ("first", first_model),
+            "first/shared-model": ("first", first_model),
+            "second/shared-model": ("second", second_model),
+        }
+        _mark_models_cached(router)
+        _mark_providers_fresh(router)
+        _set_priorities(
+            router,
+            PrioritiesConfig(priorities=["first/shared-model", "second/shared-model"]),
+        )
+
+        with pytest.raises(ProviderError) as exc_info:
+            await router.chat_completion(
+                ChatRequest(
+                    model="first/shared-model",
+                    messages=[Message(role="user", content="Hello")],
+                )
+            )
+
+        assert exc_info.value.kind is ProviderFailureKind.UNSUPPORTED_OPERATION
+        assert first._request_count == 1
+        assert second._request_count == 0
+
+    @pytest.mark.asyncio
+    async def test_provider_prefix_is_case_insensitive_and_uses_registry_name(self):
+        router = Router.__new__(Router)
+        first_model = ModelInfo(id="shared-model", name="Shared", provider="first")
+        second_model = ModelInfo(id="shared-model", name="Shared", provider="second")
+        first = MockProvider(name="first", models=[first_model])
+        second = MockProvider(name="second", models=[second_model])
+        router.providers = {"first": first, "second": second}
+        _init_router_empty(router)
+        router._models_cache = {
+            "shared-model": ("first", first_model),
+            "first/shared-model": ("first", first_model),
+            "second/shared-model": ("second", second_model),
+        }
+        _mark_models_cached(router)
+        _mark_providers_fresh(router)
+        _set_priorities(router, PrioritiesConfig(priorities=[]))
+
+        plan = await router.plan_route("FIRST/shared-model", Operation.CHAT)
+
+        assert plan.explicit is True
+        assert plan.primary.model == ModelRef("first", "shared-model")
+
+    @pytest.mark.asyncio
+    async def test_unknown_provider_prefix_returns_404_without_cross_provider_fuzzy(self):
+        router = Router.__new__(Router)
+        first_model = ModelInfo(id="shared-model", name="Shared", provider="first")
+        second_model = ModelInfo(id="shared-model", name="Shared", provider="second")
+        first = MockProvider(name="first", models=[first_model])
+        second = MockProvider(name="second", models=[second_model])
+        router.providers = {"first": first, "second": second}
+        _init_router_empty(router)
+        router._models_cache = {
+            "shared-model": ("first", first_model),
+            "first/shared-model": ("first", first_model),
+            "second/shared-model": ("second", second_model),
+        }
+        _mark_models_cached(router)
+        _mark_providers_fresh(router)
+        _set_priorities(router, PrioritiesConfig(priorities=[]))
+
+        with pytest.raises(ProviderError) as exc_info:
+            await router.chat_completion(
+                ChatRequest(
+                    model="unknown/shared-model",
+                    messages=[Message(role="user", content="Hello")],
+                )
+            )
+
+        assert exc_info.value.status_code == 404
+        assert exc_info.value.kind is ProviderFailureKind.CLIENT_REQUEST
+        assert first._request_count == 0
+        assert second._request_count == 0
+
+    @pytest.mark.asyncio
+    async def test_duplicate_fuzzy_alias_is_resolved_by_route_priority(self):
+        router = Router.__new__(Router)
+        first = MockProvider(
+            name="first",
+            models=[ModelInfo(id="shared.model", name="Shared", provider="first")],
+        )
+        second = MockProvider(
+            name="second",
+            models=[ModelInfo(id="shared.model", name="Shared", provider="second")],
+        )
+        router.providers = {"first": first, "second": second}
+        _init_router_empty(router)
+        router._models_cache = {
+            "shared.model": ("first", first._models[0]),
+            "first/shared.model": ("first", first._models[0]),
+            "second/shared.model": ("second", second._models[0]),
+        }
+        _mark_models_cached(router)
+        _mark_providers_fresh(router)
+        _set_priorities(
+            router,
+            PrioritiesConfig(priorities=["second/shared.model", "first/shared.model"]),
+        )
+
+        plan = await router.plan_route("shared-model", Operation.CHAT)
+
+        assert plan.primary.model.qualified_id == "second/shared.model"
+
+    @pytest.mark.asyncio
+    async def test_bare_alias_prefers_supported_provider_over_unsupported_priority(self):
+        router = Router.__new__(Router)
+        unsupported_model = ModelInfo(
+            id="shared-model",
+            name="Shared",
+            provider="first",
+            operation_capabilities={Operation.CHAT.value: False},
+        )
+        supported_model = ModelInfo(
+            id="shared-model",
+            name="Shared",
+            provider="second",
+            operation_capabilities={Operation.CHAT.value: True},
+        )
+        first = MockProvider(name="first", models=[unsupported_model])
+        second = MockProvider(name="second", models=[supported_model])
+        router.providers = {"first": first, "second": second}
+        _init_router_empty(router)
+        router._models_cache = {
+            "shared-model": ("first", unsupported_model),
+            "first/shared-model": ("first", unsupported_model),
+            "second/shared-model": ("second", supported_model),
+        }
+        _mark_models_cached(router)
+        _mark_providers_fresh(router)
+        _set_priorities(
+            router,
+            PrioritiesConfig(priorities=["first/shared-model", "second/shared-model"]),
+        )
+
+        plan = await router.plan_route("shared-model", Operation.CHAT)
+
+        assert plan.primary.model.qualified_id == "second/shared-model"
+
+    @pytest.mark.asyncio
+    async def test_unconfigured_bare_alias_uses_full_catalog_capabilities(self):
+        router = Router.__new__(Router)
+        unsupported_model = ModelInfo(
+            id="shared-model",
+            name="Shared",
+            provider="first",
+            operation_capabilities={Operation.CHAT.value: False},
+        )
+        supported_model = ModelInfo(
+            id="shared-model",
+            name="Shared",
+            provider="second",
+            operation_capabilities={Operation.CHAT.value: True},
+        )
+        first = MockProvider(name="first", models=[unsupported_model])
+        second = MockProvider(name="second", models=[supported_model])
+        router.providers = {"first": first, "second": second}
+        _init_router_empty(router)
+        router._models_cache = {
+            "shared-model": ("first", unsupported_model),
+            "first/shared-model": ("first", unsupported_model),
+            "second/shared-model": ("second", supported_model),
+        }
+        _mark_models_cached(router)
+        _mark_providers_fresh(router)
+        _set_priorities(router, PrioritiesConfig(priorities=[]))
+
+        plan = await router.plan_route("shared-model", Operation.CHAT)
+
+        assert plan.primary.model.qualified_id == "second/shared-model"
+
+    @pytest.mark.asyncio
+    async def test_exact_dated_bare_id_is_not_replaced_by_newer_family_version(self):
+        router = Router.__new__(Router)
+        older = ModelInfo(
+            id="claude-sonnet-4-20250101",
+            name="Claude Sonnet 4",
+            provider="anthropic",
+        )
+        newer = ModelInfo(
+            id="claude-sonnet-4-20260101",
+            name="Claude Sonnet 4",
+            provider="anthropic",
+        )
+        provider = MockProvider(name="anthropic", models=[older, newer])
+        router.providers = {"anthropic": provider}
+        _init_router_empty(router)
+        router._models_cache = {
+            older.id: ("anthropic", older),
+            newer.id: ("anthropic", newer),
+            f"anthropic/{older.id}": ("anthropic", older),
+            f"anthropic/{newer.id}": ("anthropic", newer),
+        }
+        _mark_models_cached(router)
+        _mark_providers_fresh(router)
+        _set_priorities(router, PrioritiesConfig(priorities=[]))
+
+        plan = await router.plan_route(older.id, Operation.CHAT)
+
+        assert plan.primary.model.qualified_id == f"anthropic/{older.id}"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "query",
+        [
+            "CLAUDE-SONNET-4-20250101",
+            "claude.sonnet.4.20250101",
+        ],
+    )
+    async def test_dated_identity_alias_plan_keeps_specific_version(self, query):
+        router = Router.__new__(Router)
+        older = ModelInfo(
+            id="claude-sonnet-4-20250101",
+            name="Claude Sonnet 4",
+            provider="anthropic",
+        )
+        newer = ModelInfo(
+            id="claude-sonnet-4-20260101",
+            name="Claude Sonnet 4",
+            provider="anthropic",
+        )
+        provider = MockProvider(name="anthropic", models=[older, newer])
+        router.providers = {"anthropic": provider}
+        _init_router_empty(router)
+        router._models_cache = {
+            older.id: ("anthropic", older),
+            newer.id: ("anthropic", newer),
+            f"anthropic/{older.id}": ("anthropic", older),
+            f"anthropic/{newer.id}": ("anthropic", newer),
+        }
+        _mark_models_cached(router)
+        _mark_providers_fresh(router)
+        _set_priorities(router, PrioritiesConfig(priorities=[]))
+
+        plan = await router.plan_route(query, Operation.CHAT)
+
+        assert plan.primary.model.qualified_id == f"anthropic/{older.id}"
+
+    @pytest.mark.asyncio
+    async def test_fuzzy_cross_family_ambiguity_is_a_client_error(self):
+        router = Router.__new__(Router)
+        provider = MockProvider(
+            name="anthropic",
+            models=[
+                ModelInfo(id="claude-opus-4", name="Claude Opus 4", provider="anthropic"),
+                ModelInfo(
+                    id="claude-sonnet-4",
+                    name="Claude Sonnet 4",
+                    provider="anthropic",
+                ),
+            ],
+        )
+        router.providers = {"anthropic": provider}
+        _init_router_empty(router)
+        router._models_cache = {model.id: ("anthropic", model) for model in provider._models} | {
+            f"anthropic/{model.id}": ("anthropic", model) for model in provider._models
+        }
+        _mark_models_cached(router)
+        _mark_providers_fresh(router)
+        _set_priorities(router, PrioritiesConfig(priorities=[]))
+
+        with pytest.raises(ProviderError) as exc_info:
+            await router.plan_route("claude-4", Operation.CHAT)
+
+        assert exc_info.value.status_code == 400
+        assert exc_info.value.kind is ProviderFailureKind.CLIENT_REQUEST
+        assert "ambiguous" in str(exc_info.value).lower()
 
 
 class TestRouterCreateRequestWithModel:

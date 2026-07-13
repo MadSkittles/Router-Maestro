@@ -14,7 +14,7 @@ from pydantic import BaseModel, ConfigDict, Field
 class GeminiFunctionCall(BaseModel):
     """A function call from the model."""
 
-    model_config = ConfigDict(populate_by_name=True)
+    model_config = ConfigDict(populate_by_name=True, extra="allow")
 
     name: str
     args: dict[str, Any] = Field(default_factory=dict)
@@ -24,7 +24,7 @@ class GeminiFunctionCall(BaseModel):
 class GeminiFunctionResponse(BaseModel):
     """A function response from the user."""
 
-    model_config = ConfigDict(populate_by_name=True)
+    model_config = ConfigDict(populate_by_name=True, extra="allow")
 
     name: str
     id: str | None = None
@@ -34,7 +34,7 @@ class GeminiFunctionResponse(BaseModel):
 class GeminiInlineData(BaseModel):
     """Inline binary data (e.g. images)."""
 
-    model_config = ConfigDict(populate_by_name=True)
+    model_config = ConfigDict(populate_by_name=True, extra="allow")
 
     mime_type: str = Field(alias="mimeType")
     data: str  # base64 encoded
@@ -43,7 +43,7 @@ class GeminiInlineData(BaseModel):
 class GeminiPart(BaseModel):
     """A part of a Gemini content message."""
 
-    model_config = ConfigDict(populate_by_name=True)
+    model_config = ConfigDict(populate_by_name=True, extra="allow")
 
     text: str | None = None
     function_call: GeminiFunctionCall | None = Field(default=None, alias="functionCall")
@@ -54,7 +54,7 @@ class GeminiPart(BaseModel):
 class GeminiContent(BaseModel):
     """A Gemini content message."""
 
-    model_config = ConfigDict(populate_by_name=True)
+    model_config = ConfigDict(populate_by_name=True, extra="allow")
 
     role: str | None = None  # "user" or "model"
     parts: list[GeminiPart] = Field(default_factory=list)
@@ -63,7 +63,7 @@ class GeminiContent(BaseModel):
 class GeminiFunctionDeclaration(BaseModel):
     """A function declaration for tools."""
 
-    model_config = ConfigDict(populate_by_name=True)
+    model_config = ConfigDict(populate_by_name=True, extra="allow")
 
     name: str
     description: str | None = None
@@ -73,7 +73,7 @@ class GeminiFunctionDeclaration(BaseModel):
 class GeminiTool(BaseModel):
     """A Gemini tool definition."""
 
-    model_config = ConfigDict(populate_by_name=True)
+    model_config = ConfigDict(populate_by_name=True, extra="allow")
 
     function_declarations: list[GeminiFunctionDeclaration] | None = Field(
         default=None, alias="functionDeclarations"
@@ -83,7 +83,7 @@ class GeminiTool(BaseModel):
 class GeminiFunctionCallingConfig(BaseModel):
     """Function calling configuration."""
 
-    model_config = ConfigDict(populate_by_name=True)
+    model_config = ConfigDict(populate_by_name=True, extra="allow")
 
     mode: str | None = None  # "AUTO", "ANY", "NONE"
 
@@ -91,7 +91,7 @@ class GeminiFunctionCallingConfig(BaseModel):
 class GeminiToolConfig(BaseModel):
     """Tool configuration."""
 
-    model_config = ConfigDict(populate_by_name=True)
+    model_config = ConfigDict(populate_by_name=True, extra="allow")
 
     function_calling_config: GeminiFunctionCallingConfig | None = Field(
         default=None, alias="functionCallingConfig"
@@ -101,7 +101,7 @@ class GeminiToolConfig(BaseModel):
 class GeminiGenerationConfig(BaseModel):
     """Generation configuration."""
 
-    model_config = ConfigDict(populate_by_name=True)
+    model_config = ConfigDict(populate_by_name=True, extra="allow")
 
     temperature: float | None = None
     top_p: float | None = Field(default=None, alias="topP")
@@ -110,12 +110,14 @@ class GeminiGenerationConfig(BaseModel):
     stop_sequences: list[str] | None = Field(default=None, alias="stopSequences")
     candidate_count: int | None = Field(default=None, alias="candidateCount")
     response_mime_type: str | None = Field(default=None, alias="responseMimeType")
+    frequency_penalty: float | None = Field(default=None, alias="frequencyPenalty")
+    presence_penalty: float | None = Field(default=None, alias="presencePenalty")
 
 
 class GeminiGenerateContentRequest(BaseModel):
     """Gemini generateContent request body."""
 
-    model_config = ConfigDict(populate_by_name=True)
+    model_config = ConfigDict(populate_by_name=True, extra="allow")
 
     contents: list[GeminiContent] | None = None
     system_instruction: GeminiContent | None = Field(default=None, alias="systemInstruction")

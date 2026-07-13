@@ -1,5 +1,6 @@
 """Tests for thinking configuration passthrough."""
 
+from dataclasses import replace
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -82,7 +83,7 @@ class TestTranslateThinkingConfig:
         assert result.thinking_type == "enabled"
         assert result.thinking_budget is None
 
-    @pytest.mark.parametrize("effort", ["low", "medium", "high", "xhigh", "max"])
+    @pytest.mark.parametrize("effort", ["minimal", "low", "medium", "high", "xhigh", "max"])
     def test_translate_output_config_effort(self, effort):
         """Top-level Anthropic effort is preserved as internal reasoning effort."""
         request = AnthropicMessagesRequest.model_validate(
@@ -103,16 +104,61 @@ class TestTranslateThinkingConfig:
         assert result.thinking_budget is None
         assert result.reasoning_effort == effort
 
-    def test_output_config_rejects_invalid_effort(self):
+    @pytest.mark.parametrize("effort", ["ultra", "none"])
+    def test_output_config_rejects_invalid_effort(self, effort):
         with pytest.raises(ValidationError):
             AnthropicMessagesRequest.model_validate(
                 {
                     "model": "claude-opus-4.8",
                     "max_tokens": 64000,
                     "messages": [{"role": "user", "content": "Hello"}],
-                    "output_config": {"effort": "ultra"},
+                    "output_config": {"effort": effort},
                 }
             )
+
+    def test_anthropic_options_translate_to_typed_fields(self):
+        request = AnthropicMessagesRequest(
+            model="claude-opus-4.8",
+            max_tokens=4096,
+            messages=[AnthropicUserMessage(role="user", content="Hello")],
+            temperature=0.4,
+            top_p=0.8,
+            top_k=32,
+            stop_sequences=["END"],
+            metadata={"user_id": "user-123"},
+            service_tier="standard_only",
+        )
+
+        result = translate_anthropic_to_openai(request)
+
+        assert result.temperature == 0.4
+        assert result.top_p == 0.8
+        assert result.top_k == 32
+        assert result.stop_sequences == ["END"]
+        assert result.metadata == {"user_id": "user-123"}
+        assert result.service_tier == "standard_only"
+
+    def test_anthropic_responses_opt_in_clone_preserves_typed_options(self):
+        request = AnthropicMessagesRequest(
+            model="claude-opus-4.8",
+            max_tokens=4096,
+            messages=[AnthropicUserMessage(role="user", content="Hello")],
+            top_p=0.8,
+            top_k=32,
+            stop_sequences=["END"],
+            metadata={"user_id": "user-123"},
+            service_tier="standard_only",
+        )
+        translated = translate_anthropic_to_openai(request)
+
+        opted_in = replace(translated, use_responses_api=True, extra={})
+
+        assert opted_in.use_responses_api is True
+        assert opted_in.top_p == 0.8
+        assert opted_in.top_k == 32
+        assert opted_in.stop_sequences == ["END"]
+        assert opted_in.metadata == {"user_id": "user-123"}
+        assert opted_in.service_tier == "standard_only"
 
 
 class TestCopilotPayloadThinking:

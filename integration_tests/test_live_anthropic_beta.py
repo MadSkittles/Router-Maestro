@@ -11,6 +11,7 @@ from __future__ import annotations
 from typing import Any
 
 import httpx
+import pytest
 
 from integration_tests.conftest import (
     ANTHROPIC_THINKING_BUDGETS,
@@ -48,7 +49,7 @@ def test_beta_non_streaming(client: httpx.Client, chat_model: str):
 
     assert data["type"] == "message"
     assert data["role"] == "assistant"
-    assert data["model"]
+    assert data["model"] == chat_model
     assert data["stop_reason"] in {
         "end_turn",
         "max_tokens",
@@ -79,18 +80,38 @@ def test_beta_non_streaming_compat_fields(client: httpx.Client, chat_model: str)
     assert_anthropic_usage(data["usage"])
 
 
-def test_beta_strips_unknown_fields(client: httpx.Client, chat_model: str):
-    """Beta endpoint strips unknown fields (context_management, etc.) without error."""
-    payload = anthropic_payload(chat_model)
-    payload["context_management"] = {"enabled": True}
-    payload["output_config"] = {"format": "text"}
-    payload["service_tier"] = "standard"
-    response = client.post(BETA, json=payload)
-    assert_http_success(response)
-    data = response.json()
+@pytest.mark.parametrize("stream", STREAM_MODES)
+@pytest.mark.parametrize(
+    ("option_payload", "parameter"),
+    [
+        ({"context_management": {"enabled": True}}, "context_management"),
+        (
+            {"output_config": {"effort": "low", "format": "text"}},
+            "output_config.format",
+        ),
+        ({"service_tier": "standard_only"}, "service_tier"),
+    ],
+)
+def test_beta_rejects_unknown_semantic_options(
+    client: httpx.Client,
+    chat_model: str,
+    stream: bool,
+    option_payload: dict[str, Any],
+    parameter: str,
+):
+    """Beta Messages rejects unrepresented options before SSE/provider commitment."""
+    payload = anthropic_payload(chat_model, stream=stream)
+    payload.update(option_payload)
 
-    assert data["type"] == "message"
-    assert_anthropic_usage(data["usage"])
+    response = client.post(BETA, json=payload)
+
+    assert response.status_code == 400
+    assert response.headers["content-type"].startswith("application/json")
+    error = response.json()
+    assert error["type"] == "error"
+    assert error["error"]["type"] == "invalid_request_error"
+    assert parameter in error["error"]["message"]
+    assert "event:" not in response.text
 
 
 def test_beta_streaming(client: httpx.Client, chat_model: str):
@@ -112,6 +133,8 @@ def test_beta_streaming(client: httpx.Client, chat_model: str):
     assert "content_block_delta" in event_names
     assert "message_delta" in event_names
     assert "message_stop" in event_names
+    message_start = next(payload for name, payload in events if name == "message_start")
+    assert message_start["message"]["model"] == chat_model
     # copilot_usage event must be filtered
     assert "copilot_usage" not in event_names
     # Must have text_delta

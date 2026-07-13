@@ -4,6 +4,7 @@ import asyncio
 import json
 import uuid
 from collections.abc import AsyncGenerator
+from dataclasses import replace
 from datetime import UTC, datetime
 
 from fastapi import APIRouter, HTTPException
@@ -14,6 +15,7 @@ from router_maestro.providers import (
     AnthropicProvider,
     ChatRequest,
     ProviderError,
+    RequestOptionError,
     ResponseStatus,
     TerminalOutcome,
     client_cancelled_outcome,
@@ -23,6 +25,10 @@ from router_maestro.providers import (
     unexpected_eof_outcome,
 )
 from router_maestro.routing import Router, get_router
+from router_maestro.routing.capabilities import CapabilitySupport, Feature
+from router_maestro.routing.model_ref import catalog_model_public_id, qualify_model_id
+from router_maestro.routing.route_plan import RouteCandidate
+from router_maestro.server.protocols import client_error_response, unrepresented_option_error
 from router_maestro.server.schemas.anthropic import (
     AnthropicCountTokensRequest,
     AnthropicMessagesRequest,
@@ -90,6 +96,8 @@ async def _apply_thinking_budget(
     model_router: Router,
     chat_request: ChatRequest,
     original_model: str,
+    *,
+    candidate: RouteCandidate | None = None,
 ) -> ChatRequest:
     """Resolve thinking budget from server config and return updated request.
 
@@ -114,14 +122,20 @@ async def _apply_thinking_budget(
     priorities = load_priorities_config()
     thinking_config = priorities.thinking
 
-    # Use translated model name for cache lookup (handles date-suffix stripping)
     translated_model = chat_request.model
-    model_info = await model_router.get_model_info(translated_model)
-    if model_info is None:
-        model_info = await model_router.get_model_info(original_model)
-
-    supports_thinking = model_info.supports_thinking if model_info else False
-    max_output = (model_info.max_output_tokens or 16384) if model_info else 16384
+    if candidate is not None:
+        supports_thinking = (
+            candidate.capabilities.feature(Feature.REASONING) is CapabilitySupport.SUPPORTED
+        )
+        max_output = candidate.capabilities.max_output_tokens or 16384
+        config_model = candidate.model.qualified_id
+    else:
+        model_info = await model_router.get_model_info(translated_model)
+        if model_info is None:
+            model_info = await model_router.get_model_info(original_model)
+        supports_thinking = model_info.supports_thinking if model_info else False
+        max_output = (model_info.max_output_tokens or 16384) if model_info else 16384
+        config_model = translated_model
     if chat_request.max_tokens is not None:
         max_output = min(max_output, chat_request.max_tokens)
 
@@ -129,7 +143,7 @@ async def _apply_thinking_budget(
     budget, thinking_type = resolve_thinking_budget(
         client_budget=chat_request.thinking_budget,
         client_thinking_type=chat_request.thinking_type,
-        model_id=translated_model,
+        model_id=config_model,
         max_output_tokens=max_output,
         thinking_config=thinking_config,
         supports_thinking=supports_thinking,
@@ -304,6 +318,8 @@ def _mid_conv_system_rejection_response() -> JSONResponse:
 @router.post("/api/anthropic/v1/messages")
 async def messages(request: AnthropicMessagesRequest, raw_request: FastAPIRequest):
     """Handle Anthropic Messages API requests."""
+    if error := unrepresented_option_error(request):
+        return client_error_response(error, "anthropic")
     parsed_thinking = request.thinking.model_dump(exclude_none=True) if request.thinking else None
     effort = request.output_config.effort if request.output_config else None
     raw_thinking = await _raw_body_thinking(raw_request)
@@ -350,40 +366,55 @@ async def messages(request: AnthropicMessagesRequest, raw_request: FastAPIReques
     # Translate Anthropic request to OpenAI format
     chat_request = translate_anthropic_to_openai(request)
 
-    # Resolve thinking budget from server config.
-    chat_request = await _apply_thinking_budget(model_router, chat_request, request.model)
-
     # Experimental: opt this request into Copilot's /responses endpoint when
     # the flag is on. The Copilot provider gates on the resolved provider +
     # model and falls back to /chat/completions for ineligible models, so we
     # don't pre-filter on the entry-route model string here.
     if is_experimental_responses_enabled():
-        chat_request = ChatRequest(
-            model=chat_request.model,
-            messages=chat_request.messages,
-            temperature=chat_request.temperature,
-            max_tokens=chat_request.max_tokens,
-            stream=chat_request.stream,
-            tools=chat_request.tools,
-            tool_choice=chat_request.tool_choice,
-            thinking_budget=chat_request.thinking_budget,
-            thinking_type=chat_request.thinking_type,
-            reasoning_effort=chat_request.reasoning_effort,
-            use_responses_api=True,
-            extra=chat_request.extra,
+        chat_request = replace(chat_request, use_responses_api=True, extra={})
+
+    try:
+        route_plan = await model_router.plan_chat_completion(
+            chat_request,
+            stream=request.stream,
         )
+        candidate_requests = {
+            candidate.model: await _apply_thinking_budget(
+                model_router,
+                chat_request,
+                request.model,
+                candidate=candidate,
+            )
+            for candidate in (route_plan.primary, *route_plan.prevalidation_fallbacks)
+        }
+        chat_request = candidate_requests[route_plan.primary.model]
+        prepared_plan = model_router.prepare_planned_chat_completion(
+            route_plan,
+            chat_request,
+            candidate_requests=candidate_requests,
+        )
+    except ProviderError as e:
+        if isinstance(e, RequestOptionError):
+            return client_error_response(e, "anthropic")
+        raise HTTPException(status_code=e.status_code, detail=str(e)) from e
 
     if request.stream:
-        # Resolve provider for accurate token estimation
-        provider_name = await _resolve_provider_name(request.model)
-        estimated_tokens = _estimate_input_tokens(request, provider_name)
         return sse_streaming_response(
-            stream_response(model_router, chat_request, request.model, estimated_tokens),
+            stream_response(
+                model_router,
+                chat_request,
+                request.model,
+                token_estimation_request=request,
+                prepared_plan=prepared_plan,
+            ),
             keepalive_frame=ANTHROPIC_PING_FRAME,
         )
 
     try:
-        response, provider_name = await model_router.chat_completion(chat_request)
+        response, provider_name = await model_router.chat_completion(
+            chat_request,
+            prepared_plan=prepared_plan,
+        )
 
         logger.info(
             "Upstream response from %s: content_len=%s, tool_calls=%s, finish_reason=%s",
@@ -406,6 +437,8 @@ async def messages(request: AnthropicMessagesRequest, raw_request: FastAPIReques
             )
         if response.content:
             content.append(AnthropicTextBlock(type="text", text=response.content))
+        if response.refusal:
+            content.append(AnthropicTextBlock(type="text", text=response.refusal))
 
         # Convert OpenAI-format tool_calls to Anthropic tool_use blocks
         if response.tool_calls:
@@ -439,7 +472,11 @@ async def messages(request: AnthropicMessagesRequest, raw_request: FastAPIReques
             type="message",
             role="assistant",
             content=content,
-            model=response.model,
+            model=(
+                response.selected_model.qualified_id
+                if response.selected_model is not None
+                else qualify_model_id(provider_name, response.model)
+            ),
             stop_reason=stop_reason,
             stop_sequence=None,
             usage=usage,
@@ -451,7 +488,9 @@ async def messages(request: AnthropicMessagesRequest, raw_request: FastAPIReques
             e.status_code,
             e,
         )
-        raise HTTPException(status_code=e.status_code, detail=str(e))
+        if isinstance(e, RequestOptionError):
+            return client_error_response(e, "anthropic")
+        raise HTTPException(status_code=e.status_code, detail=str(e)) from e
 
 
 @router.post("/v1/messages/count_tokens")
@@ -463,6 +502,8 @@ async def count_tokens(request: AnthropicCountTokensRequest):
     token-counting configuration. For native Anthropic, attempts an upstream
     API call for an exact count before falling back to local estimation.
     """
+    if error := unrepresented_option_error(request):
+        return client_error_response(error, "anthropic")
     logger.debug("count_tokens request: model=%s, provider=%s", request.model, None)
     provider_name = await _resolve_provider_name(request.model)
     logger.debug("count_tokens resolved provider=%s for model=%s", provider_name, request.model)
@@ -553,27 +594,52 @@ async def stream_response(
     request: ChatRequest,
     original_model: str,
     estimated_input_tokens: int = 0,
+    *,
+    token_estimation_request: AnthropicMessagesRequest | None = None,
+    prepared_plan=None,
 ) -> AsyncGenerator[str, None]:
     """Stream Anthropic Messages API response."""
     response_id = f"msg_{uuid.uuid4().hex[:24]}"
     state = AnthropicStreamState(estimated_input_tokens=estimated_input_tokens)
 
-    # Emit message_start (and a ping) BEFORE awaiting the upstream stream so
-    # the client receives bytes within milliseconds. Large-context requests
-    # (e.g. claude-opus-4.7-1m) can take 8+ seconds to produce their first
-    # token, which exceeds Claude Code's first-byte timeout and causes the
-    # client to cancel before any data arrives. Sending message_start eagerly
-    # resets that timer with a valid Anthropic protocol event.
-    start_event = build_message_start_event(state, original_model, response_id=response_id)
-    if start_event is not None:
-        yield f"event: {start_event['type']}\ndata: {json.dumps(start_event)}\n\n"
+    # Emit a protocol ping before opening the upstream stream. The shared SSE
+    # wrapper continues emitting pings while Router primes the first chunk, so
+    # slow models do not hit Claude Code's first-byte timeout. ``message_start``
+    # waits until Router has selected the actual provider/model after fallback.
     yield f"event: ping\ndata: {json.dumps({'type': 'ping'})}\n\n"
 
     pipeline = None
     stream = None
     terminal_outcome: TerminalOutcome | None = None
     try:
-        stream, provider_name = await model_router.chat_completion_stream(request)
+        if prepared_plan is None:
+            stream, provider_name = await model_router.chat_completion_stream(request)
+        else:
+            stream, provider_name = await model_router.chat_completion_stream(
+                request,
+                prepared_plan=prepared_plan,
+            )
+        selected_model = getattr(stream, "selected_model", None)
+        if token_estimation_request is not None:
+            selected_provider = (
+                selected_model.provider if selected_model is not None else provider_name
+            )
+            state.estimated_input_tokens = _estimate_input_tokens(
+                token_estimation_request,
+                selected_provider,
+            )
+        response_model = (
+            selected_model.qualified_id
+            if selected_model is not None
+            else qualify_model_id(provider_name, original_model)
+        )
+        start_event = build_message_start_event(
+            state,
+            response_model,
+            response_id=response_id,
+        )
+        if start_event is not None:
+            yield f"event: {start_event['type']}\ndata: {json.dumps(start_event)}\n\n"
 
         # Track state needed to recover tool calls that the upstream model
         # leaked as <invoke> XML *text* instead of structured tool_calls (a
@@ -651,7 +717,7 @@ async def stream_response(
             # Build OpenAI-style chunk for translation. Forward reasoning
             # under both legacy field names so the translator can pick it up.
             delta: dict = {
-                "content": chunk.content if chunk.content else None,
+                "content": chunk.content or chunk.refusal or None,
                 "tool_calls": recovered_tool_calls,
             }
             if chunk.thinking:
@@ -671,7 +737,7 @@ async def stream_response(
 
             try:
                 events = translate_openai_chunk_to_anthropic_events(
-                    openai_chunk, state, original_model
+                    openai_chunk, state, response_model
                 )
             except AnthropicStreamProtocolError:
                 terminal_outcome = exception_outcome(
@@ -794,9 +860,19 @@ async def list_models(
     # Convert to Anthropic format
     anthropic_models = [
         AnthropicModelInfo(
-            id=model.id,
+            id=catalog_model_public_id(
+                model.provider,
+                model.id,
+                id_is_qualified=model.id_is_qualified,
+            ),
             created_at=created_at,
-            display_name=_generate_display_name(model.id),
+            display_name=_generate_display_name(
+                catalog_model_public_id(
+                    model.provider,
+                    model.id,
+                    id_is_qualified=model.id_is_qualified,
+                )
+            ),
             type="model",
             max_prompt_tokens=model.max_prompt_tokens,
             max_output_tokens=model.max_output_tokens,

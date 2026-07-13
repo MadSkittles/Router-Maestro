@@ -7,11 +7,13 @@ import uuid
 from collections.abc import AsyncGenerator
 
 from fastapi import APIRouter, HTTPException
+from pydantic import ValidationError
 
 from router_maestro.providers import (
     ChatRequest,
     Message,
     ProviderError,
+    RequestOptionError,
     ResponseStatus,
     TerminalOutcome,
     client_cancelled_outcome,
@@ -21,6 +23,8 @@ from router_maestro.providers import (
     unexpected_eof_outcome,
 )
 from router_maestro.routing import Router, get_router
+from router_maestro.routing.model_ref import qualify_model_id
+from router_maestro.server.protocols import client_error_response, unrepresented_option_error
 from router_maestro.server.schemas import (
     ChatCompletionChoice,
     ChatCompletionChunk,
@@ -32,6 +36,10 @@ from router_maestro.server.schemas import (
     ChatMessage,
     ChatMessageToolCall,
 )
+from router_maestro.server.schemas.openai import (
+    ChatCompletionStreamOptions,
+    OpenAIThinkingConfig,
+)
 from router_maestro.server.streaming import sse_streaming_response
 from router_maestro.utils import get_logger
 from router_maestro.utils.async_iterators import close_async_iterator
@@ -40,6 +48,32 @@ from router_maestro.utils.reasoning import VALID_EFFORTS, effort_to_budget
 logger = get_logger("server.routes.chat")
 
 router = APIRouter()
+
+
+def _thinking_validation_error(error: ValidationError) -> RequestOptionError:
+    """Map strict thinking-schema failures to one stable OpenAI parameter."""
+    first = error.errors()[0]
+    location = first.get("loc", ())
+    parameter = "thinking"
+    if location:
+        parameter = f"thinking.{'.'.join(str(part) for part in location)}"
+    return RequestOptionError(
+        f"Invalid request option '{parameter}'",
+        parameter=parameter,
+    )
+
+
+def _stream_options_validation_error(error: ValidationError) -> RequestOptionError:
+    """Map strict stream-options failures to one stable OpenAI parameter."""
+    first = error.errors()[0]
+    location = first.get("loc", ())
+    parameter = "stream_options"
+    if location:
+        parameter = f"stream_options.{'.'.join(str(part) for part in location)}"
+    return RequestOptionError(
+        f"Invalid request option '{parameter}'",
+        parameter=parameter,
+    )
 
 
 def make_chat_usage(raw_usage: dict | None) -> ChatCompletionUsage | None:
@@ -64,6 +98,35 @@ async def chat_completions(request: ChatCompletionRequest):
         request.model,
         request.stream,
     )
+    stream_options = None
+    if "stream_options" in request.model_fields_set:
+        if request.stream_options is None:
+            return client_error_response(
+                RequestOptionError(
+                    "Invalid request option 'stream_options'",
+                    parameter="stream_options",
+                ),
+                "openai",
+            )
+        try:
+            stream_options = ChatCompletionStreamOptions.model_validate(request.stream_options)
+        except ValidationError as error:
+            return client_error_response(
+                _stream_options_validation_error(error),
+                "openai",
+            )
+        request.stream_options = stream_options
+
+    if error := unrepresented_option_error(request):
+        return client_error_response(error, "openai")
+    if stream_options is not None and not request.stream:
+        return client_error_response(
+            RequestOptionError(
+                "Invalid request option 'stream_options'",
+                parameter="stream_options",
+            ),
+            "openai",
+        )
     model_router = get_router()
 
     # Convert to internal format
@@ -78,20 +141,9 @@ async def chat_completions(request: ChatCompletionRequest):
                 content=m.content,
                 tool_call_id=m.tool_call_id,
                 tool_calls=tool_calls_raw,
+                refusal=m.refusal,
             )
         )
-
-    extra = {
-        key: value
-        for key, value in {
-            "top_p": request.top_p,
-            "frequency_penalty": request.frequency_penalty,
-            "presence_penalty": request.presence_penalty,
-            "stop": request.stop,
-            "user": request.user,
-        }.items()
-        if value is not None
-    }
 
     chat_request = ChatRequest(
         model=request.model,
@@ -101,27 +153,69 @@ async def chat_completions(request: ChatCompletionRequest):
         stream=request.stream,
         tools=request.tools,
         tool_choice=request.tool_choice,
-        extra=extra,
+        top_p=request.top_p,
+        frequency_penalty=request.frequency_penalty,
+        presence_penalty=request.presence_penalty,
+        stop=request.stop,
+        user=request.user,
+        metadata=request.metadata,
+        service_tier=request.service_tier,
     )
 
     # Reasoning / thinking passthrough.
     # Prefer OpenAI-style ``reasoning_effort``; also accept Anthropic-style
     # ``thinking`` for SDKs that forward it via the OpenAI endpoint.
+    thinking = None
+    if "thinking" in request.model_fields_set and request.thinking is None:
+        return client_error_response(
+            RequestOptionError(
+                "Invalid request option 'thinking'",
+                parameter="thinking",
+            ),
+            "openai",
+        )
+    if request.thinking is not None:
+        try:
+            thinking = OpenAIThinkingConfig.model_validate(request.thinking)
+        except ValidationError as error:
+            return client_error_response(_thinking_validation_error(error), "openai")
+
     effort = (request.reasoning_effort or "").lower() or None
-    if effort and effort in VALID_EFFORTS:
+    if effort and effort not in VALID_EFFORTS:
+        return client_error_response(
+            RequestOptionError(
+                f"Unsupported reasoning_effort '{request.reasoning_effort}'",
+                parameter="reasoning_effort",
+            ),
+            "openai",
+        )
+    if effort:
         chat_request.reasoning_effort = effort
         chat_request.thinking_budget = effort_to_budget(effort)
         chat_request.thinking_type = "enabled"
-    elif request.thinking:
-        t_type = request.thinking.get("type")
-        t_budget = request.thinking.get("budget_tokens")
-        if t_type:
-            chat_request.thinking_type = t_type
-        if isinstance(t_budget, int):
-            chat_request.thinking_budget = t_budget
+    elif thinking is not None:
+        chat_request.thinking_type = thinking.type
+        chat_request.thinking_budget = (
+            None if thinking.type == "disabled" else thinking.budget_tokens
+        )
 
     if request.stream:
-        return sse_streaming_response(stream_response(model_router, chat_request))
+        try:
+            prepared_plan = await model_router.prepare_chat_completion_stream(chat_request)
+        except ProviderError as e:
+            if isinstance(e, RequestOptionError):
+                return client_error_response(e, "openai")
+            raise HTTPException(status_code=e.status_code, detail=str(e)) from e
+        return sse_streaming_response(
+            stream_response(
+                model_router,
+                chat_request,
+                include_usage=(
+                    stream_options.include_usage if stream_options is not None else None
+                ),
+                prepared_plan=prepared_plan,
+            )
+        )
 
     try:
         response, provider_name = await model_router.chat_completion(chat_request)
@@ -136,13 +230,18 @@ async def chat_completions(request: ChatCompletionRequest):
         return ChatCompletionResponse(
             id=f"chatcmpl-{uuid.uuid4().hex[:8]}",
             created=int(time.time()),
-            model=response.model,
+            model=(
+                response.selected_model.qualified_id
+                if response.selected_model is not None
+                else qualify_model_id(provider_name, response.model)
+            ),
             choices=[
                 ChatCompletionChoice(
                     index=0,
                     message=ChatMessage(
                         role="assistant",
                         content=response.content,
+                        refusal=response.refusal,
                         tool_calls=response_tool_calls,
                     ),
                     finish_reason=response.finish_reason,
@@ -152,17 +251,42 @@ async def chat_completions(request: ChatCompletionRequest):
         )
     except ProviderError as e:
         logger.error("Chat completion request failed: %s", e)
-        raise HTTPException(status_code=e.status_code, detail=str(e))
+        if isinstance(e, RequestOptionError):
+            return client_error_response(e, "openai")
+        raise HTTPException(status_code=e.status_code, detail=str(e)) from e
 
 
-async def stream_response(model_router: Router, request: ChatRequest) -> AsyncGenerator[str, None]:
-    """Stream chat completion response."""
+async def stream_response(
+    model_router: Router,
+    request: ChatRequest,
+    *,
+    include_usage: bool | None = None,
+    prepared_plan=None,
+) -> AsyncGenerator[str, None]:
+    """Stream chat completion response with an optional explicit usage policy.
+
+    ``None`` preserves Router-Maestro's legacy wire behavior. Explicit booleans
+    implement OpenAI ``stream_options.include_usage`` without changing what the
+    provider is asked to collect.
+    """
     pipeline = None
     stream = None
     terminal_outcome: TerminalOutcome | None = None
     terminal_usage: ChatCompletionUsage | None = None
     try:
-        stream, provider_name = await model_router.chat_completion_stream(request)
+        if prepared_plan is None:
+            stream, provider_name = await model_router.chat_completion_stream(request)
+        else:
+            stream, provider_name = await model_router.chat_completion_stream(
+                request,
+                prepared_plan=prepared_plan,
+            )
+        selected_model = getattr(stream, "selected_model", None)
+        response_model = (
+            selected_model.qualified_id
+            if selected_model is not None
+            else qualify_model_id(provider_name, request.model)
+        )
         response_id = f"chatcmpl-{uuid.uuid4().hex[:8]}"
         created = int(time.time())
 
@@ -178,7 +302,7 @@ async def stream_response(model_router: Router, request: ChatRequest) -> AsyncGe
             } or None
         pipeline = RequestPipeline.create(
             request_id=response_id,
-            model=request.model,
+            model=response_model,
             tool_names=tool_names,
         )
 
@@ -186,7 +310,7 @@ async def stream_response(model_router: Router, request: ChatRequest) -> AsyncGe
         initial_chunk = ChatCompletionChunk(
             id=response_id,
             created=created,
-            model=request.model,
+            model=response_model,
             choices=[
                 ChatCompletionChunkChoice(
                     index=0,
@@ -236,29 +360,34 @@ async def stream_response(model_router: Router, request: ChatRequest) -> AsyncGe
                 chunk.finish_reason,
             )
             usage = make_chat_usage(chunk.usage)
-            if chunk.content or chunk.tool_calls:
+            if include_usage is not None and usage is not None:
+                terminal_usage = usage
+            if chunk.content or chunk.refusal or chunk.tool_calls:
                 chunk_response = ChatCompletionChunk(
                     id=response_id,
                     created=created,
-                    model=request.model,
+                    model=response_model,
                     choices=[
                         ChatCompletionChunkChoice(
                             index=0,
                             delta=ChatCompletionChunkDelta(
                                 content=chunk.content if chunk.content else None,
+                                refusal=chunk.refusal,
                                 tool_calls=chunk.tool_calls,
                             ),
                             finish_reason=None,
                         )
                     ],
-                    usage=None if chunk_outcome is not None else usage,
+                    usage=(
+                        None if include_usage is not None or chunk_outcome is not None else usage
+                    ),
                 )
                 yield f"data: {chunk_response.model_dump_json()}\n\n"
-            elif usage and chunk_outcome is None:
+            elif usage and chunk_outcome is None and include_usage is None:
                 usage_chunk = ChatCompletionChunk(
                     id=response_id,
                     created=created,
-                    model=request.model,
+                    model=response_model,
                     choices=[],
                     usage=usage,
                 )
@@ -284,7 +413,8 @@ async def stream_response(model_router: Router, request: ChatRequest) -> AsyncGe
                     )
                     return
                 terminal_outcome = chunk_outcome
-                terminal_usage = usage
+                if include_usage is None:
+                    terminal_usage = usage
 
         if terminal_outcome is None:
             terminal_outcome = unexpected_eof_outcome()
@@ -296,7 +426,7 @@ async def stream_response(model_router: Router, request: ChatRequest) -> AsyncGe
             final_chunk = ChatCompletionChunk(
                 id=response_id,
                 created=created,
-                model=request.model,
+                model=response_model,
                 choices=[
                     ChatCompletionChunkChoice(
                         index=0,
@@ -304,9 +434,18 @@ async def stream_response(model_router: Router, request: ChatRequest) -> AsyncGe
                         finish_reason=finish_reason_for_outcome(terminal_outcome),
                     )
                 ],
-                usage=terminal_usage,
+                usage=terminal_usage if include_usage is None else None,
             )
             yield f"data: {final_chunk.model_dump_json()}\n\n"
+            if include_usage and terminal_usage is not None:
+                usage_chunk = ChatCompletionChunk(
+                    id=response_id,
+                    created=created,
+                    model=response_model,
+                    choices=[],
+                    usage=terminal_usage,
+                )
+                yield f"data: {usage_chunk.model_dump_json()}\n\n"
             yield "data: [DONE]\n\n"
         pipeline.finish(wire_status=200, outcome=terminal_outcome)
 
@@ -348,6 +487,7 @@ def _is_usage_only_chunk(chunk) -> bool:
     return bool(chunk.usage) and not any(
         (
             chunk.content,
+            chunk.refusal,
             chunk.finish_reason,
             chunk.tool_calls,
             chunk.thinking,

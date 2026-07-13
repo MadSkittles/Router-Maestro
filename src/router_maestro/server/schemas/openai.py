@@ -1,8 +1,8 @@
 """OpenAI-compatible API schemas."""
 
-from typing import Any
+from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class ChatMessageFunction(BaseModel):
@@ -25,30 +25,78 @@ class ChatMessage(BaseModel):
 
     role: str
     content: str | list | None = None
+    refusal: str | None = None
     tool_calls: list[ChatMessageToolCall] | None = None
     tool_call_id: str | None = None
+
+
+class OpenAIThinkingConfig(BaseModel):
+    """Strict Anthropic-style thinking extension accepted by Chat Completions."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal["enabled", "adaptive", "disabled"]
+    budget_tokens: Annotated[int, Field(strict=True, gt=0)] | None = None
+
+    @field_validator("budget_tokens", mode="before")
+    @classmethod
+    def reject_explicit_null_budget(cls, value):
+        """Distinguish an omitted default budget from an explicit null value."""
+        if value is None:
+            raise ValueError("budget_tokens must be a positive integer when provided")
+        return value
+
+
+class ChatCompletionStreamOptions(BaseModel):
+    """Client-facing encoding options for a Chat Completions stream."""
+
+    # Retain unknown nested options so the route can return an OpenAI-native
+    # 400 through ``unrepresented_option_error`` instead of FastAPI's 422.
+    model_config = ConfigDict(extra="allow")
+
+    include_usage: Annotated[bool, Field(strict=True)] = False
 
 
 class ChatCompletionRequest(BaseModel):
     """Request for chat completion."""
 
+    # Preserve unknown top-level options long enough for the route to return an
+    # OpenAI-native 400. Pydantic's default ``extra=ignore`` would silently
+    # discard requested semantics; ``extra=forbid`` would bypass the route with
+    # FastAPI's generic 422 envelope.
+    model_config = ConfigDict(extra="allow")
+
     model: str
     messages: list[ChatMessage]
-    temperature: float = Field(default=1.0, ge=0, le=2)
+    temperature: float | None = Field(default=None, ge=0, le=2)
     max_tokens: int | None = None
     stream: bool = False
+    # Keep the raw value until the route validates it into
+    # ``ChatCompletionStreamOptions`` and can encode failures as native 400s.
+    stream_options: Any | None = None
     top_p: float | None = None
     frequency_penalty: float | None = None
     presence_penalty: float | None = None
     stop: list[str] | str | None = None
     user: str | None = None
+    metadata: dict[str, Any] | None = None
+    service_tier: str | None = None
     tools: list[dict[str, Any]] | None = None
     tool_choice: str | dict[str, Any] | None = None
-    # OpenAI-style reasoning effort: "low" | "medium" | "high"
-    # Router-Maestro additionally accepts "xhigh" (downgraded for upstream).
+    # OpenAI-style reasoning effort, including the catalog-advertised "minimal" tier.
+    # Router-Maestro additionally accepts "xhigh"/"max" (downgraded when needed).
     reasoning_effort: str | None = None
     # Anthropic-style passthrough; some SDKs forward {"type": "...", "budget_tokens": N}
-    thinking: dict[str, Any] | None = None
+    # Keep the raw value at the FastAPI boundary so the route can encode every
+    # invalid extension shape as an OpenAI-native 400 instead of a generic 422.
+    thinking: Any | None = None
+
+    @field_validator("temperature", mode="before")
+    @classmethod
+    def reject_explicit_null_temperature(cls, value):
+        if value is None:
+            raise ValueError("temperature must be a number when provided")
+        return value
 
 
 class ChatCompletionChoice(BaseModel):
@@ -85,6 +133,7 @@ class ChatCompletionChunkDelta(BaseModel):
 
     role: str | None = None
     content: str | None = None
+    refusal: str | None = None
     tool_calls: list[dict[str, Any]] | None = None
 
 

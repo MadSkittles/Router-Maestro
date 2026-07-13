@@ -10,12 +10,10 @@ producing useless logs like `Copilot stream API error: 400 -`.
 
 This module pins down two guarantees:
 
-1. The shared helper now emits an explicit "<response body not read; ...>"
-   sentinel (instead of an empty string) when a streamed response is passed
-   in without first calling `aread()`.
-2. After the caller pre-reads the body via `await response.aread()`, the
-   helper includes the actual upstream payload in both the log and the
-   `ProviderError` message.
+1. A streamed response passed in without first calling `aread()` still yields
+   a safe, useful typed error.
+2. After the caller pre-reads the body via `await response.aread()`, the raw
+   payload still never enters logs or the client-safe `ProviderError` message.
 """
 
 import httpx
@@ -44,9 +42,8 @@ def _streamed_status_error(body: bytes, status: int = 400) -> httpx.HTTPStatusEr
     raise AssertionError("raise_for_status should have raised")
 
 
-def test_helper_uses_sentinel_when_streamed_body_not_read(monkeypatch):
-    """Without a pre-read, the helper must surface the unread-body sentinel
-    rather than silently emit an empty body string."""
+def test_helper_keeps_unread_stream_body_out_of_safe_error(monkeypatch):
+    """Without a pre-read, implementation diagnostics must not enter the error."""
     err = _streamed_status_error(b'{"error":{"message":"missing image media_type"}}')
 
     # MockTransport buffers the body, so we have to simulate the
@@ -68,12 +65,11 @@ def test_helper_uses_sentinel_when_streamed_body_not_read(monkeypatch):
 
     msg = str(excinfo.value)
     assert "400" in msg
-    assert "response body not read" in msg
+    assert "response body not read" not in msg
 
 
-def test_helper_includes_body_after_caller_reads_it():
-    """After the caller pre-reads the streamed response body, the upstream
-    payload must show up verbatim in the raised `ProviderError`."""
+def test_helper_keeps_read_body_out_of_logs_and_safe_error(caplog):
+    """A read upstream body remains private in both logs and safe errors."""
     payload = b'{"error":{"message":"image media_type unsupported"}}'
     err = _streamed_status_error(payload)
 
@@ -92,5 +88,6 @@ def test_helper_includes_body_after_caller_reads_it():
         )
 
     msg = str(excinfo.value)
-    assert "image media_type unsupported" in msg
+    assert "image media_type unsupported" not in msg
+    assert "image media_type unsupported" not in caplog.text
     assert excinfo.value.status_code == 400

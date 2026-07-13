@@ -248,6 +248,80 @@ class TestRunawayGuard:
         assert result == "runaway_guard:max_bytes_exceeded:6>5"
         assert guard._delta_count == 1
 
+    @pytest.mark.parametrize("field", ["thinking", "refusal"])
+    def test_responses_payload_fields_use_utf8_bytes_and_trip_max_bytes(self, field):
+        guard = RunawayGuard(max_bytes=5, max_deltas=50_000)
+        chunk = ResponsesStreamChunk(content="", **{field: "猫猫"})
+
+        result = guard.feed_chunk(chunk)
+
+        assert result == "runaway_guard:max_bytes_exceeded:6>5"
+        assert guard._total_bytes == 6
+        assert guard._delta_count == 1
+
+    def test_reasoning_bytes_at_limit_are_allowed_and_next_fragment_trips(self):
+        guard = RunawayGuard(max_bytes=6, max_deltas=50_000)
+
+        assert guard.feed_chunk(ResponsesStreamChunk(content="", thinking="猫")) is None
+        assert guard.feed_chunk(ResponsesStreamChunk(content="", thinking="猫")) is None
+        result = guard.feed_chunk(ResponsesStreamChunk(content="", thinking="猫"))
+
+        assert result == "runaway_guard:max_bytes_exceeded:9>6"
+        assert guard._delta_count == 3
+
+    def test_control_and_usage_only_chunks_do_not_count_as_payload_deltas(self):
+        guard = RunawayGuard(max_bytes=10, max_deltas=1, min_avg_bytes=100.0)
+
+        assert guard.feed_chunk(ResponsesStreamChunk(content="", provenance_only=True)) is None
+        assert (
+            guard.feed_chunk(
+                ResponsesStreamChunk(
+                    content="",
+                    usage={"input_tokens": 1, "output_tokens": 0, "total_tokens": 1},
+                )
+            )
+            is None
+        )
+        assert guard.feed_chunk(ResponsesStreamChunk(content="x")) is None
+
+        assert guard._delta_count == 1
+        assert guard._total_bytes == 1
+
+    @pytest.mark.parametrize(
+        ("field", "value", "expected_bytes"),
+        [
+            ("thinking_signature", "ABCDEF", 6),
+            ("thinking_signature", "猫猫", 6),
+            ("thinking_id", "rs-猫", 6),
+        ],
+    )
+    def test_reasoning_identity_payload_fields_trip_utf8_byte_limit(
+        self, field, value, expected_bytes
+    ):
+        guard = RunawayGuard(max_bytes=5, max_deltas=50_000)
+
+        result = guard.feed_chunk(ResponsesStreamChunk(content="", **{field: value}))
+
+        assert result == f"runaway_guard:max_bytes_exceeded:{expected_bytes}>5"
+        assert guard._total_bytes == expected_bytes
+        assert guard._delta_count == 1
+
+    def test_combined_reasoning_fields_count_once_and_sum_all_bytes(self):
+        guard = RunawayGuard(max_bytes=10, max_deltas=50_000)
+
+        result = guard.feed_chunk(
+            ResponsesStreamChunk(
+                content="",
+                thinking="abc",
+                thinking_id="rs-1",
+                thinking_signature="WXYZ",
+            )
+        )
+
+        assert result == "runaway_guard:max_bytes_exceeded:11>10"
+        assert guard._total_bytes == 11
+        assert guard._delta_count == 1
+
 
 class TestBetaStrip:
     """Tests for beta header token stripping."""
