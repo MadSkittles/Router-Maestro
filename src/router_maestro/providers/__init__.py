@@ -11,6 +11,8 @@ from router_maestro.providers.base import (
     Message,
     ModelInfo,
     ProviderError,
+    ProviderFailureKind,
+    RequestOptionError,
     ResponsesRequest,
     ResponsesResponse,
     ResponsesStreamChunk,
@@ -37,6 +39,8 @@ __all__ = [
     # Base classes
     "BaseProvider",
     "ProviderError",
+    "ProviderFailureKind",
+    "RequestOptionError",
     "ResponseStatus",
     "TerminalError",
     "TerminalOutcome",

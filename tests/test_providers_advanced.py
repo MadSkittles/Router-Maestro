@@ -104,7 +104,7 @@ class TestChatRequest:
             model="gpt-4o",
             messages=[Message(role="user", content="Hi")],
         )
-        assert request.temperature == 1.0
+        assert request.temperature is None
         assert request.max_tokens is None
         assert request.stream is False
         assert request.tools is None
@@ -128,7 +128,8 @@ class TestChatRequest:
         assert request.stream is True
         assert request.tools is not None
         assert request.tool_choice == "auto"
-        assert request.extra["top_p"] == 0.9
+        assert request.top_p == 0.9
+        assert request.extra == {}
 
 
 class TestChatResponse:
@@ -178,6 +179,12 @@ class TestChatResponse:
         )
         assert response.usage["total_tokens"] == 15
 
+    def test_legacy_positional_constructor_keeps_finish_reason_position(self):
+        response = ChatResponse("Hello!", "gpt-4o", "length")
+
+        assert response.finish_reason == "length"
+        assert response.refusal is None
+
 
 class TestChatStreamChunk:
     """Tests for ChatStreamChunk."""
@@ -192,6 +199,12 @@ class TestChatStreamChunk:
         """Test finish chunk."""
         chunk = ChatStreamChunk(content="", finish_reason="stop")
         assert chunk.finish_reason == "stop"
+
+    def test_legacy_positional_constructor_keeps_finish_reason_position(self):
+        chunk = ChatStreamChunk("", "stop")
+
+        assert chunk.finish_reason == "stop"
+        assert chunk.refusal is None
 
     def test_chunk_with_tool_calls(self):
         """Test chunk with tool calls."""
@@ -211,7 +224,7 @@ class TestResponsesRequest:
         request = ResponsesRequest(model="gpt-4o", input="Hello")
         assert request.input == "Hello"
         assert request.stream is False
-        assert request.temperature == 1.0
+        assert request.temperature is None
 
     def test_list_input(self):
         """Test with list input."""

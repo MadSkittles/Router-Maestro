@@ -33,11 +33,23 @@ class RunawayGuard:
 
     def feed_chunk(self, chunk) -> str | None:
         """Feed a chunk and check volume thresholds."""
-        self._delta_count += 1
-        content = getattr(chunk, "content", None)
-        if content:
-            self._total_bytes += len(content.encode("utf-8"))
-        for tool_call in getattr(chunk, "tool_calls", None) or []:
+        payloads: list[str] = []
+        has_payload_event = False
+        for field in (
+            "content",
+            "refusal",
+            "thinking",
+            "thinking_id",
+            "thinking_signature",
+        ):
+            value = getattr(chunk, field, None)
+            if isinstance(value, str) and value:
+                payloads.append(value)
+                has_payload_event = True
+        tool_calls = getattr(chunk, "tool_calls", None) or []
+        if tool_calls:
+            has_payload_event = True
+        for tool_call in tool_calls:
             if not isinstance(tool_call, dict):
                 continue
             function = tool_call.get("function")
@@ -45,12 +57,19 @@ class RunawayGuard:
                 continue
             arguments = function.get("arguments")
             if isinstance(arguments, str):
-                self._total_bytes += len(arguments.encode("utf-8"))
+                payloads.append(arguments)
 
         complete_tool_call = getattr(chunk, "tool_call", None)
+        if complete_tool_call is not None:
+            has_payload_event = True
         arguments = getattr(complete_tool_call, "arguments", None)
         if isinstance(arguments, str):
-            self._total_bytes += len(arguments.encode("utf-8"))
+            payloads.append(arguments)
+
+        if not has_payload_event:
+            return None
+        self._delta_count += 1
+        self._total_bytes += sum(len(payload.encode("utf-8")) for payload in payloads)
 
         if self._total_bytes > self._max_bytes:
             reason = f"runaway_guard:max_bytes_exceeded:{self._total_bytes}>{self._max_bytes}"

@@ -12,6 +12,8 @@ from router_maestro.providers.base import (
     ChatRequest,
     Message,
     ProviderError,
+    ProviderFailureKind,
+    RequestOptionError,
     ResponsesRequest,
     ResponsesResponse,
     ResponsesStreamChunk,
@@ -61,6 +63,10 @@ class TestModelEligibility:
             "gpt-5.4-mini",
             "gpt-5.2-codex",
             "gpt-5.3-codex",
+            "gpt-5.6-luna",
+            "gpt-5.6-sol",
+            "gpt-5.6-terra",
+            "mai-code-1-flash-picker",
             "github-copilot/gpt-5.4",  # provider prefix
         ],
     )
@@ -109,6 +115,28 @@ class TestShouldUseResponses:
     def test_happy_path(self):
         req = self._req("gpt-5.4", opt_in=True)
         assert should_use_responses_for_chat(req, "github-copilot") is True
+
+    def test_catalog_support_overrides_static_ineligibility(self):
+        req = self._req("future-responses-only", opt_in=True)
+        assert (
+            should_use_responses_for_chat(
+                req,
+                "github-copilot",
+                responses_supported=True,
+            )
+            is True
+        )
+
+    def test_catalog_rejection_overrides_static_eligibility(self):
+        req = self._req("gpt-5.4", opt_in=True)
+        assert (
+            should_use_responses_for_chat(
+                req,
+                "github-copilot",
+                responses_supported=False,
+            )
+            is False
+        )
 
     def test_env_flag_disabled_blocks_even_with_opt_in(self, monkeypatch):
         """Kill-switch: env off must block even if a caller set use_responses_api."""
@@ -233,6 +261,70 @@ class TestStatusMapping:
 
 
 class TestChatToResponses:
+    def test_conversion_deeply_isolates_mutable_payload_from_source(self):
+        req = ChatRequest(
+            model="gpt-5.4",
+            messages=[
+                Message(
+                    role="user",
+                    content=[
+                        {
+                            "type": "document",
+                            "source": {
+                                "pages": [{"text": "original-document"}],
+                            },
+                        }
+                    ],
+                )
+            ],
+            tools=[
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "lookup",
+                        "parameters": {"properties": {"query": {"enum": ["original-query"]}}},
+                    },
+                }
+            ],
+            tool_choice={
+                "type": "vendor_choice",
+                "vendor": {"flags": ["original-choice"]},
+            },
+            metadata={"trace": {"tags": ["original-tag"]}},
+            provider_extensions={"vendor": {"flags": ["original-extension"]}},
+        )
+
+        out = chat_request_to_responses_request(req)
+        assert isinstance(out.input, list)
+        assert out.tools is not None
+        assert isinstance(out.tool_choice, dict)
+        assert out.metadata is not None
+
+        out.input[0]["content"][0]["source"]["pages"][0]["text"] = "polluted-document"
+        out.tools[0]["parameters"]["properties"]["query"]["enum"][0] = "polluted-query"
+        out.tool_choice["vendor"]["flags"][0] = "polluted-choice"
+        out.metadata["trace"]["tags"][0] = "polluted-tag"
+        out.provider_extensions["vendor"]["flags"][0] = "polluted-extension"
+
+        source_content = req.messages[0].content
+        assert isinstance(source_content, list)
+        assert source_content[0]["source"]["pages"][0]["text"] == "original-document"
+        assert req.tools is not None
+        assert (
+            req.tools[0]["function"]["parameters"]["properties"]["query"]["enum"][0]
+            == "original-query"
+        )
+        assert isinstance(req.tool_choice, dict)
+        assert req.tool_choice["vendor"]["flags"] == ["original-choice"]
+        assert req.metadata == {"trace": {"tags": ["original-tag"]}}
+        assert req.provider_extensions == {"vendor": {"flags": ["original-extension"]}}
+
+        assert out.input[0]["content"][0] is not source_content[0]
+        assert out.tools[0]["parameters"] is not req.tools[0]["function"]["parameters"]
+        assert out.tool_choice is not req.tool_choice
+        assert out.metadata is not req.metadata
+        assert out.provider_extensions is not req.provider_extensions
+
     def test_system_message_becomes_instructions(self):
         req = ChatRequest(
             model="gpt-5.4",
@@ -319,6 +411,47 @@ class TestChatToResponses:
         out = chat_request_to_responses_request(req)
         assert out.reasoning_effort == "high"
 
+    @pytest.mark.parametrize("thinking_budget", [1, 1023])
+    def test_positive_budget_below_lowest_tier_is_rejected(self, thinking_budget):
+        req = ChatRequest(
+            model="gpt-5.4",
+            messages=[Message(role="user", content="hi")],
+            thinking_type="enabled",
+            thinking_budget=thinking_budget,
+        )
+
+        with pytest.raises(RequestOptionError) as exc_info:
+            chat_request_to_responses_request(req)
+
+        assert exc_info.value.status_code == 400
+        assert exc_info.value.retryable is False
+        assert exc_info.value.kind is ProviderFailureKind.CLIENT_REQUEST
+        assert exc_info.value.parameter == "thinking_budget"
+
+    def test_lowest_reasoning_budget_maps_to_low(self):
+        req = ChatRequest(
+            model="gpt-5.4",
+            messages=[Message(role="user", content="hi")],
+            thinking_type="enabled",
+            thinking_budget=1024,
+        )
+
+        out = chat_request_to_responses_request(req)
+
+        assert out.reasoning_effort == "low"
+
+    @pytest.mark.parametrize("thinking_type", [None, "disabled"])
+    def test_unset_or_disabled_thinking_does_not_invent_reasoning(self, thinking_type):
+        req = ChatRequest(
+            model="gpt-5.4",
+            messages=[Message(role="user", content="hi")],
+            thinking_type=thinking_type,
+        )
+
+        out = chat_request_to_responses_request(req)
+
+        assert out.reasoning_effort is None
+
     def test_explicit_effort_wins(self):
         req = ChatRequest(
             model="gpt-5.4",
@@ -385,6 +518,23 @@ class TestChatToResponses:
                     if "text" in block:
                         assert block["type"] == "input_text"
 
+    def test_assistant_refusal_history_uses_refusal_block(self):
+        req = ChatRequest(
+            model="gpt-5.4",
+            messages=[
+                Message(role="assistant", content=None, refusal="I cannot help"),
+                Message(role="user", content="Why?"),
+            ],
+        )
+
+        out = chat_request_to_responses_request(req)
+
+        assert out.input[0] == {
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "refusal", "refusal": "I cannot help"}],
+        }
+
     def test_image_content_converted_to_input_image(self):
         """Image blocks in user messages must become input_image in Responses API."""
         req = ChatRequest(
@@ -425,6 +575,18 @@ class TestResponsesToChat:
             "completion_tokens": 5,
             "total_tokens": 15,
         }
+
+    def test_refusal_remains_distinct_from_text(self):
+        resp = ResponsesResponse(
+            content="",
+            model="gpt-5.4",
+            refusal="I cannot help",
+        )
+
+        chat = responses_response_to_chat_response(resp, "gpt-5.4")
+
+        assert chat.content is None
+        assert chat.refusal == "I cannot help"
 
     def test_tool_calls_reshaped(self):
         resp = ResponsesResponse(
@@ -567,6 +729,14 @@ class TestStreamChunkConversion:
         out = responses_chunk_to_chat_chunk(chunk)
         assert out.content == "hi"
         assert out.tool_calls is None
+
+    def test_refusal_delta_remains_distinct_from_text(self):
+        out = responses_chunk_to_chat_chunk(
+            ResponsesStreamChunk(content="", refusal="I cannot help")
+        )
+
+        assert out.content == ""
+        assert out.refusal == "I cannot help"
 
     def test_thinking_delta(self):
         chunk = ResponsesStreamChunk(content="", thinking="thought", thinking_signature="sig")
@@ -947,14 +1117,13 @@ class TestCopilotResponsesCanonicalStatus:
             patch.object(provider, "_get_headers", return_value={}),
             patch.object(provider, "_get_client", return_value=mock_client),
         ):
-            out = await provider.responses_completion(ResponsesRequest(model="gpt-5.4", input="hi"))
+            with pytest.raises(ProviderError) as exc_info:
+                await provider.responses_completion(ResponsesRequest(model="gpt-5.4", input="hi"))
 
-        assert out.finish_reason is None
-        assert out.terminal_outcome is not None
-        assert out.terminal_outcome.transport is TransportTermination.EXCEPTION
-        assert out.terminal_outcome.response_status is ResponseStatus.FAILED
-        assert out.terminal_outcome.error is not None
-        assert out.terminal_outcome.error.code == "upstream_protocol_error"
+        assert exc_info.value.kind is ProviderFailureKind.UPSTREAM_PROTOCOL
+        assert exc_info.value.status_code == 502
+        assert exc_info.value.upstream_status_code == 200
+        assert exc_info.value.retryable is True
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
@@ -979,16 +1148,11 @@ class TestCopilotResponsesCanonicalStatus:
             patch.object(provider, "_get_headers", return_value={}),
             patch.object(provider, "_get_client", return_value=mock_client),
         ):
-            out = await provider.responses_completion(ResponsesRequest(model="gpt-5.4", input="hi"))
+            with pytest.raises(ProviderError) as exc_info:
+                await provider.responses_completion(ResponsesRequest(model="gpt-5.4", input="hi"))
 
-        assert out.content == ""
-        assert out.model == "gpt-5.4"
-        assert out.terminal_outcome is not None
-        assert out.terminal_outcome.transport is TransportTermination.EXCEPTION
-        assert out.terminal_outcome.response_status is ResponseStatus.FAILED
-        assert out.terminal_outcome.error is not None
-        assert out.terminal_outcome.error.code == "upstream_protocol_error"
-        assert "DO_NOT_LEAK" not in out.terminal_outcome.error.message
+        assert exc_info.value.kind is ProviderFailureKind.UPSTREAM_PROTOCOL
+        assert "DO_NOT_LEAK" not in str(exc_info.value)
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
@@ -1086,14 +1250,11 @@ class TestCopilotResponsesCanonicalStatus:
             patch.object(provider, "_get_headers", return_value={}),
             patch.object(provider, "_get_client", return_value=mock_client),
         ):
-            out = await provider.responses_completion(ResponsesRequest(model="gpt-5.4", input="hi"))
+            with pytest.raises(ProviderError) as exc_info:
+                await provider.responses_completion(ResponsesRequest(model="gpt-5.4", input="hi"))
 
-        assert out.terminal_outcome is not None
-        assert out.terminal_outcome.transport is TransportTermination.EXCEPTION
-        assert out.terminal_outcome.response_status is ResponseStatus.FAILED
-        assert out.terminal_outcome.error is not None
-        assert out.terminal_outcome.error.code == "upstream_protocol_error"
-        assert "DO_NOT_LEAK" not in out.terminal_outcome.error.message
+        assert exc_info.value.kind is ProviderFailureKind.UPSTREAM_PROTOCOL
+        assert "DO_NOT_LEAK" not in str(exc_info.value)
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(

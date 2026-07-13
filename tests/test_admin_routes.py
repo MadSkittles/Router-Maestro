@@ -6,6 +6,7 @@ import pytest
 
 from router_maestro.auth.storage import OAuthCredential
 from router_maestro.config import PrioritiesConfig
+from router_maestro.providers import ModelInfo as ProviderModelInfo
 from router_maestro.server.routes import admin
 from router_maestro.server.schemas.admin import PrioritiesUpdateRequest
 
@@ -100,3 +101,23 @@ async def test_update_priorities_invalidates_router_cache_after_save(monkeypatch
     assert response.priorities == ["github-copilot/gpt-4o"]
     assert saved_configs[0].priorities == ["github-copilot/gpt-4o"]
     assert reset_calls == [None]
+
+
+@pytest.mark.asyncio
+async def test_admin_models_returns_unique_provider_qualified_public_ids(monkeypatch):
+    class _ModelRouter:
+        async def list_models(self):
+            return [
+                ProviderModelInfo(id="shared-model", name="Shared", provider="first"),
+                ProviderModelInfo(id="shared-model", name="Shared", provider="second"),
+            ]
+
+    monkeypatch.setattr(admin, "get_router", lambda: _ModelRouter())
+
+    response = await admin.list_models()
+
+    assert [model.id for model in response.models] == [
+        "first/shared-model",
+        "second/shared-model",
+    ]
+    assert [model.provider for model in response.models] == ["first", "second"]

@@ -11,15 +11,19 @@ import os
 import socket
 import subprocess
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
+from enum import StrEnum
 from typing import Any
 
 import httpx
 import pytest
 
-from router_maestro.auth import AuthManager
+from router_maestro.auth import AuthManager, AuthStorage, OAuthCredential, run_async
 from router_maestro.config.server import get_current_context_api_key
+from router_maestro.providers import CopilotProvider, ModelInfo
+from router_maestro.routing.model_ref import ModelRef
 from router_maestro.utils.model_match import normalize_model_id
 from router_maestro.utils.responses_bridge import RESPONSES_ELIGIBLE_MODELS
 
@@ -42,6 +46,9 @@ REASONING_PROMPT = (
 ANTHROPIC_THINKING_BUDGETS: tuple[int | None, ...] = (None, 1024, 4096, 16000)
 OPENAI_REASONING_EFFORTS: tuple[str | None, ...] = (None, "low", "medium", "high")
 STREAM_MODES: tuple[bool, ...] = (False, True)
+COMPAT_PROBE_BACKOFF_SECONDS = 0.25
+_EXACT_TRANSIENT_BAD_REQUEST = b"Bad Request\n"
+_MAX_COMPAT_PROBE_DIAGNOSTIC_BODY = 256
 RESPONSES_ONLY_CHAT_MODELS = {
     "gpt-5.2-codex",
     "gpt-5.3-codex",
@@ -57,6 +64,119 @@ class LiveServer:
     base_url: str
     api_key: str
     process: subprocess.Popen[str]
+
+
+def post_gemini_generate_content_compat_probe(
+    client: httpx.Client,
+    model: str,
+) -> httpx.Response:
+    """Run the fixed Gemini generateContent compatibility probe."""
+    return _post_compat_probe_with_exact_400_retry(
+        client,
+        f"/api/gemini/v1beta/models/{gemini_model_path(model)}:generateContent",
+        json_payload=gemini_compat_payload(),
+    )
+
+
+def post_openai_chat_compat_probe(
+    client: httpx.Client,
+    model: str,
+) -> httpx.Response:
+    """Run the fixed non-stream OpenAI Chat compatibility probe."""
+    return _post_compat_probe_with_exact_400_retry(
+        client,
+        "/api/openai/v1/chat/completions",
+        json_payload=openai_chat_usage_payload(model),
+    )
+
+
+@contextmanager
+def stream_openai_chat_compat_probe(
+    client: httpx.Client,
+    model: str,
+    *,
+    timeout: float,
+) -> Iterator[httpx.Response]:
+    """Run the fixed streaming OpenAI Chat compatibility probe."""
+    with _stream_compat_probe_with_exact_400_retry(
+        client,
+        "/api/openai/v1/chat/completions",
+        json_payload=openai_chat_usage_payload(model, stream=True),
+        timeout=timeout,
+    ) as response:
+        yield response
+
+
+def _post_compat_probe_with_exact_400_retry(
+    client: httpx.Client,
+    path: str,
+    *,
+    json_payload: dict[str, Any],
+    backoff_seconds: float = COMPAT_PROBE_BACKOFF_SECONDS,
+    sleep: Callable[[float], None] = time.sleep,
+) -> httpx.Response:
+    """POST one fixed idempotent compatibility probe, retrying one exact bare 400."""
+    first = client.post(path, json=json_payload)
+    if not _is_exact_transient_bad_request(first):
+        return first
+
+    first_summary = _compat_probe_response_summary(first)
+    first.close()
+    sleep(backoff_seconds)
+    second = client.post(path, json=json_payload)
+    if not _is_exact_transient_bad_request(second):
+        return second
+
+    second_summary = _compat_probe_response_summary(second)
+    second.close()
+    raise AssertionError(
+        "compatibility probe failed after 2 attempts; "
+        f"attempt 1: {first_summary}; attempt 2: {second_summary}"
+    )
+
+
+@contextmanager
+def _stream_compat_probe_with_exact_400_retry(
+    client: httpx.Client,
+    path: str,
+    *,
+    json_payload: dict[str, Any],
+    timeout: float,
+    backoff_seconds: float = COMPAT_PROBE_BACKOFF_SECONDS,
+    sleep: Callable[[float], None] = time.sleep,
+) -> Iterator[httpx.Response]:
+    """Open one fixed idempotent stream probe, retrying only before any SSE is parsed."""
+    with client.stream("POST", path, json=json_payload, timeout=timeout) as first:
+        if not _is_exact_transient_bad_request(first):
+            yield first
+            return
+        first_summary = _compat_probe_response_summary(first)
+
+    sleep(backoff_seconds)
+    with client.stream("POST", path, json=json_payload, timeout=timeout) as second:
+        if _is_exact_transient_bad_request(second):
+            second_summary = _compat_probe_response_summary(second)
+            raise AssertionError(
+                "stream compatibility probe failed after 2 attempts; "
+                f"attempt 1: {first_summary}; attempt 2: {second_summary}"
+            )
+        yield second
+
+
+def _is_exact_transient_bad_request(response: httpx.Response) -> bool:
+    if response.status_code != 400:
+        return False
+    if not response.is_stream_consumed:
+        response.read()
+    return response.content == _EXACT_TRANSIENT_BAD_REQUEST
+
+
+def _compat_probe_response_summary(response: httpx.Response) -> str:
+    if not response.is_stream_consumed:
+        response.read()
+    body = response.content[:_MAX_COMPAT_PROBE_DIAGNOSTIC_BODY]
+    suffix = b"..." if len(response.content) > len(body) else b""
+    return f"HTTP {response.status_code}, body={(body + suffix)!r}"
 
 
 @pytest.fixture(scope="session")
@@ -152,22 +272,97 @@ def unauthenticated_client(live_server: LiveServer) -> Iterator[httpx.Client]:
 
 
 @pytest.fixture(scope="session")
-def copilot_models(client: httpx.Client) -> list[str]:
-    """Return provider-qualified GitHub Copilot model names from the model API."""
-    response = client.get("/api/openai/v1/models")
-    response.raise_for_status()
-    models = response.json()["data"]
-    ids = [
-        _provider_model_id(model["owned_by"], model["id"])
-        for model in models
-        if model.get("owned_by") == COPILOT_PROVIDER
-    ]
-    if not ids:
+def copilot_catalog() -> dict[str, ModelInfo]:
+    """Load live Copilot metadata without mutating the user's credential file."""
+    manager = AuthManager()
+    credential = manager.get_credential(COPILOT_PROVIDER)
+    if not isinstance(credential, OAuthCredential):
+        pytest.skip(
+            "GitHub Copilot auth is not configured. Run "
+            f"`uv run router-maestro auth login {COPILOT_PROVIDER}` first."
+        )
+
+    provider = CopilotProvider()
+    provider.auth_manager = _non_persisting_auth_snapshot(credential)
+    provider._cached_token = credential.access
+    provider._token_expires = credential.expires
+    if credential.api_endpoint:
+        provider._api_base = credential.api_endpoint
+    try:
+        models = run_async(provider.list_models(force_refresh=True))
+    finally:
+        run_async(provider.close())
+    public_ids = [_provider_model_id(model.provider, model.id) for model in models]
+    duplicate_ids = sorted(
+        model_id for model_id in set(public_ids) if public_ids.count(model_id) > 1
+    )
+    if duplicate_ids:
+        pytest.fail(f"Copilot provider catalog returned duplicate public IDs: {duplicate_ids}")
+    catalog = dict(zip(public_ids, models, strict=True))
+    if not catalog:
         pytest.fail(
             "No github-copilot models are available. Run "
             "`uv run router-maestro auth login github-copilot` first."
         )
-    return ids
+    return catalog
+
+
+class _NonPersistingAuthSnapshot:
+    """Minimal in-memory AuthManager contract used by the catalog probe."""
+
+    def __init__(self, credential: OAuthCredential) -> None:
+        self.storage = AuthStorage()
+        self.storage.set(COPILOT_PROVIDER, credential.model_copy(deep=True))
+
+    def get_credential(self, provider: str):
+        return self.storage.get(provider)
+
+    def save(self) -> None:
+        return None
+
+
+def _non_persisting_auth_snapshot(credential: OAuthCredential) -> _NonPersistingAuthSnapshot:
+    """Build an in-memory credential manager for the parallel catalog probe."""
+    return _NonPersistingAuthSnapshot(credential)
+
+
+@pytest.fixture(scope="session")
+def copilot_models(
+    client: httpx.Client,
+    copilot_catalog: dict[str, ModelInfo],
+) -> list[str]:
+    """Read invokable Copilot IDs from Router-Maestro's public model list.
+
+    The direct provider catalog supplies endpoint capability metadata, while
+    the server endpoint owns the public identity that this matrix must round
+    trip back through each invocation route.
+    """
+    response = client.get("/api/openai/v1/models")
+    assert_http_success(response)
+    payload = response.json()
+    if not isinstance(payload, dict) or not isinstance(payload.get("data"), list):
+        pytest.fail("OpenAI model endpoint returned a malformed list")
+    public_ids = [
+        model.get("id")
+        for model in payload["data"]
+        if isinstance(model, dict) and model.get("owned_by") == COPILOT_PROVIDER
+    ]
+    if any(not isinstance(model_id, str) or not model_id for model_id in public_ids):
+        pytest.fail("OpenAI model endpoint returned an invalid Copilot public ID")
+    duplicate_ids = sorted(
+        model_id for model_id in set(public_ids) if public_ids.count(model_id) > 1
+    )
+    if duplicate_ids:
+        pytest.fail(f"OpenAI model endpoint returned duplicate Copilot public IDs: {duplicate_ids}")
+    models = public_ids
+    missing_metadata = [model_id for model_id in models if model_id not in copilot_catalog]
+    missing_public = [model_id for model_id in copilot_catalog if model_id not in models]
+    if missing_metadata or missing_public:
+        pytest.fail(
+            "Copilot provider catalog and Router-Maestro public model list disagree: "
+            f"missing_metadata={missing_metadata}, missing_public={missing_public}"
+        )
+    return models
 
 
 @pytest.fixture(scope="session")
@@ -190,13 +385,31 @@ def model_matrix(copilot_models: list[str]) -> list[str]:
 
 
 @pytest.fixture(scope="session")
-def anthropic_thinking_models(copilot_models: list[str]) -> list[str]:
-    """Claude-family models for Anthropic thinking budget coverage."""
+def anthropic_thinking_models(copilot_catalog: dict[str, ModelInfo]) -> list[str]:
+    """Catalog-declared Claude reasoning models for thinking budget coverage."""
     return _required_reasoning_subset(
-        copilot_models,
-        predicate=_is_anthropic_thinking_model,
-        description="Claude-family Copilot models",
+        list(copilot_catalog),
+        predicate=lambda model: (
+            _is_anthropic_thinking_model(model) and model_supports_reasoning(copilot_catalog[model])
+        ),
+        description="reasoning-capable Claude Copilot models",
     )
+
+
+@pytest.fixture(scope="session")
+def anthropic_unsupported_thinking_model(
+    copilot_catalog: dict[str, ModelInfo],
+) -> str:
+    """One Claude model whose live catalog explicitly rejects reasoning."""
+    candidates = [
+        model
+        for model in _prioritize_models(list(copilot_catalog))
+        if bare_model(model).lower().startswith("claude-")
+        and model_explicitly_rejects_reasoning(copilot_catalog[model])
+    ]
+    if not candidates:
+        pytest.skip("No catalog-declared non-reasoning Claude model is available")
+    return candidates[0]
 
 
 @pytest.fixture(scope="session")
@@ -219,12 +432,14 @@ def anthropic_effort_profile(copilot_models: list[str]) -> tuple[str, str]:
 
 
 @pytest.fixture(scope="session")
-def anthropic_gpt5_bridge_models(copilot_models: list[str]) -> list[str]:
-    """Responses-eligible GPT-5 models for Anthropic bridge coverage."""
-    eligible = {f"{COPILOT_PROVIDER}/{model_id}" for model_id in RESPONSES_ELIGIBLE_MODELS}
+def anthropic_gpt5_bridge_models(copilot_catalog: dict[str, ModelInfo]) -> list[str]:
+    """Catalog-declared Responses models for Anthropic bridge coverage."""
     return _required_reasoning_subset(
-        copilot_models,
-        predicate=lambda model: model in eligible,
+        list(copilot_catalog),
+        predicate=lambda model: (
+            bare_model(model).lower().startswith("gpt-5")
+            and select_live_http_endpoint(model, copilot_catalog) is LiveHttpEndpoint.RESPONSES
+        ),
         description="Responses-eligible GPT-5 Copilot models",
     )
 
@@ -303,7 +518,10 @@ def tool_model(copilot_models: list[str]) -> str:
 
 
 @pytest.fixture(scope="session")
-def responses_model(copilot_models: list[str]) -> str:
+def responses_model(
+    copilot_models: list[str],
+    copilot_catalog: dict[str, ModelInfo],
+) -> str:
     """Model for the OpenAI Responses path."""
     requested = os.environ.get("RM_INTEGRATION_RESPONSES_MODEL")
     if requested:
@@ -313,20 +531,47 @@ def responses_model(copilot_models: list[str]) -> str:
             f"RM_INTEGRATION_RESPONSES_MODEL={requested!r} is not in available Copilot models"
         )
 
-    eligible = {f"{COPILOT_PROVIDER}/{model_id}" for model_id in RESPONSES_ELIGIBLE_MODELS}
+    eligible = [
+        model for model in copilot_models if is_responses_eligible_model(model, copilot_catalog)
+    ]
     preferred = (
         "github-copilot/gpt-5.4-mini",
         "github-copilot/gpt-5.4",
         "github-copilot/gpt-5.3-codex",
         "github-copilot/gpt-5.2",
     )
-    selected = _first_available(copilot_models, preferred)
+    selected = _first_available(eligible, preferred)
     if selected:
         return selected
-    selected = next((model for model in copilot_models if model in eligible), None)
+    selected = next(iter(eligible), None)
     if selected:
         return selected
     pytest.skip("No Copilot model available for the /responses endpoint")
+
+
+@pytest.fixture(scope="session")
+def responses_top_p_model(
+    copilot_models: list[str],
+    copilot_catalog: dict[str, ModelInfo],
+) -> str:
+    """Responses model whose upstream contract accepts top_p.
+
+    Copilot's catalog currently declares endpoint support but not per-option
+    support. Keep this verified compatibility list isolated from endpoint
+    planning so an unsupported top_p is never silently discarded.
+    """
+    eligible = [
+        model for model in copilot_models if is_responses_eligible_model(model, copilot_catalog)
+    ]
+    preferred = (
+        "github-copilot/gpt-5.3-codex",
+        "github-copilot/mai-code-1-flash-picker",
+        "github-copilot/gpt-5-mini",
+    )
+    selected = _first_available(eligible, preferred)
+    if selected:
+        return selected
+    pytest.skip("No Responses model with verified top_p support is available")
 
 
 def openai_chat_payload(model: str, *, stream: bool = False) -> dict[str, Any]:
@@ -350,7 +595,6 @@ def model_matrix_chat_payload(model: str) -> dict[str, Any]:
     """
     payload = openai_chat_payload(model)
     payload["max_tokens"] = 512
-    payload["reasoning_effort"] = "low"
     return payload
 
 
@@ -399,6 +643,7 @@ def anthropic_payload(model: str, *, stream: bool = False) -> dict[str, Any]:
 def anthropic_compat_payload(model: str, *, stream: bool = False) -> dict[str, Any]:
     """Anthropic request exercising common compatibility fields."""
     payload = anthropic_payload(model, stream=stream)
+    payload.pop("temperature")
     payload.update(
         {
             "system": "Return concise answers.",
@@ -693,17 +938,83 @@ def assert_text_response(text: str | None) -> None:
 
 def assert_http_success(response: httpx.Response) -> None:
     """Assert an HTTP response succeeded, preserving body context on failure."""
-    assert response.status_code == 200, response.text
+    if response.status_code == 200:
+        return
+    if not response.is_stream_consumed:
+        response.read()
+    raise AssertionError(f"HTTP {response.status_code}: {response.text}")
 
 
 def bare_model(model: str) -> str:
-    """Strip a provider prefix from a model name for Gemini path parameters."""
+    """Return the unqualified model id for display labels and family checks."""
     return model.split("/", 1)[1] if "/" in model else model
 
 
-def is_responses_eligible_model(model: str) -> bool:
-    """Whether the selected Copilot model should be invoked via Responses."""
-    return bare_model(model) in RESPONSES_ELIGIBLE_MODELS
+def gemini_model_path(model: str) -> str:
+    """Preserve the provider-qualified public ID in Router-Maestro Gemini paths."""
+    return model
+
+
+class LiveHttpEndpoint(StrEnum):
+    """HTTP invocation surface selected from a live catalog profile."""
+
+    CHAT = "chat"
+    RESPONSES = "responses"
+    UNKNOWN = "unknown"
+    UNSUPPORTED = "unsupported"
+
+
+def select_live_http_endpoint(
+    model: str,
+    catalog: dict[str, ModelInfo],
+) -> LiveHttpEndpoint:
+    """Select an HTTP endpoint without inferring support from a negative flag.
+
+    Only raw ``supported_endpoints`` proves an HTTP contract; derived operation
+    capabilities can contain model-name heuristics. Only exact HTTP paths count:
+    a websocket Responses endpoint does not imply HTTP Responses. If both HTTP
+    APIs are advertised, Responses wins so GPT-5-family models use the same
+    bridge path as the rest of the integration harness.
+    """
+    info = catalog.get(model)
+    if info is None:
+        return LiveHttpEndpoint.UNSUPPORTED
+
+    if info.supported_endpoints is None:
+        return LiveHttpEndpoint.UNKNOWN
+
+    endpoints = set(info.supported_endpoints)
+    if "/responses" in endpoints:
+        return LiveHttpEndpoint.RESPONSES
+    if "/chat/completions" in endpoints:
+        return LiveHttpEndpoint.CHAT
+    return LiveHttpEndpoint.UNSUPPORTED
+
+
+def is_responses_eligible_model(
+    model: str,
+    catalog: dict[str, ModelInfo] | None = None,
+) -> bool:
+    """Whether live metadata selects the Responses endpoint for this model."""
+    if catalog is None:
+        return bare_model(model) in RESPONSES_ELIGIBLE_MODELS
+    return select_live_http_endpoint(model, catalog) is LiveHttpEndpoint.RESPONSES
+
+
+def model_supports_reasoning(model: ModelInfo) -> bool:
+    """Whether the live catalog explicitly advertises a reasoning control."""
+    return bool(
+        model.reasoning_effort_values
+        or model.supports_thinking
+        or model.feature_capabilities.get("reasoning") is True
+    )
+
+
+def model_explicitly_rejects_reasoning(model: ModelInfo) -> bool:
+    """Whether the catalog explicitly advertises no reasoning control."""
+    return (
+        model.reasoning_effort_values == [] or model.feature_capabilities.get("reasoning") is False
+    )
 
 
 def event_payloads(events: list[tuple[str | None, Any]]) -> list[Any]:
@@ -794,7 +1105,7 @@ def _require_github_copilot_auth() -> None:
 
 
 def _provider_model_id(provider: str, model_id: str) -> str:
-    return model_id if "/" in model_id else f"{provider}/{model_id}"
+    return ModelRef.from_catalog_id(provider, model_id).qualified_id
 
 
 def _prioritize_models(models: list[str]) -> list[str]:

@@ -2,7 +2,7 @@
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 # Request types
 
@@ -10,12 +10,17 @@ from pydantic import BaseModel, Field, model_validator
 class AnthropicTextBlock(BaseModel):
     """Text content block."""
 
+    model_config = ConfigDict(extra="allow")
+
     type: Literal["text"] = "text"
     text: str
+    cache_control: dict[str, Any] | None = None
 
 
 class AnthropicImageSource(BaseModel):
     """Image source for base64 encoded images."""
+
+    model_config = ConfigDict(extra="allow")
 
     type: Literal["base64"] = "base64"
     media_type: Literal["image/jpeg", "image/png", "image/gif", "image/webp"]
@@ -25,12 +30,17 @@ class AnthropicImageSource(BaseModel):
 class AnthropicImageBlock(BaseModel):
     """Image content block."""
 
+    model_config = ConfigDict(extra="allow")
+
     type: Literal["image"] = "image"
     source: AnthropicImageSource
+    cache_control: dict[str, Any] | None = None
 
 
 class AnthropicDocumentSource(BaseModel):
     """Document source — supports base64, url, text, or nested content."""
+
+    model_config = ConfigDict(extra="allow")
 
     type: Literal["base64", "url", "text", "content"]
     media_type: str | None = None
@@ -42,42 +52,56 @@ class AnthropicDocumentSource(BaseModel):
 class AnthropicDocumentBlock(BaseModel):
     """Document content block (e.g. PDF, plain text)."""
 
+    model_config = ConfigDict(extra="allow")
+
     type: Literal["document"] = "document"
     source: AnthropicDocumentSource
     title: str | None = None
     context: str | None = None
     citations: dict | None = None
+    cache_control: dict[str, Any] | None = None
 
 
 class AnthropicToolResultContentBlock(BaseModel):
     """Content block within tool result (text, image, document, or tool_reference)."""
 
+    model_config = ConfigDict(extra="allow")
+
     type: Literal["text", "image", "document", "tool_reference"]
     text: str | None = None
     source: AnthropicImageSource | AnthropicDocumentSource | None = None
     tool_name: str | None = None  # For tool_reference type (Claude Code MCP metadata)
+    cache_control: dict[str, Any] | None = None
 
 
 class AnthropicToolResultBlock(BaseModel):
     """Tool result content block."""
 
+    model_config = ConfigDict(extra="allow")
+
     type: Literal["tool_result"] = "tool_result"
     tool_use_id: str
     content: str | list[AnthropicToolResultContentBlock]
     is_error: bool | None = None
+    cache_control: dict[str, Any] | None = None
 
 
 class AnthropicToolUseBlock(BaseModel):
     """Tool use content block."""
 
+    model_config = ConfigDict(extra="allow")
+
     type: Literal["tool_use"] = "tool_use"
     id: str
     name: str
     input: dict
+    cache_control: dict[str, Any] | None = None
 
 
 class AnthropicThinkingBlock(BaseModel):
     """Thinking content block."""
+
+    model_config = ConfigDict(extra="allow")
 
     type: Literal["thinking"] = "thinking"
     thinking: str
@@ -93,12 +117,16 @@ AnthropicAssistantContentBlock = AnthropicTextBlock | AnthropicToolUseBlock | An
 class AnthropicUserMessage(BaseModel):
     """User message."""
 
+    model_config = ConfigDict(extra="allow")
+
     role: Literal["user"] = "user"
     content: str | list[AnthropicUserContentBlock]
 
 
 class AnthropicAssistantMessage(BaseModel):
     """Assistant message."""
+
+    model_config = ConfigDict(extra="allow")
 
     role: Literal["assistant"] = "assistant"
     content: str | list[AnthropicAssistantContentBlock]
@@ -110,13 +138,18 @@ AnthropicMessage = AnthropicUserMessage | AnthropicAssistantMessage
 class AnthropicTool(BaseModel):
     """Tool definition."""
 
+    model_config = ConfigDict(extra="allow")
+
     name: str
     description: str | None = None
     input_schema: dict
+    cache_control: dict[str, Any] | None = None
 
 
 class AnthropicToolChoice(BaseModel):
     """Tool choice configuration."""
+
+    model_config = ConfigDict(extra="allow")
 
     type: Literal["auto", "any", "tool", "none"]
     name: str | None = None
@@ -125,6 +158,8 @@ class AnthropicToolChoice(BaseModel):
 class AnthropicThinkingConfig(BaseModel):
     """Thinking configuration."""
 
+    model_config = ConfigDict(extra="allow")
+
     type: Literal["enabled", "adaptive", "disabled"] = "enabled"
     budget_tokens: int | None = None
 
@@ -132,11 +167,15 @@ class AnthropicThinkingConfig(BaseModel):
 class AnthropicOutputConfig(BaseModel):
     """Output configuration for reasoning effort."""
 
-    effort: Literal["low", "medium", "high", "xhigh", "max"] | None = None
+    model_config = ConfigDict(extra="allow")
+
+    effort: Literal["minimal", "low", "medium", "high", "xhigh", "max"] | None = None
 
 
 class AnthropicMessagesRequest(BaseModel):
     """Anthropic Messages API request."""
+
+    model_config = ConfigDict(extra="allow")
 
     model: str
     messages: list[AnthropicMessage]
@@ -162,6 +201,8 @@ class AnthropicMessagesRequest(BaseModel):
 
 class AnthropicCountTokensRequest(BaseModel):
     """Anthropic count_tokens API request (max_tokens not required)."""
+
+    model_config = ConfigDict(extra="allow")
 
     model: str
     messages: list[AnthropicMessage]

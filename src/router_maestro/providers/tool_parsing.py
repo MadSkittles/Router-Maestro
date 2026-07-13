@@ -190,13 +190,13 @@ def recover_tool_calls_from_content(
         try:
             parsed = json.loads(json_str)
         except json.JSONDecodeError:
-            logger.warning("Skipping malformed tool call JSON: %.200s", json_str)
+            logger.warning("Skipping malformed embedded tool call JSON")
             continue
 
         name = parsed.get("name")
         arguments = parsed.get("arguments")
         if not name:
-            logger.warning("Skipping tool call block without 'name': %.200s", json_str)
+            logger.warning("Skipping embedded tool call without a name")
             continue
 
         # arguments may be a dict or a string; normalize to string

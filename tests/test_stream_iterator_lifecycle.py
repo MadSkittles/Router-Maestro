@@ -19,6 +19,14 @@ from router_maestro.providers.base import (
     TerminalOutcome,
     TransportTermination,
 )
+from router_maestro.routing.capabilities import (
+    CapabilitySupport,
+    ModelCapabilities,
+    Operation,
+    RequestFeatures,
+)
+from router_maestro.routing.model_ref import ModelRef
+from router_maestro.routing.route_plan import RouteCandidate, RoutePlan
 from router_maestro.routing.router import Router
 from router_maestro.server.routes import anthropic, chat, gemini, responses
 from router_maestro.utils import async_iterators
@@ -47,6 +55,7 @@ class _LifecycleRouter:
     """Expose a provider stream through both Router iterator wrappers."""
 
     def __init__(self, lifecycle: _LifecycleStream):
+        self.name = "stub"
         self.lifecycle = lifecycle
         self._router = Router.__new__(Router)
         # Keep each layer alive so garbage collection cannot hide missing
@@ -62,12 +71,13 @@ class _LifecycleRouter:
             self.iterator_layers.append(provider_stream)
             return provider_stream
 
-        stream, _provider_name = await self._router._open_stream_with_fallback(
-            candidates=[("stub", "stub-model", self)],
-            request=object(),
-            build_request=lambda request, model: request,
-            call_stream=call_stream,
-            log_prefix="lifecycle",
+        stream, _provider_name = await self._router._execute_plan_stream(
+            _stream_plan(("stub", "stub-model", self)),
+            object(),
+            True,
+            lambda request, model: request,
+            call_stream,
+            "lifecycle",
         )
         self.iterator_layers.append(stream)
         return stream
@@ -107,6 +117,35 @@ class _PipelineStub:
 
     def finish(self, **kwargs: Any) -> None:
         return None
+
+
+def _stream_plan(*providers: tuple[str, str, object]) -> RoutePlan:
+    candidates: list[RouteCandidate] = []
+    for name, model, provider in providers:
+        ref = ModelRef(name, model)
+        operation = Operation.CHAT_STREAM
+        features = RequestFeatures()
+        capabilities = ModelCapabilities(
+            model=ref,
+            operations={operation: CapabilitySupport.SUPPORTED},
+        )
+        candidates.append(
+            RouteCandidate(
+                model=ref,
+                provider=provider,
+                capabilities=capabilities,
+                evaluated_operation=operation,
+                evaluated_features=features,
+                support=CapabilitySupport.SUPPORTED,
+            )
+        )
+    return RoutePlan(
+        Operation.CHAT_STREAM,
+        RequestFeatures(),
+        candidates[0],
+        tuple(candidates[1:]),
+        False,
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -274,11 +313,14 @@ async def test_retryable_priming_failure_closes_candidate_before_fallback():
     primary_close_count = 0
 
     class _Provider:
+        def __init__(self, name: str) -> None:
+            self.name = name
+
         async def ensure_token(self) -> None:
             return None
 
-    primary = _Provider()
-    secondary = _Provider()
+    primary = _Provider("primary")
+    secondary = _Provider("secondary")
 
     async def primary_stream() -> AsyncIterator[ChatStreamChunk]:
         nonlocal primary_close_count
@@ -292,17 +334,16 @@ async def test_retryable_priming_failure_closes_candidate_before_fallback():
     async def secondary_stream() -> AsyncIterator[ChatStreamChunk]:
         yield ChatStreamChunk(content="fallback", finish_reason="stop")
 
-    stream, provider_name = await router._open_stream_with_fallback(
-        candidates=[
+    stream, provider_name = await router._execute_plan_stream(
+        _stream_plan(
             ("primary", "model", primary),
             ("secondary", "model", secondary),
-        ],
-        request=object(),
-        build_request=lambda request, model: request,
-        call_stream=lambda provider, request: (
-            primary_stream() if provider is primary else secondary_stream()
         ),
-        log_prefix="lifecycle",
+        object(),
+        True,
+        lambda request, model: request,
+        lambda provider, request: primary_stream() if provider is primary else secondary_stream(),
+        "lifecycle",
     )
 
     assert provider_name == "secondary"

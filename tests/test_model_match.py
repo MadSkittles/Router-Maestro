@@ -6,6 +6,7 @@ import pytest
 
 from router_maestro.providers.base import ModelInfo
 from router_maestro.utils.model_match import (
+    AmbiguousModelMatchError,
     fuzzy_match_model,
     normalize_model_id,
 )
@@ -98,27 +99,43 @@ def sample_cache() -> dict[str, tuple[str, ModelInfo]]:
 
 class TestFuzzyMatchModel:
     def test_opus_with_spaces(self, sample_cache):
-        result = fuzzy_match_model("Opus 4.6", sample_cache)
-        assert result == "claude-opus-4-6-20250617"
+        result = fuzzy_match_model("github-copilot/Opus 4.6", sample_cache)
+        assert result == "github-copilot/claude-opus-4-6-20250617"
 
     def test_opus_hyphenated(self, sample_cache):
-        result = fuzzy_match_model("opus-4-6", sample_cache)
-        assert result == "claude-opus-4-6-20250617"
+        result = fuzzy_match_model("github-copilot/opus-4-6", sample_cache)
+        assert result == "github-copilot/claude-opus-4-6-20250617"
 
     def test_claude_opus_no_date(self, sample_cache):
-        result = fuzzy_match_model("claude-opus-4-6", sample_cache)
-        assert result == "claude-opus-4-6-20250617"
+        result = fuzzy_match_model("github-copilot/claude-opus-4-6", sample_cache)
+        assert result == "github-copilot/claude-opus-4-6-20250617"
 
     def test_sonnet_with_date_picks_available(self, sample_cache):
         """Requesting a date-suffixed model should match the family, picking newest available."""
-        result = fuzzy_match_model("claude-sonnet-4-5-20250929", sample_cache)
+        result = fuzzy_match_model(
+            "github-copilot/claude-sonnet-4-5-20250929",
+            sample_cache,
+        )
         # Should match the 20250929 version since it exists
-        assert result == "claude-sonnet-4-5-20250929"
+        assert result == "github-copilot/claude-sonnet-4-5-20250929"
+
+    @pytest.mark.parametrize(
+        "query",
+        [
+            "CLAUDE-SONNET-4-5-20250514",
+            "claude.sonnet.4.5.20250514",
+        ],
+    )
+    def test_dated_identity_alias_preserves_requested_version(self, sample_cache, query):
+        assert (
+            fuzzy_match_model(f"github-copilot/{query}", sample_cache)
+            == "github-copilot/claude-sonnet-4-5-20250514"
+        )
 
     def test_sonnet_short_picks_newest(self, sample_cache):
         """Short query should pick the newest version."""
-        result = fuzzy_match_model("sonnet-4-5", sample_cache)
-        assert result == "claude-sonnet-4-5-20250929"
+        result = fuzzy_match_model("github-copilot/sonnet-4-5", sample_cache)
+        assert result == "github-copilot/claude-sonnet-4-5-20250929"
 
     def test_provider_filter_anthropic(self, sample_cache):
         """Provider prefix should filter to only that provider and return prefixed key."""
@@ -132,6 +149,16 @@ class TestFuzzyMatchModel:
         """Provider prefix pointing to wrong provider returns None."""
         result = fuzzy_match_model("openai/opus-4-6", sample_cache)
         assert result is None
+
+    def test_unknown_provider_prefix_never_falls_back_to_global_alias(self):
+        cache = _make_cache(
+            [
+                ("shared-model", "first", "Shared"),
+                ("shared-model", "second", "Shared"),
+            ]
+        )
+
+        assert fuzzy_match_model("unknown/shared-model", cache) is None
 
     def test_nonexistent_model(self, sample_cache):
         result = fuzzy_match_model("nonexistent-xyz", sample_cache)
@@ -165,8 +192,8 @@ class TestFuzzyMatchModel:
         result = fuzzy_match_model("opus-4-6", cache)
         assert result == "claude-opus-4-6-20250617"
 
-    def test_cross_provider_first_registered_wins(self):
-        """When same model in two providers, first-registered wins (consistent with router)."""
+    def test_same_normalized_identity_across_providers_is_not_cross_family_ambiguity(self):
+        """RoutePlan, not fuzzy family ambiguity, chooses a provider for bare aliases."""
         cache = _make_cache(
             [
                 ("claude-opus-4-6-20250617", "github-copilot", "Claude Opus 4.6"),
@@ -174,20 +201,63 @@ class TestFuzzyMatchModel:
             ]
         )
         result = fuzzy_match_model("opus-4-6", cache)
-        # First registered is github-copilot, which gets the bare key
         assert result == "claude-opus-4-6-20250617"
+
+    def test_highest_fuzzy_score_wins_before_newer_cross_family_version(self):
+        cache = _make_cache(
+            [
+                ("claude-opus-4-6-20250101", "anthropic", "Claude Opus 4.6"),
+                ("opus-4-7-20990101", "anthropic", "Opus 4.7"),
+            ]
+        )
+
+        result = fuzzy_match_model("opus-4-6", cache)
+
+        assert result == "claude-opus-4-6-20250101"
+
+    def test_effectively_tied_cross_family_matches_are_ambiguous(self):
+        cache = _make_cache(
+            [
+                ("claude-opus-4", "anthropic", "Claude Opus 4"),
+                ("claude-sonnet-4", "anthropic", "Claude Sonnet 4"),
+            ]
+        )
+
+        with pytest.raises(AmbiguousModelMatchError):
+            fuzzy_match_model("claude-4", cache)
+
+    def test_low_confidence_plausible_match_is_ambiguous(self):
+        cache = _make_cache(
+            [
+                ("gpt-5", "openai", "GPT-5"),
+                ("claude-sonnet-4", "anthropic", "Claude Sonnet 4"),
+            ]
+        )
+
+        with pytest.raises(AmbiguousModelMatchError):
+            fuzzy_match_model("gpt-x", cache)
+
+    def test_provider_scope_resolves_duplicate_identity_within_provider(self):
+        cache = _make_cache(
+            [
+                ("shared-model", "first", "Shared"),
+                ("shared-model", "second", "Shared"),
+            ]
+        )
+
+        assert fuzzy_match_model("second/shared.model", cache) == "second/shared-model"
 
     def test_empty_cache(self):
         result = fuzzy_match_model("gpt-4o", {})
         assert result is None
 
     def test_case_insensitive(self, sample_cache):
-        result = fuzzy_match_model("CLAUDE-OPUS-4-6", sample_cache)
-        assert result == "claude-opus-4-6-20250617"
+        result = fuzzy_match_model("ANTHROPIC/CLAUDE-OPUS-4-6", sample_cache)
+        assert result == "anthropic/claude-opus-4-6-20250617"
 
     def test_dots_in_query(self, sample_cache):
-        result = fuzzy_match_model("claude-sonnet-4.5", sample_cache)
-        assert result == "claude-sonnet-4-5-20250929"
+        result = fuzzy_match_model("github-copilot/claude-sonnet-4.5", sample_cache)
+        assert result == "github-copilot/claude-sonnet-4-5-20250929"
 
     def test_1m_context_window_suffix(self):
         """claude-opus-4-6-1m (hyphens) should match claude-opus-4.6-1m (dot) in cache."""

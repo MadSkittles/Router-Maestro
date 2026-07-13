@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import os
+from copy import deepcopy
 
 from router_maestro.providers.base import (
     ChatRequest,
@@ -23,6 +24,8 @@ from router_maestro.providers.base import (
     ChatStreamChunk,
     Message,
     ProviderError,
+    ProviderFailureKind,
+    RequestOptionError,
     ResponsesRequest,
     ResponsesResponse,
     ResponsesStreamChunk,
@@ -43,7 +46,11 @@ RESPONSES_ELIGIBLE_MODELS: frozenset[str] = frozenset(
         "gpt-5.4",
         "gpt-5.4-mini",
         "gpt-5.5",
+        "gpt-5.6-luna",
+        "gpt-5.6-sol",
+        "gpt-5.6-terra",
         "gpt-5-mini",
+        "mai-code-1-flash-picker",
     }
 )
 
@@ -63,7 +70,12 @@ def is_model_responses_eligible(model: str) -> bool:
     return _bare_model(model) in RESPONSES_ELIGIBLE_MODELS
 
 
-def should_use_responses_for_chat(request: ChatRequest, provider_name: str) -> bool:
+def should_use_responses_for_chat(
+    request: ChatRequest,
+    provider_name: str,
+    *,
+    responses_supported: bool | None = None,
+) -> bool:
     """Decide whether a ChatRequest should be fulfilled via /responses.
 
     Requires:
@@ -80,9 +92,9 @@ def should_use_responses_for_chat(request: ChatRequest, provider_name: str) -> b
         return False
     if provider_name != "github-copilot":
         return False
-    if not is_model_responses_eligible(request.model):
-        return False
-    return True
+    if responses_supported is not None:
+        return responses_supported
+    return is_model_responses_eligible(request.model)
 
 
 # ---------------------------------------------------------------------------
@@ -231,6 +243,8 @@ def _messages_to_responses_input(
             content_blocks = (
                 _content_to_responses_blocks(msg.content, role="assistant") if msg.content else []
             )
+            if msg.refusal:
+                content_blocks.append({"type": "refusal", "refusal": msg.refusal})
             if content_blocks:
                 items.append(
                     {
@@ -286,18 +300,46 @@ def chat_request_to_responses_request(request: ChatRequest) -> ResponsesRequest:
         from router_maestro.utils.reasoning import budget_to_effort
 
         effort = budget_to_effort(request.thinking_budget)
+        if request.thinking_budget > 0 and effort is None:
+            raise RequestOptionError(
+                "Responses API has no reasoning tier at or below the requested budget",
+                model=request.model,
+                parameter="thinking_budget",
+            )
+
+    unsupported = {
+        "frequency_penalty": request.frequency_penalty,
+        "presence_penalty": request.presence_penalty,
+        "stop": request.stop,
+        "user": request.user,
+        "top_k": request.top_k,
+        "stop_sequences": request.stop_sequences,
+        "candidate_count": request.candidate_count,
+        "response_mime_type": request.response_mime_type,
+    }
+    for parameter, value in unsupported.items():
+        if value is not None:
+            raise RequestOptionError(
+                f"Responses API does not support chat option '{parameter}'",
+                model=request.model,
+                parameter=parameter,
+            )
 
     return ResponsesRequest(
         model=request.model,
-        input=input_items,
+        input=deepcopy(input_items),
         stream=request.stream,
         instructions=instructions,
         temperature=request.temperature,
         max_output_tokens=request.max_tokens,
-        tools=tools,
-        tool_choice=tool_choice,
+        tools=deepcopy(tools),
+        tool_choice=deepcopy(tool_choice),
         parallel_tool_calls=None,
         reasoning_effort=effort,
+        top_p=request.top_p,
+        metadata=deepcopy(request.metadata),
+        service_tier=request.service_tier,
+        provider_extensions=deepcopy(request.provider_extensions),
     )
 
 
@@ -342,7 +384,10 @@ def map_responses_status_to_chat(
 
 
 def responses_response_to_chat_response(
-    resp: ResponsesResponse, requested_model: str
+    resp: ResponsesResponse,
+    requested_model: str,
+    *,
+    provider: str = "github-copilot",
 ) -> ChatResponse:
     """Convert a non-streaming ResponsesResponse back into a ChatResponse.
 
@@ -379,12 +424,13 @@ def responses_response_to_chat_response(
         ResponseStatus.COMPLETED,
         ResponseStatus.INCOMPLETE,
     }:
-        message = (
-            outcome.error.message if outcome.error is not None else outcome.response_status.value
-        )
         raise ProviderError(
-            f"Copilot /responses {outcome.response_status.value}: {message}",
+            f"{provider} /responses ended with status {outcome.response_status.value}",
             status_code=502,
+            retryable=False,
+            kind=ProviderFailureKind.UPSTREAM_STATUS,
+            provider=provider,
+            model=requested_model,
         )
 
     finish_reason = (
@@ -406,6 +452,7 @@ def responses_response_to_chat_response(
         thinking=getattr(resp, "thinking", None),
         thinking_signature=getattr(resp, "thinking_signature", None),
         thinking_id=getattr(resp, "thinking_id", None),
+        refusal=resp.refusal,
     )
 
 
@@ -447,4 +494,5 @@ def responses_chunk_to_chat_chunk(chunk: ResponsesStreamChunk) -> ChatStreamChun
         thinking_signature=getattr(chunk, "thinking_signature", None),
         thinking_id=getattr(chunk, "thinking_id", None),
         terminal_outcome=chunk.terminal_outcome,
+        refusal=chunk.refusal,
     )

@@ -8,9 +8,15 @@ from rich.console import Console
 from rich.table import Table
 
 from router_maestro.cli.client import ServerNotRunningError, get_admin_client
+from router_maestro.routing.model_ref import qualify_model_id
 
 app = typer.Typer(no_args_is_help=True)
 console = Console()
+
+
+def _model_key(model: dict) -> str:
+    """Return one provider-qualified model key without duplicating its prefix."""
+    return qualify_model_id(model["provider"], model["id"])
 
 
 def _handle_server_error(e: Exception) -> None:
@@ -48,7 +54,7 @@ def list_models() -> None:
     table.add_column("Provider", style="magenta")
 
     for model in models:
-        model_key = f"{model['provider']}/{model['id']}"
+        model_key = _model_key(model)
         # Check if this model is in the priority list
         try:
             priority_idx = priorities_list.index(model_key)

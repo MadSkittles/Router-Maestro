@@ -113,16 +113,16 @@ def mock_router():
     mock.list_models = AsyncMock(
         return_value=[
             ModelInfo(
-                id="github-copilot/claude-sonnet-4",
+                id="claude-sonnet-4",
                 name="claude-sonnet-4",
                 provider="github-copilot",
             ),
             ModelInfo(
-                id="github-copilot/gpt-4o",
+                id="gpt-4o",
                 name="gpt-4o",
                 provider="github-copilot",
             ),
-            ModelInfo(id="openai/gpt-4o", name="gpt-4o", provider="openai"),
+            ModelInfo(id="gpt-4o", name="gpt-4o", provider="openai"),
         ]
     )
     return mock

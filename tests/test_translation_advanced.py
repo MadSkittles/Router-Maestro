@@ -102,14 +102,14 @@ class TestModelNameTranslationAdvanced:
     """Advanced tests for model name translation."""
 
     def test_translate_haiku_with_hyphenated_version(self):
-        """Test translating haiku with hyphenated version number."""
+        """Hyphenated dated aliases remain concrete identities for Router."""
         result = _translate_model_name("claude-haiku-4-5-20251001")
-        assert result == "claude-haiku-4.5"
+        assert result == "claude-haiku-4-5-20251001"
 
     def test_translate_sonnet_with_hyphenated_version(self):
-        """Test translating sonnet with hyphenated version number."""
+        """Do not collapse a dated Sonnet selection into an undated alias."""
         result = _translate_model_name("claude-sonnet-4-5-20250514")
-        assert result == "claude-sonnet-4.5"
+        assert result == "claude-sonnet-4-5-20250514"
 
     def test_preserve_plain_model_name(self):
         """Test that plain model names are unchanged."""

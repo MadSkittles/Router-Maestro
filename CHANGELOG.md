@@ -6,8 +6,98 @@ All notable changes to Router-Maestro are documented here.
 
 ## Unreleased
 
+### Changes
+
+- **Capability-aware route planning and stable model identity.** Resolve each
+  request once into an immutable provider/model plan, filter or rank candidates
+  using provider operations plus per-model capabilities, and consume that same
+  plan for validation and execution. Public model-list IDs and response model
+  fields are now provider-qualified using explicit raw/public catalog
+  provenance; namespaced raw upstream IDs retain their complete suffix. Bare
+  aliases remain accepted but do not lock a provider, while unknown provider
+  prefixes no longer escape their scope through cross-provider fuzzy matching.
+- **Explicit request-option policy.** Cross-protocol options are now typed and
+  are preserved, translated, substituted downward when allowed, or rejected
+  with the entry protocol's native HTTP 400 envelope. Reasoning effort is never
+  silently increased when the requested tier is unavailable. OpenAI Chat
+  `stream_options.include_usage` now controls the downstream wire shape:
+  explicit `true` emits one final `choices: []` usage chunk before `[DONE]`,
+  explicit `false` suppresses usage, and omission preserves the legacy shape.
+  Explicit Gemini `generationConfig.stopSequences: []` also retains its
+  presence through translation and provider payload construction rather than
+  being collapsed into omission.
+- **Anthropic beta transport adaptation.** Native Anthropic transport support
+  is distinct from model capability. An explicitly selected model without the
+  native transport is served through the standard translated path for that
+  same model; this is not model fallback.
+
 ### Fixes
 
+- **Consistent fallback and provider failure semantics.** Normalize transport,
+  authentication, rate-limit, upstream-status, upstream-protocol, unsupported,
+  and client-request failures into one typed contract and record every planned
+  attempt. Stream and non-stream execution now share retry decisions: failures
+  before the first provider chunk may advance to the next planned candidate,
+  while failures after commitment never switch or replay providers.
+- **Copilot runtime operation compatibility.** Classify Copilot's exact,
+  structured `unsupported_api_for_model` HTTP 400 as a typed unsupported
+  operation across Chat and Responses, stream and non-stream. This lets only an
+  automatic candidate whose support was unknown advance within its frozen plan;
+  explicit or catalog-supported selections still fail without substitution.
+- **Actual response model identity.** OpenAI Chat/Responses, Anthropic, Gemini,
+  and beta-native responses now report the provider-qualified model that
+  actually executed the request, including after fallback. Provider/catalog
+  provenance distinguishes an already-public ID from a raw upstream ID that
+  legitimately contains `/`.
+- **Provider-scoped Claude Code 1M selections.** Synthetic `[1m]` entries are
+  offered only when the exact Copilot catalog source advertises at least a 1M
+  context window. The wizard keeps Claude Code's native display key while
+  writing a provider-qualified model selection, preventing a duplicate bare
+  alias from silently routing the request through another provider.
+- **Candidate-bound Anthropic stream usage.** Compute the fallback input-token
+  estimate from the provider/model that Router actually opens, including after
+  pre-commit fallback, instead of independently re-resolving the requested bare
+  alias through a stale catalog owner.
+- **Request presence and Responses validation.** Preserve temperature omission
+  through Chat, Responses, and Gemini while retaining explicit values. Copilot
+  Responses rejects explicit temperature before provider or SSE commitment,
+  and OpenAI Responses accepts only the currently supported
+  `reasoning.effort` member instead of ignoring unsupported siblings.
+- **Candidate-bound Anthropic thinking.** Resolve thinking budgets and support
+  from the immutable capabilities/output-token snapshot of the same planned
+  candidate that executes the request, including when providers expose the same
+  bare upstream alias.
+- **Copilot Responses terminal snapshots.** Recover missing text deltas from
+  `response.output_text.done`, append only a consistent missing suffix, keep
+  output/content parts isolated, and classify conflicting or malformed
+  snapshots as typed upstream-protocol failures. Preserve reasoning output
+  indices and completion boundaries so interleaved or late-arriving reasoning
+  IDs stay atomically paired with their summaries and encrypted content.
+- **Copilot reasoning stream compatibility.** Correlate Responses reasoning
+  summary events by output/summary index instead of Copilot's per-event opaque
+  IDs, and bind replayable reasoning identity only from the final canonical
+  `id` plus `encrypted_content` pair. Chat streams now retain the usage-only
+  event that Copilot sends after the terminal choice.
+- **Claude hidden-reasoning saturation.** Treat a known reasoning-capable
+  Copilot Claude response with no choices as length-limited only when token
+  usage exactly exhausts the effective explicit enabled-thinking budget (with
+  no overriding effort) or reaches the output cap. Other empty 2xx responses
+  remain typed upstream-protocol failures.
+- **Typed OpenAI refusal preservation.** Keep assistant refusal history and
+  non-stream/stream refusal output distinct from ordinary text through OpenAI
+  Chat, the Responses bridge, and Copilot parsing. Anthropic and Gemini map it
+  to text only at protocol boundaries that lack a refusal wire type.
+- **Authoritative Copilot catalog contracts.** Use one strict catalog parser for
+  operation support and model materialization; strictly validate present names,
+  picker flags, capability types, positive token limits, and reasoning-tier
+  allowlists; renew stale snapshots; and defensively copy cached model data.
+  Accept Copilot's catalog-advertised `minimal` reasoning tier as the bottom of
+  the ordered effort ladder, preserve it through Chat, Responses, and Anthropic
+  request boundaries, and keep unknown tiers strict. `minimal` has no implicit
+  token-budget mapping, so sub-`low` budgets remain invalid rather than being
+  silently promoted or guessed. Preserve Copilot's known catalog-only `none`
+  sentinel without adding it to public request schemas, budget conversion, or
+  downward tier selection; other unknown catalog strings remain protocol errors.
 - **Beta-native Anthropic token validation.** Return an Anthropic
   `invalid_request_error` instead of an internal 500 for malformed
   `thinking.budget_tokens` values. The beta-native route now requires present

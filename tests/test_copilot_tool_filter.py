@@ -1,6 +1,9 @@
 """Tests for Copilot tool-type filtering."""
 
+import pytest
+
 from router_maestro.providers import CopilotProvider
+from router_maestro.providers.base import ProviderFailureKind, RequestOptionError, ResponsesRequest
 
 
 class TestFilterUnsupportedTools:
@@ -18,22 +21,27 @@ class TestFilterUnsupportedTools:
         ]
         assert self.provider._filter_unsupported_tools(tools) == tools
 
-    def test_drops_empty_namespace_tools(self):
-        # Bare namespace items without an inner tools[] still trigger
-        # "Missing required parameter: 'tools[N].tools'" — drop those only.
+    @pytest.mark.parametrize("inner_tools", [None, []], ids=["missing-tools", "empty-tools"])
+    def test_rejects_empty_namespace_tools(self, inner_tools):
         tools = [
             {"type": "function", "name": "foo"},
             {
                 "type": "namespace",
                 "name": "mcp__chrome_devtools__",
                 "description": "Tools in the mcp__chrome_devtools__ namespace.",
+                **({"tools": inner_tools} if inner_tools is not None else {}),
             },
             {"type": "function", "name": "bar"},
         ]
-        result = self.provider._filter_unsupported_tools(tools)
-        assert result is not None
-        assert all(t["type"] == "function" for t in result)
-        assert [t["name"] for t in result] == ["foo", "bar"]
+
+        with pytest.raises(RequestOptionError) as caught:
+            self.provider._build_responses_payload(
+                ResponsesRequest(model="gpt-5.4", input="hi", tools=tools)
+            )
+
+        assert caught.value.kind is ProviderFailureKind.CLIENT_REQUEST
+        assert caught.value.parameter == "tools"
+        assert caught.value.model == "gpt-5.4"
 
     def test_keeps_namespace_with_inner_tools(self):
         # Codex's MCP registry shape — namespace wraps the actual function
@@ -62,29 +70,37 @@ class TestFilterUnsupportedTools:
         assert len(result) == 2
         assert result[1] == kusto_namespace
 
-    def test_drops_namespace_with_empty_tools_list(self):
-        # ``tools: []`` is just as bad as omitting the field — Copilot
-        # 400s the same way. Drop both shapes.
-        tools = [
-            {"type": "function", "name": "foo"},
-            {
-                "type": "namespace",
-                "name": "mcp__empty__",
-                "description": "...",
-                "tools": [],
-            },
-        ]
-        result = self.provider._filter_unsupported_tools(tools)
-        assert result is not None
-        assert [t["name"] for t in result] == ["foo"]
+    @pytest.mark.parametrize(
+        "tool_type",
+        ["web_search", "web_search_preview", "code_interpreter"],
+    )
+    def test_rejects_unsupported_tool_types(self, tool_type):
+        with pytest.raises(RequestOptionError) as caught:
+            self.provider._build_responses_payload(
+                ResponsesRequest(
+                    model="gpt-5.4",
+                    input="hi",
+                    tools=[{"type": tool_type}],
+                )
+            )
 
-    def test_drops_web_search_and_code_interpreter(self):
+        assert caught.value.kind is ProviderFailureKind.CLIENT_REQUEST
+        assert caught.value.parameter == "tools"
+        assert caught.value.model == "gpt-5.4"
+
+    def test_mixed_supported_and_unsupported_tools_rejects_entire_request(self):
         tools = [
+            {"type": "function", "name": "lookup", "parameters": {}},
             {"type": "web_search"},
-            {"type": "web_search_preview"},
-            {"type": "code_interpreter"},
         ]
-        assert self.provider._filter_unsupported_tools(tools) is None
+
+        with pytest.raises(RequestOptionError) as caught:
+            self.provider._build_responses_payload(
+                ResponsesRequest(model="gpt-5.4", input="hi", tools=tools)
+            )
+
+        assert caught.value.parameter == "tools"
+        assert caught.value.model == "gpt-5.4"
 
     def test_keeps_unknown_non_function_types(self):
         # denylist semantics: anything not in UNSUPPORTED_TOOL_TYPES passes through

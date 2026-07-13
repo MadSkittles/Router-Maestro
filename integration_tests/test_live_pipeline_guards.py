@@ -16,6 +16,7 @@ from integration_tests.conftest import (
     anthropic_payload,
     assert_http_success,
     event_payloads,
+    gemini_model_path,
     parse_sse_events,
 )
 
@@ -46,9 +47,9 @@ def test_guards_pass_normal_anthropic_stream(client: httpx.Client, chat_model: s
 
     # Should have content
     text_deltas = [
-        p for p in payloads
-        if p.get("type") == "content_block_delta"
-        and p.get("delta", {}).get("type") == "text_delta"
+        p
+        for p in payloads
+        if p.get("type") == "content_block_delta" and p.get("delta", {}).get("type") == "text_delta"
     ]
     assert len(text_deltas) > 0
 
@@ -93,10 +94,9 @@ def test_guards_pass_normal_openai_chat_stream(client: httpx.Client, chat_model:
 
 def test_guards_pass_normal_gemini_stream(client: httpx.Client, chat_model: str):
     """Normal streaming Gemini request completes without guard interference."""
-    # Gemini endpoint needs a model without provider prefix
-    bare_model = chat_model.split("/", 1)[-1] if "/" in chat_model else chat_model
+    model_path = gemini_model_path(chat_model)
     response = client.post(
-        f"/api/gemini/v1/models/{bare_model}:streamGenerateContent",
+        f"/api/gemini/v1/models/{model_path}:streamGenerateContent",
         json={
             "contents": [{"role": "user", "parts": [{"text": "Say hello"}]}],
             "generationConfig": {"maxOutputTokens": 64},
@@ -104,7 +104,7 @@ def test_guards_pass_normal_gemini_stream(client: httpx.Client, chat_model: str)
         headers={"Accept": "text/event-stream"},
     )
     if response.status_code == 404:
-        pytest.skip(f"Gemini endpoint not available for model {bare_model}")
+        pytest.skip(f"Gemini endpoint not available for model {model_path}")
     assert_http_success(response)
     lines = [ln for ln in response.text.split("\n") if ln.startswith("data: ")]
     assert len(lines) > 0
@@ -113,5 +113,3 @@ def test_guards_pass_normal_gemini_stream(client: httpx.Client, chat_model: str)
         candidates = data.get("candidates", [])
         for c in candidates:
             assert c.get("finishReason") != "ERROR", f"Guard produced error: {data}"
-
-

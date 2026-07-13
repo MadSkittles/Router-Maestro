@@ -23,8 +23,8 @@ from integration_tests.conftest import (
     assert_gemini_usage,
     assert_http_success,
     assert_text_response,
-    bare_model,
     event_payloads,
+    gemini_model_path,
     gemini_payload,
     openai_chat_tool_required_payload,
     parse_sse_events,
@@ -88,7 +88,7 @@ def test_gemini_stream_emits_final_usage(client: httpx.Client, chat_model: str):
     """
     with client.stream(
         "POST",
-        f"/api/gemini/v1beta/models/{bare_model(chat_model)}:streamGenerateContent",
+        f"/api/gemini/v1beta/models/{gemini_model_path(chat_model)}:streamGenerateContent",
         json=gemini_payload(max_output_tokens=32),
         timeout=180.0,
     ) as response:

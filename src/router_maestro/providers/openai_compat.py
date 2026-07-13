@@ -63,11 +63,11 @@ class OpenAICompatibleProvider(OpenAIChatProvider):
                     timeout=30.0,
                 )
                 response.raise_for_status()
-                data = response.json()
+                model_ids = self._parse_model_catalog(response)
 
                 return [
-                    ModelInfo(id=model["id"], name=model["id"], provider=self.name)
-                    for model in data.get("data", [])
+                    ModelInfo(id=model_id, name=model_id, provider=self.name)
+                    for model_id in model_ids
                 ]
             except httpx.HTTPError:
                 return []

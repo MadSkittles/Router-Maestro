@@ -31,7 +31,9 @@ from integration_tests.conftest import (
 ENDPOINT = "/api/anthropic/v1/messages"
 
 # A minimal valid 1x1 red PNG for multimodal tests.
-_1PX_PNG_B64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC"
+_1PX_PNG_B64 = (
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC"
+)
 
 
 def _bridge_payload(model: str, *, stream: bool = False) -> dict[str, Any]:
@@ -301,18 +303,17 @@ def test_bridge_multi_turn(client: httpx.Client, bridge_model: str):
 
 
 # ---------------------------------------------------------------------------
-# Compatibility fields (top_p, stop_sequences, metadata)
+# Compatibility fields
 # ---------------------------------------------------------------------------
 
 
-def test_bridge_compat_fields(client: httpx.Client, bridge_model: str):
-    """Extra Anthropic fields (top_p, stop_sequences, metadata) don't break the bridge."""
+def test_bridge_compat_fields(client: httpx.Client, responses_top_p_model: str):
+    """Representable Anthropic fields (top_p and metadata) survive the bridge."""
     payload: dict[str, Any] = {
-        "model": bridge_model,
+        "model": responses_top_p_model,
         "messages": [{"role": "user", "content": TEXT_PROMPT}],
         "max_tokens": 512,
         "top_p": 1,
-        "stop_sequences": ["\n\nHuman:"],
         "metadata": {"user_id": "integration-test"},
     }
     response = client.post(ENDPOINT, json=payload)
@@ -323,6 +324,24 @@ def test_bridge_compat_fields(client: httpx.Client, bridge_model: str):
     text_blocks = [b for b in data["content"] if b["type"] == "text"]
     assert text_blocks, data
     assert_text_response(text_blocks[0]["text"])
+
+
+@pytest.mark.parametrize("stream", [False, True])
+def test_bridge_stop_sequences_returns_native_400(
+    client: httpx.Client,
+    bridge_model: str,
+    stream: bool,
+):
+    """An unrepresentable stop_sequences option is rejected before bridge I/O."""
+    payload = _bridge_payload(bridge_model, stream=stream)
+    payload["stop_sequences"] = ["END"]
+    response = client.post(ENDPOINT, json=payload)
+
+    assert response.status_code == 400
+    assert response.headers["content-type"].startswith("application/json")
+    assert response.json()["type"] == "error"
+    assert response.json()["error"]["type"] == "invalid_request_error"
+    assert "event:" not in response.text
 
 
 # ---------------------------------------------------------------------------

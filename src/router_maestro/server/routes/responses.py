@@ -4,14 +4,19 @@ import asyncio
 import json
 import time
 import uuid
+from collections import deque
 from collections.abc import AsyncGenerator
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from fastapi import APIRouter, HTTPException
+from pydantic import ValidationError
 
 from router_maestro.providers import (
     ProviderError,
+    ProviderFailureKind,
+    RequestOptionError,
+    ResponsesStreamChunk,
     ResponseStatus,
     TerminalError,
     TerminalOutcome,
@@ -23,7 +28,10 @@ from router_maestro.providers import (
 )
 from router_maestro.providers import ResponsesRequest as InternalResponsesRequest
 from router_maestro.routing import Router, get_router
+from router_maestro.routing.model_ref import qualify_model_id
+from router_maestro.server.protocols import client_error_response, unrepresented_option_error
 from router_maestro.server.schemas import (
+    ResponsesReasoningConfig,
     ResponsesRequest,
     ResponsesResponse,
     ResponsesUsage,
@@ -31,11 +39,26 @@ from router_maestro.server.schemas import (
 from router_maestro.server.streaming import sse_streaming_response
 from router_maestro.utils import get_logger
 from router_maestro.utils.async_iterators import close_async_iterator
-from router_maestro.utils.reasoning import VALID_EFFORTS
 
 logger = get_logger("server.routes.responses")
 
 router = APIRouter()
+
+
+def _reasoning_validation_error(error: ValidationError) -> RequestOptionError:
+    """Map strict Responses reasoning failures to one stable OpenAI parameter."""
+    first = error.errors()[0]
+    location = first.get("loc", ())
+    if location == ("effort",):
+        parameter = "reasoning_effort"
+    elif location:
+        parameter = f"reasoning.{'.'.join(str(part) for part in location)}"
+    else:
+        parameter = "reasoning"
+    return RequestOptionError(
+        f"Invalid request option '{parameter}'",
+        parameter=parameter,
+    )
 
 
 def generate_id(prefix: str) -> str:
@@ -205,6 +228,11 @@ def make_text_content(text: str) -> dict[str, Any]:
     return {"type": "output_text", "text": text, "annotations": []}
 
 
+def make_refusal_content(refusal: str) -> dict[str, Any]:
+    """Create a refusal content block."""
+    return {"type": "refusal", "refusal": refusal}
+
+
 def make_usage(raw_usage: dict[str, Any] | None) -> dict[str, Any] | None:
     """Create properly structured usage object matching OpenAI spec."""
     if not raw_usage:
@@ -228,15 +256,35 @@ def make_usage(raw_usage: dict[str, Any] | None) -> dict[str, Any] | None:
     }
 
 
-def make_message_item(msg_id: str, text: str, status: str = "completed") -> dict[str, Any]:
-    """Create message output item."""
+def _make_message_item_from_parts(
+    msg_id: str,
+    content: list[dict[str, Any]],
+    status: str = "completed",
+) -> dict[str, Any]:
+    """Create a message output item from typed content parts."""
     return {
         "type": "message",
         "id": msg_id,
         "role": "assistant",
-        "content": [make_text_content(text)],
+        "content": content,
         "status": status,
     }
+
+
+def make_message_item(
+    msg_id: str,
+    text: str | None,
+    status: str = "completed",
+    *,
+    refusal: str | None = None,
+) -> dict[str, Any]:
+    """Create message output item."""
+    content: list[dict[str, Any]] = []
+    if text is not None:
+        content.append(make_text_content(text))
+    if refusal is not None:
+        content.append(make_refusal_content(refusal))
+    return _make_message_item_from_parts(msg_id, content, status)
 
 
 def make_function_call_item(
@@ -313,6 +361,8 @@ async def create_response(request: ResponsesRequest):
         request.tools is not None,
         request.reasoning,
     )
+    if error := unrepresented_option_error(request):
+        return client_error_response(error, "openai")
 
     model_router = get_router()
 
@@ -328,16 +378,33 @@ async def create_response(request: ResponsesRequest):
         tools=convert_tools_to_internal(request.tools),
         tool_choice=convert_tool_choice_to_internal(request.tool_choice),
         parallel_tool_calls=request.parallel_tool_calls,
+        top_p=request.top_p,
+        metadata=request.metadata,
+        service_tier=request.service_tier,
     )
 
-    if request.reasoning:
-        effort = str(request.reasoning.get("effort", "")).lower() or None
-        if effort and effort in VALID_EFFORTS:
-            internal_request.reasoning_effort = effort
+    if request.reasoning is not None:
+        try:
+            reasoning = ResponsesReasoningConfig.model_validate(request.reasoning)
+        except ValidationError as error:
+            return client_error_response(_reasoning_validation_error(error), "openai")
+        internal_request.reasoning_effort = reasoning.effort
 
     if request.stream:
+        try:
+            prepared_plan = await model_router.prepare_responses_completion_stream(internal_request)
+        except ProviderError as e:
+            if isinstance(e, RequestOptionError):
+                return client_error_response(e, "openai")
+            raise HTTPException(status_code=e.status_code, detail=str(e)) from e
         return sse_streaming_response(
-            stream_response(model_router, internal_request, request_id, start_time),
+            stream_response(
+                model_router,
+                internal_request,
+                request_id,
+                start_time,
+                prepared_plan=prepared_plan,
+            ),
         )
 
     try:
@@ -374,9 +441,15 @@ async def create_response(request: ResponsesRequest):
                 reasoning_item["encrypted_content"] = response.thinking_signature
             output.append(reasoning_item)
 
-        if response.content:
+        if response.content or response.refusal:
             message_id = generate_id("msg")
-            output.append(make_message_item(message_id, response.content))
+            output.append(
+                make_message_item(
+                    message_id,
+                    response.content or None,
+                    refusal=response.refusal,
+                )
+            )
 
         if response.tool_calls:
             for tc in response.tool_calls:
@@ -426,7 +499,11 @@ async def create_response(request: ResponsesRequest):
         return ResponsesResponse.model_construct(
             id=response_id,
             object="response",
-            model=response.model,
+            model=(
+                response.selected_model.qualified_id
+                if response.selected_model is not None
+                else qualify_model_id(provider_name, response.model)
+            ),
             status=outcome.response_status.value,
             output=output,
             usage=usage,
@@ -441,7 +518,9 @@ async def create_response(request: ResponsesRequest):
             elapsed_ms,
             e,
         )
-        raise HTTPException(status_code=e.status_code, detail=str(e))
+        if isinstance(e, RequestOptionError):
+            return client_error_response(e, "openai")
+        raise HTTPException(status_code=e.status_code, detail=str(e)) from e
 
 
 @dataclass
@@ -452,23 +531,363 @@ class _StreamMessageState:
     output_index: int = 0
     content_index: int = 0
     current_message_id: str | None = None
+    current_source_content_index: int | None = None
     accumulated_content: str = ""
+    accumulated_refusal: str = ""
     message_started: bool = False
-    # Reasoning summary state. ``current_reasoning_id`` is the upstream
-    # reasoning item id (e.g. ``rs_…``) when Copilot supplies it on the
-    # first ``reasoning_summary_text.delta``, falling back to a locally-
-    # generated ``rs-…`` only if the upstream never sent one.
+    current_part_type: str | None = None
+    message_content_parts: list[dict[str, Any]] = field(default_factory=list)
+    # Reasoning summary state. Deltas remain buffered until the upstream
+    # identity arrives or the item must close. Only then may we emit the
+    # added/delta/done sequence under one stable id. A local id is generated
+    # only at a boundary when the upstream never supplied one.
     # ``upstream_encrypted_content`` is the verifiable blob from
     # ``output_item.done.item.encrypted_content``; it is signed against the
     # upstream id, so the (id, blob) pair MUST round-trip together — pairing
     # the blob with a local id 400s the next turn with ``Encrypted content
     # could not be decrypted``.
     current_reasoning_id: str | None = None
+    pending_reasoning_id: str | None = None
     upstream_encrypted_content: str | None = None
-    accumulated_reasoning: str = ""
+    reasoning_fragments: dict[int, list[str]] = field(default_factory=dict)
     reasoning_started: bool = False
-    summary_index: int = 0
+    reasoning_events_started: bool = False
+    reasoning_emission_offsets: dict[int, int] = field(default_factory=dict)
+    dirty_reasoning_indices: list[int] = field(default_factory=list)
+    _dirty_reasoning_index_set: set[int] = field(default_factory=set)
+    flush_reasoning_scan_count: int = 0
+    emitted_reasoning_parts: set[int] = field(default_factory=set)
+    max_reasoning_summary_index: int | None = None
+    visible_reasoning_summary_indices: dict[int, int] = field(default_factory=dict)
     reasoning_item_count: int = 0
+
+    def begin_reasoning(self) -> None:
+        """Open logical reasoning state without committing a wire identity."""
+        if self.reasoning_started:
+            return
+        self.reasoning_started = True
+
+    def bind_reasoning_id(self, reasoning_id: str) -> None:
+        """Bind one upstream identity before any reasoning event is emitted."""
+        self.begin_reasoning()
+        if self.pending_reasoning_id is not None and self.pending_reasoning_id != reasoning_id:
+            raise ProviderError(
+                "Responses reasoning item changed identity",
+                status_code=502,
+                retryable=True,
+                kind=ProviderFailureKind.UPSTREAM_PROTOCOL,
+            )
+        if self.current_reasoning_id is not None and self.current_reasoning_id != reasoning_id:
+            raise ProviderError(
+                "Responses reasoning item changed identity",
+                status_code=502,
+                retryable=True,
+                kind=ProviderFailureKind.UPSTREAM_PROTOCOL,
+            )
+        self.current_reasoning_id = reasoning_id
+        self.pending_reasoning_id = None
+
+    def latch_reasoning_id(self, reasoning_id: str) -> None:
+        """Remember provenance identity without opening a visible reasoning item."""
+        if self.current_reasoning_id is not None and self.current_reasoning_id != reasoning_id:
+            raise ProviderError(
+                "Responses reasoning item changed identity",
+                status_code=502,
+                retryable=True,
+                kind=ProviderFailureKind.UPSTREAM_PROTOCOL,
+            )
+        if self.pending_reasoning_id is not None and self.pending_reasoning_id != reasoning_id:
+            raise ProviderError(
+                "Responses reasoning item changed identity",
+                status_code=502,
+                retryable=True,
+                kind=ProviderFailureKind.UPSTREAM_PROTOCOL,
+            )
+        self.pending_reasoning_id = reasoning_id
+
+    def append_reasoning(self, delta: str, summary_index: int | None) -> None:
+        """Accumulate one delta and defer it until the item identity is stable."""
+        self.begin_reasoning()
+        if self.pending_reasoning_id is not None:
+            self.bind_reasoning_id(self.pending_reasoning_id)
+        index = 0 if summary_index is None else summary_index
+        self.bind_reasoning_summary_index(index)
+        if index not in self.visible_reasoning_summary_indices:
+            self.visible_reasoning_summary_indices[index] = len(
+                self.visible_reasoning_summary_indices
+            )
+        self.reasoning_fragments.setdefault(index, []).append(delta)
+        if index not in self._dirty_reasoning_index_set:
+            self._dirty_reasoning_index_set.add(index)
+            self.dirty_reasoning_indices.append(index)
+
+    def bind_reasoning_summary_index(self, summary_index: int | None) -> None:
+        """Validate provenance without opening an empty reasoning output item."""
+        index = 0 if summary_index is None else summary_index
+        maximum = self.max_reasoning_summary_index
+        if maximum is None and index != 0:
+            raise ProviderError(
+                "Responses reasoning summary_index must start at zero",
+                status_code=502,
+                retryable=True,
+                kind=ProviderFailureKind.UPSTREAM_PROTOCOL,
+            )
+        if maximum is not None and index > maximum + 1:
+            raise ProviderError(
+                "Responses reasoning summary_index contains a gap",
+                status_code=502,
+                retryable=True,
+                kind=ProviderFailureKind.UPSTREAM_PROTOCOL,
+            )
+        if maximum is None or index > maximum:
+            self.max_reasoning_summary_index = index
+
+    def start_reasoning_events(self, *, allow_local_id: bool = False) -> list[str]:
+        """Emit added events and buffered deltas once one stable id is available."""
+        if not self.reasoning_started or self.reasoning_events_started:
+            return []
+        if self.current_reasoning_id is None:
+            if not allow_local_id:
+                return []
+            self.current_reasoning_id = generate_id("rs")
+
+        rs_id = self.current_reasoning_id
+        self.reasoning_events_started = True
+        events = [
+            sse_event(
+                {
+                    "type": "response.output_item.added",
+                    "output_index": self.output_index,
+                    "item": {"type": "reasoning", "id": rs_id, "summary": []},
+                }
+            ),
+        ]
+        dirty_indices = self.dirty_reasoning_indices
+        self.dirty_reasoning_indices = []
+        self._dirty_reasoning_index_set = set()
+        for source_index in dirty_indices:
+            deltas = self.reasoning_fragments[source_index]
+            summary_index = self.visible_reasoning_summary_indices[source_index]
+            events.append(
+                sse_event(
+                    {
+                        "type": "response.reasoning_summary_part.added",
+                        "item_id": rs_id,
+                        "output_index": self.output_index,
+                        "summary_index": summary_index,
+                        "part": {"type": "summary_text", "text": ""},
+                    }
+                )
+            )
+            self.emitted_reasoning_parts.add(source_index)
+            self.reasoning_emission_offsets[source_index] = len(deltas)
+            events.extend(
+                sse_event(
+                    {
+                        "type": "response.reasoning_summary_text.delta",
+                        "item_id": rs_id,
+                        "output_index": self.output_index,
+                        "summary_index": summary_index,
+                        "delta": delta,
+                    }
+                )
+                for delta in deltas
+            )
+        return events
+
+    def flush_reasoning_events(self) -> list[str]:
+        """Emit deltas received after the reasoning item acquired its id."""
+        if not self.reasoning_events_started or self.current_reasoning_id is None:
+            return []
+        events: list[str] = []
+        dirty_indices = self.dirty_reasoning_indices
+        self.dirty_reasoning_indices = []
+        self._dirty_reasoning_index_set = set()
+        for source_index in dirty_indices:
+            self.flush_reasoning_scan_count += 1
+            deltas = self.reasoning_fragments[source_index]
+            summary_index = self.visible_reasoning_summary_indices[source_index]
+            if source_index not in self.emitted_reasoning_parts:
+                events.append(
+                    sse_event(
+                        {
+                            "type": "response.reasoning_summary_part.added",
+                            "item_id": self.current_reasoning_id,
+                            "output_index": self.output_index,
+                            "summary_index": summary_index,
+                            "part": {"type": "summary_text", "text": ""},
+                        }
+                    )
+                )
+                self.emitted_reasoning_parts.add(source_index)
+            offset = self.reasoning_emission_offsets.get(source_index, 0)
+            events.extend(
+                sse_event(
+                    {
+                        "type": "response.reasoning_summary_text.delta",
+                        "item_id": self.current_reasoning_id,
+                        "output_index": self.output_index,
+                        "summary_index": summary_index,
+                        "delta": delta,
+                    }
+                )
+                for delta in deltas[offset:]
+            )
+            self.reasoning_emission_offsets[source_index] = len(deltas)
+        return events
+
+    def start_message_part(self, part_type: str) -> list[str]:
+        """Open one typed Responses content part, closing a different active part."""
+        if part_type not in {"output_text", "refusal"}:
+            raise ValueError(f"unsupported Responses content part type: {part_type}")
+
+        events: list[str] = []
+        if not self.message_started:
+            self.current_message_id = generate_id("msg")
+            self.message_started = True
+            events.append(
+                sse_event(
+                    {
+                        "type": "response.output_item.added",
+                        "output_index": self.output_index,
+                        "item": {
+                            "type": "message",
+                            "id": self.current_message_id,
+                            "role": "assistant",
+                            "content": [],
+                            "status": "in_progress",
+                        },
+                    }
+                )
+            )
+
+        if self.current_part_type == part_type:
+            return events
+        events.extend(self.close_open_content_part())
+        self.current_part_type = part_type
+        empty_part = (
+            make_text_content("") if part_type == "output_text" else make_refusal_content("")
+        )
+        events.append(
+            sse_event(
+                {
+                    "type": "response.content_part.added",
+                    "item_id": self.current_message_id,
+                    "output_index": self.output_index,
+                    "content_index": self.content_index,
+                    "part": empty_part,
+                }
+            )
+        )
+        return events
+
+    def bind_source_content_index(self, source_index: int | None) -> list[str]:
+        """Honor native content-part boundaries within one indexed message."""
+        if source_index is None:
+            return []
+        if self.current_source_content_index is None:
+            if source_index != 0:
+                raise ProviderError(
+                    "Responses message content_index must start at zero",
+                    status_code=502,
+                    retryable=True,
+                    kind=ProviderFailureKind.UPSTREAM_PROTOCOL,
+                )
+            self.current_source_content_index = source_index
+            return []
+        if source_index < self.current_source_content_index:
+            raise ProviderError(
+                "Responses message content_index moved backwards",
+                status_code=502,
+                retryable=True,
+                kind=ProviderFailureKind.UPSTREAM_PROTOCOL,
+            )
+        if source_index == self.current_source_content_index:
+            return []
+        if source_index != self.current_source_content_index + 1:
+            raise ProviderError(
+                "Responses message content_index contains a gap",
+                status_code=502,
+                retryable=True,
+                kind=ProviderFailureKind.UPSTREAM_PROTOCOL,
+            )
+        events = self.close_open_content_part()
+        self.current_source_content_index = source_index
+        return events
+
+    def bind_empty_source_content_index(self, source_index: int | None) -> None:
+        """Validate provenance without opening an empty message output item."""
+        if source_index is None:
+            return
+        current = self.current_source_content_index
+        if current is None and source_index != 0:
+            raise ProviderError(
+                "Responses message content_index must start at zero",
+                status_code=502,
+                retryable=True,
+                kind=ProviderFailureKind.UPSTREAM_PROTOCOL,
+            )
+        if current is not None:
+            if source_index < current:
+                raise ProviderError(
+                    "Responses message content_index moved backwards",
+                    status_code=502,
+                    retryable=True,
+                    kind=ProviderFailureKind.UPSTREAM_PROTOCOL,
+                )
+            if source_index > current + 1:
+                raise ProviderError(
+                    "Responses message content_index contains a gap",
+                    status_code=502,
+                    retryable=True,
+                    kind=ProviderFailureKind.UPSTREAM_PROTOCOL,
+                )
+        self.current_source_content_index = source_index
+
+    def close_open_content_part(self) -> list[str]:
+        """Close the active output_text or refusal part without closing its message."""
+        if self.current_part_type is None or self.current_message_id is None:
+            return []
+
+        if self.current_part_type == "output_text":
+            value = self.accumulated_content
+            part = make_text_content(value)
+            done = {
+                "type": "response.output_text.done",
+                "item_id": self.current_message_id,
+                "output_index": self.output_index,
+                "content_index": self.content_index,
+                "text": value,
+            }
+            self.accumulated_content = ""
+        else:
+            value = self.accumulated_refusal
+            part = make_refusal_content(value)
+            done = {
+                "type": "response.refusal.done",
+                "item_id": self.current_message_id,
+                "output_index": self.output_index,
+                "content_index": self.content_index,
+                "refusal": value,
+            }
+            self.accumulated_refusal = ""
+
+        events = [
+            sse_event(done),
+            sse_event(
+                {
+                    "type": "response.content_part.done",
+                    "item_id": self.current_message_id,
+                    "output_index": self.output_index,
+                    "content_index": self.content_index,
+                    "part": part,
+                }
+            ),
+        ]
+        self.message_content_parts.append(part)
+        self.content_index += 1
+        self.current_part_type = None
+        return events
 
     def close_open_message(self, advance_index: bool = True) -> list[str]:
         """Close the currently open message.
@@ -477,21 +896,31 @@ class _StreamMessageState:
         """
         if not self.message_started or not self.current_message_id:
             return []
-        events = _close_message_events(
+        events = self.close_open_content_part()
+        item = _make_message_item_from_parts(
             self.current_message_id,
-            self.output_index,
-            self.content_index,
-            self.accumulated_content,
+            list(self.message_content_parts),
         )
-        self.output_items.append(
-            make_message_item(self.current_message_id, self.accumulated_content)
+        events.append(
+            sse_event(
+                {
+                    "type": "response.output_item.done",
+                    "output_index": self.output_index,
+                    "item": item,
+                }
+            )
         )
+        self.output_items.append(item)
         if advance_index:
             self.output_index += 1
         self.message_started = False
         self.current_message_id = None
         self.accumulated_content = ""
+        self.accumulated_refusal = ""
         self.content_index = 0
+        self.current_part_type = None
+        self.message_content_parts = []
+        self.current_source_content_index = None
         return events
 
     def close_open_reasoning(self, advance_index: bool = True) -> list[str]:
@@ -502,55 +931,234 @@ class _StreamMessageState:
           response.reasoning_summary_part.done
           response.output_item.done (item.type == "reasoning")
         """
-        if not self.reasoning_started or not self.current_reasoning_id:
+        if not self.reasoning_started:
             return []
+        events = self.start_reasoning_events(allow_local_id=True)
+        if self.current_reasoning_id is None:
+            raise RuntimeError("reasoning id was not established")
         rs_id = self.current_reasoning_id
-        text = self.accumulated_reasoning
-        summary_part = {"type": "summary_text", "text": text}
+        indexed_summary_parts = [
+            (
+                self.visible_reasoning_summary_indices[source_index],
+                {"type": "summary_text", "text": text},
+            )
+            for source_index, fragments in sorted(self.reasoning_fragments.items())
+            for text in ["".join(fragments)]
+        ]
         reasoning_item = {
             "type": "reasoning",
             "id": rs_id,
-            "summary": [summary_part],
+            "summary": [part for _, part in indexed_summary_parts],
         }
         if self.upstream_encrypted_content:
             reasoning_item["encrypted_content"] = self.upstream_encrypted_content
-        events = [
-            sse_event(
-                {
-                    "type": "response.reasoning_summary_text.done",
-                    "item_id": rs_id,
-                    "output_index": self.output_index,
-                    "summary_index": self.summary_index,
-                    "text": text,
-                }
-            ),
-            sse_event(
-                {
-                    "type": "response.reasoning_summary_part.done",
-                    "item_id": rs_id,
-                    "output_index": self.output_index,
-                    "summary_index": self.summary_index,
-                    "part": summary_part,
-                }
-            ),
+        for summary_index, summary_part in indexed_summary_parts:
+            events.extend(
+                [
+                    sse_event(
+                        {
+                            "type": "response.reasoning_summary_text.done",
+                            "item_id": rs_id,
+                            "output_index": self.output_index,
+                            "summary_index": summary_index,
+                            "text": summary_part["text"],
+                        }
+                    ),
+                    sse_event(
+                        {
+                            "type": "response.reasoning_summary_part.done",
+                            "item_id": rs_id,
+                            "output_index": self.output_index,
+                            "summary_index": summary_index,
+                            "part": summary_part,
+                        }
+                    ),
+                ]
+            )
+        events.append(
             sse_event(
                 {
                     "type": "response.output_item.done",
                     "output_index": self.output_index,
                     "item": reasoning_item,
                 }
-            ),
-        ]
+            )
+        )
         self.output_items.append(reasoning_item)
         self.reasoning_item_count += 1
         if advance_index:
             self.output_index += 1
         self.reasoning_started = False
+        self.reasoning_events_started = False
         self.current_reasoning_id = None
+        self.pending_reasoning_id = None
         self.upstream_encrypted_content = None
-        self.accumulated_reasoning = ""
-        self.summary_index = 0
+        self.reasoning_fragments = {}
+        self.reasoning_emission_offsets = {}
+        self.dirty_reasoning_indices = []
+        self._dirty_reasoning_index_set = set()
+        self.flush_reasoning_scan_count = 0
+        self.emitted_reasoning_parts = set()
+        self.max_reasoning_summary_index = None
+        self.visible_reasoning_summary_indices = {}
         return events
+
+    def finish_empty_reasoning_item(self) -> None:
+        """Clear marker-only provenance at its indexed item boundary."""
+        if self.reasoning_started:
+            return
+        self.pending_reasoning_id = None
+        self.max_reasoning_summary_index = None
+
+    def finish_empty_message_item(self) -> None:
+        """Clear marker-only content provenance at its indexed item boundary."""
+        if self.message_started:
+            return
+        self.current_source_content_index = None
+
+
+@dataclass
+class _IndexedOutputBucket:
+    """Canonical chunks belonging to one upstream Responses output item."""
+
+    item_type: str
+    chunks: list[ResponsesStreamChunk] = field(default_factory=list)
+    done: bool = False
+    buffered_chunk_count: int = 0
+    buffered_payload_bytes: int = 0
+
+
+@dataclass
+class _IndexedOutputScheduler:
+    """Release interleaved native output items in source ``output_index`` order."""
+
+    buckets: dict[int, _IndexedOutputBucket] = field(default_factory=dict)
+    next_output_index: int = 0
+    saw_indexed_item: bool = False
+    max_future_buckets: int = 64
+    max_future_chunks: int = 4096
+    max_future_payload_bytes: int = 8 * 1024 * 1024
+    future_chunk_count: int = 0
+    future_payload_bytes: int = 0
+
+    @staticmethod
+    def _protocol_error(message: str) -> ProviderError:
+        return ProviderError(
+            message,
+            status_code=502,
+            retryable=True,
+            kind=ProviderFailureKind.UPSTREAM_PROTOCOL,
+        )
+
+    def add(self, chunk: ResponsesStreamChunk) -> list[ResponsesStreamChunk]:
+        """Release the active item immediately and buffer only future items."""
+        output_index = chunk.output_index
+        if output_index is None:
+            return [chunk]
+        self.saw_indexed_item = True
+        if output_index < 0:
+            raise self._protocol_error("Responses output_index must be non-negative")
+        if output_index < self.next_output_index:
+            raise self._protocol_error("Responses output item changed after completion")
+        if output_index - self.next_output_index > self.max_future_buckets:
+            raise self._protocol_error("Responses future output index window limit exceeded")
+        item_type = chunk.output_item_type
+        if not item_type:
+            raise self._protocol_error("Responses indexed chunk is missing its output item type")
+
+        bucket = self.buckets.get(output_index)
+        if bucket is None:
+            bucket = _IndexedOutputBucket(item_type=item_type)
+            self.buckets[output_index] = bucket
+        elif bucket.item_type != item_type:
+            raise self._protocol_error("Responses output index changed item type")
+        if bucket.done:
+            raise self._protocol_error("Responses output item received data after completion")
+
+        bucket.chunks.append(chunk)
+        bucket.done = chunk.output_item_done
+        if output_index > self.next_output_index:
+            payload_size = self._chunk_payload_size(chunk)
+            bucket.buffered_chunk_count += 1
+            bucket.buffered_payload_bytes += payload_size
+            self.future_chunk_count += 1
+            self.future_payload_bytes += payload_size
+            if self._future_bucket_count() > self.max_future_buckets:
+                raise self._protocol_error("Responses future output item buffer limit exceeded")
+            if self.future_chunk_count > self.max_future_chunks:
+                raise self._protocol_error("Responses future output chunk limit exceeded")
+            if self.future_payload_bytes > self.max_future_payload_bytes:
+                raise self._protocol_error("Responses future output payload limit exceeded")
+        return self._drain_available()
+
+    def finalize(self) -> list[ResponsesStreamChunk]:
+        """Close and drain every buffered item at explicit terminal or EOF."""
+        if not self.buckets:
+            return []
+        highest_index = max(self.buckets)
+        missing = [
+            index
+            for index in range(self.next_output_index, highest_index + 1)
+            if index not in self.buckets
+        ]
+        if missing:
+            raise self._protocol_error(f"Responses output item sequence has gaps: {missing}")
+        for bucket in self.buckets.values():
+            if not bucket.done:
+                if bucket.chunks:
+                    bucket.chunks[-1] = replace(bucket.chunks[-1], output_item_done=True)
+                else:
+                    bucket.chunks.append(
+                        ResponsesStreamChunk(
+                            content="",
+                            output_index=self.next_output_index,
+                            output_item_type=bucket.item_type,
+                            output_item_done=True,
+                        )
+                    )
+                bucket.done = True
+        return self._drain_available()
+
+    def _drain_available(self) -> list[ResponsesStreamChunk]:
+        ready: list[ResponsesStreamChunk] = []
+        while True:
+            bucket = self.buckets.get(self.next_output_index)
+            if bucket is None:
+                break
+            ready.extend(bucket.chunks)
+            self.future_chunk_count -= bucket.buffered_chunk_count
+            bucket.buffered_chunk_count = 0
+            bucket.chunks = []
+            self.future_payload_bytes -= bucket.buffered_payload_bytes
+            bucket.buffered_payload_bytes = 0
+            if not bucket.done:
+                break
+            del self.buckets[self.next_output_index]
+            self.next_output_index += 1
+        return ready
+
+    def _future_bucket_count(self) -> int:
+        return sum(index > self.next_output_index for index in self.buckets)
+
+    @staticmethod
+    def _chunk_payload_size(chunk: ResponsesStreamChunk) -> int:
+        """Approximate retained payload bytes without serializing arbitrary objects."""
+        size = len(chunk.content.encode("utf-8"))
+        for value in (chunk.refusal, chunk.thinking, chunk.thinking_id, chunk.thinking_signature):
+            if value:
+                size += len(value.encode("utf-8"))
+        if chunk.tool_call is not None:
+            for value in (
+                chunk.tool_call.call_id,
+                chunk.tool_call.name,
+                chunk.tool_call.arguments,
+                chunk.tool_call.namespace,
+            ):
+                if value:
+                    size += len(value.encode("utf-8"))
+        if chunk.usage is not None:
+            size += len(json.dumps(chunk.usage, separators=(",", ":"), default=str).encode("utf-8"))
+        return size
 
 
 async def stream_response(
@@ -558,17 +1166,32 @@ async def stream_response(
     request: InternalResponsesRequest,
     request_id: str,
     start_time: float,
+    *,
+    prepared_plan=None,
 ) -> AsyncGenerator[str, None]:
     """Stream Responses API response."""
     # Generate these before the try so the except handlers can always reference
     # them even if responses_completion_stream() raises before returning.
     response_id = generate_id("resp")
     created_at = int(time.time())
+    response_model = request.model
     pipeline = None
     stream = None
     terminal_outcome: TerminalOutcome | None = None
     try:
-        stream, provider_name = await model_router.responses_completion_stream(request)
+        if prepared_plan is None:
+            stream, provider_name = await model_router.responses_completion_stream(request)
+        else:
+            stream, provider_name = await model_router.responses_completion_stream(
+                request,
+                prepared_plan=prepared_plan,
+            )
+        selected_model = getattr(stream, "selected_model", None)
+        response_model = (
+            selected_model.qualified_id
+            if selected_model is not None
+            else qualify_model_id(provider_name, request.model)
+        )
 
         # Unified pipeline: guards + audit
         from router_maestro.pipeline import RequestPipeline
@@ -590,13 +1213,19 @@ async def stream_response(
             "id": response_id,
             "object": "response",
             "created_at": created_at,
-            "model": request.model,
+            "model": response_model,
             "error": None,
             "incomplete_details": None,
         }
 
         state = _StreamMessageState()
         final_usage = None
+        deferred_chunks = []
+        chunk_queue = deque()
+        indexed_outputs = _IndexedOutputScheduler()
+        saw_unindexed_output = False
+        stream_iterator = stream.__aiter__()
+        stream_exhausted = False
 
         # response.created
         yield sse_event(
@@ -622,9 +1251,29 @@ async def stream_response(
             }
         )
 
-        async for chunk in stream:
+        while chunk_queue or not stream_exhausted:
+            if chunk_queue:
+                chunk, feed_pipeline = chunk_queue.popleft()
+            else:
+                try:
+                    chunk = await stream_iterator.__anext__()
+                except StopAsyncIteration:
+                    stream_exhausted = True
+                    indexed_ready = indexed_outputs.finalize()
+                    if indexed_ready:
+                        chunk_queue.extend((pending, False) for pending in indexed_ready)
+                        continue
+                    if state.reasoning_started and deferred_chunks:
+                        for evt in state.close_open_reasoning():
+                            yield evt
+                        chunk_queue.extend((pending, False) for pending in deferred_chunks)
+                        deferred_chunks = []
+                        continue
+                    break
+                feed_pipeline = True
+
             # Feed through guards
-            abort_reason = pipeline.feed_stream(chunk)
+            abort_reason = pipeline.feed_stream(chunk) if feed_pipeline else None
             if abort_reason:
                 terminal_outcome = exception_outcome(abort_reason, code="overloaded")
                 logger.warning("Responses stream aborted: %s", abort_reason)
@@ -649,6 +1298,142 @@ async def stream_response(
                 )
                 return
 
+            has_output_payload = bool(
+                chunk.content
+                or chunk.refusal
+                or chunk.tool_call
+                or chunk.thinking
+                or chunk.thinking_id
+                or chunk.thinking_signature
+                or chunk.output_item_type
+                or chunk.output_item_done
+            )
+            if feed_pipeline and chunk.output_index is not None:
+                if saw_unindexed_output:
+                    raise _IndexedOutputScheduler._protocol_error(
+                        "Responses stream mixed indexed and unindexed output items"
+                    )
+                chunk_is_terminal = (
+                    chunk.terminal_outcome is not None or chunk.finish_reason is not None
+                )
+                control_chunk = None
+                indexed_chunk = chunk
+                if chunk_is_terminal:
+                    control_chunk = replace(
+                        chunk,
+                        content="",
+                        refusal=None,
+                        tool_call=None,
+                        thinking=None,
+                        thinking_id=None,
+                        thinking_signature=None,
+                        output_index=None,
+                        content_index=None,
+                        reasoning_summary_index=None,
+                        provenance_only=False,
+                        output_item_type=None,
+                        output_item_done=False,
+                    )
+                    indexed_chunk = replace(
+                        chunk,
+                        usage=None,
+                        finish_reason=None,
+                        terminal_outcome=None,
+                    )
+                indexed_ready = indexed_outputs.add(indexed_chunk)
+                if control_chunk is not None:
+                    indexed_ready.extend(indexed_outputs.finalize())
+                chunk_queue.extend((pending, False) for pending in indexed_ready)
+                if control_chunk is not None:
+                    chunk_queue.append((control_chunk, False))
+                continue
+
+            if feed_pipeline and chunk.output_index is None and has_output_payload:
+                if indexed_outputs.saw_indexed_item:
+                    raise _IndexedOutputScheduler._protocol_error(
+                        "Responses stream mixed indexed and unindexed output items"
+                    )
+                saw_unindexed_output = True
+
+            if feed_pipeline and indexed_outputs.saw_indexed_item:
+                chunk_is_terminal = (
+                    chunk.terminal_outcome is not None or chunk.finish_reason is not None
+                )
+                if chunk_is_terminal:
+                    indexed_ready = indexed_outputs.finalize()
+                    if indexed_ready:
+                        chunk_queue.extend((pending, False) for pending in indexed_ready)
+                        chunk_queue.append((chunk, False))
+                        continue
+
+            chunk_is_terminal = (
+                chunk.terminal_outcome is not None or chunk.finish_reason is not None
+            )
+            if chunk.provenance_only:
+                if chunk.output_item_type == "reasoning":
+                    state.bind_reasoning_summary_index(chunk.reasoning_summary_index)
+                    if chunk.thinking_id:
+                        state.latch_reasoning_id(chunk.thinking_id)
+                elif chunk.output_item_type == "message":
+                    state.bind_empty_source_content_index(chunk.content_index)
+                if chunk.output_item_done:
+                    if chunk.output_item_type == "reasoning":
+                        for evt in state.close_open_reasoning():
+                            yield evt
+                        state.finish_empty_reasoning_item()
+                    elif chunk.output_item_type == "message":
+                        for evt in state.close_open_message():
+                            yield evt
+                        state.finish_empty_message_item()
+                if not chunk_is_terminal and chunk.usage is None:
+                    continue
+                chunk = replace(
+                    chunk,
+                    thinking_id=None,
+                    output_index=None,
+                    content_index=None,
+                    reasoning_summary_index=None,
+                    provenance_only=False,
+                    output_item_type=None,
+                    output_item_done=False,
+                )
+            chunk_has_reasoning = bool(
+                chunk.thinking or chunk.thinking_id or chunk.thinking_signature
+            )
+            has_non_reasoning_payload = bool(
+                chunk.content
+                or chunk.refusal
+                or chunk.tool_call
+                or chunk.usage
+                or chunk_is_terminal
+            )
+            # A reasoning item is not complete merely because its upstream id
+            # is known: Copilot may deliver the encrypted blob on a later
+            # output_item.done event. Keep any following canonical payload in
+            # order until the item is closed by that blob or by terminal/EOF.
+            # Include reasoning carried by this same chunk because deferral is
+            # decided before the chunk's reasoning fields are applied below.
+            reasoning_pending = state.reasoning_started or chunk_has_reasoning
+            defer_non_reasoning = reasoning_pending and has_non_reasoning_payload
+            if defer_non_reasoning and has_non_reasoning_payload:
+                deferred_chunks.append(
+                    replace(
+                        chunk,
+                        thinking=None,
+                        thinking_id=None,
+                        thinking_signature=None,
+                    )
+                )
+                chunk = replace(
+                    chunk,
+                    content="",
+                    refusal=None,
+                    tool_call=None,
+                    usage=None,
+                    finish_reason=None,
+                    terminal_outcome=None,
+                )
+
             # Handle reasoning summary text deltas. gpt-5.x and other thinking
             # models stream chain-of-thought via these events; if we don't
             # forward them, Codex sees only the final user-visible message and
@@ -660,55 +1445,42 @@ async def stream_response(
                 if state.message_started:
                     for evt in state.close_open_message():
                         yield evt
-                if not state.reasoning_started:
-                    # Prefer the upstream reasoning item id (e.g. ``rs_…``)
-                    # supplied on the delta event. Copilot signs the
-                    # encrypted_content blob against this id, so emitting a
-                    # locally-generated id would mismatch the blob and 400
-                    # the next turn.
-                    state.current_reasoning_id = chunk.thinking_id or generate_id("rs")
-                    state.reasoning_started = True
-                    state.summary_index = 0
-                    yield sse_event(
-                        {
-                            "type": "response.output_item.added",
-                            "output_index": state.output_index,
-                            "item": {
-                                "type": "reasoning",
-                                "id": state.current_reasoning_id,
-                                "summary": [],
-                            },
-                        }
-                    )
-                    yield sse_event(
-                        {
-                            "type": "response.reasoning_summary_part.added",
-                            "item_id": state.current_reasoning_id,
-                            "output_index": state.output_index,
-                            "summary_index": state.summary_index,
-                            "part": {"type": "summary_text", "text": ""},
-                        }
-                    )
-                state.accumulated_reasoning += chunk.thinking
-                yield sse_event(
-                    {
-                        "type": "response.reasoning_summary_text.delta",
-                        "item_id": state.current_reasoning_id,
-                        "output_index": state.output_index,
-                        "summary_index": state.summary_index,
-                        "delta": chunk.thinking,
-                    }
-                )
+                state.append_reasoning(chunk.thinking, chunk.reasoning_summary_index)
 
             # The upstream id may also arrive separately (e.g. on
             # output_item.done before any text deltas arrive). Capture it
             # so close_open_reasoning emits the correct (id, blob) pair.
-            if chunk.thinking_id and state.reasoning_started:
-                if state.current_reasoning_id != chunk.thinking_id:
-                    state.current_reasoning_id = chunk.thinking_id
+            if chunk.thinking_id:
+                if state.message_started and not state.reasoning_started:
+                    for evt in state.close_open_message():
+                        yield evt
+                state.bind_reasoning_id(chunk.thinking_id)
+
+            for evt in state.start_reasoning_events():
+                yield evt
+            for evt in state.flush_reasoning_events():
+                yield evt
 
             if chunk.thinking_signature:
+                if state.current_reasoning_id is None:
+                    raise ProviderError(
+                        "Reasoning signature is missing its upstream item id",
+                        status_code=502,
+                        retryable=True,
+                        kind=ProviderFailureKind.UPSTREAM_PROTOCOL,
+                    )
                 state.upstream_encrypted_content = chunk.thinking_signature
+
+            indexed_reasoning_done = (
+                chunk.output_item_done and chunk.output_item_type == "reasoning"
+            )
+            if chunk.thinking_signature or indexed_reasoning_done:
+                for evt in state.close_open_reasoning():
+                    yield evt
+                if indexed_reasoning_done:
+                    state.finish_empty_reasoning_item()
+
+            if chunk_is_terminal and deferred_chunks and state.reasoning_started:
                 for evt in state.close_open_reasoning():
                     yield evt
 
@@ -719,34 +1491,10 @@ async def stream_response(
                 # the items in order.
                 for evt in state.close_open_reasoning():
                     yield evt
-                if not state.message_started:
-                    state.current_message_id = generate_id("msg")
-                    state.message_started = True
-
-                    # Note: content starts as empty array, matching OpenAI spec
-                    yield sse_event(
-                        {
-                            "type": "response.output_item.added",
-                            "output_index": state.output_index,
-                            "item": {
-                                "type": "message",
-                                "id": state.current_message_id,
-                                "role": "assistant",
-                                "content": [],
-                                "status": "in_progress",
-                            },
-                        }
-                    )
-
-                    yield sse_event(
-                        {
-                            "type": "response.content_part.added",
-                            "item_id": state.current_message_id,
-                            "output_index": state.output_index,
-                            "content_index": state.content_index,
-                            "part": make_text_content(""),
-                        }
-                    )
+                for evt in state.bind_source_content_index(chunk.content_index):
+                    yield evt
+                for evt in state.start_message_part("output_text"):
+                    yield evt
 
                 state.accumulated_content += chunk.content
 
@@ -757,6 +1505,24 @@ async def stream_response(
                         "output_index": state.output_index,
                         "content_index": state.content_index,
                         "delta": chunk.content,
+                    }
+                )
+
+            if chunk.refusal:
+                for evt in state.close_open_reasoning():
+                    yield evt
+                for evt in state.bind_source_content_index(chunk.content_index):
+                    yield evt
+                for evt in state.start_message_part("refusal"):
+                    yield evt
+                state.accumulated_refusal += chunk.refusal
+                yield sse_event(
+                    {
+                        "type": "response.refusal.delta",
+                        "item_id": state.current_message_id,
+                        "output_index": state.output_index,
+                        "content_index": state.content_index,
+                        "delta": chunk.refusal,
                     }
                 )
 
@@ -908,6 +1674,11 @@ async def stream_response(
                     state.output_items.append(fc_item)
                     state.output_index += 1
 
+            if chunk.output_item_done and chunk.output_item_type == "message":
+                for evt in state.close_open_message():
+                    yield evt
+                state.finish_empty_message_item()
+
             if chunk.usage:
                 final_usage = chunk.usage
 
@@ -936,6 +1707,10 @@ async def stream_response(
                     ),
                 )
                 return
+
+            if deferred_chunks and not state.reasoning_started:
+                chunk_queue.extend((pending, False) for pending in deferred_chunks)
+                deferred_chunks = []
 
         terminal_outcome = unexpected_eof_outcome()
         logger.warning(
@@ -979,7 +1754,17 @@ async def stream_response(
         )
 
     except ProviderError as e:
-        terminal_outcome = exception_outcome(str(e), code="provider_error")
+        outcome_code = (
+            "upstream_protocol_error"
+            if e.kind is ProviderFailureKind.UPSTREAM_PROTOCOL
+            else "provider_error"
+        )
+        wire_error_code = (
+            "upstream_protocol_error"
+            if e.kind is ProviderFailureKind.UPSTREAM_PROTOCOL
+            else "server_error"
+        )
+        terminal_outcome = exception_outcome(str(e), code=outcome_code)
         elapsed_ms = (time.time() - start_time) * 1000
         logger.error(
             "Stream failed: req_id=%s, elapsed=%.1fms, error=%s",
@@ -1002,10 +1787,10 @@ async def stream_response(
                     "object": "response",
                     "status": "failed",
                     "created_at": created_at,
-                    "model": request.model,
+                    "model": response_model,
                     "output": [],
                     "error": {
-                        "code": "server_error",
+                        "code": wire_error_code,
                         "message": str(e),
                     },
                     "incomplete_details": None,
@@ -1042,7 +1827,7 @@ async def stream_response(
                     "object": "response",
                     "status": "failed",
                     "created_at": created_at,
-                    "model": request.model,
+                    "model": response_model,
                     "output": [],
                     "error": {
                         "code": "server_error",
@@ -1111,36 +1896,3 @@ def _terminal_response_event(
             },
         }
     )
-
-
-def _close_message_events(
-    msg_id: str, output_index: int, content_index: int, text: str
-) -> list[str]:
-    """Generate events to close a message output item."""
-    return [
-        sse_event(
-            {
-                "type": "response.output_text.done",
-                "item_id": msg_id,
-                "output_index": output_index,
-                "content_index": content_index,
-                "text": text,
-            }
-        ),
-        sse_event(
-            {
-                "type": "response.content_part.done",
-                "item_id": msg_id,
-                "output_index": output_index,
-                "content_index": content_index,
-                "part": make_text_content(text),
-            }
-        ),
-        sse_event(
-            {
-                "type": "response.output_item.done",
-                "output_index": output_index,
-                "item": make_message_item(msg_id, text),
-            }
-        ),
-    ]

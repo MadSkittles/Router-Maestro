@@ -19,6 +19,19 @@ This document is the approved implementation plan. Decisions A–C were approved
 - Phase 0 implementation and independent final review completed on 2026-07-11.
 - Phase 0 verification: `1330 passed`; Ruff, formatting, and `git diff --check` pass.
 - Phase 0 unbounded live Copilot integration: `66 passed, 1 skipped` in 15:04.
+- Phase 1 Tasks 6–10 implementation and final independent review completed on
+  2026-07-14. The final specification/scope gate reported
+  `0 Critical / 0 Important / 0 Minor`; the engineering-quality gate reported
+  `0 Critical / 0 Important` and retained three non-blocking consolidation
+  observations for Phase 2 (shared stream priming, prepared Chat snapshot
+  binding, and Chat-to-Responses transport-policy ownership).
+- Phase 1 full unit verification: `3002 passed` in 7.08s. Ruff lint and format
+  checks pass for `src/`, `tests/`, and `integration_tests/`; `git diff --check`
+  passes.
+- Phase 1 unbounded live Copilot integration: `73 passed, 3 skipped` in 24:06.
+  No model-matrix limiting environment variable was set.
+- Phase 1 local acceptance gates are complete. Landing through the Phase 1
+  pull request is pending.
 - Tasks may proceed phase-by-phase except deferred Task 19.
 - Each phase lands through its own pull request and leaves the full unit suite green.
 - Before creating every phase PR, run `uv run pytest tests/ -v`, both Ruff checks, and the unbounded `make integration-test`. A bounded model matrix is useful during development but never satisfies the phase gate.
@@ -327,13 +340,13 @@ auth/repository.py
 - Test: `tests/test_anthropic_beta.py`
 - Create: `tests/test_provider_capabilities.py`
 
-- [ ] **Step 1: Add capability selection tests**
+- [x] **Step 1: Add capability selection tests**
 
   Cover Chat, Chat stream, Responses, Responses stream, native Anthropic, tools, vision, parallel tools, and reasoning. Include two models from the same provider with different support (for example, a Copilot Claude model that can use native Anthropic and a Copilot GPT model that cannot). The beta-native messages route must request `Operation.NATIVE_ANTHROPIC` through `RoutePlan`; replace its local `_is_native_eligible()` authority with the same model capability result. The key regression is an auto-routed Responses request whose first priority cannot perform Responses but the second can.
 
   Token counting is deliberately not a completion-routing operation in this task: local estimates and exact provider token APIs have protocol-specific inputs and must not silently fall back to a different tokenizer/model. Count-token routes may use public `ModelRef` resolution, and Task 14 replaces the beta route's private Copilot transport call with a public facade method.
 
-- [ ] **Step 2: Define the minimal types**
+- [x] **Step 2: Define the minimal types**
 
   ```python
   class Operation(StrEnum):
@@ -358,7 +371,7 @@ auth/repository.py
 
   Define separate `ProviderCapabilities` (transport-level operations implemented by a provider) and tri-state `ModelCapabilities` (supported/unsupported/unknown operations and features for one catalog model). Bind `ModelCapabilities` to a `ModelRef`/catalog entry; do not infer that every model supports an operation because one model from that provider does.
 
-- [ ] **Step 3: Add public provider capability declarations**
+- [x] **Step 3: Add public provider capability declarations**
 
   Default `BaseProvider` to its actually implemented operations. Override only where a provider differs. Populate model capabilities from `ModelInfo`, catalog metadata, and existing explicit compatibility rules, preserving the distinction between unknown support and explicit `False`. Lock this decision matrix in tests:
 
@@ -370,13 +383,15 @@ auth/repository.py
   | Explicit `provider/model` | unsupported | Return the entry protocol's native 400 and do not switch models. |
   | Explicit `provider/model` | unknown | Permit the attempt for backward compatibility; a typed unsupported result is non-retryable and does not switch models. |
 
+  Erratum: `Operation.NATIVE_ANTHROPIC` describes provider transport eligibility; on beta Messages, adapt an explicitly selected `ModelRef` without that transport through the standard translated handler for the same model (not model fallback), while explicitly unsupported request features or options—including tools, vision, or reasoning—remain native 400s and Decision A may switch models only after a retryable execution failure.
+
   Decision A applies to retryable provider/transport failures after a valid explicit primary is selected. It does not turn an explicit static capability mismatch or invalid request into permission to substitute a different model.
 
-- [ ] **Step 4: Return a `RoutePlan` from resolution**
+- [x] **Step 4: Return a `RoutePlan` from resolution**
 
   Resolve Decision A in these tests because candidate enumeration is part of the first `RoutePlan` contract. The plan contains the primary and filtered/ranked fallback candidates, each with its `ModelRef` and effective tri-state capabilities. Keep `Router` as the public facade during migration. Make beta-native messages consume this plan for `NATIVE_ANTHROPIC`; leave count-token behavior scoped as described above.
 
-- [ ] **Step 5: Verify**
+- [x] **Step 5: Verify**
 
   Run: `uv run pytest tests/test_provider_capabilities.py tests/test_router_advanced.py tests/test_anthropic_beta.py tests/test_providers.py -v`
 
@@ -393,23 +408,23 @@ auth/repository.py
 - Test: `tests/test_providers_advanced.py`
 - Create: `tests/test_provider_protocol_errors.py`
 
-- [ ] **Step 1: Add malformed 2xx tests**
+- [x] **Step 1: Add malformed 2xx tests**
 
   Cover invalid JSON, HTML, empty choices/content, bad SSE JSON before first chunk, and bad SSE JSON after first chunk.
 
-- [ ] **Step 2: Add a typed provider failure contract**
+- [x] **Step 2: Add a typed provider failure contract**
 
   At minimum distinguish transport, authentication, rate limit, upstream status, upstream protocol, unsupported operation, and client request. Carry HTTP status, safe client message, retryability, provider/model context, and original cause. This is the sole error-kind vocabulary used by the later attempt ledger and protocol encoders.
 
-- [ ] **Step 3: Catch adapter-boundary parser failures**
+- [x] **Step 3: Catch adapter-boundary parser failures**
 
   Convert `JSONDecodeError`, `KeyError`, `IndexError`, and schema violations into a 502 upstream-protocol failure. Mark it retryable before stream commitment.
 
-- [ ] **Step 4: Preserve the stream commit distinction**
+- [x] **Step 4: Preserve the stream commit distinction**
 
   Expose malformed events before the primed first chunk as retryable provider failures. After the first chunk is committed, surface the same typed failure to the protocol stream encoder without replay or provider switching.
 
-- [ ] **Step 5: Verify**
+- [x] **Step 5: Verify**
 
   Run: `uv run pytest tests/test_provider_protocol_errors.py tests/test_providers.py tests/test_providers_advanced.py -v`
 
@@ -424,27 +439,27 @@ auth/repository.py
 - Test: `tests/test_provider_protocol_errors.py`
 - Create: `tests/test_fallback_attempts.py`
 
-- [ ] **Step 1: Add a shared stream/non-stream attempt matrix**
+- [x] **Step 1: Add a shared stream/non-stream attempt matrix**
 
   Cover primary retryable failure, secondary fatal failure, all retryable failures, auth failure, malformed upstream protocol failure from Task 7, and max retry count.
 
-- [ ] **Step 2: Verify the RoutePlan candidate contract**
+- [x] **Step 2: Verify the RoutePlan candidate contract**
 
   Reuse the Decision A behavior fixed by Task 6 and assert execution consumes candidates in exactly that order without recomputing priorities mid-request.
 
-- [ ] **Step 3: Implement a shared attempt ledger**
+- [x] **Step 3: Implement a shared attempt ledger**
 
   Record provider, `ModelRef`, operation, HTTP status (when one exists), typed failure kind, and retryability. Stop on non-retryable errors. On exhaustion, raise the last meaningful failure or a typed `AllProvidersFailed` that preserves all attempts.
 
-- [ ] **Step 4: Keep the stream commit point**
+- [x] **Step 4: Keep the stream commit point**
 
   Continue priming the first chunk before exposing the iterator. A failure before the first chunk may select the next planned candidate; once the first chunk is committed, never switch providers.
 
-- [ ] **Step 5: Add structured fallback logging/metrics**
+- [x] **Step 5: Add structured fallback logging/metrics**
 
   Reuse the existing observability mechanism; do not add a second metrics registry.
 
-- [ ] **Step 6: Verify**
+- [x] **Step 6: Verify**
 
   Run: `uv run pytest tests/test_fallback_attempts.py tests/test_provider_protocol_errors.py tests/test_router_advanced.py tests/test_observability_metrics.py -v`
 
@@ -463,23 +478,23 @@ auth/repository.py
 - Test: `tests/test_anthropic_models.py`
 - Test: `tests/test_router_advanced.py`
 
-- [ ] **Step 1: Resolve Decision B and add round-trip tests**
+- [x] **Step 1: Resolve Decision B and add round-trip tests**
 
   A model selected from a public list must route back to the same provider. Cover two providers exposing the same upstream ID.
 
-- [ ] **Step 2: Return unique public identifiers**
+- [x] **Step 2: Return unique public identifiers**
 
   Keep `ModelRef` internally and encode the agreed public ID at the route boundary.
 
-- [ ] **Step 3: Make fuzzy score authoritative**
+- [x] **Step 3: Make fuzzy score authoritative**
 
   Choose the highest score first. Use model date/version only to break ties within the same normalized family. Return an ambiguity error when confidence is too low or top candidates are effectively tied across families.
 
-- [ ] **Step 4: Verify aliases and provider scoping**
+- [x] **Step 4: Verify aliases and provider scoping**
 
   Preserve dot/hyphen aliases and ensure `provider/query` never crosses providers.
 
-- [ ] **Step 5: Verify**
+- [x] **Step 5: Verify**
 
   Run: `uv run pytest tests/test_model_match.py tests/test_models_route.py tests/test_anthropic_models.py tests/test_router_advanced.py -v`
 
@@ -504,23 +519,23 @@ auth/repository.py
 - Create: `tests/test_provider_option_fidelity.py`
 - Create: `tests/test_protocol_error_envelopes.py`
 
-- [ ] **Step 1: Create an option-fidelity matrix**
+- [x] **Step 1: Create an option-fidelity matrix**
 
   Cover `top_p`, frequency/presence penalties, stop, user, top_k, stop sequences, metadata, service tier, temperature, and reasoning effort across each provider/operation.
 
-- [ ] **Step 2: Resolve Decision C**
+- [x] **Step 2: Resolve Decision C**
 
   Encode each provider's `supported`, `translated`, `substituted-down`, and `rejected` behavior in tests. Add explicit coverage showing the recommended policy never maps a requested reasoning tier upward; if the compatibility alternative is chosen, assert that every upward substitution is surfaced rather than silently called a downgrade.
 
-- [ ] **Step 3: Add typed fields**
+- [x] **Step 3: Add typed fields**
 
   Move supported cross-protocol options out of `extra`. Retain a narrowly scoped provider-extension map only if a real use case remains; it must not overwrite core payload fields with `dict.update()`.
 
-- [ ] **Step 4: Make bridges preserve or reject options**
+- [x] **Step 4: Make bridges preserve or reject options**
 
   Chat → Responses and Anthropic/Gemini translations must not silently lose accepted options. Introduce the minimal shared `CLIENT_REQUEST` failure mapping and protocol error encoder here so rejection produces the correct native 400; Task 13 later expands the same encoder to all error sources and stream phases rather than migrating route-specific `HTTPException(detail=...)` bodies.
 
-- [ ] **Step 5: Verify**
+- [x] **Step 5: Verify**
 
   Run: `uv run pytest tests/test_provider_option_fidelity.py tests/test_chat_route_options.py tests/test_gemini_routes.py tests/test_thinking_passthrough.py tests/test_protocol_error_envelopes.py -v`
 

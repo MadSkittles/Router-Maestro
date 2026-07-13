@@ -20,6 +20,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from router_maestro.providers.base import ChatResponse
+from router_maestro.routing.capabilities import CapabilitySupport
 from router_maestro.server.routes.anthropic import (
     _MID_CONV_SYSTEM_BETA,
     router,
@@ -38,6 +39,23 @@ def client(app):
     return TestClient(app)
 
 
+def _add_planning_contract(
+    model_router: MagicMock,
+    *,
+    provider: str,
+    model: str,
+) -> object:
+    """Give a route-focused mock the Router planning seam used by Messages."""
+    route_plan = MagicMock()
+    route_plan.primary.capabilities.feature.return_value = CapabilitySupport.UNKNOWN
+    route_plan.primary.capabilities.max_output_tokens = None
+    route_plan.primary.model.qualified_id = f"{provider}/{model}"
+    prepared_plan = object()
+    model_router.plan_chat_completion = AsyncMock(return_value=route_plan)
+    model_router.prepare_planned_chat_completion = MagicMock(return_value=prepared_plan)
+    return prepared_plan
+
+
 @pytest.fixture
 def mock_router_success():
     """A router that returns a trivial assistant response so non-rejected
@@ -52,6 +70,11 @@ def mock_router_success():
     mock.chat_completion = AsyncMock(return_value=(response, "anthropic"))
     mock._resolve_provider = AsyncMock(return_value=("anthropic", "claude-opus-4-8", MagicMock()))
     mock.get_model_info = AsyncMock(return_value=None)
+    _add_planning_contract(
+        mock,
+        provider="anthropic",
+        model="claude-opus-4-8",
+    )
     return mock
 
 
@@ -166,3 +189,80 @@ class TestMidConvSystemRejection:
                 headers={"anthropic-beta": _MID_CONV_SYSTEM_BETA},
             )
         assert response.status_code == 400
+
+
+def test_standard_messages_routes_exact_older_dated_model_without_family_rewrite(client):
+    older = "claude-sonnet-4-20250101"
+    newer = "claude-sonnet-4-20260101"
+    received_models: list[str] = []
+
+    async def chat_completion(request, *, prepared_plan=None):
+        received_models.append(request.model)
+        selected = newer if request.model == "claude-sonnet-4" else request.model
+        return (
+            ChatResponse(
+                content="ok",
+                model=selected,
+                finish_reason="stop",
+                usage={"prompt_tokens": 1, "completion_tokens": 1},
+            ),
+            "anthropic",
+        )
+
+    model_router = MagicMock()
+    model_router.chat_completion = AsyncMock(side_effect=chat_completion)
+    model_router.get_model_info = AsyncMock(return_value=None)
+    _add_planning_contract(
+        model_router,
+        provider="anthropic",
+        model=older,
+    )
+
+    with patch("router_maestro.server.routes.anthropic.get_router", return_value=model_router):
+        response = client.post(
+            "/v1/messages",
+            json={
+                "model": older,
+                "max_tokens": 16,
+                "messages": [{"role": "user", "content": "Hi"}],
+            },
+        )
+
+    assert response.status_code == 200
+    assert received_models == [older]
+    assert response.json()["model"] == f"anthropic/{older}"
+
+
+@pytest.mark.parametrize("upstream_model", ["shared-model", "first/shared-model"])
+def test_standard_messages_qualifies_actual_provider_exactly_once(client, upstream_model):
+    model_router = MagicMock()
+    model_router.chat_completion = AsyncMock(
+        return_value=(
+            ChatResponse(
+                content="ok",
+                model=upstream_model,
+                finish_reason="stop",
+                usage={"prompt_tokens": 1, "completion_tokens": 1},
+            ),
+            "first",
+        )
+    )
+    model_router.get_model_info = AsyncMock(return_value=None)
+    _add_planning_contract(
+        model_router,
+        provider="first",
+        model="shared-model",
+    )
+
+    with patch("router_maestro.server.routes.anthropic.get_router", return_value=model_router):
+        response = client.post(
+            "/v1/messages",
+            json={
+                "model": "shared-model",
+                "max_tokens": 16,
+                "messages": [{"role": "user", "content": "Hi"}],
+            },
+        )
+
+    assert response.status_code == 200
+    assert response.json()["model"] == "first/shared-model"

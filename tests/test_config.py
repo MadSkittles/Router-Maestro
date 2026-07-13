@@ -9,6 +9,7 @@ from unittest.mock import patch
 
 import pytest
 import tomlkit
+from rich.console import Console
 
 from router_maestro.cli import config as cli_config
 from router_maestro.cli.config import (
@@ -17,8 +18,11 @@ from router_maestro.cli.config import (
     _OPUS_47_1M_NATIVE_KEY,
     _OPUS_48_1M_NATIVE_KEY,
     _SONNET_46_1M_NATIVE_KEY,
+    _display_models,
     _maybe_inject_opus_1m,
+    _model_key,
     _prompt_auto_compact_window,
+    _prompt_endpoint_mode,
     _select_model,
 )
 from router_maestro.config.contexts import ContextConfig, ContextsConfig
@@ -192,6 +196,37 @@ class TestSelectModel:
         result = _select_model(self._make_models(), "Pick")
         assert result == "github-copilot/gpt-4o"
 
+    def test_qualified_server_id_is_not_double_prefixed(self, monkeypatch):
+        monkeypatch.setattr("router_maestro.cli.config.Prompt.ask", lambda *a, **kw: "1")
+        models = [
+            {
+                "provider": "github-copilot",
+                "id": "github-copilot/gpt-5.5",
+                "name": "GPT-5.5",
+            }
+        ]
+
+        assert _select_model(models, "Pick") == "github-copilot/gpt-5.5"
+        assert _model_key(models[0]) == "github-copilot/gpt-5.5"
+
+    def test_display_uses_qualified_server_id_once(self, monkeypatch):
+        output = Console(record=True, width=120)
+        monkeypatch.setattr(cli_config, "console", output)
+
+        _display_models(
+            [
+                {
+                    "provider": "github-copilot",
+                    "id": "github-copilot/gpt-5.5",
+                    "name": "GPT-5.5",
+                }
+            ]
+        )
+
+        rendered = output.export_text()
+        assert "github-copilot/gpt-5.5" in rendered
+        assert "github-copilot/github-copilot/gpt-5.5" not in rendered
+
     def test_returns_custom_key(self, monkeypatch):
         """Selection of model with custom_key returns the custom key."""
         models = [
@@ -206,6 +241,27 @@ class TestSelectModel:
         monkeypatch.setattr("router_maestro.cli.config.Prompt.ask", lambda *a, **kw: "3")
         result = _select_model(models, "Pick")
         assert result == _OPUS_1M_NATIVE_KEY
+
+    def test_injected_1m_model_keeps_native_display_and_provider_qualified_wire_key(
+        self,
+        monkeypatch,
+    ):
+        models = _maybe_inject_opus_1m(
+            [
+                {
+                    "provider": "github-copilot",
+                    "id": "claude-opus-4.6",
+                    "name": "Claude Opus 4.6",
+                    "max_context_window_tokens": 1_000_000,
+                }
+            ]
+        )
+        synthetic = models[0]
+        monkeypatch.setattr("router_maestro.cli.config.Prompt.ask", lambda *a, **kw: "1")
+
+        assert synthetic["display_key"] == _OPUS_1M_NATIVE_KEY
+        assert _model_key(synthetic) == f"github-copilot/{_OPUS_1M_NATIVE_KEY}"
+        assert _select_model(models, "Pick") == f"github-copilot/{_OPUS_1M_NATIVE_KEY}"
 
     def test_auto_routing(self, monkeypatch):
         """Choice 0 returns router-maestro for auto-routing."""
@@ -232,7 +288,12 @@ class TestMaybeInjectOpus1M:
     def test_prepends_synthetic_entry_when_1m_model_present(self):
         """Synthetic entry is prepended when the source model exists."""
         models = [
-            {"provider": "github-copilot", "id": "claude-opus-4.6", "name": "Claude Opus 4.6"},
+            {
+                "provider": "github-copilot",
+                "id": "claude-opus-4.6",
+                "name": "Claude Opus 4.6",
+                "max_context_window_tokens": 1_000_000,
+            },
         ]
 
         result = _maybe_inject_opus_1m(models)
@@ -240,11 +301,52 @@ class TestMaybeInjectOpus1M:
         assert len(result) == 2
         assert len(models) == 1  # original list not mutated
         synthetic = result[0]
-        assert synthetic["custom_key"] == _OPUS_1M_NATIVE_KEY
+        assert synthetic["wire_key"] == f"github-copilot/{_OPUS_1M_NATIVE_KEY}"
         assert synthetic["display_key"] == _OPUS_1M_NATIVE_KEY
         assert synthetic["name"] == "Opus 4.6 1M (Auto-activated)"
         assert synthetic["provider"] == "github-copilot"
         assert synthetic["id"] == "claude-opus-4.6"
+
+    @pytest.mark.parametrize(
+        "context_metadata",
+        [
+            {"max_context_window_tokens": 1_000_000},
+            {"max_prompt_tokens": 936_000, "max_output_tokens": 64_000},
+        ],
+        ids=["explicit-context-window", "prompt-plus-output"],
+    )
+    def test_qualified_server_source_with_1m_metadata_injects_synthetic_entry(
+        self,
+        context_metadata,
+    ):
+        models = [
+            {
+                "provider": "github-copilot",
+                "id": "github-copilot/claude-opus-4.6",
+                "name": "Claude Opus 4.6",
+                **context_metadata,
+            }
+        ]
+
+        result = _maybe_inject_opus_1m(models)
+
+        assert result[0]["wire_key"] == f"github-copilot/{_OPUS_1M_NATIVE_KEY}"
+        assert result[0]["id"] == "claude-opus-4.6"
+        assert _model_key(result[0]) == f"github-copilot/{_OPUS_1M_NATIVE_KEY}"
+
+    def test_source_without_advertised_1m_context_is_not_injected(self):
+        models = [
+            {
+                "provider": "github-copilot",
+                "id": "claude-opus-4.6",
+                "name": "Claude Opus 4.6",
+                "max_context_window_tokens": 999_999,
+            }
+        ]
+
+        result = _maybe_inject_opus_1m(models)
+
+        assert result is models
 
     def test_no_injection_when_1m_model_absent(self):
         """No synthetic entry when the source model is not in the list."""
@@ -286,11 +388,17 @@ class TestMaybeInjectOpus1M:
         """4.8 and sonnet-4.6 have no dedicated -1m variant; the synthetic
         entries map their [1m] native key straight to the base catalog id."""
         models = [
-            {"provider": "github-copilot", "id": "claude-opus-4.8", "name": "Claude Opus 4.8"},
+            {
+                "provider": "github-copilot",
+                "id": "claude-opus-4.8",
+                "name": "Claude Opus 4.8",
+                "max_context_window_tokens": 1_000_000,
+            },
             {
                 "provider": "github-copilot",
                 "id": "claude-sonnet-4.6",
                 "name": "Claude Sonnet 4.6",
+                "max_context_window_tokens": 1_000_000,
             },
         ]
 
@@ -298,14 +406,34 @@ class TestMaybeInjectOpus1M:
 
         # Two new synthetic entries appear before the originals.
         assert len(result) == 4
-        custom_keys = {m.get("custom_key") for m in result if "custom_key" in m}
-        assert _OPUS_48_1M_NATIVE_KEY in custom_keys
-        assert _SONNET_46_1M_NATIVE_KEY in custom_keys
+        display_keys = {m.get("display_key") for m in result if "display_key" in m}
+        assert _OPUS_48_1M_NATIVE_KEY in display_keys
+        assert _SONNET_46_1M_NATIVE_KEY in display_keys
         # The synthetic entries point at the base ids — there is no -1m suffix
         # on the catalog side for these.
-        synthetic_by_key = {m["custom_key"]: m for m in result if "custom_key" in m}
+        synthetic_by_key = {m["display_key"]: m for m in result if "display_key" in m}
         assert synthetic_by_key[_OPUS_48_1M_NATIVE_KEY]["id"] == "claude-opus-4.8"
         assert synthetic_by_key[_SONNET_46_1M_NATIVE_KEY]["id"] == "claude-sonnet-4.6"
+
+
+@pytest.mark.parametrize(
+    "model_id",
+    ["claude-opus-4.6", "github-copilot/claude-opus-4.6"],
+    ids=["legacy-bare", "qualified-server"],
+)
+def test_claude_endpoint_prompt_recognizes_bare_upstream_id(monkeypatch, model_id):
+    monkeypatch.setattr(cli_config.Prompt, "ask", lambda *a, **kw: "2")
+
+    assert (
+        _prompt_endpoint_mode(
+            {
+                "provider": "github-copilot",
+                "id": model_id,
+                "name": "Claude Opus 4.6",
+            }
+        )
+        is True
+    )
 
 
 class TestPromptAutoCompactWindow:
@@ -315,12 +443,13 @@ class TestPromptAutoCompactWindow:
     """
 
     @staticmethod
-    def _synthetic(custom_key: str) -> dict:
+    def _synthetic(native_key: str) -> dict:
         """A model dict shaped like the synthetic entries _maybe_inject_opus_1m emits."""
         return {
             "provider": "github-copilot",
             "id": "ignored-base-id",
-            "custom_key": custom_key,
+            "display_key": native_key,
+            "wire_key": f"github-copilot/{native_key}",
             "name": "test",
         }
 
@@ -409,6 +538,26 @@ def _setup_codex_env(
     return home, cwd
 
 
+def _qualified_server_models() -> list[dict]:
+    return [
+        {
+            "provider": "github-copilot",
+            "id": "github-copilot/gpt-5.5",
+            "name": "GPT-5.5",
+        },
+        {
+            "provider": "github-copilot",
+            "id": "github-copilot/claude-opus-4.6",
+            "name": "Claude Opus 4.6",
+        },
+        {
+            "provider": "github-copilot",
+            "id": "github-copilot/gemini-2.5-pro",
+            "name": "Gemini 2.5 Pro",
+        },
+    ]
+
+
 class TestCodexConfig:
     """Tests for ``router-maestro config codex`` (the ``codex_config`` CLI command)."""
 
@@ -431,6 +580,20 @@ class TestCodexConfig:
             "env_key": "ROUTER_MAESTRO_API_KEY",
             "wire_api": "responses",
         }
+
+    def test_qualified_server_model_writes_single_provider_prefix(self, tmp_path, monkeypatch):
+        home, _ = _setup_codex_env(monkeypatch, tmp_path, level_choice="1")
+        monkeypatch.setattr(
+            cli_config,
+            "_fetch_and_display_models",
+            lambda: _qualified_server_models(),
+        )
+
+        cli_config.codex_config()
+
+        with open(home / ".codex" / "config.toml", "rb") as f:
+            data = tomllib.load(f)
+        assert data["model"] == "github-copilot/gpt-5.5"
 
     def test_project_level_writes_only_model(self, tmp_path, monkeypatch):
         """Project-level scope must NOT write ``model_provider``/``model_providers``."""
@@ -506,3 +669,80 @@ class TestCodexConfig:
         assert "model_provider" not in data
         assert "router-maestro" not in data["model_providers"]
         assert data["model_providers"]["other"]["name"] == "User Custom"
+
+
+def test_claude_config_qualified_models_write_single_prefix_and_offer_beta(
+    tmp_path,
+    monkeypatch,
+):
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setattr(cli_config.Path, "home", classmethod(lambda cls: home))
+    monkeypatch.setattr(cli_config.Path, "cwd", classmethod(lambda cls: tmp_path))
+    monkeypatch.setattr(cli_config, "_fetch_models", _qualified_server_models)
+    monkeypatch.setattr(cli_config, "get_admin_client", lambda: _StubAdminClient())
+    monkeypatch.setattr(cli_config, "get_current_context_api_key", lambda: "test-key")
+    monkeypatch.setattr(cli_config, "_prompt_auto_compact_window", lambda _model: None)
+    answers = iter(["1", "2", "1", "2"])
+    monkeypatch.setattr(cli_config.Prompt, "ask", lambda *a, **kw: next(answers))
+    monkeypatch.setattr(cli_config.Confirm, "ask", lambda *a, **kw: False)
+
+    cli_config.claude_code_config()
+
+    data = json.loads((home / ".claude" / "settings.json").read_text(encoding="utf-8"))
+    assert data["env"]["ANTHROPIC_MODEL"] == "github-copilot/claude-opus-4.6"
+    assert data["env"]["ANTHROPIC_SMALL_FAST_MODEL"] == "github-copilot/gpt-5.5"
+    assert data["env"]["ANTHROPIC_BASE_URL"].endswith("/api/anthropic/beta")
+
+
+def test_claude_config_writes_provider_qualified_native_1m_key(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setattr(cli_config.Path, "home", classmethod(lambda cls: home))
+    monkeypatch.setattr(cli_config.Path, "cwd", classmethod(lambda cls: tmp_path))
+    monkeypatch.setattr(
+        cli_config,
+        "_fetch_models",
+        lambda: [
+            {
+                "provider": "github-copilot",
+                "id": "github-copilot/claude-opus-4.6",
+                "name": "Claude Opus 4.6",
+                "max_context_window_tokens": 1_000_000,
+            }
+        ],
+    )
+    monkeypatch.setattr(cli_config, "get_admin_client", lambda: _StubAdminClient())
+    monkeypatch.setattr(cli_config, "get_current_context_api_key", lambda: "test-key")
+    monkeypatch.setattr(cli_config, "_prompt_auto_compact_window", lambda _model: None)
+    monkeypatch.setattr(cli_config, "_prompt_endpoint_mode", lambda _model: False)
+    answers = iter(["1", "1", "2"])
+    monkeypatch.setattr(cli_config.Prompt, "ask", lambda *a, **kw: next(answers))
+    monkeypatch.setattr(cli_config.Confirm, "ask", lambda *a, **kw: False)
+
+    cli_config.claude_code_config()
+
+    data = json.loads((home / ".claude" / "settings.json").read_text(encoding="utf-8"))
+    assert data["env"]["ANTHROPIC_MODEL"] == f"github-copilot/{_OPUS_1M_NATIVE_KEY}"
+
+
+def test_gemini_config_qualified_model_preserves_public_id(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setattr(cli_config.Path, "home", classmethod(lambda cls: home))
+    monkeypatch.setattr(cli_config.Path, "cwd", classmethod(lambda cls: tmp_path))
+    monkeypatch.setattr(
+        cli_config,
+        "_fetch_and_display_models",
+        lambda: [_qualified_server_models()[2]],
+    )
+    monkeypatch.setattr(cli_config, "get_admin_client", lambda: _StubAdminClient())
+    monkeypatch.setattr(cli_config, "get_current_context_api_key", lambda: "test-key")
+    answers = iter(["1", "1"])
+    monkeypatch.setattr(cli_config.Prompt, "ask", lambda *a, **kw: next(answers))
+    monkeypatch.setattr(cli_config.Confirm, "ask", lambda *a, **kw: False)
+
+    cli_config.gemini_cli_config()
+
+    env = cli_config._parse_env_file(home / ".gemini" / ".env")
+    assert env["GEMINI_MODEL"] == "github-copilot/gemini-2.5-pro"

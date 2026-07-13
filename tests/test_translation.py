@@ -20,14 +20,14 @@ class TestModelNameTranslation:
     """Tests for model name translation."""
 
     def test_translate_claude_with_date_suffix(self):
-        """Test removing date suffix from Claude model names."""
+        """A concrete dated catalog identity must reach Router unchanged."""
         result = _translate_model_name("claude-sonnet-4-20250514")
-        assert result == "claude-sonnet-4"
+        assert result == "claude-sonnet-4-20250514"
 
     def test_translate_claude_opus_with_date_suffix(self):
-        """Test removing date suffix from Claude Opus."""
+        """Dated Opus identities are exact model selections, not family aliases."""
         result = _translate_model_name("claude-opus-4-20250101")
-        assert result == "claude-opus-4"
+        assert result == "claude-opus-4-20250101"
 
     def test_preserve_version_suffix(self):
         """Test preserving version numbers like .5."""
@@ -35,9 +35,9 @@ class TestModelNameTranslation:
         assert result == "claude-opus-4.5"
 
     def test_preserve_version_with_date(self):
-        """Test model with version and date suffix."""
+        """Preserve both dotted version and date for exact routing."""
         result = _translate_model_name("claude-sonnet-4.5-20250514")
-        assert result == "claude-sonnet-4.5"
+        assert result == "claude-sonnet-4.5-20250514"
 
     def test_non_claude_model_unchanged(self):
         """Test that non-Claude models pass through unchanged."""

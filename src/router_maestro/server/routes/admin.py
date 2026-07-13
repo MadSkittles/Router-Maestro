@@ -18,6 +18,7 @@ from router_maestro.config import (
     save_priorities_config,
 )
 from router_maestro.routing import get_router, reset_router
+from router_maestro.routing.model_ref import catalog_model_public_id
 from router_maestro.server.oauth_sessions import oauth_sessions
 from router_maestro.server.schemas.admin import (
     AuthListResponse,
@@ -232,7 +233,11 @@ async def list_models() -> ModelsResponse:
     model_list = [
         ModelInfo(
             provider=model.provider,
-            id=model.id,
+            id=catalog_model_public_id(
+                model.provider,
+                model.id,
+                id_is_qualified=model.id_is_qualified,
+            ),
             name=model.name,
             max_prompt_tokens=model.max_prompt_tokens,
             max_output_tokens=model.max_output_tokens,

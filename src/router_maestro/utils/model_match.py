@@ -7,9 +7,24 @@ from rapidfuzz import fuzz, process
 from router_maestro.providers.base import ModelInfo
 from router_maestro.utils.model_sort import parse_model_id, strip_date_suffix
 
+MIN_MATCH_SCORE = 80.0
+CONFIDENT_MATCH_SCORE = 85.0
+AMBIGUITY_SCORE_MARGIN = 1.0
+
+
+class AmbiguousModelMatchError(ValueError):
+    """Raised when a model alias cannot select one provider/model identity."""
+
+
+def normalize_model_identity(model_id: str) -> str:
+    """Normalize spelling while preserving a concrete date/version identity."""
+    result = model_id.lower()
+    result = result.replace(" ", "-")
+    return result.replace(".", "-")
+
 
 def normalize_model_id(model_id: str) -> str:
-    """Normalize a model ID for fuzzy comparison.
+    """Normalize a model ID to its date-independent family for fuzzy comparison.
 
     Pipeline:
     1. Lowercase
@@ -23,11 +38,7 @@ def normalize_model_id(model_id: str) -> str:
     Returns:
         Normalized model ID (e.g. "opus-4-6")
     """
-    result = model_id.lower()
-    result = result.replace(" ", "-")
-    result = result.replace(".", "-")
-    result = strip_date_suffix(result)
-    return result
+    return strip_date_suffix(normalize_model_identity(model_id))
 
 
 def fuzzy_match_model(
@@ -46,48 +57,63 @@ def fuzzy_match_model(
     if not models_cache:
         return None
 
-    # Extract provider filter from query if present
+    # An exact raw cache alias preserves an upstream namespace. Every other
+    # slash is a provider boundary, including an unknown provider name.
     provider_filter: str | None = None
     match_query = query
     if "/" in query:
-        provider_filter, match_query = query.split("/", 1)
+        exact_entry = models_cache.get(query)
+        exact_is_raw_alias = exact_entry is not None and query != (
+            f"{exact_entry[0]}/{exact_entry[1].id}"
+        )
+        if not exact_is_raw_alias:
+            possible_provider, possible_query = query.split("/", 1)
+            provider_filter = possible_provider.lower()
+            match_query = possible_query
 
-    normalized_query = normalize_model_id(match_query)
+    identity_query = normalize_model_identity(match_query)
 
-    # Build candidates: normalized_id -> list of (cache_key, provider_name, ModelInfo)
+    # Build identities first so case/dot aliases keep a concrete dated version.
     # When provider filter is set, scan prefixed keys to find that provider's models.
     # Otherwise, scan bare keys only (avoiding duplicates).
-    candidates: dict[str, list[tuple[str, str, ModelInfo]]] = {}
+    identity_candidates: dict[str, list[tuple[str, str, ModelInfo]]] = {}
     for cache_key, (provider_name, model_info) in models_cache.items():
-        has_slash = "/" in cache_key
+        qualified_key = f"{provider_name}/{model_info.id}"
+        is_qualified = cache_key == qualified_key
         if provider_filter is not None:
             # With a provider filter, use prefixed keys for the target provider
-            if not has_slash:
+            if not is_qualified:
                 continue
-            key_provider, bare_id = cache_key.split("/", 1)
-            if key_provider != provider_filter:
+            if provider_name.lower() != provider_filter:
                 continue
             # Return the prefixed cache key so the router resolves the correct provider
-            normalized = normalize_model_id(bare_id)
-            if normalized not in candidates:
-                candidates[normalized] = []
-            candidates[normalized].append((cache_key, provider_name, model_info))
+            identity = normalize_model_identity(model_info.id)
+            identity_candidates.setdefault(identity, []).append(
+                (cache_key, provider_name, model_info)
+            )
         else:
             # Without filter, use bare keys only to avoid duplicates
-            if has_slash:
+            if is_qualified:
                 continue
-            normalized = normalize_model_id(cache_key)
-            if normalized not in candidates:
-                candidates[normalized] = []
-            candidates[normalized].append((cache_key, provider_name, model_info))
+            identity = normalize_model_identity(model_info.id)
+            identity_candidates.setdefault(identity, []).append(
+                (cache_key, provider_name, model_info)
+            )
 
-    if not candidates:
+    if not identity_candidates:
         return None
 
-    # Check for exact normalized match first (prevents false positives like gpt-4o -> gpt-4o-mini)
+    if identity_query in identity_candidates:
+        return identity_candidates[identity_query][0][0]
+
+    normalized_query = strip_date_suffix(identity_query)
+    candidates: dict[str, list[tuple[str, str, ModelInfo]]] = {}
+    for identity, hits in identity_candidates.items():
+        candidates.setdefault(strip_date_suffix(identity), []).extend(hits)
+
+    # Family aliases intentionally select the newest concrete catalog version.
     if normalized_query in candidates:
-        all_hits = candidates[normalized_query]
-        return _select_best(all_hits)
+        return _select_best(candidates[normalized_query])
 
     # Use rapidfuzz to find matches
     matches = process.extract(
@@ -95,27 +121,37 @@ def fuzzy_match_model(
         list(candidates.keys()),
         scorer=fuzz.WRatio,
         limit=5,
-        score_cutoff=80.0,
+        score_cutoff=MIN_MATCH_SCORE,
     )
 
     if not matches:
         return None
 
-    # Collect all original models behind the matched normalized keys
-    all_hits = []
-    for matched_normalized, _score, _idx in matches:
-        all_hits.extend(candidates[matched_normalized])
+    top_normalized, top_score, _index = matches[0]
+    if top_score < CONFIDENT_MATCH_SCORE:
+        raise AmbiguousModelMatchError(
+            f"Model alias '{query}' is a low-confidence match; use provider/model"
+        )
+    tied_families = {
+        matched_normalized
+        for matched_normalized, score, _index in matches
+        if top_score - score <= AMBIGUITY_SCORE_MARGIN
+    }
+    if len(tied_families) > 1:
+        raise AmbiguousModelMatchError(
+            f"Model alias '{query}' matches multiple model families; use provider/model"
+        )
 
-    if not all_hits:
-        return None
-
-    return _select_best(all_hits)
+    # Score is authoritative across families. Date/version only breaks ties among
+    # concrete catalog entries that normalize to the winning family.
+    return _select_best(candidates[top_normalized])
 
 
 def _select_best(hits: list[tuple[str, str, ModelInfo]]) -> str:
     """Select the best model from a list of candidates.
 
-    Prefers newest version (by date), dated over undated, first-registered as tiebreaker.
+    All hits must belong to one normalized family. Prefer newest date/version,
+    then retain catalog order as the stable provider tiebreaker.
 
     Args:
         hits: List of (cache_key, provider_name, ModelInfo)

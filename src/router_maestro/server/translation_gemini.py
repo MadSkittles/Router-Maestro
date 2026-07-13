@@ -132,17 +132,33 @@ def translate_gemini_to_openai(request: GeminiGenerateContentRequest, model: str
         _translate_gemini_tool_config(request.tool_config) if request.tool_config else None
     )
 
-    temperature = 1.0
+    temperature: float | None = None
     max_tokens: int | None = None
-    extra: dict[str, Any] = {}
+    top_p: float | None = None
+    top_k: int | None = None
+    stop_sequences: list[str] | None = None
+    candidate_count: int | None = None
+    response_mime_type: str | None = None
+    frequency_penalty: float | None = None
+    presence_penalty: float | None = None
     if request.generation_config:
         if request.generation_config.temperature is not None:
             temperature = request.generation_config.temperature
         max_tokens = request.generation_config.max_output_tokens
         if request.generation_config.top_p is not None:
-            extra["top_p"] = request.generation_config.top_p
-        if request.generation_config.stop_sequences:
-            extra["stop"] = request.generation_config.stop_sequences
+            top_p = request.generation_config.top_p
+        if request.generation_config.top_k is not None:
+            top_k = request.generation_config.top_k
+        if request.generation_config.stop_sequences is not None:
+            stop_sequences = request.generation_config.stop_sequences
+        if request.generation_config.candidate_count is not None:
+            candidate_count = request.generation_config.candidate_count
+        if request.generation_config.response_mime_type is not None:
+            response_mime_type = request.generation_config.response_mime_type
+        if request.generation_config.frequency_penalty is not None:
+            frequency_penalty = request.generation_config.frequency_penalty
+        if request.generation_config.presence_penalty is not None:
+            presence_penalty = request.generation_config.presence_penalty
 
     return ChatRequest(
         model=model,
@@ -152,7 +168,13 @@ def translate_gemini_to_openai(request: GeminiGenerateContentRequest, model: str
         stream=False,
         tools=tools,
         tool_choice=tool_choice,
-        extra=extra,
+        top_p=top_p,
+        top_k=top_k,
+        stop_sequences=stop_sequences,
+        candidate_count=candidate_count,
+        response_mime_type=response_mime_type,
+        frequency_penalty=frequency_penalty,
+        presence_penalty=presence_penalty,
     )
 
 
@@ -339,6 +361,8 @@ def translate_openai_to_gemini(
     # Text content
     if response.content:
         parts.append(GeminiPart(text=response.content))
+    if response.refusal:
+        parts.append(GeminiPart(text=response.refusal))
 
     # Tool calls
     if response.tool_calls:

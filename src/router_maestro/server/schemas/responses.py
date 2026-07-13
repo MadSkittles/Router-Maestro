@@ -1,8 +1,8 @@
 """OpenAI Responses API schemas for Codex models."""
 
-from typing import Any
+from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 # ============================================================================
 # Input Types
@@ -91,6 +91,14 @@ class ResponsesToolChoiceFunction(BaseModel):
     name: str
 
 
+class ResponsesReasoningConfig(BaseModel):
+    """Reasoning controls represented by Router-Maestro in Phase 1."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    effort: Literal["minimal", "low", "medium", "high", "xhigh", "max"] | None = None
+
+
 # ============================================================================
 # Request
 # ============================================================================
@@ -105,6 +113,10 @@ class ResponsesRequest(BaseModel):
     - A list including function_call and function_call_output items
     """
 
+    # Retain unknown top-level options for the route's native unsupported-option
+    # response instead of silently dropping them or returning FastAPI's 422.
+    model_config = ConfigDict(extra="allow")
+
     model: str
     input: (
         str
@@ -117,15 +129,27 @@ class ResponsesRequest(BaseModel):
     )
     stream: bool = False
     instructions: str | None = None
-    temperature: float = Field(default=1.0, ge=0, le=2)
+    temperature: float | None = Field(default=None, ge=0, le=2)
+    top_p: float | None = Field(default=None, ge=0, le=1)
+    metadata: dict[str, Any] | None = None
+    service_tier: str | None = None
     max_output_tokens: int | None = None
     # Tool support
     tools: list[ResponsesFunctionTool | dict[str, Any]] | None = None
     tool_choice: str | ResponsesToolChoiceFunction | dict[str, Any] | None = None
     parallel_tool_calls: bool | None = None
-    # OpenAI Responses native shape: {"effort": "low"|"medium"|"high"}
-    # Router-Maestro additionally accepts "xhigh" (downgraded for upstream).
-    reasoning: dict[str, Any] | None = None
+    # OpenAI Responses reasoning shape, including the catalog-advertised
+    # "minimal" tier. Router-Maestro also accepts "xhigh"/"max" extensions.
+    # Keep the raw boundary value so route-level validation can return the
+    # OpenAI-native 400 envelope instead of FastAPI's generic 422 body.
+    reasoning: Any | None = None
+
+    @field_validator("temperature", mode="before")
+    @classmethod
+    def reject_explicit_null_temperature(cls, value):
+        if value is None:
+            raise ValueError("temperature must be a number when provided")
+        return value
 
 
 # ============================================================================
@@ -141,6 +165,13 @@ class ResponsesOutputText(BaseModel):
     annotations: list[Any] = Field(default_factory=list)
 
 
+class ResponsesRefusalOutput(BaseModel):
+    """Refusal content in the response output."""
+
+    type: str = "refusal"
+    refusal: str
+
+
 class ResponsesMessageOutput(BaseModel):
     """A message output in the response."""
 
@@ -148,7 +179,7 @@ class ResponsesMessageOutput(BaseModel):
     id: str
     role: str = "assistant"
     status: str = "completed"
-    content: list[ResponsesOutputText]
+    content: list[ResponsesOutputText | ResponsesRefusalOutput]
 
 
 class ResponsesFunctionCallOutput(BaseModel):
