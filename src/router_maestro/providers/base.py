@@ -600,11 +600,11 @@ class ProviderError(Exception):
         return self.status_code
 
     @property
-    def attempts(self) -> tuple[AttemptRecord, ...]:
+    def attempts(self) -> tuple["AttemptRecord", ...]:
         """Read-only snapshot of routing attempts that led to this failure."""
         return self._attempts
 
-    def with_attempts(self, attempts: tuple[AttemptRecord, ...]) -> Self:
+    def with_attempts(self, attempts: tuple["AttemptRecord", ...]) -> Self:
         """Copy a ``__dict__``-backed error and attach a request-local snapshot."""
         error = BaseException.__new__(type(self), *self.args)
         error.__dict__ = self.__dict__.copy()
