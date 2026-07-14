@@ -112,6 +112,13 @@ async def _apply_thinking_budget(
         )
     if chat_request.reasoning_effort is not None and chat_request.thinking_type != "enabled":
         return chat_request
+    if chat_request.thinking_type == "disabled":
+        if chat_request.thinking_budget is None:
+            return chat_request
+        return chat_request.with_thinking(
+            thinking_budget=None,
+            thinking_type=chat_request.thinking_type,
+        )
 
     from router_maestro.config import load_priorities_config
 

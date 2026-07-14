@@ -196,11 +196,24 @@ class CopilotChatCodec:
                 and thinking_budget > 0
                 and completion_tokens == thinking_budget
             )
-            if (
-                reasoning_capable
-                and self.thinking_requested(request)
+            exhausted_explicit_output_cap = (
+                self.thinking_requested(request)
                 and has_positive_output_cap
-                and (completion_tokens >= max_tokens or exhausted_explicit_thinking_budget)
+                and completion_tokens >= max_tokens
+            )
+            exhausted_implicit_output_cap = (
+                request.thinking_type is None
+                and has_positive_output_cap
+                and completion_tokens == max_tokens
+            )
+            if reasoning_capable and (
+                exhausted_explicit_output_cap
+                or exhausted_implicit_output_cap
+                or (
+                    self.thinking_requested(request)
+                    and has_positive_output_cap
+                    and exhausted_explicit_thinking_budget
+                )
             ):
                 logger.warning(
                     "Copilot returned empty choices after exhausting a requested cap: "

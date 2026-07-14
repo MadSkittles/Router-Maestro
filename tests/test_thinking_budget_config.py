@@ -327,6 +327,50 @@ class TestAnthropicRouteThinkingBudget:
     """Tests for route-level thinking budget resolution."""
 
     @pytest.mark.asyncio
+    async def test_explicit_disabled_thinking_survives_route_resolution(self, monkeypatch):
+        router = MagicMock()
+        resolver = MagicMock()
+        monkeypatch.setattr(anthropic_route, "resolve_thinking_budget", resolver)
+        request = ChatRequest(
+            model="claude-opus-4.8",
+            messages=[Message(role="user", content="hi")],
+            max_tokens=4096,
+            thinking_type="disabled",
+        )
+
+        result = await _apply_thinking_budget(router, request, request.model)
+
+        assert result is request
+        assert result.thinking_type == "disabled"
+        resolver.assert_not_called()
+        router.get_model_info.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_explicit_disabled_thinking_clears_conflicting_budget(self, monkeypatch):
+        from router_maestro.providers.copilot import CopilotProvider
+
+        router = MagicMock()
+        resolver = MagicMock()
+        monkeypatch.setattr(anthropic_route, "resolve_thinking_budget", resolver)
+        request = ChatRequest(
+            model="claude-opus-4.8",
+            messages=[Message(role="user", content="hi")],
+            max_tokens=4096,
+            thinking_type="disabled",
+            thinking_budget=1024,
+        )
+
+        result = await _apply_thinking_budget(router, request, request.model)
+        payload = CopilotProvider()._build_chat_payload(result, stream=False)
+
+        assert result.thinking_type == "disabled"
+        assert result.thinking_budget is None
+        assert "reasoning_effort" not in payload
+        assert "thinking_budget" not in payload
+        resolver.assert_not_called()
+        router.get_model_info.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_dash_alias_uses_catalog_max_output_for_client_budget(self, monkeypatch):
         """claude-opus-4-6 should use claude-opus-4.6 metadata, not 16k fallback."""
 

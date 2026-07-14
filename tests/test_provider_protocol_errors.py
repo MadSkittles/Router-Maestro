@@ -1654,8 +1654,17 @@ async def test_copilot_chat_empty_reasoning_below_sent_output_cap_is_protocol_fa
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("max_tokens", [None, 0, -1])
+@pytest.mark.parametrize(
+    ("thinking_budget", "completion_tokens"),
+    [
+        pytest.param(1024, 4096, id="unrelated-completion"),
+        pytest.param(1024, 1024, id="completion-equals-budget"),
+    ],
+)
 async def test_copilot_chat_empty_reasoning_without_positive_output_cap_is_protocol_failure(
     max_tokens: int | None,
+    thinking_budget: int,
+    completion_tokens: int,
 ) -> None:
     provider = CopilotProvider()
     provider.ensure_token = AsyncMock()  # type: ignore[method-assign]
@@ -1663,7 +1672,7 @@ async def test_copilot_chat_empty_reasoning_without_positive_output_cap_is_proto
         return_value=_response_for_payload(
             {
                 "choices": [],
-                "usage": {"completion_tokens": 4096},
+                "usage": {"completion_tokens": completion_tokens},
                 "model": "claude-opus-4.8",
             }
         )
@@ -1675,7 +1684,7 @@ async def test_copilot_chat_empty_reasoning_without_positive_output_cap_is_proto
                 model="claude-opus-4.8",
                 max_tokens=max_tokens,
                 thinking_type="enabled",
-                thinking_budget=1024,
+                thinking_budget=thinking_budget,
             )
         )
 
@@ -1687,7 +1696,7 @@ async def test_copilot_chat_empty_reasoning_without_positive_output_cap_is_proto
 
 
 @pytest.mark.asyncio
-async def test_copilot_chat_empty_nonthinking_response_at_output_cap_is_protocol_failure() -> None:
+async def test_copilot_chat_empty_nonthinking_reasoning_response_at_output_cap_is_length() -> None:
     provider = CopilotProvider()
     provider.ensure_token = AsyncMock()  # type: ignore[method-assign]
     provider._send_with_auth_retry = AsyncMock(  # type: ignore[method-assign]
@@ -1700,13 +1709,72 @@ async def test_copilot_chat_empty_nonthinking_response_at_output_cap_is_protocol
         )
     )
 
+    response = await provider.chat_completion(
+        _chat_request(model="claude-opus-4.8", max_tokens=4096)
+    )
+
+    assert response.content == ""
+    assert response.finish_reason == "length"
+    assert response.usage == {"completion_tokens": 4096}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("model", "max_tokens", "thinking_type", "thinking_budget", "completion_tokens"),
+    [
+        pytest.param("claude-opus-4.8", 4096, None, None, 4097, id="implicit-above-cap"),
+        pytest.param(
+            "claude-opus-4.8",
+            4096,
+            "disabled",
+            None,
+            4096,
+            id="explicitly-disabled-at-cap",
+        ),
+        pytest.param("gpt-4o", 4096, None, None, 4096, id="non-reasoning-at-cap"),
+        pytest.param(
+            "claude-opus-4.8",
+            4096,
+            None,
+            1024,
+            1024,
+            id="budget-only-without-opt-in",
+        ),
+    ],
+)
+async def test_copilot_chat_empty_implicit_exception_remains_narrow(
+    model: str,
+    max_tokens: int,
+    thinking_type: str | None,
+    thinking_budget: int | None,
+    completion_tokens: int,
+) -> None:
+    provider = CopilotProvider()
+    provider.ensure_token = AsyncMock()  # type: ignore[method-assign]
+    provider._send_with_auth_retry = AsyncMock(  # type: ignore[method-assign]
+        return_value=_response_for_payload(
+            {
+                "choices": [],
+                "usage": {"completion_tokens": completion_tokens},
+                "model": model,
+            }
+        )
+    )
+
     with pytest.raises(ProviderError) as exc_info:
-        await provider.chat_completion(_chat_request(model="claude-opus-4.8", max_tokens=4096))
+        await provider.chat_completion(
+            _chat_request(
+                model=model,
+                max_tokens=max_tokens,
+                thinking_type=thinking_type,
+                thinking_budget=thinking_budget,
+            )
+        )
 
     _assert_protocol_failure(
         exc_info.value,
         provider="github-copilot",
-        model="claude-opus-4.8",
+        model=model,
     )
 
 
