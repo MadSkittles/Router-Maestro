@@ -20,6 +20,7 @@ from router_maestro.providers.base import (
     ModelInfo,
     ProviderError,
     ProviderFailureKind,
+    ProviderFailureSignal,
     RequestOptionError,
     ResponsesRequest,
     ResponsesResponse,
@@ -55,6 +56,7 @@ COPILOT_COUNT_TOKENS_PATH = "/v1/messages/count_tokens"
 
 _COPILOT_UNSUPPORTED_OPERATION_CODE = "unsupported_api_for_model"
 _MAX_COPILOT_ERROR_BODY_BYTES = 64 * 1024
+_EXACT_COPILOT_BARE_BAD_REQUEST = b"Bad Request\n"
 
 
 def _responses_terminal_outcome(response: Any) -> TerminalOutcome:
@@ -424,6 +426,13 @@ class CopilotProvider(BaseProvider):
             cause=cause,
         ) from cause
 
+    @staticmethod
+    def _failure_signal(status_code: int, body: bytes) -> ProviderFailureSignal | None:
+        """Classify one exact Copilot failure without retaining its body."""
+        if status_code == 400 and body == _EXACT_COPILOT_BARE_BAD_REQUEST:
+            return ProviderFailureSignal.COPILOT_BARE_BAD_REQUEST
+        return None
+
     async def _send_with_auth_retry(
         self,
         method: str,
@@ -749,6 +758,7 @@ class CopilotProvider(BaseProvider):
                 include_body=True,
                 provider=self.name,
                 model=request.model,
+                signal=self._failure_signal(e.response.status_code, e.response.content),
             )
         except httpx.TimeoutException as e:
             self._raise_timeout_error("Copilot", e, logger, provider=self.name, model=request.model)
@@ -852,6 +862,7 @@ class CopilotProvider(BaseProvider):
                 include_body=True,
                 provider=self.name,
                 model=request.model,
+                signal=self._failure_signal(e.response.status_code, error_body),
             )
         except httpx.TimeoutException as e:
             self._raise_timeout_error(
@@ -1071,6 +1082,7 @@ class CopilotProvider(BaseProvider):
                 include_body=True,
                 provider=self.name,
                 model=request.model,
+                signal=self._failure_signal(e.response.status_code, e.response.content),
             )
         except httpx.TimeoutException as e:
             self._raise_timeout_error("Copilot", e, logger, provider=self.name, model=request.model)
@@ -1138,6 +1150,7 @@ class CopilotProvider(BaseProvider):
                         upstream_status_code=status_code,
                         provider=self.name,
                         model=request.model,
+                        signal=self._failure_signal(status_code, error_body),
                     )
 
                 async for chunk in self._responses_codec.decode_stream(

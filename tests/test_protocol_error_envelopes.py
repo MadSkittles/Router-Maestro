@@ -204,6 +204,40 @@ def test_provider_cause_is_not_exposed_by_native_encoder(surface: str) -> None:
     assert private_marker not in response.body.decode()
 
 
+@pytest.mark.parametrize("surface", _PROTOCOL_SURFACES)
+def test_provider_signal_maps_to_one_allowlisted_header(surface: str) -> None:
+    from router_maestro.providers import ProviderFailureSignal
+
+    error = ProviderError(
+        "Copilot API error: 400",
+        status_code=400,
+        retryable=False,
+        kind=ProviderFailureKind.UPSTREAM_STATUS,
+        signal=ProviderFailureSignal.COPILOT_BARE_BAD_REQUEST,
+        cause=RuntimeError("private-upstream-body"),
+    )
+
+    response = protocol_errors.protocol_error_response(error, surface)
+
+    assert response.headers["X-Router-Maestro-Error-Signal"] == "copilot_bare_bad_request"
+    assert "private-upstream-body" not in response.body.decode()
+    assert "private-upstream-body" not in str(dict(response.headers))
+
+
+@pytest.mark.parametrize("surface", _PROTOCOL_SURFACES)
+def test_provider_error_without_signal_emits_no_signal_header(surface: str) -> None:
+    error = ProviderError(
+        "Ordinary provider failure",
+        status_code=400,
+        retryable=False,
+        kind=ProviderFailureKind.UPSTREAM_STATUS,
+    )
+
+    response = protocol_errors.protocol_error_response(error, surface)
+
+    assert "X-Router-Maestro-Error-Signal" not in response.headers
+
+
 @pytest.mark.parametrize(
     ("surface", "expected"),
     [

@@ -11,12 +11,17 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from router_maestro.providers import (
     ProviderError,
     ProviderFailureKind,
+    ProviderFailureSignal,
     RequestOptionError,
 )
 
 ProtocolName = Literal["openai", "anthropic", "gemini"]
 ProtocolSurface = Literal["openai_chat", "openai_responses", "anthropic", "gemini"]
 ProtocolSelector = ProtocolName | ProtocolSurface
+PROVIDER_FAILURE_SIGNAL_HEADER = "X-Router-Maestro-Error-Signal"
+_PROVIDER_SIGNAL_HEADERS = {
+    ProviderFailureSignal.COPILOT_BARE_BAD_REQUEST: "copilot_bare_bad_request",
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -105,6 +110,7 @@ def normalize_protocol_error(error: Exception) -> NormalizedProtocolError:
         )
 
     if isinstance(error, ProviderError):
+        signal_value = _PROVIDER_SIGNAL_HEADERS.get(error.signal)
         return NormalizedProtocolError(
             status_code=error.downstream_status_code,
             message=error.safe_message,
@@ -114,6 +120,9 @@ def normalize_protocol_error(error: Exception) -> NormalizedProtocolError:
                 "unsupported_parameter"
                 if isinstance(error, RequestOptionError) and error.parameter
                 else _error_code(error.downstream_status_code, error.kind)
+            ),
+            headers=(
+                {PROVIDER_FAILURE_SIGNAL_HEADER: signal_value} if signal_value is not None else None
             ),
         )
 

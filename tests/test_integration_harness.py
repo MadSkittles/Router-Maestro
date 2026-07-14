@@ -996,15 +996,19 @@ def _scripted_compat_client(
     )
 
 
-def test_compat_probe_retries_once_after_exact_bare_400_bytes():
+def test_compat_probe_two_marked_400s_then_success_uses_three_attempts():
     conftest = importlib.import_module("integration_tests.conftest")
-    first = httpx.Response(400, content=b"Bad Request\n")
+    signal_headers = {
+        "X-Router-Maestro-Error-Signal": "copilot_bare_bad_request",
+    }
+    first = httpx.Response(400, json={"error": {}}, headers=signal_headers)
+    second = httpx.Response(400, json={"error": {}}, headers=signal_headers)
     success = httpx.Response(200, json={"ok": True})
-    client, requests = _scripted_compat_client(first, success)
+    client, requests = _scripted_compat_client(first, second, success)
     sleeper = Mock()
 
     with client:
-        response = conftest._post_compat_probe_with_exact_400_retry(
+        response = conftest._post_compat_probe_with_marked_400_retry(
             client,
             "/compat",
             json_payload={"probe": True},
@@ -1013,32 +1017,33 @@ def test_compat_probe_retries_once_after_exact_bare_400_bytes():
         )
 
     assert response is success
-    assert len(requests) == 2
+    assert len(requests) == 3
     assert first.is_stream_consumed
     assert first.is_closed
-    sleeper.assert_called_once_with(0.01)
+    assert second.is_stream_consumed
+    assert second.is_closed
+    assert sleeper.call_args_list == [((0.01,),), ((0.01,),)]
 
 
 @pytest.mark.parametrize(
-    ("status_code", "body"),
+    ("status_code", "signal", "body"),
     [
-        (400, b"Bad Request\r\n"),
-        (400, b"Bad Request"),
-        (400, b" Bad Request\n"),
-        (400, b"Bad Request\n "),
-        (400, b'{"error":"Bad Request"}'),
-        (500, b"Bad Request\n"),
+        (400, None, b"Bad Request\n"),
+        (400, "copilot_bare_bad_request_near_match", b"{}"),
+        (400, "COPILOT_BARE_BAD_REQUEST", b"{}"),
+        (500, "copilot_bare_bad_request", b"{}"),
     ],
 )
-def test_compat_probe_does_not_retry_near_match_or_other_status(status_code, body):
+def test_compat_probe_requires_exact_status_and_signal(status_code, signal, body):
     conftest = importlib.import_module("integration_tests.conftest")
-    first = httpx.Response(status_code, content=body)
+    headers = {"X-Router-Maestro-Error-Signal": signal} if signal is not None else None
+    first = httpx.Response(status_code, content=body, headers=headers)
     unexpected = httpx.Response(200, json={"unexpected": True})
     client, requests = _scripted_compat_client(first, unexpected)
     sleeper = Mock()
 
     with client:
-        response = conftest._post_compat_probe_with_exact_400_retry(
+        response = conftest._post_compat_probe_with_marked_400_retry(
             client,
             "/compat",
             json_payload={"probe": True},
@@ -1050,27 +1055,33 @@ def test_compat_probe_does_not_retry_near_match_or_other_status(status_code, bod
     sleeper.assert_not_called()
 
 
-def test_compat_probe_double_exact_failure_reports_two_bounded_attempts():
+def test_compat_probe_three_marked_failures_reports_three_bounded_attempts():
     conftest = importlib.import_module("integration_tests.conftest")
-    first = httpx.Response(400, content=b"Bad Request\n")
-    second = httpx.Response(400, content=b"Bad Request\n")
-    client, requests = _scripted_compat_client(first, second)
+    signal_headers = {
+        "X-Router-Maestro-Error-Signal": "copilot_bare_bad_request",
+    }
+    first = httpx.Response(400, json={"error": {}}, headers=signal_headers)
+    second = httpx.Response(400, json={"error": {}}, headers=signal_headers)
+    third = httpx.Response(400, json={"error": {}}, headers=signal_headers)
+    client, requests = _scripted_compat_client(first, second, third)
+    sleeper = Mock()
 
     with client, pytest.raises(AssertionError) as exc_info:
-        conftest._post_compat_probe_with_exact_400_retry(
+        conftest._post_compat_probe_with_marked_400_retry(
             client,
             "/compat",
             json_payload={"probe": True},
-            backoff_seconds=0,
-            sleep=lambda _seconds: None,
+            backoff_seconds=0.01,
+            sleep=sleeper,
         )
 
     message = str(exc_info.value)
-    assert "failed after 2 attempts" in message
+    assert "failed after 3 attempts" in message
     assert "attempt 1: HTTP 400" in message
     assert "attempt 2: HTTP 400" in message
-    assert message.count("Bad Request") == 2
-    assert len(requests) == 2
+    assert "attempt 3: HTTP 400" in message
+    assert len(requests) == 3
+    assert sleeper.call_args_list == [((0.01,),), ((0.01,),)]
 
 
 def test_compat_probe_nonmatching_failure_returns_to_normal_http_assertion():
@@ -1079,7 +1090,7 @@ def test_compat_probe_nonmatching_failure_returns_to_normal_http_assertion():
     client, requests = _scripted_compat_client(failure)
 
     with client:
-        response = conftest._post_compat_probe_with_exact_400_retry(
+        response = conftest._post_compat_probe_with_marked_400_retry(
             client,
             "/compat",
             json_payload={"probe": True},
@@ -1091,15 +1102,27 @@ def test_compat_probe_nonmatching_failure_returns_to_normal_http_assertion():
     assert len(requests) == 1
 
 
-def test_stream_compat_probe_closes_exact_400_then_reopens_once_before_yield():
+def test_stream_compat_probe_two_marked_400s_then_success_before_yield():
     conftest = importlib.import_module("integration_tests.conftest")
-    first = httpx.Response(400, stream=httpx.ByteStream(b"Bad Request\n"))
+    signal_headers = {
+        "X-Router-Maestro-Error-Signal": "copilot_bare_bad_request",
+    }
+    first = httpx.Response(
+        400,
+        stream=httpx.ByteStream(b'{"error":{}}'),
+        headers=signal_headers,
+    )
+    second = httpx.Response(
+        400,
+        stream=httpx.ByteStream(b'{"error":{}}'),
+        headers=signal_headers,
+    )
     success = httpx.Response(200, stream=httpx.ByteStream(b"data: [DONE]\n\n"))
-    client, requests = _scripted_compat_client(first, success)
+    client, requests = _scripted_compat_client(first, second, success)
     sleeper = Mock()
 
     with client:
-        with conftest._stream_compat_probe_with_exact_400_retry(
+        with conftest._stream_compat_probe_with_marked_400_retry(
             client,
             "/compat",
             json_payload={"probe": True},
@@ -1110,11 +1133,13 @@ def test_stream_compat_probe_closes_exact_400_then_reopens_once_before_yield():
             assert response is success
             assert first.is_stream_consumed
             assert first.is_closed
+            assert second.is_stream_consumed
+            assert second.is_closed
             assert not response.is_stream_consumed
             assert b"".join(response.iter_bytes()) == b"data: [DONE]\n\n"
 
-    assert len(requests) == 2
-    sleeper.assert_called_once_with(0.01)
+    assert len(requests) == 3
+    assert sleeper.call_args_list == [((0.01,),), ((0.01,),)]
 
 
 def test_stream_compat_probe_never_retries_200_before_or_after_body_consumption():
@@ -1125,7 +1150,7 @@ def test_stream_compat_probe_never_retries_200_before_or_after_body_consumption(
     sleeper = Mock()
 
     with client:
-        with conftest._stream_compat_probe_with_exact_400_retry(
+        with conftest._stream_compat_probe_with_marked_400_retry(
             client,
             "/compat",
             json_payload={"probe": True},
@@ -1141,14 +1166,14 @@ def test_stream_compat_probe_never_retries_200_before_or_after_body_consumption(
     sleeper.assert_not_called()
 
 
-def test_stream_compat_probe_nonmatching_400_is_read_but_not_retried():
+def test_stream_compat_probe_unmarked_400_is_not_retried():
     conftest = importlib.import_module("integration_tests.conftest")
     failure = httpx.Response(400, stream=httpx.ByteStream(b"Bad Request\r\n"))
     unexpected = httpx.Response(200, stream=httpx.ByteStream(b"data: unexpected\n\n"))
     client, requests = _scripted_compat_client(failure, unexpected)
 
     with client:
-        with conftest._stream_compat_probe_with_exact_400_retry(
+        with conftest._stream_compat_probe_with_marked_400_retry(
             client,
             "/compat",
             json_payload={"probe": True},
@@ -1156,37 +1181,42 @@ def test_stream_compat_probe_nonmatching_400_is_read_but_not_retried():
             sleep=lambda _seconds: None,
         ) as response:
             assert response is failure
-            assert response.is_stream_consumed
             with pytest.raises(AssertionError, match="Bad Request"):
                 conftest.assert_http_success(response)
 
     assert len(requests) == 1
 
 
-def test_stream_compat_probe_double_exact_failure_reports_two_attempts():
+def test_stream_compat_probe_three_marked_failures_reports_three_attempts():
     conftest = importlib.import_module("integration_tests.conftest")
-    first = httpx.Response(400, stream=httpx.ByteStream(b"Bad Request\n"))
-    second = httpx.Response(400, stream=httpx.ByteStream(b"Bad Request\n"))
-    client, requests = _scripted_compat_client(first, second)
+    headers = {"X-Router-Maestro-Error-Signal": "copilot_bare_bad_request"}
+    first = httpx.Response(400, stream=httpx.ByteStream(b"{}"), headers=headers)
+    second = httpx.Response(400, stream=httpx.ByteStream(b"{}"), headers=headers)
+    third = httpx.Response(400, stream=httpx.ByteStream(b"{}"), headers=headers)
+    client, requests = _scripted_compat_client(first, second, third)
+    sleeper = Mock()
 
     with client, pytest.raises(AssertionError) as exc_info:
-        with conftest._stream_compat_probe_with_exact_400_retry(
+        with conftest._stream_compat_probe_with_marked_400_retry(
             client,
             "/compat",
             json_payload={"probe": True},
             timeout=180.0,
-            backoff_seconds=0,
-            sleep=lambda _seconds: None,
+            backoff_seconds=0.01,
+            sleep=sleeper,
         ):
-            raise AssertionError("double exact retry unexpectedly yielded a response")
+            raise AssertionError("marked retry unexpectedly yielded a response")
 
     message = str(exc_info.value)
-    assert "failed after 2 attempts" in message
+    assert "failed after 3 attempts" in message
     assert "attempt 1: HTTP 400" in message
     assert "attempt 2: HTTP 400" in message
-    assert len(requests) == 2
+    assert "attempt 3: HTTP 400" in message
+    assert len(requests) == 3
     assert first.is_closed
     assert second.is_closed
+    assert third.is_closed
+    assert sleeper.call_args_list == [((0.01,),), ((0.01,),)]
 
 
 class _ReadErrorStream(httpx.SyncByteStream):
@@ -1200,21 +1230,19 @@ class _ReadErrorStream(httpx.SyncByteStream):
         self.closed = True
 
 
-@pytest.mark.parametrize("failing_attempt", [1, 2])
-def test_stream_compat_probe_closes_response_when_classifier_read_fails(failing_attempt):
+def test_stream_compat_probe_closes_response_when_diagnostic_read_fails():
     conftest = importlib.import_module("integration_tests.conftest")
     failing_stream = _ReadErrorStream()
-    failing = httpx.Response(400, stream=failing_stream)
-    responses = (
-        (failing,)
-        if failing_attempt == 1
-        else (httpx.Response(400, content=b"Bad Request\n"), failing)
+    failing = httpx.Response(
+        400,
+        stream=failing_stream,
+        headers={"X-Router-Maestro-Error-Signal": "copilot_bare_bad_request"},
     )
-    client, requests = _scripted_compat_client(*responses)
+    client, requests = _scripted_compat_client(failing)
 
     with client:
         with pytest.raises(httpx.ReadError, match="compat probe read failed"):
-            with conftest._stream_compat_probe_with_exact_400_retry(
+            with conftest._stream_compat_probe_with_marked_400_retry(
                 client,
                 "/compat",
                 json_payload={"probe": True},
@@ -1225,7 +1253,7 @@ def test_stream_compat_probe_closes_response_when_classifier_read_fails(failing_
                 raise AssertionError("read failure unexpectedly yielded a response")
         assert failing_stream.closed
 
-    assert len(requests) == failing_attempt
+    assert len(requests) == 1
 
 
 class _RecordingStreamContext:
@@ -1257,19 +1285,31 @@ class _ProbeBodyError(Exception):
     pass
 
 
-@pytest.mark.parametrize("yield_attempt", [1, 2])
+@pytest.mark.parametrize("yield_attempt", [1, 3])
 def test_stream_compat_probe_forwards_yield_exception_to_active_context(yield_attempt):
     conftest = importlib.import_module("integration_tests.conftest")
     success = httpx.Response(200, stream=httpx.ByteStream(b"data: event\n\n"))
     responses = (
         (success,)
         if yield_attempt == 1
-        else (httpx.Response(400, content=b"Bad Request\n"), success)
+        else (
+            httpx.Response(
+                400,
+                content=b"{}",
+                headers={"X-Router-Maestro-Error-Signal": "copilot_bare_bad_request"},
+            ),
+            httpx.Response(
+                400,
+                content=b"{}",
+                headers={"X-Router-Maestro-Error-Signal": "copilot_bare_bad_request"},
+            ),
+            success,
+        )
     )
     client = _RecordingStreamClient(*responses)
 
     with pytest.raises(_ProbeBodyError, match="consumer failed") as exc_info:
-        with conftest._stream_compat_probe_with_exact_400_retry(
+        with conftest._stream_compat_probe_with_marked_400_retry(
             client,
             "/compat",
             json_payload={"probe": True},
@@ -1295,7 +1335,7 @@ def _enclosing_function_name(node, parents) -> str:
     return "<module>"
 
 
-def test_exact_400_retry_apis_are_scoped_to_three_fixed_compat_probes():
+def test_marked_400_retry_apis_are_scoped_to_three_fixed_compat_probes():
     public_apis = {
         "post_gemini_generate_content_compat_probe": (
             "test_live_gemini_paths.py",
@@ -1336,13 +1376,13 @@ def test_exact_400_retry_apis_are_scoped_to_three_fixed_compat_probes():
         assert attribute_references[name] == []
 
     conftest = importlib.import_module("integration_tests.conftest")
-    assert not hasattr(conftest, "post_compat_probe_with_exact_400_retry")
-    assert not hasattr(conftest, "stream_compat_probe_with_exact_400_retry")
+    assert not hasattr(conftest, "post_compat_probe_with_marked_400_retry")
+    assert not hasattr(conftest, "stream_compat_probe_with_marked_400_retry")
 
     source = ast.parse((ROOT / "integration_tests" / "conftest.py").read_text(encoding="utf-8"))
     private_core_calls = {
-        "_post_compat_probe_with_exact_400_retry": [],
-        "_stream_compat_probe_with_exact_400_retry": [],
+        "_post_compat_probe_with_marked_400_retry": [],
+        "_stream_compat_probe_with_marked_400_retry": [],
     }
     parents = {
         child: parent for parent in ast.walk(source) for child in ast.iter_child_nodes(parent)
@@ -1356,11 +1396,11 @@ def test_exact_400_retry_apis_are_scoped_to_three_fixed_compat_probes():
             private_core_calls[node.func.id].append(_enclosing_function_name(node, parents))
 
     assert private_core_calls == {
-        "_post_compat_probe_with_exact_400_retry": [
+        "_post_compat_probe_with_marked_400_retry": [
             "post_gemini_generate_content_compat_probe",
             "post_openai_chat_compat_probe",
         ],
-        "_stream_compat_probe_with_exact_400_retry": [
+        "_stream_compat_probe_with_marked_400_retry": [
             "stream_openai_chat_compat_probe",
         ],
     }

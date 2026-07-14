@@ -27,7 +27,12 @@ from router_maestro.providers import (
     TerminalOutcome,
     TransportTermination,
 )
-from router_maestro.providers.base import BaseProvider, ProviderError, ProviderFailureKind
+from router_maestro.providers.base import (
+    BaseProvider,
+    ProviderError,
+    ProviderFailureKind,
+    ProviderFailureSignal,
+)
 from router_maestro.providers.tool_parsing import recover_tool_calls_from_content
 from router_maestro.routing.capabilities import (
     CapabilitySupport,
@@ -3181,6 +3186,84 @@ async def test_copilot_transport_failure_preserves_model_context() -> None:
 
 
 @pytest.mark.asyncio
+async def test_copilot_exact_bare_400_sets_nonretryable_signal() -> None:
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(400, content=b"Bad Request\n")
+
+    provider = CopilotProvider()
+    provider._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    provider.ensure_token = _noop  # type: ignore[method-assign]
+    provider._get_headers = lambda *args, **kwargs: {}  # type: ignore[method-assign]
+
+    with pytest.raises(ProviderError) as exc_info:
+        await provider.chat_completion(_chat_request(model="claude-haiku-4.5"))
+
+    error = exc_info.value
+    assert error.kind is ProviderFailureKind.UPSTREAM_STATUS
+    assert error.status_code == 400
+    assert error.upstream_status_code == 400
+    assert error.retryable is False
+    assert getattr(error, "signal", None) is not None
+    assert error.signal.value == "copilot_bare_bad_request"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("status", "body"),
+    [
+        (400, b"Bad Request\r\n"),
+        (400, b"Bad Request"),
+        (400, b" Bad Request\n"),
+        (400, b"Bad Request\n "),
+        (400, b'{"error":"Bad Request"}'),
+        (500, b"Bad Request\n"),
+    ],
+)
+async def test_copilot_bare_400_signal_requires_exact_status_and_body(
+    status: int,
+    body: bytes,
+) -> None:
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(status, content=body)
+
+    provider = CopilotProvider()
+    provider._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    provider.ensure_token = _noop  # type: ignore[method-assign]
+    provider._get_headers = lambda *args, **kwargs: {}  # type: ignore[method-assign]
+
+    with pytest.raises(ProviderError) as exc_info:
+        await provider.chat_completion(_chat_request(model="claude-haiku-4.5"))
+
+    assert exc_info.value.signal is None
+
+
+@pytest.mark.asyncio
+async def test_copilot_stream_exact_bare_400_sets_signal_and_closes_once() -> None:
+    response = httpx.Response(400, stream=httpx.ByteStream(b"Bad Request\n"))
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return response
+
+    provider = CopilotProvider()
+    provider._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    provider.ensure_token = _noop  # type: ignore[method-assign]
+    provider._get_headers = lambda *args, **kwargs: {}  # type: ignore[method-assign]
+
+    with pytest.raises(ProviderError) as exc_info:
+        async for _chunk in provider.chat_completion_stream(
+            _chat_request(model="claude-haiku-4.5", stream=True)
+        ):
+            pass
+
+    error = exc_info.value
+    assert error.kind is ProviderFailureKind.UPSTREAM_STATUS
+    assert error.retryable is False
+    assert error.signal is ProviderFailureSignal.COPILOT_BARE_BAD_REQUEST
+    assert response.is_stream_consumed
+    assert response.is_closed
+
+
+@pytest.mark.asyncio
 async def test_copilot_responses_stream_529_is_rate_limit() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(529, request=request)
@@ -3729,6 +3812,69 @@ async def test_nonstream_plan_stops_on_secondary_fatal_failure() -> None:
     assert exc_info.value is not secondary_error
     assert exc_info.value.__cause__ is secondary_error
     assert calls == ["primary", "secondary"]
+
+
+@pytest.mark.asyncio
+async def test_marked_copilot_400_does_not_allow_router_fallback() -> None:
+    signal_error = ProviderError(
+        "Copilot API error: 400",
+        status_code=400,
+        retryable=False,
+        kind=ProviderFailureKind.UPSTREAM_STATUS,
+        upstream_status_code=400,
+        signal=ProviderFailureSignal.COPILOT_BARE_BAD_REQUEST,
+    )
+    calls: list[str] = []
+
+    class _Provider:
+        def __init__(self, name: str, error: ProviderError | None = None) -> None:
+            self.name = name
+            self.error = error
+
+        async def ensure_token(self) -> None:
+            return None
+
+    primary = _Provider("github-copilot", signal_error)
+    secondary = _Provider("secondary")
+    features = RequestFeatures()
+    candidates = []
+    for provider in (primary, secondary):
+        ref = ModelRef(provider.name, "model")
+        capabilities = ModelCapabilities(
+            model=ref,
+            operations={Operation.CHAT: CapabilitySupport.SUPPORTED},
+        )
+        candidates.append(
+            RouteCandidate(
+                model=ref,
+                provider=provider,  # type: ignore[arg-type]
+                capabilities=capabilities,
+                evaluated_operation=Operation.CHAT,
+                evaluated_features=features,
+                support=CapabilitySupport.SUPPORTED,
+            )
+        )
+    plan = RoutePlan(Operation.CHAT, features, candidates[0], (candidates[1],), False)
+
+    async def call(provider, _request):
+        calls.append(provider.name)
+        if provider.error is not None:
+            raise provider.error
+        return ChatResponse(content="unexpected", model="m2")
+
+    with pytest.raises(ProviderError) as exc_info:
+        await Router.__new__(Router)._execute_plan_nonstream(
+            plan,
+            object(),
+            True,
+            lambda request, _model: request,
+            call,
+        )
+
+    assert calls == ["github-copilot"]
+    assert exc_info.value.retryable is False
+    assert exc_info.value.signal is ProviderFailureSignal.COPILOT_BARE_BAD_REQUEST
+    assert len(exc_info.value.attempts) == 1
 
 
 @pytest.mark.asyncio
