@@ -25,8 +25,8 @@ from typing import Any
 
 from router_maestro.config import load_priorities_config
 from router_maestro.config.priorities import PrioritiesConfig
+from router_maestro.pipeline.guards import GuardChain, StreamGuard
 from router_maestro.pipeline.leak_guard import LeakGuard
-from router_maestro.pipeline.runaway_guard import RunawayGuard
 from router_maestro.providers.base import TerminalOutcome
 from router_maestro.utils import get_logger
 from router_maestro.utils.audit import AuditTrace, get_trace_dir, is_tracing_enabled
@@ -42,7 +42,7 @@ class RequestPipeline:
     """
 
     __slots__ = (
-        "_guards",
+        "_guard_chain",
         "_audit",
         "_leak_guard",
         "_config",
@@ -56,7 +56,7 @@ class RequestPipeline:
     def __init__(
         self,
         request_id: str,
-        guards: list,
+        guards: list[StreamGuard] | GuardChain,
         leak_guard: LeakGuard | None,
         audit: AuditTrace | None,
         config: PrioritiesConfig,
@@ -64,7 +64,7 @@ class RequestPipeline:
         defer_flush: bool = False,
     ):
         self._request_id = request_id
-        self._guards = guards
+        self._guard_chain = guards if isinstance(guards, GuardChain) else GuardChain(guards)
         self._leak_guard = leak_guard
         self._audit = audit
         self._config = config
@@ -92,22 +92,12 @@ class RequestPipeline:
             return context.pipeline
 
         config = context.config if context is not None else load_priorities_config()
-        guards_cfg = config.guards
-
-        guards: list = []
-        leak_guard: LeakGuard | None = None
-
-        if guards_cfg.leak_guard.enabled:
-            leak_guard = LeakGuard(allowed_tool_names=tool_names)
-            guards.append(leak_guard)
-
-        if guards_cfg.runaway_guard.enabled:
-            guards.append(
-                RunawayGuard(
-                    max_bytes=guards_cfg.runaway_guard.max_bytes,
-                    max_deltas=guards_cfg.runaway_guard.max_deltas,
-                )
-            )
+        guard_chain = GuardChain.from_config(
+            config.guards,
+            model=model,
+            tool_names=tool_names,
+        )
+        leak_guard = guard_chain.find(LeakGuard)
 
         audit = context.audit if context is not None else None
         if context is None and is_tracing_enabled(config.audit.enabled):
@@ -116,7 +106,7 @@ class RequestPipeline:
 
         pipeline = cls(
             request_id=request_id,
-            guards=guards,
+            guards=guard_chain,
             leak_guard=leak_guard,
             audit=audit,
             config=config,
@@ -147,10 +137,6 @@ class RequestPipeline:
     def wire_status(self) -> int | None:
         """Return the HTTP status recorded by the first finalization."""
         return self._wire_status
-
-    @property
-    def beta_strip_patterns(self) -> list[str]:
-        return self._config.beta_strip
 
     def record_inbound(
         self,
@@ -194,24 +180,11 @@ class RequestPipeline:
         Returns an abort reason string if any guard trips, else None.
         Works with both ChatStreamChunk and ResponsesStreamChunk.
         """
-        for guard in self._guards:
-            reason = guard.feed_chunk(chunk)
-            if reason:
-                return reason
-            content = getattr(chunk, "content", None)
-            if content:
-                reason = guard.feed_text(content)
-                if reason:
-                    return reason
-        return None
+        return self._guard_chain.feed_chunk(chunk)
 
     def feed_text(self, text: str) -> str | None:
         """Feed raw text (for passthrough routes that don't use ChatStreamChunk)."""
-        for guard in self._guards:
-            reason = guard.feed_text(text)
-            if reason:
-                return reason
-        return None
+        return self._guard_chain.feed_text(text)
 
     def check_invoke_at_finish(self) -> list[dict] | None:
         """Check for recoverable invoke leaks at stream end."""

@@ -8,7 +8,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from router_maestro.auth.storage import OAuthCredential
+from router_maestro.auth.storage import AuthStorage, OAuthCredential
 from router_maestro.providers import (
     AnthropicProvider,
     ChatRequest,
@@ -3297,6 +3297,7 @@ async def test_copilot_token_refresh_529_is_rate_limit() -> None:
         response=response,
     )
     provider = CopilotProvider()
+    provider.auth_manager.storage = AuthStorage()
     provider.auth_manager.storage.set(
         "github-copilot",
         OAuthCredential(refresh="github-token", access="", expires=0),

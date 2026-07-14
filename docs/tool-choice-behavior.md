@@ -1,8 +1,9 @@
 # tool_choice 与 finish_reason 行为分析
 
-## `finish_reason` 在不同 `tool_choice` 下的行为
+## 直连 OpenAI API 的 `finish_reason` 行为
 
-当请求中包含 `tools` 和 `tool_choice` 时，`finish_reason` 的值取决于 `tool_choice` 的格式：
+以下表格记录本页引用的原生 OpenAI API 观测结果，不是
+Router-Maestro 规范化后的输出：
 
 | tool_choice | finish_reason | tool_calls | 说明 |
 |---|---|---|---|
@@ -46,7 +47,19 @@ OpenAI 员工 @brianz-oai 在 [社区论坛](https://community.openai.com/t/new-
 
 ## Router-Maestro 代理行为
 
-直连 Copilot API 和经由 Router-Maestro 代理的响应**完全一致**，代理透传正确，无修改或丢失。
+上表记录的是直连 API 的观测行为。Router-Maestro 对 Copilot Chat
+响应做 canonical normalization，不保证逐字节透传：它会合并
+Copilot 分开返回的文本与工具 choices，将泄漏在文本中的 XML
+工具调用恢复为结构化 `tool_calls`，并在实际存在工具调用时将
+`finish_reason` 统一为 `"tool_calls"`。Anthropic 和 Gemini 入口还会
+分别编码为它们的原生工具终态。
+
+Router-Maestro 会在上游 I/O 前校验所选 provider/model 是否支持请求的
+operation、tools 和 parallel tool calls。支持的 `tools` / `tool_choice` 会按目标
+provider 的原生格式透传或等价翻译；无法表达的显式选项会以入口协议的 HTTP
+400 错误返回，不会静默丢弃，也不会借此切换到另一模型。Copilot Responses
+还会拒绝其不支持的 tool type；因此本页的 `finish_reason` 表格只描述已经通过
+这些能力与选项校验、实际发往 Copilot Chat transport 的请求。
 
 ## 客户端注意事项
 
@@ -58,10 +71,11 @@ if (message.tool_calls && message.tool_calls.length > 0) {
   handleToolCalls(message.tool_calls);
 }
 
-// 错误：依赖 finish_reason（强制工具调用时为 "stop"）
+// 错误：依赖上游或某一 API 版本的 finish_reason 差异
 if (finish_reason === "tool_calls") {
   handleToolCalls(message.tool_calls);
 }
 ```
 
-如果需要 `finish_reason` 一致为 `"tool_calls"`，可将 `tool_choice` 从 `{"type":"function",...}` 改为 `"required"`（仅在 Copilot API 下有效，原生 OpenAI API 仍返回 `"stop"`）。
+不要为了改变 `finish_reason` 而改写 `tool_choice`；两者表达的请求
+语义不同。客户端应直接检查规范化后的 `tool_calls`。

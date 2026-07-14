@@ -9,7 +9,7 @@ capability-aware route plan, providers execute the selected wire operation, and
 the entry protocol encodes the result.
 
 ```
-Anthropic Request ──► translate_anthropic_to_openai() ──► ChatRequest ──► Provider ──► ChatResponse ──► translate_openai_to_anthropic() ──► Anthropic Response
+Anthropic Request ──► translate_anthropic_to_openai() ──► ChatRequest ──► Provider ──► ChatResponse ──► build_anthropic_response() ──► Anthropic Response
 OpenAI Request ──────────────── (passthrough) ──────────► ChatRequest ──► Provider ──► ChatResponse ──────────── (passthrough) ──────────────► OpenAI Response
 OpenAI Responses ───────────── typed normalization ─────► ResponsesRequest ──► Provider/bridge ──► Responses output
 Gemini Request ─────────────── protocol translation ────► ChatRequest ──► Provider ──► ChatResponse ──► Gemini Response
@@ -104,7 +104,8 @@ entry and snapshots its capabilities.
 
 ### Path 2: Internal → Anthropic (Response Outbound, Non-Streaming)
 
-**Function:** `translate_openai_to_anthropic()` in `translation.py`
+**Function:** `build_anthropic_response()` in
+`src/router_maestro/server/protocols/anthropic_reducer.py`
 
 | Internal / OpenAI Field | Anthropic Field | Transformation |
 |---|---|---|
@@ -162,13 +163,46 @@ object is a no-op. `reasoning.summary` and any unknown sibling are rejected with
 an OpenAI `invalid_request_error` whose parameter identifies the exact field;
 streaming validation occurs before SSE commitment.
 
+### Terminal and HTTP Semantics
+
+Transport termination and response semantics are independent. Router-Maestro
+records whether a provider ended with an explicit terminal, unexpected EOF,
+client cancellation, or exception, separately from whether the response was
+completed, incomplete, failed, cancelled, or unknown. Only an explicit
+`completed` terminal is success; a clean EOF without a terminal is
+`unexpected_eof`.
+
+| Boundary | HTTP behavior | Protocol behavior |
+|---|---|---|
+| Validation, routing, provider open, or primed first-chunk failure before the route returns SSE | Entry-protocol non-2xx JSON error | No success SSE terminal is emitted |
+| Failure after the response has started | HTTP status remains committed (normally `200`) | Exactly one protocol-native error/incomplete terminal; no fallback or replay |
+| Explicit incomplete terminal | HTTP `200` | Preserve the protocol's incomplete/length terminal |
+| Clean provider EOF without an explicit terminal | HTTP `200` after commitment | Encode `unexpected_eof` as a non-success in-stream terminal |
+| Downstream disconnect | Already-committed status if any | Record cancellation and finalize resources; do not manufacture success |
+
+The standard Anthropic stream emits a protocol `ping` while the Router opens
+and primes the provider stream. Consequently, an open/first-chunk failure after
+that ping is already post-commit and is encoded in-stream. OpenAI Chat,
+Responses, Gemini, and beta-native Anthropic open/prime before returning their
+stream response, so their corresponding early failures can still be non-2xx.
+
+Native OpenAI Responses status is part of the response body, not a replacement
+HTTP status. Non-stream `status: "incomplete"`, `"failed"`, or `"cancelled"`
+remains HTTP `200`; streaming uses `response.incomplete` or `response.failed`
+(with response status `failed`/`cancelled`) and also remains HTTP `200` once
+started. The Chat/Anthropic/Gemini non-stream bridges cannot represent a native
+failed/cancelled Responses result, so they return their own protocol-native
+error envelope rather than a false success.
+
 ---
 
 ### Path 4: Internal → Anthropic (Response Outbound, Streaming)
 
-**Function:** `translate_openai_chunk_to_anthropic_events()` in `translation.py`
+**Reducer:** `AnthropicReducer` in
+`src/router_maestro/server/protocols/anthropic_reducer.py`
 
-Uses a state machine (`AnthropicStreamState`) to translate OpenAI streaming chunks into Anthropic SSE events:
+The reducer owns an `AnthropicStreamState` and translates canonical
+`ChatStreamChunk` values into Anthropic SSE events:
 
 ```
 OpenAI chunk: {"choices":[{"delta":{"content":"Hello"},"finish_reason":null}]}
@@ -292,6 +326,31 @@ OpenAI errors use `invalid_request_error`, Anthropic errors use an
 `invalid_request_error` envelope, and Gemini errors use `INVALID_ARGUMENT`.
 Static capability/option failures are non-retryable and never authorize a model
 switch.
+
+The concrete provider policy is intentionally conservative:
+
+| Provider transport | Representative supported translations | Explicit rejection examples |
+|---|---|---|
+| Copilot Chat | temperature, tools/tool choice, `top_p`, penalties, stop, user, metadata, service tier, downward reasoning-tier selection | `top_k`, Gemini candidate count/response MIME type, conflicting stop fields, unknown extensions |
+| Copilot Responses | tools/tool choice, parallel tools, `top_p`, metadata, service tier, downward reasoning-tier selection | any explicit temperature, unsupported tool types, unknown extensions |
+| OpenAI/custom Chat Completions | OpenAI-native temperature, tools/tool choice, `top_p`, penalties, stop, user, metadata, service tier; extended reasoning tiers are downgraded to upstream `high` | `top_k`, Gemini candidate count/response MIME type, conflicting stop fields, unknown extensions |
+| Anthropic Messages | temperature, tools/tool choice, `top_p`, `top_k`, stop sequences, metadata/user, service tier, thinking and effort | penalties, Gemini candidate count/response MIME type, conflicting stop fields, unknown extensions |
+
+Model operation/feature capabilities are checked during route planning before
+this payload policy runs. A fallback candidate is eligible only when its
+provider transport and selected model can support the requested operation and
+required tools, vision, reasoning, or parallel-tool feature (or support is
+explicitly unknown and the runtime contract permits probing). An explicitly
+selected model remains primary; configured priorities can follow it only after
+a retryable execution failure, even when the primary was absent from the
+priority list. Static option/capability errors never trigger fallback.
+
+When a Chat-shaped request is adapted to the Copilot Responses transport, the
+Responses policy also rejects `frequency_penalty`, `presence_penalty`, `stop`,
+`user`, `top_k`, `stop_sequences`, Gemini candidate count, and Gemini response
+MIME type. This applies whether the entry protocol was OpenAI Chat, Anthropic,
+or Gemini: the rejection is encoded as that entry protocol's HTTP 400 and is
+resolved before provider I/O or model fallback.
 
 Some protocol information still has no lossless counterpart:
 

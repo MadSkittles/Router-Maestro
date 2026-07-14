@@ -1,11 +1,263 @@
 """Tests for the stream pipeline guards."""
 
+import importlib
+from types import SimpleNamespace
+
 import pytest
 
+import router_maestro.pipeline as pipeline_api
+import router_maestro.runtime.request_context as request_context_module
+from router_maestro.config.priorities import PrioritiesConfig
 from router_maestro.pipeline.beta_strip import strip_beta_tokens
-from router_maestro.pipeline.leak_guard import LeakGuard, RawFrameLeakGuard
+from router_maestro.pipeline.leak_guard import LeakGuard
+from router_maestro.pipeline.request_pipeline import RequestPipeline
 from router_maestro.pipeline.runaway_guard import RunawayGuard
 from router_maestro.providers.base import ChatStreamChunk, ResponsesStreamChunk, ResponsesToolCall
+
+
+class _RecordingGuard:
+    def __init__(self, *, abort_text: str | None = None):
+        self.abort_text = abort_text
+        self.calls: list[tuple[str, object]] = []
+
+    def feed_chunk(self, chunk: object) -> str | None:
+        self.calls.append(("chunk", chunk))
+        return None
+
+    def feed_text(self, text: str) -> str | None:
+        self.calls.append(("text", text))
+        if text == self.abort_text:
+            return "recording_guard:abort"
+        return None
+
+
+def test_guard_compatibility_imports_remain_available():
+    guards_module = importlib.import_module("router_maestro.pipeline.guards")
+
+    assert pipeline_api.StreamGuard is guards_module.StreamGuard
+    assert pipeline_api.build_guards is guards_module.build_guards
+    assert pipeline_api.guarded_stream is guards_module.guarded_stream
+    assert guards_module.GuardAbortError.__module__ == "router_maestro.pipeline.guards"
+
+
+def test_superseded_raw_frame_guard_is_not_a_second_production_entrypoint():
+    leak_guard_module = importlib.import_module("router_maestro.pipeline.leak_guard")
+
+    assert not hasattr(leak_guard_module, "RawFrameLeakGuard")
+
+
+def test_guard_chain_dispatches_in_order_and_stops_after_first_abort():
+    first = _RecordingGuard(abort_text="stop")
+    second = _RecordingGuard()
+    chain = pipeline_api.GuardChain([first, second])
+    chunk = ChatStreamChunk(content="stop")
+
+    result = chain.feed_chunk(chunk)
+
+    assert result == "recording_guard:abort"
+    assert first.calls == [("chunk", chunk), ("text", "stop")]
+    assert second.calls == []
+
+
+def test_legacy_custom_guard_receives_only_content_text():
+    guard = _RecordingGuard()
+    chain = pipeline_api.GuardChain([guard])
+    chunk = ResponsesStreamChunk(
+        content="content",
+        refusal="refusal",
+        thinking="thinking",
+    )
+
+    assert chain.feed_chunk(chunk) is None
+    assert guard.calls == [("chunk", chunk), ("text", "content")]
+
+
+@pytest.mark.parametrize("field", ["content", "refusal", "thinking"])
+def test_guard_chain_leak_scans_each_human_visible_text_field(field):
+    leak_guard = LeakGuard()
+    chain = pipeline_api.GuardChain([leak_guard])
+    payload = {"content": "", "refusal": None, "thinking": None}
+    payload[field] = '<channel source="guard-test">visible</channel>'
+    chunk = ResponsesStreamChunk(**payload)
+
+    result = chain.feed_chunk(chunk)
+
+    assert result == "response_leak:control_envelope:channel"
+
+
+def test_guard_chain_separates_visible_leak_text_from_opaque_counted_payloads():
+    leak_guard = LeakGuard()
+    runaway_guard = RunawayGuard(max_bytes=10_000, max_deltas=50_000)
+    chain = pipeline_api.GuardChain([leak_guard, runaway_guard])
+    chunk = ResponsesStreamChunk(
+        content="content",
+        refusal="refusal",
+        thinking="thinking",
+        thinking_id="<tick>opaque-id</tick>",
+        thinking_signature="<tick>opaque-signature</tick>",
+        tool_call=ResponsesToolCall(
+            call_id="call-1",
+            name="lookup",
+            arguments="<tick>structured-arguments</tick>",
+        ),
+    )
+
+    result = chain.feed_chunk(chunk)
+
+    assert result is None
+    assert leak_guard.accumulated_text == "content"
+    counted_payloads = (
+        chunk.content,
+        chunk.refusal,
+        chunk.thinking,
+        chunk.thinking_id,
+        chunk.thinking_signature,
+        chunk.tool_call.arguments,
+    )
+    assert runaway_guard._total_bytes == sum(
+        len(payload.encode("utf-8")) for payload in counted_payloads if payload is not None
+    )
+    assert runaway_guard._delta_count == 1
+
+
+def test_guard_chain_recovers_invoke_from_content_but_not_refusal_or_thinking():
+    leak_guard = LeakGuard(allowed_tool_names={"Read"})
+    chain = pipeline_api.GuardChain([leak_guard])
+    invoke = '<invoke name="Read"><parameter name="file_path">/tmp/x</parameter></invoke>'
+
+    assert (
+        chain.feed_chunk(
+            ResponsesStreamChunk(
+                content="",
+                refusal=invoke,
+                thinking=invoke,
+            )
+        )
+        is None
+    )
+    assert leak_guard.check_invoke_at_finish() is None
+
+    assert chain.feed_chunk(ResponsesStreamChunk(content=invoke)) is None
+    recovered = leak_guard.check_invoke_at_finish()
+    assert recovered is not None
+    assert [tool_call["function"]["name"] for tool_call in recovered] == ["Read"]
+
+
+def test_leak_guard_scanner_state_is_isolated_between_visible_text_kinds():
+    leak_guard = LeakGuard()
+    chain = pipeline_api.GuardChain([leak_guard])
+
+    assert chain.feed_chunk(ResponsesStreamChunk(content="```")) is None
+    result = chain.feed_chunk(
+        ResponsesStreamChunk(
+            content="",
+            thinking="<tick>private control</tick>",
+        )
+    )
+
+    assert result == "response_leak:control_envelope:tick"
+
+
+def test_leak_guard_never_joins_control_envelope_across_visible_text_kinds():
+    leak_guard = LeakGuard()
+    chain = pipeline_api.GuardChain([leak_guard])
+
+    assert chain.feed_chunk(ResponsesStreamChunk(content="<tick>content")) is None
+    result = chain.feed_chunk(
+        ResponsesStreamChunk(
+            content="",
+            thinking="thinking</tick>",
+        )
+    )
+
+    assert result is None
+
+
+def test_request_pipeline_normalizes_legacy_guard_list_to_guard_chain():
+    guard = _RecordingGuard()
+    pipeline = RequestPipeline(
+        request_id="req-guard-list",
+        guards=[guard],
+        leak_guard=None,
+        audit=None,
+        config=PrioritiesConfig(),
+    )
+    chunk = ChatStreamChunk(content="visible")
+
+    assert pipeline.feed_stream(chunk) is None
+    assert isinstance(pipeline._guard_chain, pipeline_api.GuardChain)
+    assert guard.calls == [("chunk", chunk), ("text", "visible")]
+
+
+def test_request_pipeline_builds_guards_from_bound_request_config(monkeypatch):
+    config = PrioritiesConfig.model_validate(
+        {
+            "guards": {
+                "leak_guard": {"enabled": False},
+                "runaway_guard": {"enabled": False},
+            }
+        }
+    )
+    context = SimpleNamespace(config=config, audit=None, pipeline=None)
+    monkeypatch.setattr(
+        request_context_module,
+        "get_current_request_context",
+        lambda: context,
+    )
+
+    def fail_config_reload():
+        pytest.fail("RequestPipeline reloaded config instead of using the request snapshot")
+
+    monkeypatch.setattr(
+        "router_maestro.pipeline.request_pipeline.load_priorities_config",
+        fail_config_reload,
+    )
+
+    pipeline = RequestPipeline.create(
+        request_id="req-snapshot-guards",
+        model="github-copilot/gpt-4o",
+    )
+
+    assert context.pipeline is pipeline
+    assert isinstance(pipeline._guard_chain, pipeline_api.GuardChain)
+    assert pipeline.feed_stream(ChatStreamChunk(content="<tick>visible</tick>")) is None
+
+
+def test_build_guards_retains_legacy_list_api():
+    guards = pipeline_api.build_guards(
+        model="github-copilot/gpt-4o",
+        leak_guard_enabled=True,
+        runaway_guard_enabled=True,
+    )
+
+    assert isinstance(guards, list)
+    assert [type(guard) for guard in guards] == [LeakGuard, RunawayGuard]
+
+
+@pytest.mark.asyncio
+async def test_guarded_stream_retains_abort_tuple_behavior_without_wrapper_warning(caplog):
+    guard = _RecordingGuard(abort_text="stop")
+    chunks = [
+        ChatStreamChunk(content="first"),
+        ChatStreamChunk(content="stop"),
+        ChatStreamChunk(content="unreachable"),
+    ]
+
+    async def inner():
+        for chunk in chunks:
+            yield chunk
+
+    with caplog.at_level("WARNING", logger="router_maestro.pipeline.guards"):
+        results = [
+            item
+            async for item in pipeline_api.guarded_stream(
+                inner(),
+                [guard],
+            )
+        ]
+
+    assert results == [(chunks[0], None), (chunks[1], "recording_guard:abort")]
+    assert caplog.records == []
 
 
 class TestLeakGuard:
@@ -122,39 +374,6 @@ class TestLeakGuard:
         r1 = guard.feed_text(text)
         r2 = guard.feed_text("more text")
         assert r1 == r2
-
-
-class TestRawFrameLeakGuard:
-    """Tests for the passthrough-route leak guard variant."""
-
-    def test_text_delta_detected(self):
-        import json
-
-        guard = RawFrameLeakGuard()
-        data = json.dumps({"delta": {"type": "text_delta", "text": "<tick>content</tick>"}})
-        result = guard.feed_frame("content_block_delta", data)
-        assert result is not None
-        assert "tick" in result
-
-    def test_non_delta_event_ignored(self):
-        guard = RawFrameLeakGuard()
-        result = guard.feed_frame("message_start", '{"message":{}}')
-        assert result is None
-
-    def test_thinking_delta_scanned(self):
-        import json
-
-        guard = RawFrameLeakGuard()
-        data = json.dumps(
-            {
-                "delta": {
-                    "type": "thinking_delta",
-                    "thinking": '<channel source="x">leak</channel>',
-                }
-            }
-        )
-        result = guard.feed_frame("content_block_delta", data)
-        assert result is not None
 
 
 class TestRunawayGuard:
@@ -320,6 +539,18 @@ class TestRunawayGuard:
 
         assert result == "runaway_guard:max_bytes_exceeded:11>10"
         assert guard._total_bytes == 11
+        assert guard._delta_count == 1
+
+    def test_opaque_wire_payload_overrides_typed_field_byte_accounting(self):
+        guard = RunawayGuard(max_bytes=10_000, max_deltas=50_000)
+        chunk = ChatStreamChunk(
+            content="visible",
+            thinking="private",
+            opaque_payload="exact-wire-frame",
+        )
+
+        assert guard.feed_chunk(chunk) is None
+        assert guard._total_bytes == len(b"exact-wire-frame")
         assert guard._delta_count == 1
 
 

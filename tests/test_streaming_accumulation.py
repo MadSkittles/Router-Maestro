@@ -1,7 +1,8 @@
 """Tests for streaming chunk token accumulation (Feature 3)."""
 
+from router_maestro.providers import ChatStreamChunk
+from router_maestro.server.protocols.anthropic_reducer import AnthropicReducer
 from router_maestro.server.schemas.anthropic import AnthropicStreamState
-from router_maestro.server.translation import translate_openai_chunk_to_anthropic_events
 
 
 def _make_chunk(
@@ -10,18 +11,18 @@ def _make_chunk(
     usage: dict | None = None,
     tool_calls: list | None = None,
     chunk_id: str = "chatcmpl-test",
-) -> dict:
-    """Build a minimal OpenAI-style streaming chunk."""
-    delta: dict = {}
-    if content is not None:
-        delta["content"] = content
-    if tool_calls is not None:
-        delta["tool_calls"] = tool_calls
-    return {
-        "id": chunk_id,
-        "choices": [{"delta": delta, "finish_reason": finish_reason}],
-        "usage": usage,
-    }
+) -> ChatStreamChunk:
+    """Build a minimal canonical streaming chunk."""
+    return ChatStreamChunk(
+        content=content or "",
+        finish_reason=finish_reason,
+        usage=usage,
+        tool_calls=tool_calls,
+    )
+
+
+def _reduce(chunk: ChatStreamChunk, state: AnthropicStreamState, model: str) -> list[dict]:
+    return AnthropicReducer(response_id="chatcmpl-test", model=model, state=state).reduce(chunk)
 
 
 class TestStreamingAccumulation:
@@ -34,7 +35,7 @@ class TestStreamingAccumulation:
             content="hello",
             usage={"prompt_tokens": 50, "completion_tokens": 10},
         )
-        translate_openai_chunk_to_anthropic_events(chunk, state, "test-model")
+        _reduce(chunk, state, "test-model")
 
         assert state.accumulated_prompt_tokens == 50
         assert state.accumulated_completion_tokens == 10
@@ -49,7 +50,7 @@ class TestStreamingAccumulation:
             content="hi",
             usage={"prompt_tokens": 50, "completion_tokens": 5},
         )
-        translate_openai_chunk_to_anthropic_events(chunk1, state, "test-model")
+        _reduce(chunk1, state, "test-model")
         assert state.accumulated_completion_tokens == 5
 
         # Second chunk with higher cumulative total
@@ -57,7 +58,7 @@ class TestStreamingAccumulation:
             content=" there",
             usage={"prompt_tokens": 50, "completion_tokens": 15},
         )
-        translate_openai_chunk_to_anthropic_events(chunk2, state, "test-model")
+        _reduce(chunk2, state, "test-model")
         assert state.accumulated_completion_tokens == 15
         assert state.accumulated_prompt_tokens == 50
 
@@ -72,7 +73,7 @@ class TestStreamingAccumulation:
                 "completion_tokens_details": {"reasoning_tokens": 3},
             },
         )
-        translate_openai_chunk_to_anthropic_events(chunk, state, "test-model")
+        _reduce(chunk, state, "test-model")
         assert state.completion_tokens_details == {"reasoning_tokens": 3}
 
     def test_prompt_tokens_details_tracked(self):
@@ -86,7 +87,7 @@ class TestStreamingAccumulation:
                 "prompt_tokens_details": {"cached_tokens": 8},
             },
         )
-        translate_openai_chunk_to_anthropic_events(chunk, state, "test-model")
+        _reduce(chunk, state, "test-model")
         assert state.prompt_tokens_details == {"cached_tokens": 8}
 
     def test_finish_uses_accumulated_tokens(self):
@@ -98,11 +99,11 @@ class TestStreamingAccumulation:
             content="hello",
             usage={"prompt_tokens": 200, "completion_tokens": 30},
         )
-        translate_openai_chunk_to_anthropic_events(chunk1, state, "test-model")
+        _reduce(chunk1, state, "test-model")
 
         # Finish chunk without usage
         finish_chunk = _make_chunk(finish_reason="stop")
-        events = translate_openai_chunk_to_anthropic_events(finish_chunk, state, "test-model")
+        events = _reduce(finish_chunk, state, "test-model")
 
         # Find message_delta event
         delta_events = [e for e in events if e.get("type") == "message_delta"]
@@ -117,14 +118,14 @@ class TestStreamingAccumulation:
 
         # Content chunk without usage
         chunk1 = _make_chunk(content="hello")
-        translate_openai_chunk_to_anthropic_events(chunk1, state, "test-model")
+        _reduce(chunk1, state, "test-model")
 
         # Finish chunk with usage
         finish_chunk = _make_chunk(
             finish_reason="stop",
             usage={"prompt_tokens": 150, "completion_tokens": 20},
         )
-        events = translate_openai_chunk_to_anthropic_events(finish_chunk, state, "test-model")
+        events = _reduce(finish_chunk, state, "test-model")
 
         delta_events = [e for e in events if e.get("type") == "message_delta"]
         assert len(delta_events) == 1
@@ -138,11 +139,11 @@ class TestStreamingAccumulation:
 
         # Content chunk
         chunk1 = _make_chunk(content="hello")
-        translate_openai_chunk_to_anthropic_events(chunk1, state, "test-model")
+        _reduce(chunk1, state, "test-model")
 
         # Finish with no usage
         finish_chunk = _make_chunk(finish_reason="stop")
-        events = translate_openai_chunk_to_anthropic_events(finish_chunk, state, "test-model")
+        events = _reduce(finish_chunk, state, "test-model")
 
         delta_events = [e for e in events if e.get("type") == "message_delta"]
         assert len(delta_events) == 1
@@ -158,14 +159,14 @@ class TestStreamingAccumulation:
             content="x",
             usage={"prompt_tokens": 100, "completion_tokens": 10},
         )
-        translate_openai_chunk_to_anthropic_events(chunk1, state, "test-model")
+        _reduce(chunk1, state, "test-model")
 
         # Chunk with zero values should not reduce accumulated
         chunk2 = _make_chunk(
             content="y",
             usage={"prompt_tokens": 0, "completion_tokens": 0},
         )
-        translate_openai_chunk_to_anthropic_events(chunk2, state, "test-model")
+        _reduce(chunk2, state, "test-model")
 
         assert state.accumulated_prompt_tokens == 100
         assert state.accumulated_completion_tokens == 10

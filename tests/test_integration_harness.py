@@ -3,6 +3,9 @@
 import ast
 import importlib
 import inspect
+import json
+import os
+import subprocess
 import time
 from pathlib import Path
 from unittest.mock import AsyncMock, Mock, patch
@@ -16,6 +19,281 @@ from router_maestro.providers import CopilotProvider, ModelInfo
 from router_maestro.routing.capabilities import Operation
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+class _LivePipe:
+    def __init__(self, process) -> None:
+        self.process = process
+        self.read_calls = 0
+
+    def read(self) -> str:
+        self.read_calls += 1
+        if self.process.returncode is None:
+            raise AssertionError("stdout.read would block while the process is alive")
+        return "controlled startup diagnostic"
+
+
+class _HungStartupProcess:
+    def __init__(self) -> None:
+        self.returncode = None
+        self.terminate_calls = 0
+        self.stdout = _LivePipe(self)
+
+    def poll(self):
+        return self.returncode
+
+    def terminate(self) -> None:
+        self.terminate_calls += 1
+        self.returncode = -15
+
+    def wait(self, timeout=None):
+        if self.returncode is None:
+            raise subprocess.TimeoutExpired("router-maestro", timeout)
+        return self.returncode
+
+
+def test_startup_timeout_terminates_before_reading_live_stdout(monkeypatch):
+    conftest = importlib.import_module("integration_tests.conftest")
+    process = _HungStartupProcess()
+    monotonic = iter((0.0, 0.0, 1.0))
+    monkeypatch.setattr(conftest, "STARTUP_TIMEOUT_SECONDS", 0.5)
+    monkeypatch.setattr(conftest.time, "time", lambda: next(monotonic))
+    monkeypatch.setattr(conftest.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(
+        httpx.Client,
+        "get",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(httpx.ConnectError("not ready")),
+    )
+
+    with pytest.raises(pytest.fail.Exception, match="controlled startup diagnostic"):
+        conftest._wait_for_health("http://127.0.0.1:1", process)
+
+    assert process.terminate_calls == 1
+    assert process.returncode == -15
+    assert process.stdout.read_calls == 1
+
+
+def test_startup_exit_reads_diagnostics_without_reterminating(monkeypatch):
+    conftest = importlib.import_module("integration_tests.conftest")
+    process = _HungStartupProcess()
+    process.returncode = 7
+    monkeypatch.setattr(conftest.time, "time", lambda: 0.0)
+
+    with pytest.raises(pytest.fail.Exception, match="controlled startup diagnostic"):
+        conftest._wait_for_health("http://127.0.0.1:1", process)
+
+    assert process.terminate_calls == 0
+    assert process.stdout.read_calls == 1
+
+
+def test_controlled_server_routes_subprocess_output_to_nonblocking_file(tmp_path, monkeypatch):
+    conftest = importlib.import_module("integration_tests.conftest")
+    process = _HungStartupProcess()
+    captured = {}
+
+    def popen(_command, **kwargs):
+        captured.update(kwargs)
+        return process
+
+    monkeypatch.setattr(conftest.subprocess, "Popen", popen)
+    monkeypatch.setattr(conftest, "_wait_for_health", lambda *_args: None)
+    monkeypatch.setattr(conftest, "_terminate_process", lambda *_args: None)
+
+    with conftest.controlled_router_server(
+        tmp_path,
+        providers={},
+        priorities={"priorities": []},
+    ):
+        assert captured["stdout"] is not subprocess.PIPE
+        assert not captured["stdout"].closed
+
+    assert captured["stdout"].closed
+    assert Path(process._router_maestro_output_path).parent == tmp_path
+
+
+def test_controlled_xdg_environment_is_isolated_and_drops_provider_secrets(tmp_path):
+    conftest = importlib.import_module("integration_tests.conftest")
+    source = {
+        "HOME": "/Users/example",
+        "PATH": os.environ.get("PATH", ""),
+        "OPENAI_API_KEY": "must-not-leak",
+        "ANTHROPIC_API_KEY": "must-not-leak",
+        "ROUTER_MAESTRO_API_KEY": "must-be-replaced",
+    }
+
+    env = conftest.controlled_xdg_environment(
+        tmp_path,
+        source=source,
+        api_key="controlled-key",
+    )
+
+    assert env["XDG_CONFIG_HOME"] == str(tmp_path / "config")
+    assert env["XDG_DATA_HOME"] == str(tmp_path / "data")
+    assert env["ROUTER_MAESTRO_API_KEY"] == "controlled-key"
+    assert env["HOME"] == str(tmp_path / "home")
+    assert env["PATH"] == source["PATH"]
+    assert "OPENAI_API_KEY" not in env
+    assert "ANTHROPIC_API_KEY" not in env
+
+
+def test_recorded_request_selector_uses_exact_method_path_and_occurrence():
+    conftest = importlib.import_module("integration_tests.conftest")
+    requests = [
+        conftest.RecordedUpstreamRequest("GET", "/models", None, {}),
+        conftest.RecordedUpstreamRequest("POST", "/responses", {"model": "one"}, {}),
+        conftest.RecordedUpstreamRequest("POST", "/responses", {"model": "two"}, {}),
+    ]
+
+    selected = conftest.select_recorded_request(
+        requests,
+        method="POST",
+        path="/responses",
+        occurrence=1,
+    )
+
+    assert selected.payload == {"model": "two"}
+    with pytest.raises(AssertionError, match="no upstream request matched"):
+        conftest.select_recorded_request(requests, method="POST", path="responses")
+    with pytest.raises(AssertionError, match="occurrence 2"):
+        conftest.select_recorded_request(
+            requests,
+            method="POST",
+            path="/responses",
+            occurrence=2,
+        )
+
+
+def test_exact_outbound_payload_helper_rejects_missing_extra_and_changed_fields():
+    conftest = importlib.import_module("integration_tests.conftest")
+    actual = {"model": "m", "stream": False, "top_p": 0.7}
+
+    conftest.assert_exact_outbound_payload(
+        actual,
+        {"model": "m", "stream": False, "top_p": 0.7},
+    )
+    with pytest.raises(AssertionError, match="exact outbound payload mismatch"):
+        conftest.assert_exact_outbound_payload(actual, {"model": "m", "stream": False})
+    with pytest.raises(AssertionError, match="exact outbound payload mismatch"):
+        conftest.assert_exact_outbound_payload(
+            actual,
+            {"model": "m", "stream": False, "top_p": 0.8},
+        )
+
+
+def test_scripted_upstream_records_exact_json_and_returns_programmed_reply():
+    conftest = importlib.import_module("integration_tests.conftest")
+
+    def responder(request):
+        assert request.headers["authorization"] == "Bearer fake-token"
+        return (
+            200,
+            json.dumps({"received": request.payload}).encode(),
+            {"Content-Type": "application/json"},
+        )
+
+    with conftest.scripted_upstream(responder) as upstream:
+        response = httpx.post(
+            f"{upstream.base_url}/chat/completions?ignored=query",
+            headers={"Authorization": "Bearer fake-token"},
+            json={"model": "m", "stream": False},
+        )
+
+    assert response.json() == {"received": {"model": "m", "stream": False}}
+    recorded = conftest.select_recorded_request(
+        upstream.requests,
+        method="POST",
+        path="/chat/completions",
+    )
+    conftest.assert_exact_outbound_payload(recorded.payload, {"model": "m", "stream": False})
+
+
+def test_controlled_router_server_uses_only_declared_temporary_provider(tmp_path):
+    conftest = importlib.import_module("integration_tests.conftest")
+
+    def responder(request):
+        if request.path == "/chat/completions":
+            return (
+                200,
+                json.dumps(
+                    {
+                        "id": "chatcmpl-fake",
+                        "model": request.payload["model"],
+                        "choices": [
+                            {
+                                "index": 0,
+                                "message": {"role": "assistant", "content": "pong"},
+                                "finish_reason": "stop",
+                            }
+                        ],
+                        "usage": {
+                            "prompt_tokens": 1,
+                            "completion_tokens": 1,
+                            "total_tokens": 2,
+                        },
+                    }
+                ).encode(),
+                {"Content-Type": "application/json"},
+            )
+        return 404, b'{"error":"unexpected"}', {"Content-Type": "application/json"}
+
+    with conftest.scripted_upstream(responder) as upstream:
+        providers = {
+            "fake": {
+                "type": "openai-compatible",
+                "baseURL": upstream.base_url,
+                "models": {"echo": {"name": "Echo"}},
+                "options": {"allow_unauthenticated": True},
+            }
+        }
+        priorities = {
+            "priorities": ["fake/echo"],
+            "fallback": {"strategy": "none", "maxRetries": 0},
+        }
+        with conftest.controlled_router_server(
+            tmp_path,
+            providers=providers,
+            priorities=priorities,
+        ) as server:
+            response = httpx.post(
+                f"{server.base_url}/api/openai/v1/chat/completions",
+                headers={"Authorization": f"Bearer {server.api_key}"},
+                json={
+                    "model": "router-maestro",
+                    "messages": [{"role": "user", "content": "ping"}],
+                    "temperature": 0,
+                },
+            )
+
+    assert response.status_code == 200
+    assert response.json()["model"] == "fake/echo"
+    sent = conftest.select_recorded_request(
+        upstream.requests,
+        method="POST",
+        path="/chat/completions",
+    )
+    conftest.assert_exact_outbound_payload(
+        sent.payload,
+        {
+            "model": "echo",
+            "messages": [{"role": "user", "content": "ping"}],
+            "stream": False,
+            "temperature": 0.0,
+        },
+    )
+
+
+def test_controlled_postcommit_protocol_failure_is_not_misclassified_as_eof(tmp_path):
+    """Keep the real transport/codec/Router/route post-commit chain in default CI."""
+    boundaries = importlib.import_module("integration_tests.test_controlled_boundaries")
+
+    boundaries.test_stream_postcommit_failure_is_normalized_once_and_never_replays(tmp_path)
+
+
+def test_controlled_automatic_fallback_filters_required_features(tmp_path):
+    """Keep capability-aware fallback execution in the default CI suite."""
+    boundaries = importlib.import_module("integration_tests.test_controlled_boundaries")
+
+    boundaries.test_automatic_fallback_skips_feature_incompatible_candidates(tmp_path)
 
 
 def test_integration_tests_are_outside_default_pytest_tree():
@@ -1274,8 +1552,10 @@ class _RecordingStreamClient:
     def __init__(self, *responses: httpx.Response):
         self.contexts = [_RecordingStreamContext(response) for response in responses]
         self.calls = 0
+        self.call_args = []
 
-    def stream(self, *_args, **_kwargs):
+    def stream(self, *args, **kwargs):
+        self.call_args.append((args, kwargs))
         context = self.contexts[self.calls]
         self.calls += 1
         return context
@@ -1403,6 +1683,31 @@ def test_marked_400_retry_apis_are_scoped_to_three_fixed_compat_probes():
         "_stream_compat_probe_with_marked_400_retry": [
             "stream_openai_chat_compat_probe",
         ],
+    }
+
+
+def test_gemini_generate_content_probe_uses_base_protocol_payload(monkeypatch):
+    conftest = importlib.import_module("integration_tests.conftest")
+    captured = {}
+    expected_response = Mock()
+
+    def post_probe(client, path, *, json_payload):
+        captured.update(client=client, path=path, json_payload=json_payload)
+        return expected_response
+
+    monkeypatch.setattr(conftest, "_post_compat_probe_with_marked_400_retry", post_probe)
+    client = Mock()
+
+    response = conftest.post_gemini_generate_content_compat_probe(
+        client,
+        "github-copilot/claude-haiku-4.5",
+    )
+
+    assert response is expected_response
+    assert captured == {
+        "client": client,
+        "path": ("/api/gemini/v1beta/models/github-copilot/claude-haiku-4.5:generateContent"),
+        "json_payload": conftest.gemini_payload(),
     }
 
 
@@ -1592,7 +1897,7 @@ def test_anthropic_reasoning_result_rejects_empty_end_turn():
         )
 
 
-def test_anthropic_reasoning_result_rejects_empty_content_below_requested_token_limit():
+def test_anthropic_reasoning_result_accepts_authoritative_max_tokens_below_requested_cap():
     matrix = importlib.import_module("integration_tests.test_live_reasoning_matrix")
     data = {
         "content": [],
@@ -1600,15 +1905,14 @@ def test_anthropic_reasoning_result_rejects_empty_content_below_requested_token_
         "usage": {"input_tokens": 12, "output_tokens": 2047},
     }
 
-    with pytest.raises(AssertionError):
-        matrix._assert_anthropic_reasoning_result(
-            data,
-            requested_max_tokens=2048,
-            requested_thinking_budget=None,
-        )
+    matrix._assert_anthropic_reasoning_result(
+        data,
+        requested_max_tokens=2048,
+        requested_thinking_budget=None,
+    )
 
 
-def test_anthropic_reasoning_result_rejects_empty_content_below_explicit_thinking_budget():
+def test_anthropic_reasoning_result_treats_thinking_budget_as_ceiling_not_usage_floor():
     matrix = importlib.import_module("integration_tests.test_live_reasoning_matrix")
     data = {
         "content": [],
@@ -1616,12 +1920,11 @@ def test_anthropic_reasoning_result_rejects_empty_content_below_explicit_thinkin
         "usage": {"input_tokens": 12, "output_tokens": 15999},
     }
 
-    with pytest.raises(AssertionError):
-        matrix._assert_anthropic_reasoning_result(
-            data,
-            requested_max_tokens=16384,
-            requested_thinking_budget=16000,
-        )
+    matrix._assert_anthropic_reasoning_result(
+        data,
+        requested_max_tokens=16384,
+        requested_thinking_budget=16000,
+    )
 
 
 @pytest.mark.parametrize(
@@ -1664,8 +1967,8 @@ def test_anthropic_reasoning_result_rejects_missing_usage_or_terminal(missing_fi
         )
 
 
-def test_anthropic_effort_payload_includes_conflicting_budget():
-    """Live coverage must exercise effort precedence, not effort in isolation."""
+def test_anthropic_effort_payload_combines_enabled_budget_and_effort():
+    """Live coverage must exercise all three supported controls together."""
     conftest = importlib.import_module("integration_tests.conftest")
 
     payload = conftest.anthropic_effort_payload(
@@ -1675,9 +1978,172 @@ def test_anthropic_effort_payload_includes_conflicting_budget():
         stream=True,
     )
 
-    assert payload["thinking"] == {"type": "adaptive", "budget_tokens": 1024}
+    assert payload["thinking"] == {"type": "enabled", "budget_tokens": 1024}
     assert payload["output_config"] == {"effort": "xhigh"}
     assert payload["stream"] is True
+
+
+def test_anthropic_effort_profile_probes_candidates_until_manual_thinking_is_accepted():
+    conftest = importlib.import_module("integration_tests.conftest")
+    incompatible = "github-copilot/claude-sonnet-4.6"
+    compatible = "github-copilot/claude-opus-4.6"
+    catalog = {
+        incompatible: ModelInfo(
+            id="claude-sonnet-4.6",
+            name="Claude Sonnet 4.6",
+            provider="github-copilot",
+            supported_endpoints=("/chat/completions", "/v1/messages"),
+            reasoning_effort_values=["low", "xhigh"],
+        ),
+        compatible: ModelInfo(
+            id="claude-opus-4.6",
+            name="Claude Opus 4.6",
+            provider="github-copilot",
+            supported_endpoints=("/chat/completions", "/v1/messages"),
+            reasoning_effort_values=["low", "high"],
+        ),
+    }
+    rejected = httpx.Response(
+        400,
+        stream=httpx.ByteStream(b'{"type":"error"}'),
+        request=httpx.Request("POST", "https://router.example/beta"),
+    )
+    accepted = httpx.Response(
+        200,
+        stream=httpx.ByteStream(b'{"type":"message"}'),
+        request=httpx.Request("POST", "https://router.example/beta"),
+    )
+    client = _RecordingStreamClient(rejected, accepted)
+
+    selected = conftest.anthropic_effort_profile.__wrapped__(catalog, client)
+
+    assert selected == (compatible, "low")
+    assert [kwargs["json"]["model"] for _args, kwargs in client.call_args] == [
+        incompatible,
+        compatible,
+    ]
+    assert all(kwargs["json"]["stream"] is False for _args, kwargs in client.call_args)
+    assert not rejected.is_stream_consumed
+    assert not accepted.is_stream_consumed
+    assert rejected.is_closed
+    assert accepted.is_closed
+
+
+@pytest.mark.parametrize(
+    "model_info",
+    [
+        ModelInfo(
+            id="claude-sonnet-4.6",
+            name="Claude Sonnet 4.6",
+            provider="github-copilot",
+            supported_endpoints=("/chat/completions",),
+            reasoning_effort_values=["low"],
+            feature_capabilities={"reasoning": True},
+        ),
+        ModelInfo(
+            id="claude-sonnet-4.6",
+            name="Claude Sonnet 4.6",
+            provider="github-copilot",
+            supported_endpoints=("/chat/completions", "/v1/messages"),
+            reasoning_effort_values=[],
+            feature_capabilities={"reasoning": False},
+        ),
+    ],
+    ids=["missing-native-endpoint", "missing-effort-tier"],
+)
+def test_anthropic_effort_profile_requires_both_endpoints_and_live_effort(model_info):
+    conftest = importlib.import_module("integration_tests.conftest")
+    model = f"github-copilot/{model_info.id}"
+
+    with pytest.raises(pytest.skip.Exception, match="enabled thinking with effort"):
+        conftest.anthropic_effort_profile.__wrapped__({model: model_info}, Mock())
+
+
+def test_anthropic_effort_profile_fails_when_catalog_candidates_reject_manual_thinking():
+    conftest = importlib.import_module("integration_tests.conftest")
+    model = "github-copilot/claude-future"
+    catalog = {
+        model: ModelInfo(
+            id="claude-future",
+            name="Claude Future",
+            provider="github-copilot",
+            supported_endpoints=("/chat/completions", "/v1/messages"),
+            reasoning_effort_values=["low"],
+        )
+    }
+    response = httpx.Response(
+        400,
+        stream=httpx.ByteStream(b'{"type":"error"}'),
+        request=httpx.Request("POST", "https://router.example/beta"),
+    )
+    client = _RecordingStreamClient(response)
+
+    with pytest.raises(pytest.fail.Exception, match="rejected enabled thinking with effort"):
+        conftest.anthropic_effort_profile.__wrapped__(catalog, client)
+
+    assert not response.is_stream_consumed
+    assert response.is_closed
+
+
+def test_anthropic_effort_profile_bounds_runtime_compatibility_probes():
+    conftest = importlib.import_module("integration_tests.conftest")
+    catalog = {
+        f"github-copilot/claude-candidate-{index}": ModelInfo(
+            id=f"claude-candidate-{index}",
+            name=f"Claude Candidate {index}",
+            provider="github-copilot",
+            supported_endpoints=("/chat/completions", "/v1/messages"),
+            reasoning_effort_values=["low"],
+        )
+        for index in range(4)
+    }
+    responses = [
+        httpx.Response(
+            400,
+            stream=httpx.ByteStream(b'{"type":"error"}'),
+            request=httpx.Request("POST", "https://router.example/beta"),
+        )
+        for _index in range(4)
+    ]
+    client = _RecordingStreamClient(*responses)
+
+    with pytest.raises(pytest.fail.Exception, match="after 3 bounded attempts"):
+        conftest.anthropic_effort_profile.__wrapped__(catalog, client)
+
+    assert client.calls == 3
+    for response in responses[:3]:
+        assert not response.is_stream_consumed
+        assert response.is_closed
+    assert not responses[3].is_closed
+
+
+def test_anthropic_effort_profile_does_not_buffer_probe_response_body():
+    conftest = importlib.import_module("integration_tests.conftest")
+    model = "github-copilot/claude-future"
+    catalog = {
+        model: ModelInfo(
+            id="claude-future",
+            name="Claude Future",
+            provider="github-copilot",
+            supported_endpoints=("/chat/completions", "/v1/messages"),
+            reasoning_effort_values=["low"],
+        )
+    }
+    response = httpx.Response(
+        200,
+        stream=httpx.ByteStream(b"must not be buffered"),
+        request=httpx.Request("POST", "https://router.example/beta"),
+    )
+    client = _RecordingStreamClient(response)
+
+    selected = conftest.anthropic_effort_profile.__wrapped__(catalog, client)
+
+    assert selected == (model, "low")
+    assert client.calls == 1
+    assert not response.is_stream_consumed
+    assert response.is_closed
+    context = client.contexts[0]
+    assert context.exit_args == (None, None, None)
 
 
 def test_integration_tests_include_reasoning_and_gemini_family_matrices():
@@ -1690,7 +2156,7 @@ def test_integration_tests_include_reasoning_and_gemini_family_matrices():
     assert "test_anthropic_claude_thinking_budget_matrix" in reasoning
     assert "test_anthropic_gpt5_responses_bridge_thinking_budget_matrix" in reasoning
     assert "test_openai_chat_reasoning_effort_matrix" in reasoning
-    assert "test_anthropic_output_config_effort_precedence" in reasoning
+    assert "test_anthropic_enabled_budget_and_output_config_effort" in reasoning
     assert "test_gemini_family_generate_content_matrix" in gemini
 
 

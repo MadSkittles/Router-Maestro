@@ -139,6 +139,16 @@ output-token headroom exists. An adaptive budget may remain as an internal
 routing signal when effort is absent, but it is never serialized into an
 Anthropic-native adaptive thinking object.
 
+Reasoning effort stays on the selected base model. Router-Maestro does not
+rewrite model IDs to `-high`, `-xhigh`, or other reasoning suffixes. If the
+catalog does not advertise the requested tier, substitution is downward-only
+on `minimal < low < medium < high < xhigh < max`; no supported tier at or below
+the request means rejection. Likewise, Claude Code's synthetic `[1m]` selection
+is offered only for a Copilot base catalog entry that already advertises a
+one-million-token context window. The provider-qualified `[1m]` configuration
+maps to that base model and changes Claude Code's auto-compact threshold; it is
+not rewritten to a `-1m` upstream model variant.
+
 ---
 
 ## Key Differences

@@ -10,12 +10,16 @@ from __future__ import annotations
 import os
 import socket
 import subprocess
+import threading
 import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from enum import StrEnum
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 import httpx
 import pytest
@@ -24,7 +28,7 @@ from router_maestro.auth import AuthManager, AuthStorage, OAuthCredential, run_a
 from router_maestro.config.server import get_current_context_api_key
 from router_maestro.providers import CopilotProvider, ModelInfo
 from router_maestro.routing.model_ref import ModelRef
-from router_maestro.utils.model_match import normalize_model_id
+from router_maestro.utils.reasoning import EFFORT_ORDER
 from router_maestro.utils.responses_bridge import RESPONSES_ELIGIBLE_MODELS
 
 STARTUP_TIMEOUT_SECONDS = 45.0
@@ -48,6 +52,7 @@ OPENAI_REASONING_EFFORTS: tuple[str | None, ...] = (None, "low", "medium", "high
 STREAM_MODES: tuple[bool, ...] = (False, True)
 COMPAT_PROBE_BACKOFF_SECONDS = 0.25
 COMPAT_PROBE_MAX_ATTEMPTS = 3
+ANTHROPIC_EFFORT_PROBE_MAX_CANDIDATES = 3
 _PROVIDER_FAILURE_SIGNAL_HEADER = "X-Router-Maestro-Error-Signal"
 _COPILOT_BARE_BAD_REQUEST_SIGNAL = "copilot_bare_bad_request"
 _MAX_COMPAT_PROBE_DIAGNOSTIC_BODY = 256
@@ -68,15 +73,242 @@ class LiveServer:
     process: subprocess.Popen[str]
 
 
+@dataclass(frozen=True)
+class RecordedUpstreamRequest:
+    """One exact request observed by a controllable local upstream."""
+
+    method: str
+    path: str
+    payload: dict[str, Any] | None
+    headers: dict[str, str]
+
+
+@dataclass
+class ScriptedUpstream:
+    """Connection details and observations for one local fake upstream."""
+
+    base_url: str
+    requests: list[RecordedUpstreamRequest]
+
+
+@dataclass(frozen=True)
+class ControlledServer:
+    """One Router-Maestro subprocess backed only by temporary XDG state."""
+
+    base_url: str
+    api_key: str
+    process: subprocess.Popen[str]
+    xdg_root: Path
+
+
+def controlled_xdg_environment(
+    root,
+    *,
+    source: dict[str, str] | None = None,
+    api_key: str = DEFAULT_API_KEY,
+) -> dict[str, str]:
+    """Build a subprocess environment that cannot read the developer's RM state."""
+    root = os.fspath(root)
+    source = dict(os.environ if source is None else source)
+    allowed = {
+        key: value
+        for key, value in source.items()
+        if key
+        in {
+            "PATH",
+            "TMPDIR",
+            "LANG",
+            "LC_ALL",
+            "SSL_CERT_FILE",
+            "SSL_CERT_DIR",
+            "UV_CACHE_DIR",
+            "VIRTUAL_ENV",
+        }
+    }
+    allowed.update(
+        {
+            "HOME": os.path.join(root, "home"),
+            "XDG_CONFIG_HOME": os.path.join(root, "config"),
+            "XDG_DATA_HOME": os.path.join(root, "data"),
+            "ROUTER_MAESTRO_API_KEY": api_key,
+            "ROUTER_MAESTRO_LOG_LEVEL": source.get("ROUTER_MAESTRO_LOG_LEVEL", "WARNING"),
+        }
+    )
+    return allowed
+
+
+def select_recorded_request(
+    requests: list[RecordedUpstreamRequest],
+    *,
+    method: str,
+    path: str,
+    occurrence: int = 0,
+) -> RecordedUpstreamRequest:
+    """Select one exact method/path occurrence without substring matching."""
+    matches = [request for request in requests if request.method == method and request.path == path]
+    if not matches:
+        raise AssertionError(f"no upstream request matched {method} {path}")
+    if occurrence < 0 or occurrence >= len(matches):
+        raise AssertionError(
+            f"upstream request occurrence {occurrence} is unavailable for {method} {path}; "
+            f"matched {len(matches)}"
+        )
+    return matches[occurrence]
+
+
+def assert_exact_outbound_payload(
+    actual: dict[str, Any] | None,
+    expected: dict[str, Any],
+) -> None:
+    """Require exact outbound JSON equality, including omitted and extra fields."""
+    if actual != expected:
+        raise AssertionError(
+            f"exact outbound payload mismatch: expected={expected!r}, actual={actual!r}"
+        )
+
+
+@contextmanager
+def controlled_router_server(
+    root: Path,
+    *,
+    providers: dict[str, Any],
+    priorities: dict[str, Any],
+    credentials: dict[str, Any] | None = None,
+    api_key: str = DEFAULT_API_KEY,
+) -> Iterator[ControlledServer]:
+    """Start Router-Maestro against explicit temporary config and credentials."""
+    import json
+
+    env = controlled_xdg_environment(root, api_key=api_key)
+    config_dir = Path(env["XDG_CONFIG_HOME"]) / "router-maestro"
+    data_dir = Path(env["XDG_DATA_HOME"]) / "router-maestro"
+    Path(env["HOME"]).mkdir(parents=True, exist_ok=True)
+    config_dir.mkdir(parents=True, exist_ok=True)
+    data_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "providers.json").write_text(json.dumps({"providers": providers}))
+    (config_dir / "priorities.json").write_text(json.dumps(priorities))
+    (data_dir / "auth.json").write_text(json.dumps(credentials or {}))
+
+    port = _find_free_port()
+    base_url = f"http://127.0.0.1:{port}"
+    command = [
+        "uv",
+        "run",
+        "uvicorn",
+        "router_maestro.server:app",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        str(port),
+        "--log-level",
+        env["ROUTER_MAESTRO_LOG_LEVEL"].lower(),
+    ]
+    if "github-copilot" in (credentials or {}):
+        initialization = "\n".join(
+            (
+                "def init(self,*a,**k):",
+                " old(self,*a,**k)",
+                " c=self.auth_manager.get_credential(self.provider_name)",
+                " self.cached_token=c.access",
+                " self.token_expires=c.expires",
+                " self.api_base=c.api_endpoint",
+            )
+        )
+        bootstrap = (
+            "import uvicorn; "
+            "from router_maestro.providers.copilot_support.auth_session import CopilotAuthSession; "
+            "old=CopilotAuthSession.__init__; "
+            f"exec({initialization!r}); "
+            "CopilotAuthSession.__init__=init; "
+            f"uvicorn.run('router_maestro.server:app',host='127.0.0.1',port={port},log_level="
+            f"'{env['ROUTER_MAESTRO_LOG_LEVEL'].lower()}')"
+        )
+        command = ["uv", "run", "python", "-c", bootstrap]
+    output_path = root / "router-maestro-startup.log"
+    with output_path.open("w+", encoding="utf-8") as output:
+        process = subprocess.Popen(
+            command,
+            cwd=_repo_root(),
+            env=env,
+            stdout=output,
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
+        process._router_maestro_output_path = output_path  # type: ignore[attr-defined]
+        try:
+            _wait_for_health(base_url, process)
+            yield ControlledServer(base_url, api_key, process, root)
+        finally:
+            _terminate_process(process)
+
+
+@contextmanager
+def scripted_upstream(
+    responder: Callable[[RecordedUpstreamRequest], tuple[int, bytes, dict[str, str]]],
+) -> Iterator[ScriptedUpstream]:
+    """Run the smallest possible recording HTTP upstream on loopback."""
+    import json
+
+    requests: list[RecordedUpstreamRequest] = []
+    requests_lock = threading.Lock()
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:  # noqa: N802
+            self._dispatch()
+
+        def do_POST(self) -> None:  # noqa: N802
+            self._dispatch()
+
+        def _dispatch(self) -> None:
+            length = int(self.headers.get("content-length", "0"))
+            raw = self.rfile.read(length) if length else b""
+            payload = json.loads(raw) if raw else None
+            request = RecordedUpstreamRequest(
+                method=self.command,
+                path=urlsplit(self.path).path,
+                payload=payload,
+                headers={key.lower(): value for key, value in self.headers.items()},
+            )
+            with requests_lock:
+                requests.append(request)
+            try:
+                status_code, body, headers = responder(request)
+            except Exception as error:
+                status_code = 500
+                body = json.dumps({"error": str(error)}).encode()
+                headers = {"Content-Type": "application/json"}
+            self.send_response(status_code)
+            for key, value in headers.items():
+                self.send_header(key, value)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, _format: str, *_args: object) -> None:
+            return None
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    host, port = server.server_address
+    upstream = ScriptedUpstream(f"http://{host}:{port}", requests)
+    try:
+        yield upstream
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
 def post_gemini_generate_content_compat_probe(
     client: httpx.Client,
     model: str,
 ) -> httpx.Response:
-    """Run the fixed Gemini generateContent compatibility probe."""
+    """Run the base Gemini generateContent protocol probe."""
     return _post_compat_probe_with_marked_400_retry(
         client,
         f"/api/gemini/v1beta/models/{gemini_model_path(model)}:generateContent",
-        json_payload=gemini_compat_payload(),
+        json_payload=gemini_payload(),
     )
 
 
@@ -415,22 +647,67 @@ def anthropic_unsupported_thinking_model(
 
 
 @pytest.fixture(scope="session")
-def anthropic_effort_profile(copilot_models: list[str]) -> tuple[str, str]:
-    """Choose a Claude model and an effort tier verified by the Copilot endpoint."""
-    profiles = (
-        ("claude-opus-4.8", "xhigh"),
-        ("claude-opus-4.7", "xhigh"),
-        ("claude-opus-4.6", "high"),
-        ("claude-sonnet-4.6", "high"),
+def anthropic_effort_profile(
+    copilot_catalog: dict[str, ModelInfo],
+    client: httpx.Client,
+) -> tuple[str, str]:
+    """Probe catalog candidates for manual thinking plus explicit effort.
+
+    Copilot's catalog currently advertises endpoints and effort tiers but may
+    omit ``supports.thinking``. A bounded non-stream request therefore confirms
+    the combined native contract instead of inferring it from a model name or
+    collapsing an omitted capability into an explicit rejection.
+    """
+    required_endpoints = {"/chat/completions", "/v1/messages"}
+    candidates: list[tuple[str, str]] = []
+
+    for model in _prioritize_models(list(copilot_catalog)):
+        info = copilot_catalog[model]
+        endpoints = set(info.supported_endpoints or ())
+        efforts = [value for value in info.reasoning_effort_values or [] if value in EFFORT_ORDER]
+        if (
+            bare_model(model).lower().startswith("claude-")
+            and required_endpoints.issubset(endpoints)
+            and efforts
+        ):
+            candidates.append((model, min(efforts, key=EFFORT_ORDER.index)))
+
+    if not candidates:
+        pytest.skip(
+            "No Copilot Claude model advertises enabled thinking with effort prerequisites "
+            "across Chat and native Messages"
+        )
+
+    rejected: list[str] = []
+    bounded_candidates = candidates[:ANTHROPIC_EFFORT_PROBE_MAX_CANDIDATES]
+    for model, effort in bounded_candidates:
+        with client.stream(
+            "POST",
+            "/api/anthropic/beta/v1/messages",
+            json={
+                "model": model,
+                "messages": [{"role": "user", "content": TEXT_PROMPT}],
+                "max_tokens": 1025,
+                "stream": False,
+                "thinking": {"type": "enabled", "budget_tokens": 1024},
+                "output_config": {"effort": effort},
+            },
+            timeout=120.0,
+        ) as response:
+            if response.status_code == 200:
+                return model, effort
+            if response.status_code == 400:
+                rejected.append(model)
+                continue
+            pytest.fail(
+                "Anthropic effort compatibility probe failed before validation: "
+                f"model={model}, HTTP {response.status_code}"
+            )
+
+    pytest.fail(
+        "All catalog candidates rejected enabled thinking with effort "
+        f"after {len(bounded_candidates)} bounded attempts: " + ", ".join(rejected)
     )
-    models_by_normalized_id = {
-        normalize_model_id(bare_model(model)): model for model in copilot_models
-    }
-    for bare_id, effort in profiles:
-        model = models_by_normalized_id.get(normalize_model_id(bare_id))
-        if model is not None:
-            return model, effort
-    pytest.skip("No Copilot Claude model with output_config.effort support is available")
 
 
 @pytest.fixture(scope="session")
@@ -665,23 +942,6 @@ def gemini_payload(*, max_output_tokens: int = 16) -> dict[str, Any]:
     }
 
 
-def gemini_compat_payload(*, max_output_tokens: int = 16) -> dict[str, Any]:
-    """Gemini request exercising systemInstruction and generationConfig."""
-    payload = gemini_payload(max_output_tokens=max_output_tokens)
-    payload.update(
-        {
-            "systemInstruction": {"parts": [{"text": "Return concise answers."}]},
-            "generationConfig": {
-                "temperature": 0,
-                "topP": 1,
-                "maxOutputTokens": max_output_tokens,
-                "stopSequences": ["\n\n"],
-            },
-        }
-    )
-    return payload
-
-
 def openai_chat_usage_payload(model: str, *, stream: bool = False) -> dict[str, Any]:
     """OpenAI Chat payload with compatibility fields and usage assertions."""
     payload = openai_chat_payload(model, stream=stream)
@@ -756,13 +1016,13 @@ def anthropic_effort_payload(
     budget: int = 1024,
     stream: bool = False,
 ) -> dict[str, Any]:
-    """Anthropic adaptive-thinking request with a deliberately conflicting budget."""
+    """Anthropic request combining enabled thinking, a budget, and explicit effort."""
     return {
         "model": model,
         "messages": [{"role": "user", "content": REASONING_PROMPT}],
         "max_tokens": max(4096, budget + 1024),
         "stream": stream,
-        "thinking": {"type": "adaptive", "budget_tokens": budget},
+        "thinking": {"type": "enabled", "budget_tokens": budget},
         "output_config": {"effort": effort},
     }
 
@@ -1209,6 +1469,7 @@ def _wait_for_health(base_url: str, process: subprocess.Popen[str]) -> None:
                 last_error = exc
             time.sleep(0.25)
 
+    _terminate_process(process)
     output = _read_process_output(process)
     pytest.fail(f"Router-Maestro server did not become healthy: {last_error}\n{output}")
 
@@ -1224,6 +1485,12 @@ def _terminate_process(process: subprocess.Popen[str]) -> None:
 
 
 def _read_process_output(process: subprocess.Popen[str]) -> str:
+    output_path = getattr(process, "_router_maestro_output_path", None)
+    if output_path is not None:
+        try:
+            return Path(output_path).read_text(encoding="utf-8")
+        except OSError:
+            return ""
     if process.stdout is None:
         return ""
     try:

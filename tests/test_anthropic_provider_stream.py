@@ -9,7 +9,7 @@ from unittest.mock import patch
 import httpx
 import pytest
 
-from router_maestro.auth.storage import ApiKeyCredential
+from router_maestro.auth.storage import ApiKeyCredential, AuthStorage
 from router_maestro.providers import ChatRequest, Message
 from router_maestro.providers.anthropic import AnthropicProvider
 
@@ -21,6 +21,7 @@ def _sse(*events: str) -> bytes:
 def _make_provider() -> AnthropicProvider:
     provider = AnthropicProvider()
     # Inject an API key credential so _get_api_key() succeeds.
+    provider.auth_manager.storage = AuthStorage()
     provider.auth_manager.storage.set("anthropic", ApiKeyCredential(key="sk-test"))
     return provider
 

@@ -8,11 +8,13 @@ deployments. The first observability layer is intentionally narrow:
 - HTTP request duration histograms
 - request IDs propagated through `X-Request-ID`
 
-Provider, fallback, and streaming-specific metrics are planned separately. In
-this layer, provider-side failures are visible through the HTTP status and
-request ID that connects the client response to server logs. Streaming response
-duration is measured when the response body finishes, not when the stream object
-is created.
+Provider, fallback, and terminal-outcome Prometheus metrics are not yet exposed.
+Provider-side attempts and streaming outcomes are available through opt-in audit
+traces, while the request ID connects client responses, audit directories, and
+server logs. Do not infer stream success from HTTP `200` alone: after a stream
+is committed, an upstream failure or unexpected EOF is encoded in-stream and
+recorded as a non-success terminal outcome. Streaming response duration is
+measured when the response body finishes, not when the stream object is created.
 
 ## Scraping `/metrics`
 
@@ -136,6 +138,36 @@ curl http://localhost:8080/api/openai/v1/models \
   -i
 ```
 
+## Request Lifecycle and Audit Traces
+
+Every inference and token-count request receives one request context. It binds
+the request ID to an immutable runtime configuration revision and Router
+generation, owns the optional audit trace, records the semantic terminal
+outcome separately from the wire HTTP status, and releases resources only
+after the final ASGI response-body frame or cancellation. The five streaming
+protocol encoders additionally use the guard pipeline; non-stream routes share
+the lifecycle/audit context without pretending to be streaming pipelines.
+
+Enable audit traces with `ROUTER_MAESTRO_TRACE=1` or
+`audit.enabled: true` in `priorities.json`. The directory
+`~/.local/share/router-maestro/traces/{request_id}/` can contain:
+
+| Artifact | Meaning |
+|---|---|
+| `inbound.json` | Redacted inbound request |
+| `upstream.json`, `upstream_2.json`, ... | Each upstream request attempt, in order |
+| `upstream_resp.json`, `upstream_resp_2.json`, ... | Upstream responses that were obtained, in order |
+| `outbound.json` | Wire status, duration, transport termination, response status, incomplete details, and safe terminal error |
+
+The set is dynamic. An early validation failure can have no upstream file; a
+fallback or authentication retry can have several. Upstream request and
+response observations are numbered independently because a failed request may
+produce no response. The recognized `Authorization`, `X-API-Key`, and
+`X-Goog-API-Key` headers and common credential-shaped payload keys are redacted
+before asynchronous disk writes. Treat traces as sensitive debugging data
+anyway because prompts, model output, and unrecognized application-specific
+headers can contain private data.
+
 ## Troubleshooting
 
 ### `/metrics` returns 401
@@ -187,6 +219,10 @@ sum by (path_template, status) (
 
 Then ask the client for the `X-Request-ID` response header and search the
 server logs for that request ID.
+
+For streaming requests, also inspect the protocol's final SSE event and the
+matching `outbound.json`. HTTP `200` can accompany `unexpected_eof`, failed, or
+cancelled terminal semantics after commitment.
 
 ### Requests are slow
 

@@ -290,11 +290,11 @@ def test_beta_thinking_streaming(client: httpx.Client, chat_model: str):
     assert sig_deltas, "Expected signature_delta events"
 
 
-def test_beta_output_config_effort_precedence(
+def test_beta_enabled_budget_and_output_config_effort(
     client: httpx.Client,
     anthropic_effort_profile: tuple[str, str],
 ):
-    """Native path should preserve effort and remove its conflicting budget."""
+    """Native path preserves enabled thinking, budget, and effort together."""
     model, effort = anthropic_effort_profile
     failures: list[str] = []
 

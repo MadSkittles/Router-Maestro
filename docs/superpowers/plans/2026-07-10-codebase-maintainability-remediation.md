@@ -1039,6 +1039,28 @@ targeted re-review before the final acceptance gates below.
 
 - [ ] **Step 2: Delete only confirmed dead code/dependencies**
 
+  `pipeline/guards.py` is not deleted as a file merely because its original
+  helper functions have no in-repository callers.  The package exported those
+  helpers publicly, and the protocol audit found payload classes that the
+  inlined `RequestPipeline` loop did not inspect.  The approved replacement is
+  a typed guard domain boundary:
+
+  - retain `StreamGuard`, `build_guards`, and `guarded_stream` as compatibility
+    imports while implementing their dispatch through one `GuardChain`;
+  - let `RequestPipeline` own that chain and construct it from the request's
+    immutable configuration snapshot;
+  - leak-scan human-readable `content`, `refusal`, and `thinking` exactly once,
+    while runaway accounting also covers opaque reasoning identifiers,
+    signatures, and tool arguments;
+  - project beta-native Anthropic start and delta payloads onto the same guard
+    input contract before emitting their raw frames;
+  - keep the existing stream-only protection boundary.  Extending guards to
+    non-stream responses is a separate behavior decision, not Task 23 cleanup.
+
+  Regression tests must exercise the real guard chain, compatibility imports,
+  beta-native initial payloads and signature/tool deltas, protocol-native abort
+  terminals, and absence of double accounting.
+
 - [ ] **Step 3: Re-lock and verify imports/build**
 
   Run:
