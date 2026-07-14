@@ -3,7 +3,7 @@
 import logging
 
 import httpx
-from fastapi import APIRouter, BackgroundTasks, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, Response
 
 from router_maestro.auth import AuthManager, AuthType
 from router_maestro.auth.github_oauth import (
@@ -13,9 +13,10 @@ from router_maestro.auth.github_oauth import (
     request_device_code,
 )
 from router_maestro.auth.storage import OAuthCredential
-from router_maestro.config import (
-    load_priorities_config,
-    save_priorities_config,
+from router_maestro.config.repository import (
+    RuntimeConfigConflictError,
+    RuntimeConfigRepository,
+    RuntimeConfigSnapshot,
 )
 from router_maestro.routing import get_router, reset_router
 from router_maestro.routing.model_ref import catalog_model_public_id
@@ -35,6 +36,24 @@ from router_maestro.server.schemas.admin import (
 router = APIRouter(prefix="/api/admin", tags=["admin"])
 
 logger = logging.getLogger("router_maestro.server.routes.admin")
+
+
+def get_runtime_config_repository(request: Request) -> RuntimeConfigRepository:
+    """Return the application-owned runtime configuration repository."""
+    return request.app.state.runtime_config_repository
+
+
+def get_router_owner(request: Request):
+    """Return the application-owned Router generation owner."""
+    return request.app.state.router_owner
+
+
+def _runtime_config_response(snapshot: RuntimeConfigSnapshot) -> PrioritiesResponse:
+    return PrioritiesResponse(**snapshot.config.model_dump(mode="json"), revision=snapshot.revision)
+
+
+def _set_revision_etag(response: Response, revision: str) -> None:
+    response.headers["ETag"] = f'"{revision}"'
 
 
 # ============================================================================
@@ -269,34 +288,43 @@ async def refresh_models() -> dict:
 
 
 @router.get("/priorities", response_model=PrioritiesResponse)
-async def get_priorities() -> PrioritiesResponse:
+async def get_priorities(
+    response: Response,
+    repository: RuntimeConfigRepository = Depends(get_runtime_config_repository),
+) -> PrioritiesResponse:
     """Get current priority configuration."""
-    config = load_priorities_config()
-
-    return PrioritiesResponse(
-        priorities=config.priorities,
-        fallback=config.fallback.model_dump(),
-    )
+    snapshot = repository.read()
+    _set_revision_etag(response, snapshot.revision)
+    return _runtime_config_response(snapshot)
 
 
+@router.patch("/priorities", response_model=PrioritiesResponse)
 @router.put("/priorities", response_model=PrioritiesResponse)
-async def update_priorities(request: PrioritiesUpdateRequest) -> PrioritiesResponse:
-    """Update priority configuration."""
-    config = load_priorities_config()
+async def update_priorities(
+    request: PrioritiesUpdateRequest,
+    response: Response,
+    repository: RuntimeConfigRepository = Depends(get_runtime_config_repository),
+    router_owner=Depends(get_router_owner),
+) -> PrioritiesResponse:
+    """Replace runtime configuration using content-revision compare-and-swap."""
+    replacement = request.model_dump(exclude={"revision"})
+    try:
+        snapshot = repository.compare_and_swap(
+            expected_revision=request.revision,
+            replacement=repository.read().config.model_validate(replacement),
+        )
+    except RuntimeConfigConflictError as error:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "config_revision_conflict",
+                "message": "Runtime configuration changed; refresh and retry",
+                "current_revision": error.current_revision,
+            },
+            headers={"ETag": f'"{error.current_revision}"'},
+        ) from error
 
-    # Update priorities
-    config.priorities = request.priorities
-
-    # Update fallback if provided
-    if request.fallback is not None:
-        from router_maestro.config import FallbackConfig
-
-        config.fallback = FallbackConfig.model_validate(request.fallback)
-
-    save_priorities_config(config)
-    reset_router()
-
-    return PrioritiesResponse(
-        priorities=config.priorities,
-        fallback=config.fallback.model_dump(),
-    )
+    if snapshot.revision != request.revision:
+        await router_owner.rebuild(config_snapshot=snapshot)
+    _set_revision_etag(response, snapshot.revision)
+    return _runtime_config_response(snapshot)

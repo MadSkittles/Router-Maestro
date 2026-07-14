@@ -2,6 +2,8 @@
 
 from pydantic import BaseModel, Field
 
+from router_maestro.config.priorities import PrioritiesConfig
+
 
 class AuthProviderInfo(BaseModel):
     """Information about an authenticated provider."""
@@ -59,15 +61,20 @@ class ModelsResponse(BaseModel):
     models: list[ModelInfo] = Field(default_factory=list)
 
 
-class PrioritiesResponse(BaseModel):
-    """Response for getting priorities."""
-
-    priorities: list[str] = Field(default_factory=list, description="Model priorities in order")
-    fallback: dict = Field(default_factory=dict, description="Fallback configuration")
+REVISION_PATTERN = r"^[0-9a-f]{64}$"
 
 
-class PrioritiesUpdateRequest(BaseModel):
-    """Request to update priorities."""
+class RuntimeConfigResponse(PrioritiesConfig):
+    """Complete runtime configuration at one content revision."""
 
-    priorities: list[str] = Field(..., description="New priority list")
-    fallback: dict | None = Field(default=None, description="Optional fallback config update")
+    revision: str = Field(pattern=REVISION_PATTERN)
+
+
+class RuntimeConfigPatchRequest(PrioritiesConfig):
+    """Complete replacement runtime configuration with its expected revision."""
+
+    revision: str = Field(pattern=REVISION_PATTERN)
+
+
+PrioritiesResponse = RuntimeConfigResponse
+PrioritiesUpdateRequest = RuntimeConfigPatchRequest

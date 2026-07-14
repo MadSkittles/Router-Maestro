@@ -3,9 +3,10 @@
 from dataclasses import dataclass
 
 import pytest
+from starlette.responses import Response
 
 from router_maestro.auth.storage import OAuthCredential
-from router_maestro.config import PrioritiesConfig
+from router_maestro.config.repository import RuntimeConfigRepository
 from router_maestro.providers import ModelInfo as ProviderModelInfo
 from router_maestro.server.routes import admin
 from router_maestro.server.schemas.admin import PrioritiesUpdateRequest
@@ -86,21 +87,35 @@ async def test_oauth_completion_preserves_copilot_api_endpoint(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_update_priorities_invalidates_router_cache_after_save(monkeypatch):
-    saved_configs: list[PrioritiesConfig] = []
-    reset_calls: list[None] = []
+async def test_update_priorities_rebuilds_router_after_cas(tmp_path):
+    repository = RuntimeConfigRepository(tmp_path / "priorities.json")
+    initial = repository.read()
 
-    monkeypatch.setattr(admin, "load_priorities_config", lambda: PrioritiesConfig())
-    monkeypatch.setattr(admin, "save_priorities_config", saved_configs.append)
-    monkeypatch.setattr(admin, "reset_router", lambda: reset_calls.append(None))
+    class _Owner:
+        snapshots = []
+
+        async def rebuild(self, *, config_snapshot=None):
+            self.snapshots.append(config_snapshot)
+            return 2
+
+    owner = _Owner()
+    wire_response = Response()
+    request = PrioritiesUpdateRequest(
+        **initial.config.model_dump(mode="json"),
+        revision=initial.revision,
+    )
+    request.priorities = ["github-copilot/gpt-4o"]
 
     response = await admin.update_priorities(
-        PrioritiesUpdateRequest(priorities=["github-copilot/gpt-4o"])
+        request,
+        wire_response,
+        repository,
+        owner,
     )
 
     assert response.priorities == ["github-copilot/gpt-4o"]
-    assert saved_configs[0].priorities == ["github-copilot/gpt-4o"]
-    assert reset_calls == [None]
+    assert repository.read().config.priorities == ["github-copilot/gpt-4o"]
+    assert [snapshot.revision for snapshot in owner.snapshots] == [response.revision]
 
 
 @pytest.mark.asyncio
