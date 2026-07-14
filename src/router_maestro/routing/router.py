@@ -1,11 +1,12 @@
 """Model router with priority-based selection and fallback."""
 
+import asyncio
+import inspect
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from copy import deepcopy
-from dataclasses import replace
-from typing import TypeVar
+from dataclasses import dataclass, replace
+from typing import Generic, TypeVar, cast
 
-from router_maestro.auth import ApiKeyCredential, AuthManager
 from router_maestro.config import (
     FallbackStrategy,
     PrioritiesConfig,
@@ -20,7 +21,6 @@ from router_maestro.providers import (
     ChatStreamChunk,
     CopilotProvider,
     ModelInfo,
-    OpenAICompatibleProvider,
     OpenAIProvider,
     ProviderError,
     ProviderFailureKind,
@@ -79,6 +79,344 @@ _router_instance: "Router | None" = None
 RequestT = TypeVar("RequestT")
 ResponseT = TypeVar("ResponseT")
 ChunkT = TypeVar("ChunkT")
+RouterT = TypeVar("RouterT")
+
+
+@dataclass(slots=True)
+class _RouterGeneration(Generic[RouterT]):
+    generation_id: int
+    router: RouterT
+    config_snapshot: object | None = None
+    references: int = 0
+    retired: bool = False
+    closing: bool = False
+    closed: bool = False
+    closed_event: asyncio.Event | None = None
+
+    def event(self) -> asyncio.Event:
+        if self.closed_event is None:
+            self.closed_event = asyncio.Event()
+        return self.closed_event
+
+
+async def _close_router_resources(router: object) -> None:
+    close = getattr(router, "close", None)
+    if callable(close):
+        result = close()
+        if inspect.isawaitable(result):
+            await result
+        return
+
+    providers = getattr(router, "providers", {})
+    seen: set[int] = set()
+    for provider in providers.values():
+        if id(provider) in seen:
+            continue
+        seen.add(id(provider))
+        provider_close = getattr(provider, "close", None)
+        if not callable(provider_close):
+            continue
+        result = provider_close()
+        if inspect.isawaitable(result):
+            await result
+
+
+async def _await_task_ignoring_cancellation(task: asyncio.Task[RouterT]) -> tuple[RouterT, bool]:
+    """Wait through repeated caller cancellation and report whether it occurred."""
+    cancelled = False
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            cancelled = True
+    return task.result(), cancelled
+
+
+async def _close_uninstalled_router(router: object) -> None:
+    close_task = asyncio.create_task(_close_router_resources(router))
+    await _await_task_ignoring_cancellation(close_task)
+
+
+class RouterLease(Generic[RouterT]):
+    """Idempotent reference to one immutable Router generation."""
+
+    def __init__(
+        self,
+        owner: "RouterOwner[RouterT]",
+        generation: _RouterGeneration[RouterT],
+    ) -> None:
+        self._owner = owner
+        self._generation = generation
+        self._release_lock = asyncio.Lock()
+        self._released = False
+
+    @property
+    def generation_id(self) -> int:
+        return self._generation.generation_id
+
+    @property
+    def router(self) -> RouterT:
+        return self._generation.router
+
+    @property
+    def config_snapshot(self) -> object | None:
+        return self._generation.config_snapshot
+
+    @property
+    def released(self) -> bool:
+        return self._released
+
+    async def release(self) -> None:
+        """Release this generation reference exactly once."""
+        async with self._release_lock:
+            if self._released:
+                return
+            release_task = asyncio.create_task(self._owner._release(self._generation))
+            _, cancelled = await _await_task_ignoring_cancellation(release_task)
+            self._released = True
+            if cancelled:
+                raise asyncio.CancelledError
+
+    async def __aenter__(self) -> "RouterLease[RouterT]":
+        return self
+
+    async def __aexit__(self, *_exc_info: object) -> None:
+        await self.release()
+
+
+class RouterOwner(Generic[RouterT]):
+    """Own atomically swappable Router generations and their resources."""
+
+    def __init__(
+        self,
+        factory: Callable[[object | None], RouterT | Awaitable[RouterT]] | None = None,
+    ) -> None:
+        self._factory = factory or cast(
+            Callable[[object | None], RouterT],
+            lambda snapshot: Router(
+                config_snapshot=snapshot,
+                managed_generation=True,
+            ),
+        )
+        self._operation_lock = asyncio.Lock()
+        self._state_lock = asyncio.Lock()
+        self._active: _RouterGeneration[RouterT] | None = None
+        self._generations: dict[int, _RouterGeneration[RouterT]] = {}
+        self._next_generation_id = 1
+        self._cleanup_tasks: set[asyncio.Task[None]] = set()
+        self._close_task: asyncio.Task[None] | None = None
+        self._closing = False
+        self._closed = False
+
+    async def _build(self, config_snapshot: object | None) -> RouterT:
+        built = self._factory(config_snapshot)
+        if inspect.isawaitable(built):
+            return await built
+        return built
+
+    async def start(self, config_snapshot: object | None = None) -> int:
+        """Build the initial generation and make it available for leases."""
+        async with self._operation_lock:
+            async with self._state_lock:
+                if self._closed or self._closing:
+                    raise RuntimeError("RouterOwner is closed")
+                if self._active is not None:
+                    return self._active.generation_id
+            build_task = asyncio.create_task(self._build(config_snapshot))
+            router: RouterT | None = None
+            installed = False
+            try:
+                router, cancelled = await _await_task_ignoring_cancellation(build_task)
+                if cancelled:
+                    raise asyncio.CancelledError
+                async with self._state_lock:
+                    generation = self._new_generation(router, config_snapshot)
+                    self._active = generation
+                    installed = True
+                    return generation.generation_id
+            finally:
+                if router is not None and not installed:
+                    await _close_uninstalled_router(router)
+
+    def _new_generation(
+        self,
+        router: RouterT,
+        config_snapshot: object | None,
+    ) -> _RouterGeneration[RouterT]:
+        generation = _RouterGeneration(
+            self._next_generation_id,
+            router,
+            config_snapshot,
+        )
+        self._next_generation_id += 1
+        self._generations[generation.generation_id] = generation
+        return generation
+
+    async def _acquire_active(self) -> RouterLease[RouterT]:
+        async with self._state_lock:
+            if self._closed or self._closing:
+                raise RuntimeError("RouterOwner is closed")
+            generation = self._active
+            if generation is None:
+                raise RuntimeError("RouterOwner has not been started")
+            if generation.retired:
+                raise RuntimeError("Active Router generation is retired")
+            generation.references += 1
+            return RouterLease(self, generation)
+
+    async def acquire(self) -> RouterLease[RouterT]:
+        """Acquire the active generation, rebuilding stale provider configuration once."""
+        lease = await self._acquire_active()
+        needs_reload = getattr(lease.router, "needs_provider_config_reload", None)
+        if not callable(needs_reload) or not needs_reload():
+            return lease
+        stale_generation_id = lease.generation_id
+        await lease.release()
+
+        async with self._operation_lock:
+            current = await self._acquire_active()
+            try:
+                current_needs_reload = getattr(
+                    current.router,
+                    "needs_provider_config_reload",
+                    None,
+                )
+                if (
+                    current.generation_id == stale_generation_id
+                    and callable(current_needs_reload)
+                    and current_needs_reload()
+                ):
+                    await self._rebuild_locked(current.config_snapshot)
+            finally:
+                await current.release()
+        return await self._acquire_active()
+
+    async def rebuild(
+        self,
+        config_snapshot: object | None = None,
+        *,
+        before_swap: Callable[[], object | None] | None = None,
+    ) -> int:
+        """Build a replacement before atomically retiring the active generation."""
+        async with self._operation_lock:
+            return await self._rebuild_locked(config_snapshot, before_swap=before_swap)
+
+    async def _rebuild_locked(
+        self,
+        config_snapshot: object | None,
+        *,
+        before_swap: Callable[[], object | None] | None = None,
+    ) -> int:
+        """Rebuild while the caller owns the operation lock."""
+        async with self._state_lock:
+            if self._closed or self._closing:
+                raise RuntimeError("RouterOwner is closed")
+            build_snapshot = (
+                self._active.config_snapshot
+                if config_snapshot is None and self._active is not None
+                else config_snapshot
+            )
+        build_task = asyncio.create_task(self._build(build_snapshot))
+        router: RouterT | None = None
+        installed = False
+        try:
+            router, cancelled = await _await_task_ignoring_cancellation(build_task)
+            if cancelled:
+                raise asyncio.CancelledError
+
+            to_close: _RouterGeneration[RouterT] | None = None
+            await self._state_lock.acquire()
+            try:
+                generation_snapshot = build_snapshot
+                if before_swap is not None:
+                    committed_snapshot = before_swap()
+                    if inspect.isawaitable(committed_snapshot):
+                        raise TypeError("before_swap callback must be synchronous")
+                    if committed_snapshot is not None:
+                        generation_snapshot = committed_snapshot
+                previous = self._active
+                generation = self._new_generation(router, generation_snapshot)
+                self._active = generation
+                installed = True
+                if previous is not None:
+                    previous.retired = True
+                    if previous.references == 0 and not previous.closing:
+                        previous.closing = True
+                        to_close = previous
+            finally:
+                self._state_lock.release()
+            if to_close is not None:
+                self._schedule_generation_close(to_close)
+            return generation.generation_id
+        finally:
+            if router is not None and not installed:
+                await _close_uninstalled_router(router)
+
+    async def _release(self, generation: _RouterGeneration[RouterT]) -> None:
+        to_close = False
+        async with self._state_lock:
+            if generation.references <= 0:
+                return
+            generation.references -= 1
+            if generation.retired and generation.references == 0 and not generation.closing:
+                generation.closing = True
+                to_close = True
+        if to_close:
+            await self._close_generation(generation)
+
+    async def _close_generation(self, generation: _RouterGeneration[RouterT]) -> None:
+        try:
+            await _close_router_resources(generation.router)
+        except Exception:
+            logger.warning(
+                "Failed to close Router generation %s",
+                generation.generation_id,
+                exc_info=True,
+            )
+        finally:
+            async with self._state_lock:
+                generation.closed = True
+                self._generations.pop(generation.generation_id, None)
+                generation.event().set()
+
+    def _schedule_generation_close(self, generation: _RouterGeneration[RouterT]) -> None:
+        """Own a post-swap close task without extending the rebuild commit path."""
+        task = asyncio.create_task(self._close_generation(generation))
+        self._cleanup_tasks.add(task)
+        task.add_done_callback(self._cleanup_tasks.discard)
+
+    async def _shutdown(self) -> None:
+        """Retire every generation and wait for its resources to close."""
+        async with self._operation_lock:
+            async with self._state_lock:
+                if self._closed:
+                    return
+                self._closing = True
+                active = self._active
+                self._active = None
+                if active is not None:
+                    active.retired = True
+                generations = list(self._generations.values())
+                close_now: list[_RouterGeneration[RouterT]] = []
+                for generation in generations:
+                    if generation.references == 0 and not generation.closing:
+                        generation.closing = True
+                        close_now.append(generation)
+
+            for generation in close_now:
+                await self._close_generation(generation)
+            await asyncio.gather(*(generation.event().wait() for generation in generations))
+            async with self._state_lock:
+                self._closed = True
+                self._closing = False
+
+    async def close(self) -> None:
+        """Finish one owner-owned shutdown before propagating caller cancellation."""
+        if self._close_task is None:
+            self._close_task = asyncio.create_task(self._shutdown())
+        _, cancelled = await _await_task_ignoring_cancellation(self._close_task)
+        if cancelled:
+            raise asyncio.CancelledError
 
 
 class _PrimedStream(AsyncIterator[ChunkT]):
@@ -128,6 +466,15 @@ def get_router() -> "Router":
     Returns:
         The global Router instance
     """
+    try:
+        from router_maestro.runtime.request_context import get_current_request_context
+
+        context = get_current_request_context()
+    except ImportError:
+        context = None
+    if context is not None:
+        return cast(Router, context.router)
+
     global _router_instance
     if _router_instance is None:
         _router_instance = Router()
@@ -150,7 +497,17 @@ def reset_router() -> None:
 class Router:
     """Router for model requests with priority and fallback support."""
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        config_snapshot: object | None = None,
+        *,
+        managed_generation: bool = False,
+    ) -> None:
+        self._config_snapshot = config_snapshot
+        self._managed_generation = managed_generation
+        self._close_lock = asyncio.Lock()
+        self._closed_provider_ids: set[int] = set()
+        self._closed = False
         self.providers: dict[str, BaseProvider] = {}
         # Model cache: maps model_id -> (provider_name, ModelInfo)
         self._models_cache: dict[str, tuple[str, ModelInfo]] = {}
@@ -161,13 +518,14 @@ class Router:
         self._fuzzy_cache: dict[str, str | None] = {}
         # Providers config cache
         self._providers_ttl: TTLCache[bool] = TTLCache(CACHE_TTL_SECONDS)
+        snapshot_config = getattr(config_snapshot, "config", config_snapshot)
+        if isinstance(snapshot_config, PrioritiesConfig):
+            self._priorities_cache.set(deepcopy(snapshot_config))
         self._load_providers()
 
     def _load_providers(self) -> None:
         """Load providers from configuration."""
         custom_providers_config = load_providers_config()
-        auth_manager = AuthManager()
-
         old_providers = self.providers
         self.providers = {}
 
@@ -177,7 +535,7 @@ class Router:
 
         # Load custom providers from providers.json
         for provider_name, provider_config in custom_providers_config.providers.items():
-            provider = self._create_custom_provider(provider_name, provider_config, auth_manager)
+            provider = self._create_custom_provider(provider_name, provider_config)
             if provider is not None:
                 self.providers[provider_name] = provider
 
@@ -201,30 +559,25 @@ class Router:
         self,
         provider_name: str,
         provider_config,
-        auth_manager: AuthManager,
     ) -> BaseProvider | None:
-        provider_type = provider_config.type
-        if provider_type != "openai-compatible":
-            logger.warning(
-                "Unknown provider type '%s' for %s; skipping", provider_type, provider_name
-            )
-            return None
+        from router_maestro.auth.repository import CredentialRepository
+        from router_maestro.providers.custom_factory import create_custom_provider
 
-        cred = auth_manager.get_credential(provider_name)
-        if not isinstance(cred, ApiKeyCredential):
-            logger.debug("Skipping custom provider %s (no API key)", provider_name)
-            return None
-
-        provider = OpenAICompatibleProvider(
-            name=provider_name,
-            base_url=provider_config.baseURL,
-            api_key=cred.key,
-            models={
-                model_id: model_config.name
-                for model_id, model_config in provider_config.models.items()
-            },
+        provider = create_custom_provider(
+            provider_name,
+            provider_config,
+            credential_repository=CredentialRepository(),
         )
-        logger.debug("Loaded custom provider: %s", provider_name)
+        if provider is None and provider_config.type != "openai-compatible":
+            logger.warning(
+                "Unknown provider type '%s' for %s; skipping",
+                provider_config.type,
+                provider_name,
+            )
+        elif provider is None:
+            logger.debug("Skipping custom provider %s (no API key)", provider_name)
+        else:
+            logger.debug("Loaded custom provider: %s", provider_name)
         return provider
 
     def _get_priorities_config(self) -> PrioritiesConfig:
@@ -233,12 +586,19 @@ class Router:
         if cached is not None:
             return cached
 
+        if getattr(self, "_managed_generation", False):
+            frozen = self._priorities_cache.peek()
+            if frozen is not None:
+                return frozen
+
         config = load_priorities_config()
         self._priorities_cache.set(config)
         return config
 
     def _ensure_providers_fresh(self) -> None:
         """Ensure providers config is fresh, reload if expired."""
+        if getattr(self, "_managed_generation", False):
+            return
         if not self._providers_ttl.is_valid:
             logger.debug("Providers config expired, reloading")
             self._load_providers()
@@ -246,6 +606,36 @@ class Router:
             self._models_cache.clear()
             self._fuzzy_cache.clear()
             self._models_cache_ttl.clear()
+
+    def needs_provider_config_reload(self) -> bool:
+        """Return whether this immutable managed generation needs replacement."""
+        return self._managed_generation and not self._providers_ttl.is_valid
+
+    async def close(self) -> None:
+        """Close every provider resource owned by this Router exactly once."""
+        async with self._close_lock:
+            if self._closed:
+                return
+            seen = set(self._closed_provider_ids)
+            for provider in self.providers.values():
+                if id(provider) in seen:
+                    continue
+                seen.add(id(provider))
+                close = getattr(provider, "close", None)
+                if not callable(close):
+                    continue
+                try:
+                    result = close()
+                    if inspect.isawaitable(result):
+                        await result
+                except Exception:
+                    logger.warning(
+                        "Failed to close provider %s",
+                        getattr(provider, "name", type(provider).__name__),
+                        exc_info=True,
+                    )
+                self._closed_provider_ids.add(id(provider))
+            self._closed = True
 
     def _parse_model_key(self, model_key: str) -> tuple[str, str]:
         """Parse a model key into provider and model.

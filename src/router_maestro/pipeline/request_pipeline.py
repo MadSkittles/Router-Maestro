@@ -50,6 +50,7 @@ class RequestPipeline:
         "_outcome",
         "_wire_status",
         "_request_id",
+        "_defer_flush",
     )
 
     def __init__(
@@ -59,6 +60,8 @@ class RequestPipeline:
         leak_guard: LeakGuard | None,
         audit: AuditTrace | None,
         config: PrioritiesConfig,
+        *,
+        defer_flush: bool = False,
     ):
         self._request_id = request_id
         self._guards = guards
@@ -68,6 +71,7 @@ class RequestPipeline:
         self._finished = False
         self._outcome: TerminalOutcome | None = None
         self._wire_status: int | None = None
+        self._defer_flush = defer_flush
 
     @classmethod
     def create(
@@ -77,7 +81,17 @@ class RequestPipeline:
         tool_names: set[str] | None = None,
     ) -> RequestPipeline:
         """Factory: build a pipeline from current configuration."""
-        config = load_priorities_config()
+        context = None
+        try:
+            from router_maestro.runtime.request_context import get_current_request_context
+
+            context = get_current_request_context()
+        except ImportError:
+            pass
+        if context is not None and context.pipeline is not None:
+            return context.pipeline
+
+        config = context.config if context is not None else load_priorities_config()
         guards_cfg = config.guards
 
         guards: list = []
@@ -95,18 +109,22 @@ class RequestPipeline:
                 )
             )
 
-        audit: AuditTrace | None = None
-        if is_tracing_enabled(config.audit.enabled):
+        audit = context.audit if context is not None else None
+        if context is None and is_tracing_enabled(config.audit.enabled):
             trace_dir = get_trace_dir(config.audit.trace_dir)
             audit = AuditTrace(request_id, trace_dir)
 
-        return cls(
+        pipeline = cls(
             request_id=request_id,
             guards=guards,
             leak_guard=leak_guard,
             audit=audit,
             config=config,
+            defer_flush=context is not None,
         )
+        if context is not None:
+            context.pipeline = pipeline
+        return pipeline
 
     @property
     def audit(self) -> AuditTrace | None:
@@ -225,7 +243,7 @@ class RequestPipeline:
         self._finished = True
         self._wire_status = wire_status
         self._outcome = outcome
-        if self._audit:
+        if self._audit and not self._defer_flush:
             self._audit.record_outbound(
                 wire_status,
                 body_summary=body_summary,

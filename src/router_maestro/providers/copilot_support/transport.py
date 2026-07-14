@@ -12,6 +12,7 @@ from uuid import uuid4
 
 import httpx
 
+from router_maestro.pipeline.beta_strip import strip_beta_tokens
 from router_maestro.providers.base import (
     TIMEOUT_NON_STREAMING,
     Message,
@@ -25,6 +26,13 @@ from router_maestro.providers.copilot_support.auth_session import (
 from router_maestro.utils import get_logger
 
 logger = get_logger("providers.copilot.transport")
+
+
+def _request_audit():
+    from router_maestro.runtime import get_current_request_context
+
+    context = get_current_request_context()
+    return context.audit if context is not None else None
 
 
 class CopilotTransport:
@@ -94,6 +102,16 @@ class CopilotTransport:
             headers["X-Initiator"] = self.chat_initiator(messages)
         if vision_request:
             headers["Copilot-Vision-Request"] = "true"
+        from router_maestro.runtime import get_current_request_context
+
+        context = get_current_request_context()
+        if context is not None:
+            anthropic_beta = strip_beta_tokens(
+                context.request_header("anthropic-beta"),
+                context.config.beta_strip,
+            )
+            if anthropic_beta is not None:
+                headers["anthropic-beta"] = anthropic_beta
         return headers
 
     def get_client(self) -> httpx.AsyncClient:
@@ -155,18 +173,22 @@ class CopilotTransport:
         active_client = client or get_client()
         headers_kwargs = headers_kwargs or {}
         for attempt in range(2):
+            headers = get_headers(**headers_kwargs)
+            audit = _request_audit()
+            if audit is not None:
+                audit.record_upstream(method, self.url(path), headers, json)
             try:
                 if method == "GET":
                     response = await active_client.get(
                         self.url(path),
-                        headers=get_headers(**headers_kwargs),
+                        headers=headers,
                         timeout=timeout,
                     )
                 else:
                     response = await active_client.post(
                         self.url(path),
                         json=json,
-                        headers=get_headers(**headers_kwargs),
+                        headers=headers,
                         timeout=timeout,
                     )
             except (httpx.RemoteProtocolError, httpx.PoolTimeout, httpx.ConnectError) as error:
@@ -188,6 +210,12 @@ class CopilotTransport:
                     model=model,
                     cause=error,
                 ) from error
+            if audit is not None:
+                audit.record_upstream_response(
+                    response.status_code,
+                    dict(response.headers),
+                    response.content,
+                )
             if attempt == 0 and await refresh_for_auth_status(path, response.status_code):
                 continue
             if response.status_code in AUTH_RETRY_STATUSES:
@@ -216,12 +244,16 @@ class CopilotTransport:
         raise_auth_failure = raise_auth_failure or self.auth.raise_auth_failure
         client = get_client()
         for attempt in range(2):
+            headers = get_headers(**headers_kwargs)
+            audit = _request_audit()
+            if audit is not None:
+                audit.record_upstream("POST", self.url(path), headers, json)
             try:
                 cm: AbstractAsyncContextManager[httpx.Response] = client.stream(
                     "POST",
                     self.url(path),
                     json=json,
-                    headers=get_headers(**headers_kwargs),
+                    headers=headers,
                 )
                 response = await cm.__aenter__()
             except (httpx.RemoteProtocolError, httpx.PoolTimeout, httpx.ConnectError) as error:
@@ -243,6 +275,12 @@ class CopilotTransport:
                     model=model,
                     cause=error,
                 ) from error
+            if audit is not None:
+                audit.record_upstream_response(
+                    response.status_code,
+                    dict(response.headers),
+                    stream_summary="stream opened",
+                )
             if attempt == 0 and response.status_code in AUTH_RETRY_STATUSES:
                 with contextlib.suppress(Exception):
                     await response.aread()

@@ -259,8 +259,13 @@ class RawFrameLeakGuard:
     content_block_delta events and feeds them to an inner LeakGuard.
     """
 
-    def __init__(self, allowed_tool_names: set[str] | None = None):
-        self._inner = LeakGuard(allowed_tool_names=allowed_tool_names)
+    def __init__(
+        self,
+        allowed_tool_names: set[str] | None = None,
+        *,
+        inner: LeakGuard | None = None,
+    ):
+        self._inner = inner or LeakGuard(allowed_tool_names=allowed_tool_names)
 
     def feed_frame(self, event_type: str, data_str: str) -> str | None:
         """Feed a raw SSE frame. Returns abort reason if leak detected."""

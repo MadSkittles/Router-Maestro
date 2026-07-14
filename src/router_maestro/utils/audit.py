@@ -17,9 +17,11 @@ Activation:
 Trace directory defaults to ~/.local/share/router-maestro/traces/
 """
 
+import asyncio
 import json
 import os
 import time
+from copy import deepcopy
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -32,6 +34,20 @@ if TYPE_CHECKING:
 logger = get_logger("utils.audit")
 
 _SENSITIVE_HEADERS = frozenset({"authorization", "x-api-key", "x-goog-api-key"})
+_SENSITIVE_FIELD_KEYS = frozenset(
+    {
+        "apikey",
+        "accesstoken",
+        "idtoken",
+        "clientsecret",
+        "refreshtoken",
+        "authorization",
+        "password",
+        "secret",
+        "token",
+        "privatekey",
+    }
+)
 
 
 def is_tracing_enabled(audit_config_enabled: bool = False) -> bool:
@@ -67,6 +83,31 @@ def _safe_json(obj: Any) -> Any:
     return str(obj)
 
 
+def _redact_payload(obj: Any) -> Any:
+    """Return a detached value with credential-like payload fields removed."""
+    value = _safe_json(obj)
+    if isinstance(value, dict):
+        return {
+            key: (
+                "***"
+                if "".join(character for character in str(key).casefold() if character.isalnum())
+                in _SENSITIVE_FIELD_KEYS
+                else _redact_payload(item)
+            )
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_redact_payload(item) for item in value]
+    return value
+
+
+def _write_records(trace_dir: Path, records: dict[str, Any]) -> None:
+    trace_dir.mkdir(parents=True, exist_ok=True)
+    for name, data in records.items():
+        path = trace_dir / f"{name}.json"
+        path.write_text(json.dumps(data, indent=2, default=str))
+
+
 class AuditTrace:
     """Collects per-request trace data and writes to disk on flush."""
 
@@ -75,6 +116,14 @@ class AuditTrace:
         self._dir = trace_dir / request_id
         self._records: dict[str, Any] = {}
         self._start_time = time.time()
+
+    def _append_record(self, base_name: str, record: dict[str, Any]) -> None:
+        index = 1
+        name = base_name
+        while name in self._records:
+            index += 1
+            name = f"{base_name}_{index}"
+        self._records[name] = record
 
     def record_inbound(
         self,
@@ -89,7 +138,7 @@ class AuditTrace:
             "method": method,
             "path": path,
             "headers": _redact_headers(headers),
-            "body": _safe_json(body),
+            "body": _redact_payload(body),
         }
 
     def record_upstream(
@@ -99,14 +148,17 @@ class AuditTrace:
         headers: dict[str, str],
         body: Any,
     ) -> None:
-        self._records["upstream"] = {
-            "timestamp": time.time(),
-            "request_id": self._request_id,
-            "method": method,
-            "url": url,
-            "headers": _redact_headers(headers),
-            "body": _safe_json(body),
-        }
+        self._append_record(
+            "upstream",
+            {
+                "timestamp": time.time(),
+                "request_id": self._request_id,
+                "method": method,
+                "url": url,
+                "headers": _redact_headers(headers),
+                "body": _redact_payload(body),
+            },
+        )
 
     def record_upstream_response(
         self,
@@ -120,13 +172,13 @@ class AuditTrace:
             "timestamp": time.time(),
             "request_id": self._request_id,
             "status": status,
-            "headers": dict(headers),
+            "headers": _redact_headers(headers),
         }
         if stream_summary:
             record["stream_summary"] = stream_summary
         elif body is not None:
-            record["body"] = _safe_json(body)
-        self._records["upstream_resp"] = record
+            record["body"] = _redact_payload(body)
+        self._append_record("upstream_resp", record)
 
     def record_outbound(
         self,
@@ -139,7 +191,7 @@ class AuditTrace:
             "timestamp": time.time(),
             "request_id": self._request_id,
             "status": status,
-            "headers": headers or {},
+            "headers": _redact_headers(headers or {}),
             "body_summary": body_summary,
             "duration_ms": round((time.time() - self._start_time) * 1000, 1),
         }
@@ -161,10 +213,19 @@ class AuditTrace:
             return
 
         try:
-            self._dir.mkdir(parents=True, exist_ok=True)
-            for name, data in self._records.items():
-                path = self._dir / f"{name}.json"
-                path.write_text(json.dumps(data, indent=2, default=str))
+            records = _redact_payload(deepcopy(self._records))
+            _write_records(self._dir, records)
             logger.debug("Audit trace written: %s (%d files)", self._dir, len(self._records))
         except OSError as e:
             logger.warning("Failed to write audit trace: %s", e)
+
+    async def flush_async(self) -> None:
+        """Write a redacted snapshot without blocking the event loop."""
+        if not self._records:
+            return
+        records = _redact_payload(deepcopy(self._records))
+        try:
+            await asyncio.to_thread(_write_records, self._dir, records)
+            logger.debug("Audit trace written: %s (%d files)", self._dir, len(records))
+        except OSError as error:
+            logger.warning("Failed to write audit trace: %s", error)

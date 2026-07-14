@@ -6,6 +6,7 @@ This ensures consistent behavior between local and remote contexts.
 
 import httpx
 
+from router_maestro.auth.discovery import ProviderAuthDefinition
 from router_maestro.config import load_contexts_config
 
 
@@ -23,6 +24,14 @@ class ServerNotRunningError(AdminClientError):
         super().__init__(
             f"Server is not running at {endpoint}. Start it with: router-maestro server start"
         )
+
+
+class AdminConfigConflictError(AdminClientError):
+    """A runtime configuration mutation used a stale content revision."""
+
+    def __init__(self, current_revision: str | None) -> None:
+        self.current_revision = current_revision
+        super().__init__("Runtime configuration changed; refresh and retry")
 
 
 class AdminClient:
@@ -67,6 +76,21 @@ class AdminClient:
         except httpx.HTTPError as e:
             self._handle_connection_error(e)
             return []  # unreachable, for type checker
+
+    async def list_auth_providers(self) -> tuple[ProviderAuthDefinition, ...]:
+        """List typed provider authentication definitions exposed by the server."""
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.get(
+                    f"{self.endpoint}/api/admin/auth/providers",
+                    headers=self._get_headers(),
+                )
+                response.raise_for_status()
+                records = response.json().get("providers", [])
+                return tuple(ProviderAuthDefinition.from_mapping(record) for record in records)
+        except httpx.HTTPError as e:
+            self._handle_connection_error(e)
+            return ()  # unreachable, for type checker
 
     async def login_oauth(self, provider: str) -> dict:
         """Initiate OAuth login.
@@ -214,6 +238,35 @@ class AdminClient:
             self._handle_connection_error(e)
             return {}
 
+    async def get_runtime_config(self) -> dict:
+        """Get the complete versioned runtime configuration."""
+        return await self.get_priorities()
+
+    async def patch_runtime_config(self, *, config: dict, revision: str) -> dict:
+        """Replace runtime configuration when revision is still current."""
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.patch(
+                    f"{self.endpoint}/api/admin/priorities",
+                    headers=self._get_headers(),
+                    json={**config, "revision": revision},
+                )
+                if response.status_code == 409:
+                    current_revision = None
+                    try:
+                        detail = response.json().get("detail", {})
+                        current_revision = detail.get("current_revision")
+                    except (TypeError, ValueError):
+                        pass
+                    raise AdminConfigConflictError(current_revision)
+                response.raise_for_status()
+                return response.json()
+        except AdminConfigConflictError:
+            raise
+        except httpx.HTTPError as e:
+            self._handle_connection_error(e)
+            return {}
+
     async def set_priorities(self, priorities: list[str], fallback: dict | None = None) -> bool:
         """Set priority configuration.
 
@@ -224,22 +277,13 @@ class AdminClient:
         Returns:
             True if successful
         """
-        try:
-            async with httpx.AsyncClient() as client:
-                payload: dict = {"priorities": priorities}
-                if fallback is not None:
-                    payload["fallback"] = fallback
-
-                response = await client.put(
-                    f"{self.endpoint}/api/admin/priorities",
-                    headers=self._get_headers(),
-                    json=payload,
-                )
-                response.raise_for_status()
-                return True
-        except httpx.HTTPError as e:
-            self._handle_connection_error(e)
-            return False
+        current = await self.get_runtime_config()
+        revision = current.pop("revision")
+        current["priorities"] = priorities
+        if fallback is not None:
+            current["fallback"] = fallback
+        await self.patch_runtime_config(config=current, revision=revision)
+        return True
 
     async def test_connection(self) -> dict:
         """Test connection to the server.

@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, patch
 import httpx
 import pytest
 
+from router_maestro.runtime import request_context as request_context_module
 from router_maestro.server.schemas.anthropic import (
     AnthropicTool,
     AnthropicUserMessage,
@@ -291,6 +292,123 @@ class TestCountTokensViaAnthropicApi:
                     model="claude-sonnet-4-20250514",
                     messages=[{"role": "user", "content": "Hello"}],
                 )
+
+    @pytest.mark.asyncio
+    async def test_request_context_audits_successful_transport_attempt(self):
+        class AuditSpy:
+            def __init__(self) -> None:
+                self.upstream = []
+                self.responses = []
+
+            def record_upstream(self, *args) -> None:
+                self.upstream.append(args)
+
+            def record_upstream_response(self, *args) -> None:
+                self.responses.append(args)
+
+        audit = AuditSpy()
+        mock_response = httpx.Response(
+            200,
+            json={"input_tokens": 42},
+            headers={"x-request-id": "upstream-1"},
+            request=httpx.Request("POST", "https://api.anthropic.com/v1/messages/count_tokens"),
+        )
+
+        with patch("router_maestro.utils.token_config.httpx.AsyncClient") as mock_client_cls:
+            mock_client = AsyncMock()
+            mock_client.post.return_value = mock_response
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock(return_value=False)
+            mock_client_cls.return_value = mock_client
+            token = request_context_module._current_request_context.set(  # type: ignore[attr-defined]
+                type("Context", (), {"audit": audit})()
+            )
+            try:
+                result = await count_tokens_via_anthropic_api(
+                    base_url="https://api.anthropic.com/v1",
+                    api_key="secret-key",
+                    model="claude-sonnet-4-20250514",
+                    messages=[{"role": "user", "content": "Hello"}],
+                )
+            finally:
+                request_context_module._current_request_context.reset(token)  # type: ignore[attr-defined]
+
+        assert result == 42
+        assert audit.upstream == [
+            (
+                "POST",
+                "https://api.anthropic.com/v1/messages/count_tokens",
+                {
+                    "x-api-key": "secret-key",
+                    "anthropic-version": "2023-06-01",
+                    "content-type": "application/json",
+                },
+                {
+                    "model": "claude-sonnet-4-20250514",
+                    "messages": [{"role": "user", "content": "Hello"}],
+                },
+            )
+        ]
+        assert audit.responses == [
+            (
+                200,
+                {
+                    "x-request-id": "upstream-1",
+                    "content-length": "19",
+                    "content-type": "application/json",
+                },
+                b'{"input_tokens":42}',
+            )
+        ]
+
+    @pytest.mark.asyncio
+    async def test_request_context_audits_http_error_response_before_reraising(self):
+        class AuditSpy:
+            def __init__(self) -> None:
+                self.upstream_count = 0
+                self.responses = []
+
+            def record_upstream(self, *_args) -> None:
+                self.upstream_count += 1
+
+            def record_upstream_response(self, *args) -> None:
+                self.responses.append(args)
+
+        audit = AuditSpy()
+        mock_response = httpx.Response(
+            429,
+            json={"error": "rate limited"},
+            request=httpx.Request("POST", "https://api.anthropic.com/v1/messages/count_tokens"),
+        )
+
+        with patch("router_maestro.utils.token_config.httpx.AsyncClient") as mock_client_cls:
+            mock_client = AsyncMock()
+            mock_client.post.return_value = mock_response
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock(return_value=False)
+            mock_client_cls.return_value = mock_client
+            token = request_context_module._current_request_context.set(  # type: ignore[attr-defined]
+                type("Context", (), {"audit": audit})()
+            )
+            try:
+                with pytest.raises(httpx.HTTPStatusError):
+                    await count_tokens_via_anthropic_api(
+                        base_url="https://api.anthropic.com/v1",
+                        api_key="secret-key",
+                        model="claude-sonnet-4-20250514",
+                        messages=[{"role": "user", "content": "Hello"}],
+                    )
+            finally:
+                request_context_module._current_request_context.reset(token)  # type: ignore[attr-defined]
+
+        assert audit.upstream_count == 1
+        assert audit.responses == [
+            (
+                429,
+                {"content-length": "24", "content-type": "application/json"},
+                b'{"error":"rate limited"}',
+            )
+        ]
 
     @pytest.mark.asyncio
     async def test_trailing_slash_stripped(self):

@@ -37,6 +37,7 @@ from router_maestro.server.protocols.anthropic_reducer import (
     build_anthropic_response,
 )
 from router_maestro.server.protocols.errors import postcommit_error_data, protocol_error_response
+from router_maestro.server.routes._outcomes import record_chat_response_outcome
 from router_maestro.server.schemas.anthropic import (
     AnthropicCountTokensRequest,
     AnthropicMessagesRequest,
@@ -120,9 +121,15 @@ async def _apply_thinking_budget(
             thinking_type=chat_request.thinking_type,
         )
 
-    from router_maestro.config import load_priorities_config
+    from router_maestro.runtime import get_current_request_context
 
-    priorities = load_priorities_config()
+    context = get_current_request_context()
+    if context is not None:
+        priorities = context.config
+    else:
+        from router_maestro.config import load_priorities_config
+
+        priorities = load_priorities_config()
     thinking_config = priorities.thinking
 
     translated_model = chat_request.model
@@ -428,6 +435,7 @@ async def messages(request: AnthropicMessagesRequest, raw_request: FastAPIReques
             response_id=f"msg_{uuid.uuid4().hex[:24]}",
             model=response_model,
         )
+        record_chat_response_outcome(response)
 
         logger.info(
             "Upstream response from %s: content_len=%s, tool_calls=%s, finish_reason=%s",

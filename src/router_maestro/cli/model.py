@@ -140,10 +140,9 @@ def priority_add(
     client = get_admin_client()
 
     try:
-        # Get current priorities
-        data = asyncio.run(client.get_priorities())
+        data = asyncio.run(client.get_runtime_config())
+        revision = data.pop("revision")
         priorities = data.get("priorities", [])
-        fallback = data.get("fallback")
 
         # Remove if already exists
         if model_key in priorities:
@@ -156,8 +155,8 @@ def priority_add(
             pos = position - 1  # Convert 1-based to 0-based
             priorities.insert(pos, model_key)
 
-        # Save
-        asyncio.run(client.set_priorities(priorities, fallback))
+        data["priorities"] = priorities
+        asyncio.run(client.patch_runtime_config(config=data, revision=revision))
 
         if position:
             console.print(f"[green]Added '{model_key}' at position {position}[/green]")
@@ -180,14 +179,14 @@ def priority_remove(
     client = get_admin_client()
 
     try:
-        # Get current priorities
-        data = asyncio.run(client.get_priorities())
+        data = asyncio.run(client.get_runtime_config())
+        revision = data.pop("revision")
         priorities = data.get("priorities", [])
-        fallback = data.get("fallback")
 
         if model_key in priorities:
             priorities.remove(model_key)
-            asyncio.run(client.set_priorities(priorities, fallback))
+            data["priorities"] = priorities
+            asyncio.run(client.patch_runtime_config(config=data, revision=revision))
             console.print(f"[green]Removed '{model_key}' from priority list[/green]")
         else:
             console.print(f"[yellow]'{model_key}' was not in the priority list[/yellow]")
@@ -202,9 +201,10 @@ def priority_clear() -> None:
     client = get_admin_client()
 
     try:
-        data = asyncio.run(client.get_priorities())
-        fallback = data.get("fallback")
-        asyncio.run(client.set_priorities([], fallback))
+        data = asyncio.run(client.get_runtime_config())
+        revision = data.pop("revision")
+        data["priorities"] = []
+        asyncio.run(client.patch_runtime_config(config=data, revision=revision))
         console.print("[green]Cleared all priorities[/green]")
     except Exception as e:
         _handle_server_error(e)
@@ -270,9 +270,8 @@ def fallback_set(
     client = get_admin_client()
 
     try:
-        # Get current config
-        data = asyncio.run(client.get_priorities())
-        priorities = data.get("priorities", [])
+        data = asyncio.run(client.get_runtime_config())
+        revision = data.pop("revision")
         fallback = data.get("fallback", {})
 
         # Update fallback config
@@ -281,8 +280,8 @@ def fallback_set(
         if max_retries is not None:
             fallback["maxRetries"] = max_retries
 
-        # Save
-        asyncio.run(client.set_priorities(priorities, fallback))
+        data["fallback"] = fallback
+        asyncio.run(client.patch_runtime_config(config=data, revision=revision))
 
         console.print("[green]Fallback configuration updated[/green]")
 

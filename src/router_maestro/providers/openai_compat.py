@@ -3,7 +3,7 @@
 import httpx
 
 from router_maestro.providers.base import ModelInfo
-from router_maestro.providers.openai_base import OpenAIChatProvider
+from router_maestro.providers.openai_base import OpenAIChatProvider, _request_audit
 from router_maestro.utils import get_logger
 
 logger = get_logger("providers.openai_compat")
@@ -16,8 +16,10 @@ class OpenAICompatibleProvider(OpenAIChatProvider):
         self,
         name: str,
         base_url: str,
-        api_key: str,
+        api_key: str | None,
         models: dict[str, str] | None = None,
+        *,
+        allow_unauthenticated: bool = False,
     ) -> None:
         """Initialize the provider.
 
@@ -26,22 +28,24 @@ class OpenAICompatibleProvider(OpenAIChatProvider):
             base_url: Base URL for API requests
             api_key: API key for authentication
             models: Dict of model_id -> display_name
+            allow_unauthenticated: Whether the configured endpoint explicitly permits no key
         """
         self.name = name
         super().__init__(base_url=base_url, logger=logger)
         self.api_key = api_key
+        self.allow_unauthenticated = allow_unauthenticated
         self._models = models or {}
 
     def is_authenticated(self) -> bool:
-        """Check if authenticated (always true for custom providers)."""
-        return bool(self.api_key)
+        """Check whether a key exists or anonymous access was explicitly allowed."""
+        return bool(self.api_key) or self.allow_unauthenticated
 
     def _get_headers(self) -> dict[str, str]:
         """Get headers for API requests."""
-        return {
-            "Authorization": f"Bearer {self.api_key}",
-            "Content-Type": "application/json",
-        }
+        headers = {"Content-Type": "application/json"}
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
+        return headers
 
     def _error_label(self) -> str:
         return self.name
@@ -55,13 +59,24 @@ class OpenAICompatibleProvider(OpenAIChatProvider):
             ]
 
         # Try to fetch from API
+        url = f"{self.base_url}/models"
+        headers = self._get_headers()
+        audit = _request_audit()
+        if audit is not None:
+            audit.record_upstream("GET", url, headers, None)
         async with httpx.AsyncClient() as client:
             try:
                 response = await client.get(
-                    f"{self.base_url}/models",
-                    headers=self._get_headers(),
+                    url,
+                    headers=headers,
                     timeout=30.0,
                 )
+                if audit is not None:
+                    audit.record_upstream_response(
+                        response.status_code,
+                        dict(response.headers),
+                        response.content,
+                    )
                 response.raise_for_status()
                 model_ids = self._parse_model_catalog(response)
 

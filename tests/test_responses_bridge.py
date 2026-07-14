@@ -706,6 +706,7 @@ class TestResponsesToChat:
         chat = responses_response_to_chat_response(resp, "gpt-5.4")
 
         assert chat.finish_reason == expected
+        assert chat.terminal_outcome == resp.terminal_outcome
 
     @pytest.mark.parametrize("status", [ResponseStatus.FAILED, ResponseStatus.CANCELLED])
     def test_canonical_failure_cannot_become_non_stream_chat_success(self, status):

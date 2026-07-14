@@ -25,6 +25,22 @@ class _FakeRouter:
         ]
 
 
+class _RouterLease:
+    def __init__(self, router):
+        self.router = router
+
+    async def release(self):
+        return None
+
+
+class _RouterOwner:
+    def __init__(self, router):
+        self.router = router
+
+    async def acquire(self):
+        return _RouterLease(self.router)
+
+
 @pytest.mark.anyio
 async def test_openai_models_route_uses_routing_singleton(monkeypatch):
     """The models route should reuse the routing singleton instead of constructing Router."""
@@ -52,8 +68,7 @@ async def test_public_model_lists_encode_provider_namespaced_upstream_id(monkeyp
     openai_response = await list_models()
     with patch("router_maestro.server.routes.anthropic.get_router", return_value=model_router):
         anthropic_response = await list_anthropic_models()
-    with patch("router_maestro.server.routes.admin.get_router", return_value=model_router):
-        admin_response = await list_admin_models()
+    admin_response = await list_admin_models(_RouterOwner(model_router))
 
     expected = ["openrouter/openrouter/auto"]
     assert [model.id for model in openai_response.data] == expected
@@ -80,8 +95,7 @@ async def test_public_model_lists_do_not_double_prefix_qualified_catalog_ids(mon
     openai_response = await list_models()
     with patch("router_maestro.server.routes.anthropic.get_router", return_value=model_router):
         anthropic_response = await list_anthropic_models()
-    with patch("router_maestro.server.routes.admin.get_router", return_value=model_router):
-        admin_response = await list_admin_models()
+    admin_response = await list_admin_models(_RouterOwner(model_router))
 
     assert [model.id for model in openai_response.data] == ["github-copilot/claude-sonnet-4.6"]
     assert [model.id for model in anthropic_response.data] == ["github-copilot/claude-sonnet-4.6"]
@@ -137,8 +151,7 @@ async def test_public_model_lists_round_trip_to_same_provider_with_bare_upstream
     openai_response = await list_models()
     with patch("router_maestro.server.routes.anthropic.get_router", return_value=model_router):
         anthropic_response = await list_anthropic_models()
-    with patch("router_maestro.server.routes.admin.get_router", return_value=model_router):
-        admin_response = await list_admin_models()
+    admin_response = await list_admin_models(_RouterOwner(model_router))
 
     for public_ids in (
         [model.id for model in openai_response.data],

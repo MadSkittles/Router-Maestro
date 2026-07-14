@@ -17,7 +17,18 @@ from fastapi import Request as FastAPIRequest
 from fastapi.responses import JSONResponse
 from pydantic import ValidationError
 
-from router_maestro.providers import ProviderError, ProviderFailureKind, RequestOptionError
+from router_maestro.providers import (
+    ProviderError,
+    ProviderFailureKind,
+    RequestOptionError,
+    ResponseStatus,
+    TerminalError,
+    TerminalOutcome,
+    TransportTermination,
+    client_cancelled_outcome,
+    exception_outcome,
+    unexpected_eof_outcome,
+)
 from router_maestro.providers.copilot import CopilotProvider
 from router_maestro.routing import get_router
 from router_maestro.routing.capabilities import CapabilitySupport, Operation, RequestFeatures
@@ -121,6 +132,10 @@ class _NativeUpstreamStatusError(ProviderError):
             model=model,
         )
         self.response = response
+
+
+class _NativeUnexpectedEOFError(ProviderError):
+    """Native Anthropic transport ended cleanly before a terminal event."""
 
 
 def _raise_for_native_status(response, candidate: RouteCandidate) -> None:
@@ -494,9 +509,15 @@ def _apply_thinking_budget_native(
         ):
             return body
 
-    from router_maestro.config import load_priorities_config
+    from router_maestro.runtime import get_current_request_context
 
-    priorities = load_priorities_config()
+    context = get_current_request_context()
+    if context is not None:
+        priorities = context.config
+    else:
+        from router_maestro.config import load_priorities_config
+
+        priorities = load_priorities_config()
     thinking_config = priorities.thinking
 
     client_budget = None
@@ -693,7 +714,12 @@ async def _stream_native_candidate(
         except ProviderError as error:
             if error.kind is not ProviderFailureKind.UPSTREAM_PROTOCOL or error.provider:
                 raise
-            raise ProviderError(
+            error_type = (
+                _NativeUnexpectedEOFError
+                if isinstance(error, _NativeUnexpectedEOFError)
+                else ProviderError
+            )
+            raise error_type(
                 error.safe_message,
                 status_code=error.status_code,
                 retryable=error.retryable,
@@ -709,15 +735,195 @@ async def _stream_native_candidate(
 
 async def _encode_native_stream_errors(
     stream: AsyncIterator[str],
+    *,
+    pipeline=None,
 ) -> AsyncGenerator[str, None]:
-    """Encode a post-commit native provider failure in the active SSE response."""
+    """Apply raw stream guards and preserve native semantic terminal state."""
+    terminal_outcome: TerminalOutcome | None = None
+    response_status = ResponseStatus.COMPLETED
+    raw_leak_guard = None
+    if pipeline is not None and pipeline.leak_guard is not None:
+        from router_maestro.pipeline.leak_guard import RawFrameLeakGuard
+
+        raw_leak_guard = RawFrameLeakGuard(inner=pipeline.leak_guard)
     try:
         async for frame in stream:
+            event_type, data = _parse_native_frame(frame)
+            if pipeline is not None:
+                abort_reason = _feed_native_frame_guards(
+                    pipeline,
+                    raw_leak_guard,
+                    event_type,
+                    data,
+                )
+                if abort_reason is not None:
+                    terminal_outcome = exception_outcome(abort_reason, code="overloaded")
+                    pipeline.finish(
+                        wire_status=200,
+                        outcome=terminal_outcome,
+                        body_summary=abort_reason,
+                    )
+                    yield _native_overload_event()
+                    return
+            if event_type == "message_delta" and isinstance(data, dict):
+                delta = data.get("delta")
+                if isinstance(delta, dict):
+                    stop_reason = delta.get("stop_reason")
+                    if stop_reason in {"max_tokens", "model_context_window_exceeded"}:
+                        response_status = ResponseStatus.INCOMPLETE
+                    elif stop_reason is not None:
+                        response_status = ResponseStatus.COMPLETED
+            frame_outcome = _native_frame_outcome(
+                event_type,
+                data,
+                response_status=response_status,
+            )
+            if frame_outcome is not None:
+                terminal_outcome = frame_outcome
             yield frame
-    except ProviderError as error:
+            if terminal_outcome is not None:
+                if pipeline is not None:
+                    pipeline.finish(wire_status=200, outcome=terminal_outcome)
+                return
+        terminal_outcome = unexpected_eof_outcome()
+        if pipeline is not None:
+            pipeline.finish(
+                wire_status=200,
+                outcome=terminal_outcome,
+                body_summary=terminal_outcome.error.message,
+            )
+        yield _sse_error_event(
+            ProviderError(
+                terminal_outcome.error.message,
+                status_code=502,
+                retryable=True,
+                kind=ProviderFailureKind.UPSTREAM_PROTOCOL,
+            )
+        )
+    except _NativeUnexpectedEOFError as error:
+        terminal_outcome = unexpected_eof_outcome()
+        if pipeline is not None:
+            pipeline.finish(
+                wire_status=200,
+                outcome=terminal_outcome,
+                body_summary=terminal_outcome.error.message,
+            )
         yield _sse_error_event(error)
+    except ProviderError as error:
+        terminal_outcome = exception_outcome(error.safe_message, code="provider_error")
+        if pipeline is not None:
+            pipeline.finish(
+                wire_status=200,
+                outcome=terminal_outcome,
+                body_summary=error.safe_message,
+            )
+        yield _sse_error_event(error)
+    except asyncio.CancelledError:
+        if pipeline is not None:
+            pipeline.finish(wire_status=200, outcome=client_cancelled_outcome())
+        raise
+    except Exception:
+        terminal_outcome = exception_outcome("Internal server error", code="server_error")
+        if pipeline is not None:
+            pipeline.finish(
+                wire_status=200,
+                outcome=terminal_outcome,
+                body_summary="Internal server error",
+            )
+        logger.error("Unexpected error in beta anthropic stream", exc_info=True)
+        yield _sse_error_event("Internal server error")
     finally:
         await close_async_iterator(stream)
+
+
+def _parse_native_frame(frame: str) -> tuple[str | None, dict | None]:
+    """Return the event discriminator and JSON object from one encoded frame."""
+    event_type: str | None = None
+    data: dict | None = None
+    for line in frame.splitlines():
+        if line.startswith("event: "):
+            event_type = line.removeprefix("event: ")
+        elif line.startswith("data: "):
+            try:
+                parsed = json.loads(line.removeprefix("data: "))
+            except json.JSONDecodeError:
+                continue
+            if isinstance(parsed, dict):
+                data = parsed
+    return event_type, data
+
+
+def _feed_native_frame_guards(
+    pipeline,
+    raw_leak_guard,
+    event_type: str | None,
+    data: dict | None,
+) -> str | None:
+    """Project native content deltas onto the shared guard input contract."""
+    if event_type != "content_block_delta" or data is None:
+        return None
+    delta = data.get("delta")
+    if not isinstance(delta, dict):
+        return None
+    from router_maestro.providers.base import ChatStreamChunk
+
+    delta_type = delta.get("type")
+    if delta_type == "text_delta":
+        chunk = ChatStreamChunk(content=delta.get("text", ""))
+    elif delta_type == "thinking_delta":
+        if raw_leak_guard is not None:
+            leak_reason = raw_leak_guard.feed_frame(event_type, json.dumps(data))
+            if leak_reason is not None:
+                return leak_reason
+        chunk = ChatStreamChunk(content="", thinking=delta.get("thinking", ""))
+    elif delta_type == "input_json_delta":
+        chunk = ChatStreamChunk(
+            content="",
+            tool_calls=[{"function": {"arguments": delta.get("partial_json", "")}}],
+        )
+    else:
+        return None
+    return pipeline.feed_stream(chunk)
+
+
+def _native_frame_outcome(
+    event_type: str | None,
+    data: dict | None,
+    *,
+    response_status: ResponseStatus,
+) -> TerminalOutcome | None:
+    """Map a native Anthropic terminal event onto the shared semantic outcome."""
+    if event_type == "error":
+        error = data.get("error") if isinstance(data, dict) else None
+        error_type = error.get("type") if isinstance(error, dict) else "api_error"
+        message = error.get("message") if isinstance(error, dict) else "Upstream response failed"
+        return TerminalOutcome(
+            transport=TransportTermination.EXPLICIT_TERMINAL,
+            response_status=ResponseStatus.FAILED,
+            error=TerminalError(code=str(error_type), message=str(message)),
+        )
+    if event_type != "message_stop":
+        return None
+    return TerminalOutcome(
+        transport=TransportTermination.EXPLICIT_TERMINAL,
+        response_status=response_status,
+        incomplete_details=(
+            {"reason": "max_output_tokens"}
+            if response_status is ResponseStatus.INCOMPLETE
+            else None
+        ),
+    )
+
+
+def _native_overload_event() -> str:
+    return _sse_error_event(
+        ProviderError(
+            "Overloaded: please retry this request",
+            status_code=529,
+            retryable=True,
+            kind=ProviderFailureKind.RATE_LIMIT,
+        )
+    )
 
 
 def _qualify_native_stream_frame(frame: str, qualified_model: str) -> str:
@@ -880,6 +1086,21 @@ async def beta_messages(raw_request: FastAPIRequest):
         await copilot_provider.ensure_token()
 
     if stream:
+        from router_maestro.pipeline import RequestPipeline
+
+        tool_names = {
+            tool.get("name", "")
+            for tool in body.get("tools", [])
+            if isinstance(tool, dict) and tool.get("name")
+        } or None
+        from router_maestro.runtime import get_current_request_context
+
+        context = get_current_request_context()
+        pipeline = RequestPipeline.create(
+            request_id=(context.request_id if context is not None else f"beta-{actual_model}"),
+            model=model,
+            tool_names=tool_names,
+        )
         if native_resolution.plan is not None:
             try:
                 selected_stream, _used_provider = await Router.execute_plan_stream(
@@ -895,11 +1116,18 @@ async def beta_messages(raw_request: FastAPIRequest):
                 )
                 return protocol_error_response(e, "anthropic")
             return sse_streaming_response(
-                _encode_native_stream_errors(selected_stream),
+                _encode_native_stream_errors(selected_stream, pipeline=pipeline),
                 keepalive_frame=ANTHROPIC_PING_FRAME,
             )
         return sse_streaming_response(
-            _stream_passthrough(copilot_provider, body),
+            _encode_native_stream_errors(
+                _stream_passthrough(
+                    copilot_provider,
+                    body,
+                    raise_provider_errors=True,
+                ),
+                pipeline=pipeline,
+            ),
             keepalive_frame=ANTHROPIC_PING_FRAME,
         )
 
@@ -1074,15 +1302,6 @@ async def _stream_passthrough(
     On a signature validation error (400), strips history thinking blocks
     and retries once before surfacing the error.
     """
-    # Build leak guard with tool names from the payload
-    from router_maestro.pipeline.leak_guard import RawFrameLeakGuard
-
-    tool_names: set[str] | None = None
-    tools = payload.get("tools")
-    if tools:
-        tool_names = {t.get("name", "") for t in tools if t.get("name")} or None
-    leak_guard = RawFrameLeakGuard(allowed_tool_names=tool_names)
-
     try:
         async with provider._stream_with_auth_retry(
             COPILOT_MESSAGES_PATH,
@@ -1121,7 +1340,7 @@ async def _stream_passthrough(
                 return
             else:
                 # Success — stream events
-                async for frame in _iter_sse_frames(response, leak_guard=leak_guard):
+                async for frame in _iter_sse_frames(response):
                     yield frame
                 return
 
@@ -1144,9 +1363,11 @@ async def _stream_passthrough(
                 yield _sse_error_event(msg)
                 return
 
-            async for frame in _iter_sse_frames(response, leak_guard=leak_guard):
+            async for frame in _iter_sse_frames(response):
                 yield frame
 
+    except _NativeUnexpectedEOFError:
+        raise
     except ProviderError as e:
         if raise_provider_errors:
             raise
@@ -1206,7 +1427,7 @@ async def _iter_sse_frames(response, *, leak_guard=None) -> AsyncGenerator[str, 
     if current_event is not None or data_buffer:
         _raise_native_stream_protocol_error(ValueError("truncated upstream SSE frame"))
     if not terminal_received:
-        _raise_native_stream_protocol_error(
+        _raise_native_stream_unexpected_eof(
             ValueError("upstream SSE ended before a terminal event")
         )
 
@@ -1214,6 +1435,18 @@ async def _iter_sse_frames(response, *, leak_guard=None) -> AsyncGenerator[str, 
 def _raise_native_stream_protocol_error(cause: BaseException) -> None:
     """Raise a safe retryable failure for malformed native Anthropic SSE."""
     raise ProviderError(
+        "Native Anthropic upstream returned a malformed stream",
+        status_code=502,
+        retryable=True,
+        kind=ProviderFailureKind.UPSTREAM_PROTOCOL,
+        upstream_status_code=200,
+        cause=cause,
+    ) from cause
+
+
+def _raise_native_stream_unexpected_eof(cause: BaseException) -> None:
+    """Raise the typed signal for clean EOF before a native terminal event."""
+    raise _NativeUnexpectedEOFError(
         "Native Anthropic upstream returned a malformed stream",
         status_code=502,
         retryable=True,

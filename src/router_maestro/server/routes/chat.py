@@ -27,6 +27,7 @@ from router_maestro.routing import Router, get_router
 from router_maestro.routing.model_ref import qualify_model_id
 from router_maestro.server.protocols import client_error_response, unrepresented_option_error
 from router_maestro.server.protocols.errors import postcommit_error_data, protocol_error_response
+from router_maestro.server.routes._outcomes import record_chat_response_outcome
 from router_maestro.server.schemas import (
     ChatCompletionChoice,
     ChatCompletionChunk,
@@ -239,7 +240,7 @@ async def chat_completions(request: ChatCompletionRequest):
         if response.tool_calls:
             response_tool_calls = [ChatMessageToolCall(**tc) for tc in response.tool_calls]
 
-        return ChatCompletionResponse(
+        downstream_response = ChatCompletionResponse(
             id=f"chatcmpl-{uuid.uuid4().hex[:8]}",
             created=int(time.time()),
             model=(
@@ -261,6 +262,8 @@ async def chat_completions(request: ChatCompletionRequest):
             ],
             usage=usage,
         )
+        record_chat_response_outcome(response)
+        return downstream_response
     except ProviderError as e:
         logger.error("Chat completion request failed: %s", e)
         if isinstance(e, RequestOptionError):

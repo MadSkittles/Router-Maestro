@@ -31,6 +31,13 @@ logger = get_logger("providers.anthropic")
 ANTHROPIC_API_URL = "https://api.anthropic.com/v1"
 
 
+def _request_audit():
+    from router_maestro.runtime import get_current_request_context
+
+    context = get_current_request_context()
+    return context.audit if context is not None else None
+
+
 class AnthropicProvider(BaseProvider):
     """Anthropic Claude provider."""
 
@@ -241,16 +248,27 @@ class AnthropicProvider(BaseProvider):
     async def chat_completion(self, request: ChatRequest) -> ChatResponse:
         """Generate a chat completion via Anthropic."""
         payload = self._build_payload(request)
+        url = f"{self.base_url}/messages"
+        headers = self._get_headers()
+        audit = _request_audit()
+        if audit is not None:
+            audit.record_upstream("POST", url, headers, payload)
 
         logger.debug("Anthropic chat completion: model=%s", request.model)
         async with httpx.AsyncClient() as client:
             try:
                 response = await client.post(
-                    f"{self.base_url}/messages",
+                    url,
                     json=payload,
-                    headers=self._get_headers(),
+                    headers=headers,
                     timeout=TIMEOUT_NON_STREAMING,
                 )
+                if audit is not None:
+                    audit.record_upstream_response(
+                        response.status_code,
+                        dict(response.headers),
+                        response.content,
+                    )
                 response.raise_for_status()
                 try:
                     data = response.json()
@@ -280,6 +298,11 @@ class AnthropicProvider(BaseProvider):
     async def chat_completion_stream(self, request: ChatRequest) -> AsyncIterator[ChatStreamChunk]:
         """Generate a streaming chat completion via Anthropic."""
         payload = self._build_payload(request, stream=True)
+        url = f"{self.base_url}/messages"
+        headers = self._get_headers()
+        audit = _request_audit()
+        if audit is not None:
+            audit.record_upstream("POST", url, headers, payload)
 
         logger.debug("Anthropic streaming chat: model=%s", request.model)
         decoder = AnthropicStreamDecoder(
@@ -289,11 +312,17 @@ class AnthropicProvider(BaseProvider):
             try:
                 async with client.stream(
                     "POST",
-                    f"{self.base_url}/messages",
+                    url,
                     json=payload,
-                    headers=self._get_headers(),
+                    headers=headers,
                     timeout=TIMEOUT_STREAMING,
                 ) as response:
+                    if audit is not None:
+                        audit.record_upstream_response(
+                            response.status_code,
+                            dict(response.headers),
+                            stream_summary="stream opened",
+                        )
                     response.raise_for_status()
 
                     async for line in response.aiter_lines():

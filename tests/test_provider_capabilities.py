@@ -747,7 +747,7 @@ async def test_stale_copilot_catalog_keeps_planning_and_transport_consistent(
         )
     ]
     provider._models_ttl_cache.set(stale)
-    provider._models_ttl_cache._timestamp = 0
+    provider._models_ttl_cache._timestamp -= provider._models_ttl_cache._ttl + 1
 
     def failed_refresh(_request: httpx.Request) -> httpx.Response:
         return httpx.Response(503, json={"error": "catalog unavailable"})

@@ -453,6 +453,7 @@ def responses_response_to_chat_response(
         thinking_signature=getattr(resp, "thinking_signature", None),
         thinking_id=getattr(resp, "thinking_id", None),
         refusal=resp.refusal,
+        terminal_outcome=outcome,
     )
 
 

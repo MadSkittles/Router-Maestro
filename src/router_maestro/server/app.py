@@ -16,8 +16,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from router_maestro import __version__
+from router_maestro.config.repository import RuntimeConfigRepository
 from router_maestro.providers import ProviderError
-from router_maestro.routing import get_router
+from router_maestro.routing.router import RouterOwner
+from router_maestro.runtime import RequestContextMiddleware
 from router_maestro.server.middleware import (
     REQUEST_ID_HEADER,
     ObservabilityMiddleware,
@@ -55,31 +57,34 @@ async def lifespan(app: FastAPI):
     setup_logging(level=log_level)
     logger.info("Router-Maestro server starting up")
 
-    # Pre-warm model cache if any providers are authenticated
-    router = get_router()
-    authenticated_providers = [
-        name for name, provider in router.providers.items() if provider.is_authenticated()
-    ]
-    if authenticated_providers:
-        logger.info(
-            "Pre-warming model cache for authenticated providers: %s", authenticated_providers
-        )
+    repository: RuntimeConfigRepository = app.state.runtime_config_repository
+    owner: RouterOwner = app.state.router_owner
+    try:
+        snapshot = repository.read()
+        await owner.start(snapshot)
+        lease = await owner.acquire()
         try:
-            models = await router.list_models()
-            logger.info("Model cache pre-warmed with %d models", len(models))
-        except Exception as e:
-            logger.warning("Failed to pre-warm model cache: %s", e)
+            router = lease.router
+            authenticated_providers = [
+                name for name, provider in router.providers.items() if provider.is_authenticated()
+            ]
+            if authenticated_providers:
+                logger.info(
+                    "Pre-warming model cache for authenticated providers: %s",
+                    authenticated_providers,
+                )
+                try:
+                    models = await router.list_models()
+                    logger.info("Model cache pre-warmed with %d models", len(models))
+                except Exception as e:
+                    logger.warning("Failed to pre-warm model cache: %s", e)
+        finally:
+            await lease.release()
 
-    yield
-    # Shutdown — close provider HTTP clients
-    router = get_router()
-    for provider in router.providers.values():
-        if hasattr(provider, "close"):
-            try:
-                await provider.close()
-            except Exception:
-                pass
-    logger.info("Router-Maestro server shutting down")
+        yield
+    finally:
+        await owner.close()
+        logger.info("Router-Maestro server shutting down")
 
 
 def get_metrics_token() -> str | None:
@@ -175,6 +180,8 @@ def create_app() -> FastAPI:
         lifespan=lifespan,
     )
     app.state.http_metrics = create_http_metrics()
+    app.state.runtime_config_repository = RuntimeConfigRepository()
+    app.state.router_owner = RouterOwner()
     app.add_exception_handler(RequestValidationError, protocol_validation_exception_handler)
     app.add_exception_handler(StarletteHTTPException, protocol_http_exception_handler)
     app.add_exception_handler(ProviderError, protocol_provider_exception_handler)
@@ -188,6 +195,7 @@ def create_app() -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+    app.add_middleware(RequestContextMiddleware)
     app.add_middleware(ObservabilityMiddleware)
 
     # Include routers with API key verification

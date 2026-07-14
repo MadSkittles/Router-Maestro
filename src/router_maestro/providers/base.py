@@ -358,6 +358,8 @@ class ChatResponse:
     # Router-selected identity. Providers leave this unset; Router attaches the
     # exact candidate so protocol boundaries never infer raw/public provenance.
     selected_model: "ModelRef | None" = None
+    # Canonical provider semantics. Appended to preserve positional construction.
+    terminal_outcome: TerminalOutcome | None = None
 
 
 @dataclass
