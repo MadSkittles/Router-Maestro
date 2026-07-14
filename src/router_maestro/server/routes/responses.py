@@ -6,7 +6,7 @@ import time
 from collections.abc import AsyncGenerator
 from typing import Any
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter
 from pydantic import ValidationError
 
 from router_maestro.providers import (
@@ -27,6 +27,7 @@ from router_maestro.server.protocols import (
     responses_reducer,
     unrepresented_option_error,
 )
+from router_maestro.server.protocols.errors import postcommit_error_data, protocol_error_response
 from router_maestro.server.schemas import (
     ResponsesReasoningConfig,
     ResponsesRequest,
@@ -267,21 +268,31 @@ async def create_response(request: ResponsesRequest):
         internal_request.reasoning_effort = reasoning.effort
 
     if request.stream:
+        stream = None
         try:
             prepared_plan = await model_router.prepare_responses_completion_stream(internal_request)
+            stream, provider_name = await model_router.responses_completion_stream(
+                internal_request,
+                prepared_plan=prepared_plan,
+            )
         except ProviderError as e:
             if isinstance(e, RequestOptionError):
                 return client_error_response(e, "openai")
-            raise HTTPException(status_code=e.status_code, detail=str(e)) from e
-        return sse_streaming_response(
-            stream_response(
-                model_router,
-                internal_request,
-                request_id,
-                start_time,
-                prepared_plan=prepared_plan,
-            ),
-        )
+            return protocol_error_response(e, "openai_responses")
+        try:
+            return sse_streaming_response(
+                stream_response(
+                    model_router,
+                    internal_request,
+                    request_id,
+                    start_time,
+                    opened_stream=stream,
+                    opened_provider_name=provider_name,
+                ),
+            )
+        except Exception:
+            await close_async_iterator(stream)
+            raise
 
     try:
         response, provider_name = await model_router.responses_completion(internal_request)
@@ -311,7 +322,7 @@ async def create_response(request: ResponsesRequest):
         )
         if isinstance(e, RequestOptionError):
             return client_error_response(e, "openai")
-        raise HTTPException(status_code=e.status_code, detail=str(e)) from e
+        return protocol_error_response(e, "openai_responses")
 
 
 async def stream_response(
@@ -321,13 +332,15 @@ async def stream_response(
     start_time: float,
     *,
     prepared_plan=None,
+    opened_stream=None,
+    opened_provider_name: str | None = None,
 ) -> AsyncGenerator[str, None]:
     """Orchestrate a provider stream through the pure Responses reducer."""
     response_id = generate_id("resp")
     created_at = int(time.time())
     response_model = request.model
     pipeline = None
-    stream = None
+    stream = opened_stream
     terminal_outcome: TerminalOutcome | None = None
     reducer = ResponsesReducer(
         {
@@ -340,13 +353,17 @@ async def stream_response(
         }
     )
     try:
-        if prepared_plan is None:
+        if stream is not None:
+            provider_name = opened_provider_name
+        elif prepared_plan is None:
             stream, provider_name = await model_router.responses_completion_stream(request)
         else:
             stream, provider_name = await model_router.responses_completion_stream(
                 request,
                 prepared_plan=prepared_plan,
             )
+        if provider_name is None:
+            raise RuntimeError("Opened Responses stream is missing provider identity")
         selected_model = getattr(stream, "selected_model", None)
         response_model = (
             selected_model.qualified_id
@@ -366,12 +383,18 @@ async def stream_response(
             if abort_reason:
                 terminal_outcome = exception_outcome(abort_reason, code="overloaded")
                 logger.warning("Responses stream aborted: %s", abort_reason)
+                overload_error = ProviderError(
+                    "Overloaded: please retry",
+                    status_code=529,
+                    retryable=True,
+                    kind=ProviderFailureKind.RATE_LIMIT,
+                )
                 result = reducer.terminate(
                     terminal_outcome,
-                    wire_error={
-                        "type": "server_error",
-                        "message": "Overloaded: please retry",
-                    },
+                    wire_error=postcommit_error_data(
+                        overload_error,
+                        "openai_responses",
+                    ),
                 )
                 for event in result.events:
                     yield sse_event(event)
@@ -424,11 +447,6 @@ async def stream_response(
             if error.kind is ProviderFailureKind.UPSTREAM_PROTOCOL
             else "provider_error"
         )
-        wire_error_code = (
-            "upstream_protocol_error"
-            if error.kind is ProviderFailureKind.UPSTREAM_PROTOCOL
-            else "server_error"
-        )
         terminal_outcome = exception_outcome(str(error), code=outcome_code)
         elapsed_ms = (time.time() - start_time) * 1000
         logger.error(
@@ -439,7 +457,7 @@ async def stream_response(
         )
         result = reducer.terminate(
             terminal_outcome,
-            wire_error={"code": wire_error_code, "message": str(error)},
+            wire_error=postcommit_error_data(error, "openai_responses"),
         )
         if pipeline is not None:
             pipeline.finish(
@@ -465,7 +483,10 @@ async def stream_response(
         )
         result = reducer.terminate(
             terminal_outcome,
-            wire_error={"code": "server_error", "message": "Internal server error"},
+            wire_error=postcommit_error_data(
+                RuntimeError("Internal server error"),
+                "openai_responses",
+            ),
         )
         if pipeline is not None:
             pipeline.finish(

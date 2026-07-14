@@ -30,6 +30,7 @@ from router_maestro.server.routes.anthropic_beta import (
     _clean_stream_frame,
     _is_native_eligible,
     _is_signature_error,
+    _iter_sse_frames,
     _NativeModelResolution,
     _parse_native_message_response,
     _ResolvedModel,
@@ -77,6 +78,48 @@ def _valid_native_message_response() -> dict:
         "stop_sequence": None,
         "usage": {"input_tokens": 5, "output_tokens": 2},
     }
+
+
+@pytest.mark.asyncio
+async def test_native_stream_guard_abort_uses_one_anthropic_overload_terminal() -> None:
+    class _Response:
+        async def aiter_lines(self):
+            yield "event: message_start"
+            yield f"data: {json.dumps(_VALID_MESSAGE_START)}"
+            yield ""
+            yield "event: message_stop"
+            yield 'data: {"type":"message_stop"}'
+            yield ""
+
+    class _Guard:
+        def feed_frame(self, _event_type, _data):
+            return "guard overloaded"
+
+    frames = [frame async for frame in _iter_sse_frames(_Response(), leak_guard=_Guard())]
+    event_types = [
+        line.removeprefix("event: ")
+        for frame in frames
+        for line in frame.splitlines()
+        if line.startswith("event: ")
+    ]
+    payloads = [
+        json.loads(line.removeprefix("data: "))
+        for frame in frames
+        for line in frame.splitlines()
+        if line.startswith("data: ")
+    ]
+
+    assert event_types == ["error"]
+    assert "message_stop" not in event_types
+    assert payloads == [
+        {
+            "type": "error",
+            "error": {
+                "type": "overloaded_error",
+                "message": "Overloaded: please retry this request",
+            },
+        }
+    ]
 
 
 def _assert_native_protocol_failure(error: ProviderError) -> None:
@@ -1442,6 +1485,71 @@ class TestBetaMessagesEndpoint:
             assert forwarded["model"] == "claude-compatible"
             assert forwarded["json"]["model"] == "claude-compatible"
 
+    @pytest.mark.parametrize(
+        ("status_code", "kind", "expected_type"),
+        [
+            (400, ProviderFailureKind.CLIENT_REQUEST, "invalid_request_error"),
+            (401, ProviderFailureKind.AUTHENTICATION, "authentication_error"),
+            (429, ProviderFailureKind.RATE_LIMIT, "rate_limit_error"),
+            (529, ProviderFailureKind.RATE_LIMIT, "overloaded_error"),
+        ],
+    )
+    def test_planned_native_stream_open_failure_uses_typed_anthropic_json(
+        self,
+        client,
+        status_code,
+        kind,
+        expected_type,
+    ):
+        from router_maestro.routing.router import Router
+
+        provider = _native_provider()
+        plan = self._native_plan(
+            provider,
+            CapabilitySupport.SUPPORTED,
+            model="typed-open-failure",
+        )
+        model_router = Router.__new__(Router)
+        model_router._models_cache = {}
+        model_router.plan_route = AsyncMock(return_value=plan)
+        error = ProviderError(
+            "Safe planned stream failure",
+            status_code=status_code,
+            retryable=status_code in {429, 529},
+            kind=kind,
+        )
+
+        with (
+            patch(
+                "router_maestro.server.routes.anthropic_beta.get_router",
+                return_value=model_router,
+            ),
+            patch(
+                "router_maestro.server.routes.anthropic_beta.Router.execute_plan_stream",
+                new_callable=AsyncMock,
+                side_effect=error,
+            ),
+        ):
+            response = client.post(
+                "/api/anthropic/beta/v1/messages",
+                json={
+                    "model": "router-maestro",
+                    "max_tokens": 100,
+                    "stream": True,
+                    "messages": [{"role": "user", "content": "Hi"}],
+                },
+            )
+
+        assert response.status_code == status_code
+        assert response.headers["content-type"].startswith("application/json")
+        assert response.json() == {
+            "type": "error",
+            "error": {
+                "type": expected_type,
+                "message": "Safe planned stream failure",
+            },
+        }
+
     @pytest.mark.parametrize("stream", [False, True], ids=["nonstream", "stream"])
     @pytest.mark.parametrize(
         ("case", "feature"),
@@ -2468,6 +2576,86 @@ class TestBetaMessagesEndpoint:
         primary._stream_with_auth_retry.assert_called_once()
         secondary._stream_with_auth_retry.assert_called_once()
 
+    @pytest.mark.parametrize(
+        ("status_code", "expected_type"),
+        [(429, "rate_limit_error"), (529, "overloaded_error")],
+    )
+    def test_native_stream_endpoint_postcommit_provider_error_is_typed_and_safe(
+        self,
+        client,
+        status_code,
+        expected_type,
+    ):
+        from router_maestro.routing.router import Router
+
+        close_calls = 0
+        private_cause = "private-native-stream-cause"
+
+        async def selected_stream():
+            nonlocal close_calls
+            try:
+                yield f"event: message_start\ndata: {json.dumps(_VALID_MESSAGE_START)}\n\n"
+                raise ProviderError(
+                    "Safe native stream failure",
+                    status_code=status_code,
+                    kind=ProviderFailureKind.RATE_LIMIT,
+                    cause=RuntimeError(private_cause),
+                )
+            finally:
+                close_calls += 1
+
+        primary = _native_provider()
+        plan = self._native_plan(
+            primary,
+            CapabilitySupport.SUPPORTED,
+            model="committed-primary",
+        )
+        model_router = Router.__new__(Router)
+        model_router._models_cache = {}
+        model_router.plan_route = AsyncMock(return_value=plan)
+
+        with (
+            patch(
+                "router_maestro.server.routes.anthropic_beta.get_router",
+                return_value=model_router,
+            ),
+            patch(
+                "router_maestro.server.routes.anthropic_beta.Router.execute_plan_stream",
+                new_callable=AsyncMock,
+                return_value=(selected_stream(), "github-copilot"),
+            ),
+        ):
+            downstream = client.post(
+                "/api/anthropic/beta/v1/messages",
+                json={
+                    "model": "router-maestro",
+                    "max_tokens": 100,
+                    "stream": True,
+                    "messages": [{"role": "user", "content": "Hi"}],
+                },
+            )
+
+        event_types = [
+            line.removeprefix("event: ")
+            for line in downstream.text.splitlines()
+            if line.startswith("event: ")
+        ]
+        errors = [
+            json.loads(line.removeprefix("data: "))
+            for line in downstream.text.splitlines()
+            if line.startswith("data: ") and '"type": "error"' in line
+        ]
+        assert downstream.status_code == 200
+        assert event_types.count("error") == 1
+        assert "message_stop" not in event_types
+        assert len(errors) == 1
+        assert errors[0]["error"] == {
+            "type": expected_type,
+            "message": "Safe native stream failure",
+        }
+        assert private_cause not in downstream.text
+        assert close_calls == 1
+
     def test_native_stream_endpoint_clean_eof_after_commit_emits_one_error_and_closes(
         self,
         client,
@@ -3379,10 +3567,14 @@ class TestBetaMessagesEndpoint:
         assert upstream_marker not in caplog.text
 
     @pytest.mark.parametrize(
-        ("provider_error", "expected_status"),
+        ("provider_error", "expected_status", "expected_type"),
         [
-            (ProviderError("Unknown model", status_code=404), 404),
-            (ProviderError("Provider authentication required", status_code=401), 401),
+            (ProviderError("Unknown model", status_code=404), 404, "not_found_error"),
+            (
+                ProviderError("Provider authentication required", status_code=401),
+                401,
+                "authentication_error",
+            ),
         ],
         ids=["unknown-model", "authentication"],
     )
@@ -3391,6 +3583,7 @@ class TestBetaMessagesEndpoint:
         non_raising_client,
         provider_error,
         expected_status,
+        expected_type,
     ):
         model_router = MagicMock()
         model_router.plan_route = AsyncMock(side_effect=provider_error)
@@ -3409,7 +3602,13 @@ class TestBetaMessagesEndpoint:
             )
 
         assert response.status_code == expected_status
-        assert response.json()["detail"] == str(provider_error)
+        assert response.json() == {
+            "type": "error",
+            "error": {
+                "type": expected_type,
+                "message": str(provider_error),
+            },
+        }
 
     def test_native_planning_unexpected_error_is_not_swallowed(self, client):
         model_router = MagicMock()
@@ -4728,19 +4927,46 @@ class TestBetaMessagesEndpoint:
 
 class TestBetaCountTokensEndpoint:
     @patch("router_maestro.server.routes.anthropic_beta._resolve_model")
+    def test_count_tokens_resolution_provider_error_is_anthropic_native(
+        self,
+        mock_resolve,
+        client,
+    ):
+        mock_resolve.side_effect = ProviderError(
+            "Unknown model",
+            status_code=404,
+            kind=ProviderFailureKind.CLIENT_REQUEST,
+        )
+
+        response = client.post(
+            "/api/anthropic/beta/v1/messages/count_tokens",
+            json={
+                "model": "unknown-model",
+                "messages": [{"role": "user", "content": "Hello"}],
+            },
+        )
+
+        assert response.status_code == 404
+        assert response.json() == {
+            "type": "error",
+            "error": {"type": "not_found_error", "message": "Unknown model"},
+        }
+
+    @patch("router_maestro.server.routes.anthropic_beta._resolve_model")
     def test_count_tokens_provider_error_message_does_not_leak_to_logs(
         self,
         mock_resolve,
         client,
         caplog: pytest.LogCaptureFixture,
     ):
-        marker = "private-count-tokens-error-marker"
+        marker = "private-count-tokens-cause-marker"
         provider = _native_provider()
         provider._send_with_auth_retry.side_effect = ProviderError(
-            marker,
+            "Safe count tokens failure",
             status_code=502,
             retryable=True,
             kind=ProviderFailureKind.TRANSPORT,
+            cause=RuntimeError(marker),
         )
         mock_resolve.return_value = _ResolvedModel(
             "github-copilot",
@@ -4761,6 +4987,14 @@ class TestBetaCountTokensEndpoint:
             )
 
         assert downstream.status_code == 502
+        assert downstream.json() == {
+            "type": "error",
+            "error": {
+                "type": "api_error",
+                "message": "Safe count tokens failure",
+            },
+        }
+        assert marker not in downstream.text
         assert marker not in caplog.text
 
     def test_count_tokens_does_not_request_completion_route_plan(self, client):

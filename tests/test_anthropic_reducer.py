@@ -395,7 +395,13 @@ def test_nonstream_route_surfaces_malformed_canonical_scalar_as_typed_502() -> N
         )
 
     assert route_response.status_code == 502
-    assert route_response.json() == {"detail": "content must be a string or null"}
+    assert route_response.json() == {
+        "type": "error",
+        "error": {
+            "type": "api_error",
+            "message": "content must be a string or null",
+        },
+    }
 
 
 @pytest.mark.asyncio
@@ -545,7 +551,13 @@ def test_nonstream_route_surfaces_malformed_canonical_tool_as_typed_502() -> Non
         )
 
     assert route_response.status_code == 502
-    assert route_response.json() == {"detail": "tool call arguments must be a valid JSON object"}
+    assert route_response.json() == {
+        "type": "error",
+        "error": {
+            "type": "api_error",
+            "message": "tool call arguments must be a valid JSON object",
+        },
+    }
 
 
 def test_no_events_after_message_complete() -> None:

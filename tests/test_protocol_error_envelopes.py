@@ -1,10 +1,13 @@
 """Protocol-native client-error envelopes for option rejection."""
 
+import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI
+from fastapi.exceptions import RequestValidationError
 from fastapi.testclient import TestClient
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from router_maestro.config import PrioritiesConfig
 from router_maestro.providers import (
@@ -25,11 +28,477 @@ from router_maestro.routing.capabilities import (
 from router_maestro.routing.model_ref import ModelRef
 from router_maestro.routing.route_plan import RouteCandidate, RoutePlan
 from router_maestro.routing.router import CACHE_TTL_SECONDS, Router
+from router_maestro.server.app import create_app
+from router_maestro.server.middleware import REQUEST_ID_HEADER, verify_api_key
+from router_maestro.server.protocols import errors as protocol_errors
+from router_maestro.server.routes import chat as chat_routes
+from router_maestro.server.routes import gemini as gemini_routes
+from router_maestro.server.routes import responses as responses_routes
 from router_maestro.server.routes.anthropic import router as anthropic_router
 from router_maestro.server.routes.chat import router as chat_router
 from router_maestro.server.routes.gemini import router as gemini_router
 from router_maestro.server.routes.responses import router as responses_router
+from router_maestro.server.schemas.gemini import GeminiGenerateContentRequest
+from router_maestro.server.schemas.openai import ChatCompletionRequest
+from router_maestro.server.schemas.responses import ResponsesRequest
 from router_maestro.utils.cache import TTLCache
+
+_PROTOCOL_SURFACES = (
+    "openai_chat",
+    "openai_responses",
+    "anthropic",
+    "gemini",
+)
+
+
+def _native_error(response, surface: str) -> dict:
+    body = response.json() if hasattr(response, "json") else json.loads(response.body)
+    if surface.startswith("openai"):
+        return body["error"]
+    if surface == "anthropic":
+        assert body["type"] == "error"
+        return body["error"]
+    return body["error"]
+
+
+@pytest.mark.parametrize(
+    ("status_code", "kind", "openai_type", "anthropic_type", "gemini_status"),
+    [
+        (
+            400,
+            ProviderFailureKind.CLIENT_REQUEST,
+            "invalid_request_error",
+            "invalid_request_error",
+            "INVALID_ARGUMENT",
+        ),
+        (
+            401,
+            ProviderFailureKind.AUTHENTICATION,
+            "authentication_error",
+            "authentication_error",
+            "UNAUTHENTICATED",
+        ),
+        (
+            429,
+            ProviderFailureKind.RATE_LIMIT,
+            "rate_limit_error",
+            "rate_limit_error",
+            "RESOURCE_EXHAUSTED",
+        ),
+        (502, ProviderFailureKind.UPSTREAM_PROTOCOL, "api_error", "api_error", "INTERNAL"),
+    ],
+)
+@pytest.mark.parametrize("surface", _PROTOCOL_SURFACES)
+def test_typed_provider_error_uses_native_protocol_envelope(
+    surface: str,
+    status_code: int,
+    kind: ProviderFailureKind,
+    openai_type: str,
+    anthropic_type: str,
+    gemini_status: str,
+) -> None:
+    error = ProviderError(
+        "Safe provider failure",
+        status_code=status_code,
+        retryable=status_code >= 429,
+        kind=kind,
+    )
+
+    response = protocol_errors.protocol_error_response(error, surface)
+
+    assert response.status_code == status_code
+    native = _native_error(response, surface)
+    assert native["message"] == "Safe provider failure"
+    if surface.startswith("openai"):
+        assert native["type"] == openai_type
+    elif surface == "anthropic":
+        assert native["type"] == anthropic_type
+    else:
+        assert native["code"] == status_code
+        assert native["status"] == gemini_status
+
+
+@pytest.mark.parametrize("surface", _PROTOCOL_SURFACES)
+def test_request_validation_error_is_native_and_does_not_echo_input(
+    surface: str,
+) -> None:
+    private_marker = "private-validation-input"
+    error = RequestValidationError(
+        [
+            {
+                "type": "missing",
+                "loc": ("body", "model"),
+                "msg": "Field required",
+                "input": {"secret": private_marker},
+            }
+        ]
+    )
+
+    response = protocol_errors.protocol_error_response(error, surface)
+
+    assert response.status_code == 422
+    native = _native_error(response, surface)
+    assert native["message"] == "Invalid request"
+    assert private_marker not in response.body.decode()
+    if surface.startswith("openai"):
+        assert native["param"] == "model"
+    elif surface == "gemini":
+        assert native["details"] == [{"reason": "invalid_request", "parameter": "model"}]
+
+
+@pytest.mark.parametrize("surface", _PROTOCOL_SURFACES)
+def test_http_exception_is_native_and_preserves_safe_headers(surface: str) -> None:
+    error = StarletteHTTPException(
+        status_code=401,
+        detail="Missing API key",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+
+    response = protocol_errors.protocol_error_response(error, surface)
+
+    assert response.status_code == 401
+    assert response.headers["WWW-Authenticate"] == "Bearer"
+    native = _native_error(response, surface)
+    assert native["message"] == "Missing API key"
+
+
+@pytest.mark.parametrize("surface", _PROTOCOL_SURFACES)
+def test_non_string_http_detail_is_not_reflected(surface: str) -> None:
+    private_marker = "private-http-detail"
+    error = StarletteHTTPException(
+        status_code=400,
+        detail={"nested": {"secret": private_marker}},
+    )
+
+    response = protocol_errors.protocol_error_response(error, surface)
+
+    assert response.status_code == 400
+    assert _native_error(response, surface)["message"] == "Invalid request"
+    assert private_marker not in response.body.decode()
+
+
+@pytest.mark.parametrize("surface", _PROTOCOL_SURFACES)
+def test_unexpected_exception_is_generic_and_native(surface: str) -> None:
+    private_marker = "private-unexpected-cause"
+
+    response = protocol_errors.protocol_error_response(RuntimeError(private_marker), surface)
+
+    assert response.status_code == 500
+    assert _native_error(response, surface)["message"] == "Internal server error"
+    assert private_marker not in response.body.decode()
+
+
+@pytest.mark.parametrize("surface", _PROTOCOL_SURFACES)
+def test_provider_cause_is_not_exposed_by_native_encoder(surface: str) -> None:
+    private_marker = "private-provider-cause"
+    error = ProviderError(
+        "Safe upstream failure",
+        status_code=502,
+        kind=ProviderFailureKind.UPSTREAM_PROTOCOL,
+        cause=RuntimeError(private_marker),
+    )
+
+    response = protocol_errors.protocol_error_response(error, surface)
+
+    assert _native_error(response, surface)["message"] == "Safe upstream failure"
+    assert private_marker not in response.body.decode()
+
+
+@pytest.mark.parametrize(
+    ("surface", "expected"),
+    [
+        (
+            "openai_chat",
+            {
+                "error": {
+                    "message": "Safe late failure",
+                    "type": "rate_limit_error",
+                    "code": "rate_limit_exceeded",
+                }
+            },
+        ),
+        (
+            "openai_responses",
+            {"code": "rate_limit_exceeded", "message": "Safe late failure"},
+        ),
+        (
+            "anthropic",
+            {
+                "type": "error",
+                "error": {"type": "rate_limit_error", "message": "Safe late failure"},
+            },
+        ),
+        (
+            "gemini",
+            {
+                "error": {
+                    "code": 429,
+                    "message": "Safe late failure",
+                    "status": "RESOURCE_EXHAUSTED",
+                    "details": [],
+                }
+            },
+        ),
+    ],
+)
+def test_postcommit_error_data_is_protocol_native(surface: str, expected: dict) -> None:
+    error = ProviderError(
+        "Safe late failure",
+        status_code=429,
+        kind=ProviderFailureKind.RATE_LIMIT,
+    )
+
+    data = protocol_errors.postcommit_error_data(error, surface)
+
+    assert data == expected
+
+
+def test_openai_chat_postcommit_overload_preserves_error_code() -> None:
+    error = ProviderError(
+        "Server overloaded, retry",
+        status_code=529,
+        kind=ProviderFailureKind.RATE_LIMIT,
+    )
+
+    data = protocol_errors.postcommit_error_data(error, "openai_chat")
+
+    assert data == {
+        "error": {
+            "message": "Server overloaded, retry",
+            "type": "rate_limit_error",
+            "code": "overloaded",
+        }
+    }
+
+
+@pytest.mark.parametrize("surface", _PROTOCOL_SURFACES)
+def test_postcommit_unexpected_error_is_generic(surface: str) -> None:
+    marker = "private-postcommit-error"
+
+    data = protocol_errors.postcommit_error_data(RuntimeError(marker), surface)
+
+    assert marker not in json.dumps(data)
+    assert "Internal server error" in json.dumps(data)
+
+
+@pytest.mark.parametrize(
+    ("path", "expected"),
+    [
+        ("/api/openai/v1/responses", "openai_responses"),
+        ("/api/openai/v1/responses/not-found", "openai_responses"),
+        ("/api/openai/v1/chat/completions", "openai_chat"),
+        ("/api/openai/v1/not-found", "openai_chat"),
+        ("/v1/messages", "anthropic"),
+        ("/v1/messages/count_tokens", "anthropic"),
+        ("/api/anthropic/beta/v1/messages", "anthropic"),
+        ("/api/gemini/v1beta/models/m:generateContent", "gemini"),
+        ("/api/admin/models", None),
+        ("/health", None),
+        ("/unmatched", None),
+    ],
+)
+def test_protocol_surface_is_classified_from_path(path: str, expected: str | None) -> None:
+    assert protocol_errors.protocol_surface_for_path(path) == expected
+
+
+_APP_PROTOCOL_CASES = (
+    (
+        "openai_chat",
+        "/api/openai/v1/chat/completions",
+        {"model": "m", "messages": [{"role": "user", "content": "hi"}]},
+    ),
+    (
+        "openai_responses",
+        "/api/openai/v1/responses",
+        {"model": "m", "input": "hi"},
+    ),
+    (
+        "anthropic",
+        "/v1/messages",
+        {
+            "model": "m",
+            "max_tokens": 8,
+            "messages": [{"role": "user", "content": "hi"}],
+        },
+    ),
+    (
+        "gemini",
+        "/api/gemini/v1beta/models/m:generateContent",
+        {"contents": [{"role": "user", "parts": [{"text": "hi"}]}]},
+    ),
+)
+
+
+@pytest.fixture
+def app_client(monkeypatch) -> TestClient:
+    monkeypatch.setenv("ROUTER_MAESTRO_API_KEY", "server-secret")
+    return TestClient(create_app(), raise_server_exceptions=False)
+
+
+@pytest.mark.parametrize(("surface", "path", "_payload"), _APP_PROTOCOL_CASES)
+def test_app_schema_validation_uses_native_envelope(
+    app_client: TestClient,
+    surface: str,
+    path: str,
+    _payload: dict,
+) -> None:
+    private_marker = "private-validation-body"
+    invalid_body = (
+        {"contents": private_marker}
+        if surface == "gemini"
+        else {"unexpected": {"secret": private_marker}}
+    )
+
+    response = app_client.post(
+        path,
+        json=invalid_body,
+        headers={"Authorization": "Bearer server-secret"},
+    )
+
+    assert response.status_code == 422
+    assert _native_error(response, surface)["message"] == "Invalid request"
+    assert private_marker not in response.text
+
+
+@pytest.mark.parametrize(("surface", "path", "payload"), _APP_PROTOCOL_CASES)
+@pytest.mark.parametrize(
+    "headers",
+    [{}, {"Authorization": "Bearer wrong-secret"}],
+    ids=["missing", "invalid"],
+)
+def test_app_auth_failure_uses_native_envelope_and_preserves_challenge(
+    app_client: TestClient,
+    surface: str,
+    path: str,
+    payload: dict,
+    headers: dict[str, str],
+) -> None:
+    response = app_client.post(path, json=payload, headers=headers)
+
+    assert response.status_code == 401
+    assert response.headers["WWW-Authenticate"] == "Bearer"
+    assert _native_error(response, surface)["message"]
+
+
+@pytest.mark.parametrize(
+    ("surface", "path"),
+    [
+        ("openai_chat", "/api/openai/v1/not-found"),
+        ("openai_responses", "/api/openai/v1/responses/not-found"),
+        ("anthropic", "/api/anthropic/v1/not-found"),
+        ("gemini", "/api/gemini/v1beta/not-found"),
+    ],
+)
+def test_app_namespace_404_uses_native_envelope(
+    app_client: TestClient,
+    surface: str,
+    path: str,
+) -> None:
+    response = app_client.post(
+        path,
+        json={},
+        headers={"Authorization": "Bearer server-secret"},
+    )
+
+    assert response.status_code == 404
+    assert _native_error(response, surface)["message"] == "Not Found"
+    assert "detail" not in response.json()
+
+
+@pytest.mark.parametrize(("surface", "path", "_payload"), _APP_PROTOCOL_CASES)
+def test_app_wrong_method_uses_native_envelope(
+    app_client: TestClient,
+    surface: str,
+    path: str,
+    _payload: dict,
+) -> None:
+    response = app_client.get(
+        path,
+        headers={"Authorization": "Bearer server-secret"},
+    )
+
+    assert response.status_code == 405
+    assert _native_error(response, surface)["message"] == "Method Not Allowed"
+    assert "detail" not in response.json()
+
+
+@pytest.mark.parametrize(
+    ("surface", "path"),
+    [
+        ("openai_chat", "/api/openai/v1/boom"),
+        ("openai_responses", "/api/openai/v1/responses/boom"),
+        ("anthropic", "/api/anthropic/v1/boom"),
+        ("gemini", "/api/gemini/v1beta/boom"),
+    ],
+)
+def test_app_unexpected_failure_is_native_with_one_request_id(
+    monkeypatch,
+    surface: str,
+    path: str,
+) -> None:
+    monkeypatch.setenv("ROUTER_MAESTRO_API_KEY", "server-secret")
+    app = create_app()
+
+    async def boom() -> None:
+        raise RuntimeError("private-unexpected-marker")
+
+    app.add_api_route(path, boom, methods=["GET"], dependencies=[Depends(verify_api_key)])
+    client = TestClient(app, raise_server_exceptions=False)
+
+    response = client.get(
+        path,
+        headers={
+            "Authorization": "Bearer server-secret",
+            REQUEST_ID_HEADER: "req-native-error",
+        },
+    )
+
+    assert response.status_code == 500
+    assert _native_error(response, surface)["message"] == "Internal server error"
+    assert "private-unexpected-marker" not in response.text
+    assert response.headers.get_list(REQUEST_ID_HEADER) == ["req-native-error"]
+
+
+def test_app_nonprotocol_provider_error_keeps_plain_500_with_one_request_id(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("ROUTER_MAESTRO_API_KEY", "server-secret")
+    app = create_app()
+
+    async def provider_boom() -> None:
+        raise ProviderError(
+            "Safe provider failure",
+            status_code=502,
+            kind=ProviderFailureKind.UPSTREAM_STATUS,
+        )
+
+    app.add_api_route("/provider-boom", provider_boom, methods=["GET"])
+    client = TestClient(app, raise_server_exceptions=False)
+
+    response = client.get(
+        "/provider-boom",
+        headers={REQUEST_ID_HEADER: "req-provider-boom"},
+    )
+
+    assert response.status_code == 500
+    assert response.text == "Internal Server Error"
+    assert response.headers.get_list(REQUEST_ID_HEADER) == ["req-provider-boom"]
+
+
+def test_app_nonprotocol_responses_keep_existing_default_shapes(app_client: TestClient) -> None:
+    health = app_client.get("/health")
+    unmatched = app_client.get("/not-a-protocol-path")
+    admin = app_client.get("/api/admin/models")
+
+    assert health.status_code == 200
+    assert health.json() == {"status": "healthy"}
+    assert unmatched.status_code == 404
+    assert unmatched.json() == {"detail": "Not Found"}
+    assert admin.status_code == 401
+    assert admin.json() == {
+        "detail": "Missing API key. Use 'Authorization: Bearer <api_key>' header."
+    }
+    assert admin.headers["WWW-Authenticate"] == "Bearer"
 
 
 def _unsupported(parameter: str) -> RequestOptionError:
@@ -581,31 +1050,35 @@ def test_anthropic_content_vendor_payload_is_not_treated_as_request_option(
     assert response.json()["type"] == "message"
 
 
-def _routing_error() -> ProviderError:
+def _routing_error(
+    status_code: int = 404,
+    kind: ProviderFailureKind = ProviderFailureKind.CLIENT_REQUEST,
+) -> ProviderError:
     return ProviderError(
-        "Model 'missing' not found",
-        status_code=404,
+        "Safe routed failure",
+        status_code=status_code,
         retryable=False,
-        kind=ProviderFailureKind.CLIENT_REQUEST,
+        kind=kind,
     )
 
 
 @pytest.mark.parametrize(
-    ("path", "payload", "patch_target", "expected"),
+    ("surface", "path", "payload", "patch_target"),
     [
         (
+            "openai_chat",
             "/api/openai/v1/chat/completions",
             {"model": "missing", "messages": [{"role": "user", "content": "hi"}]},
             "router_maestro.server.routes.chat.get_router",
-            {"detail": "Model 'missing' not found"},
         ),
         (
+            "openai_responses",
             "/api/openai/v1/responses",
             {"model": "missing", "input": "hi"},
             "router_maestro.server.routes.responses.get_router",
-            {"detail": "Model 'missing' not found"},
         ),
         (
+            "anthropic",
             "/v1/messages",
             {
                 "model": "missing",
@@ -613,44 +1086,248 @@ def _routing_error() -> ProviderError:
                 "messages": [{"role": "user", "content": "hi"}],
             },
             "router_maestro.server.routes.anthropic.get_router",
-            {"detail": "Model 'missing' not found"},
         ),
         (
+            "gemini",
             "/api/gemini/v1beta/models/missing:generateContent",
             {"contents": [{"role": "user", "parts": [{"text": "hi"}]}]},
             "router_maestro.server.routes.gemini.get_router",
-            {
-                "detail": {
-                    "error": {
-                        "code": 404,
-                        "message": "Model 'missing' not found",
-                        "status": "INTERNAL",
-                    }
-                }
-            },
         ),
     ],
 )
-def test_non_option_client_error_keeps_route_specific_envelope(
+@pytest.mark.parametrize(
+    ("status_code", "kind"),
+    [
+        (400, ProviderFailureKind.CLIENT_REQUEST),
+        (401, ProviderFailureKind.AUTHENTICATION),
+        (429, ProviderFailureKind.RATE_LIMIT),
+        (502, ProviderFailureKind.UPSTREAM_PROTOCOL),
+    ],
+)
+def test_nonstream_provider_error_uses_native_envelope(
     client: TestClient,
+    surface: str,
     path: str,
     payload: dict,
     patch_target: str,
-    expected: dict,
+    status_code: int,
+    kind: ProviderFailureKind,
 ) -> None:
+    error = _routing_error(status_code, kind)
     router = MagicMock()
-    router.chat_completion = AsyncMock(side_effect=_routing_error())
-    router.responses_completion = AsyncMock(side_effect=_routing_error())
-    router.plan_chat_completion = AsyncMock(side_effect=_routing_error())
-    router.prepare_planned_chat_completion = MagicMock(side_effect=_routing_error())
+    router.chat_completion = AsyncMock(side_effect=error)
+    router.responses_completion = AsyncMock(side_effect=error)
+    router.plan_chat_completion = AsyncMock(side_effect=error)
+    router.prepare_planned_chat_completion = MagicMock(side_effect=error)
     router.get_model_info = AsyncMock(return_value=None)
     router._resolve_provider = AsyncMock(return_value=("test", "missing", MagicMock()))
 
     with patch(patch_target, return_value=router):
         response = client.post(path, json=payload)
 
-    assert response.status_code == 404
-    assert response.json() == expected
+    assert response.status_code == status_code
+    native = _native_error(response, surface)
+    assert native["message"] == "Safe routed failure"
+    assert "detail" not in response.json()
+
+
+@pytest.mark.parametrize(
+    ("surface", "path", "payload", "patch_target", "prepare_method", "open_method"),
+    [
+        (
+            "openai_chat",
+            "/api/openai/v1/chat/completions",
+            {
+                "model": "m",
+                "stream": True,
+                "messages": [{"role": "user", "content": "hi"}],
+            },
+            "router_maestro.server.routes.chat.get_router",
+            "prepare_chat_completion_stream",
+            "chat_completion_stream",
+        ),
+        (
+            "openai_responses",
+            "/api/openai/v1/responses",
+            {"model": "m", "input": "hi", "stream": True},
+            "router_maestro.server.routes.responses.get_router",
+            "prepare_responses_completion_stream",
+            "responses_completion_stream",
+        ),
+        (
+            "gemini",
+            "/api/gemini/v1beta/models/m:streamGenerateContent",
+            {"contents": [{"role": "user", "parts": [{"text": "hi"}]}]},
+            "router_maestro.server.routes.gemini.get_router",
+            "prepare_chat_completion_stream",
+            "chat_completion_stream",
+        ),
+    ],
+)
+@pytest.mark.parametrize(
+    ("status_code", "kind", "message"),
+    [
+        (401, ProviderFailureKind.AUTHENTICATION, "Provider authentication required"),
+        (502, ProviderFailureKind.UPSTREAM_PROTOCOL, "Provider returned an empty stream"),
+        (503, ProviderFailureKind.UPSTREAM_STATUS, "All fallback providers failed"),
+    ],
+)
+def test_stream_provider_open_failure_is_native_json_before_sse(
+    client: TestClient,
+    surface: str,
+    path: str,
+    payload: dict,
+    patch_target: str,
+    prepare_method: str,
+    open_method: str,
+    status_code: int,
+    kind: ProviderFailureKind,
+    message: str,
+) -> None:
+    router = MagicMock()
+    setattr(router, prepare_method, AsyncMock(return_value=object()))
+    setattr(
+        router,
+        open_method,
+        AsyncMock(
+            side_effect=ProviderError(
+                message,
+                status_code=status_code,
+                retryable=status_code >= 500,
+                kind=kind,
+            )
+        ),
+    )
+
+    with patch(patch_target, return_value=router):
+        response = client.post(path, json=payload)
+
+    assert response.status_code == status_code
+    assert response.headers["content-type"].startswith("application/json")
+    assert _native_error(response, surface)["message"] == message
+    assert "data:" not in response.text
+    getattr(router, open_method).assert_awaited_once()
+
+
+class _EndpointOwnedStream:
+    def __init__(self) -> None:
+        self.close_count = 0
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        raise StopAsyncIteration
+
+    async def aclose(self) -> None:
+        self.close_count += 1
+
+
+def _sse_event_types(text: str) -> list[str]:
+    return [
+        line.removeprefix("event: ") for line in text.splitlines() if line.startswith("event: ")
+    ]
+
+
+def test_standard_anthropic_open_failure_keeps_eager_ping_compatibility(
+    client: TestClient,
+) -> None:
+    router = MagicMock()
+    candidate = MagicMock()
+    candidate.model = ModelRef("test", "m")
+    route_plan = MagicMock(primary=candidate, prevalidation_fallbacks=())
+    prepared_plan = object()
+    router.plan_chat_completion = AsyncMock(return_value=route_plan)
+    router.prepare_planned_chat_completion = MagicMock(return_value=prepared_plan)
+    router.chat_completion_stream = AsyncMock(
+        side_effect=ProviderError(
+            "Provider authentication required",
+            status_code=401,
+            kind=ProviderFailureKind.AUTHENTICATION,
+        )
+    )
+
+    with (
+        patch("router_maestro.server.routes.anthropic.get_router", return_value=router),
+        patch(
+            "router_maestro.server.routes.anthropic._apply_thinking_budget",
+            AsyncMock(side_effect=lambda _router, request, _model, **_kwargs: request),
+        ),
+    ):
+        response = client.post(
+            "/v1/messages",
+            json={
+                "model": "m",
+                "stream": True,
+                "max_tokens": 8,
+                "messages": [{"role": "user", "content": "hi"}],
+            },
+        )
+
+    event_types = _sse_event_types(response.text)
+    assert response.status_code == 200
+    assert event_types[0] == "ping"
+    assert event_types.count("error") == 1
+    assert "message_start" not in event_types
+    assert "message_stop" not in event_types
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("protocol", ["chat", "responses", "gemini"])
+async def test_primed_stream_closes_once_if_response_handoff_fails(
+    protocol: str,
+    monkeypatch,
+) -> None:
+    stream = _EndpointOwnedStream()
+    router = MagicMock()
+    handoff_error = RuntimeError("response construction failed")
+
+    if protocol == "chat":
+        router.prepare_chat_completion_stream = AsyncMock(return_value=object())
+        router.chat_completion_stream = AsyncMock(return_value=(stream, "provider"))
+        monkeypatch.setattr(chat_routes, "get_router", lambda: router)
+        monkeypatch.setattr(
+            chat_routes,
+            "sse_streaming_response",
+            MagicMock(side_effect=handoff_error),
+        )
+        call = chat_routes.chat_completions(
+            ChatCompletionRequest(
+                model="m",
+                stream=True,
+                messages=[{"role": "user", "content": "hi"}],
+            )
+        )
+    elif protocol == "responses":
+        router.prepare_responses_completion_stream = AsyncMock(return_value=object())
+        router.responses_completion_stream = AsyncMock(return_value=(stream, "provider"))
+        monkeypatch.setattr(responses_routes, "get_router", lambda: router)
+        monkeypatch.setattr(
+            responses_routes,
+            "sse_streaming_response",
+            MagicMock(side_effect=handoff_error),
+        )
+        call = responses_routes.create_response(
+            ResponsesRequest(model="m", input="hi", stream=True)
+        )
+    else:
+        router.prepare_chat_completion_stream = AsyncMock(return_value=object())
+        router.chat_completion_stream = AsyncMock(return_value=(stream, "provider"))
+        monkeypatch.setattr(gemini_routes, "get_router", lambda: router)
+        monkeypatch.setattr(
+            gemini_routes,
+            "sse_streaming_response",
+            MagicMock(side_effect=handoff_error),
+        )
+        call = gemini_routes.stream_generate_content(
+            "m",
+            GeminiGenerateContentRequest(contents=[{"role": "user", "parts": [{"text": "hi"}]}]),
+        )
+
+    with pytest.raises(RuntimeError, match="response construction failed"):
+        await call
+
+    assert stream.close_count == 1
 
 
 @pytest.mark.parametrize(

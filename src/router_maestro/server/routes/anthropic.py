@@ -7,7 +7,7 @@ from collections.abc import AsyncGenerator
 from dataclasses import replace
 from datetime import UTC, datetime
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter
 from fastapi import Request as FastAPIRequest
 from fastapi.responses import JSONResponse
 
@@ -16,6 +16,7 @@ from router_maestro.providers import (
     ChatRequest,
     ChatStreamChunk,
     ProviderError,
+    ProviderFailureKind,
     RequestOptionError,
     ResponseStatus,
     TerminalOutcome,
@@ -35,6 +36,7 @@ from router_maestro.server.protocols.anthropic_reducer import (
     AnthropicStreamProtocolError,
     build_anthropic_response,
 )
+from router_maestro.server.protocols.errors import postcommit_error_data, protocol_error_response
 from router_maestro.server.schemas.anthropic import (
     AnthropicCountTokensRequest,
     AnthropicMessagesRequest,
@@ -390,7 +392,7 @@ async def messages(request: AnthropicMessagesRequest, raw_request: FastAPIReques
     except ProviderError as e:
         if isinstance(e, RequestOptionError):
             return client_error_response(e, "anthropic")
-        raise HTTPException(status_code=e.status_code, detail=str(e)) from e
+        return protocol_error_response(e, "anthropic")
 
     if request.stream:
         return sse_streaming_response(
@@ -437,7 +439,7 @@ async def messages(request: AnthropicMessagesRequest, raw_request: FastAPIReques
         )
         if isinstance(e, RequestOptionError):
             return client_error_response(e, "anthropic")
-        raise HTTPException(status_code=e.status_code, detail=str(e)) from e
+        return protocol_error_response(e, "anthropic")
 
 
 @router.post("/v1/messages/count_tokens")
@@ -618,7 +620,13 @@ async def stream_response(
             if abort_reason:
                 terminal_outcome = exception_outcome(abort_reason, code="overloaded")
                 logger.warning("Stream aborted: %s", abort_reason)
-                yield _sse_error_event("Overloaded: please retry this request")
+                yield _sse_error_event(
+                    ProviderError(
+                        "Overloaded: please retry this request",
+                        status_code=529,
+                        kind=ProviderFailureKind.RATE_LIMIT,
+                    )
+                )
                 pipeline.finish(
                     wire_status=200,
                     outcome=terminal_outcome,
@@ -662,7 +670,9 @@ async def stream_response(
             }:
                 error = chunk_outcome.error
                 message = error.message if error is not None else "Upstream response failed"
-                yield _sse_error_event(message)
+                yield _sse_error_event(
+                    ProviderError(message, status_code=502, kind=ProviderFailureKind.UNKNOWN)
+                )
                 pipeline.finish(
                     wire_status=200,
                     outcome=chunk_outcome,
@@ -690,7 +700,13 @@ async def stream_response(
                     code="upstream_protocol_error",
                 )
                 logger.warning("Invalid Anthropic tool stream from upstream", exc_info=True)
-                yield _sse_error_event("Invalid tool call from upstream")
+                yield _sse_error_event(
+                    ProviderError(
+                        "Invalid tool call from upstream",
+                        status_code=502,
+                        kind=ProviderFailureKind.UPSTREAM_PROTOCOL,
+                    )
+                )
                 pipeline.finish(
                     wire_status=200,
                     outcome=terminal_outcome,
@@ -706,7 +722,13 @@ async def stream_response(
                 return
 
         terminal_outcome = unexpected_eof_outcome()
-        yield _sse_error_event(terminal_outcome.error.code)
+        yield _sse_error_event(
+            ProviderError(
+                terminal_outcome.error.code,
+                status_code=502,
+                kind=ProviderFailureKind.UPSTREAM_PROTOCOL,
+            )
+        )
         pipeline.finish(
             wire_status=200,
             outcome=terminal_outcome,
@@ -721,7 +743,7 @@ async def stream_response(
                 outcome=terminal_outcome,
                 body_summary=str(e),
             )
-        yield _sse_error_event(str(e))
+        yield _sse_error_event(e)
     except asyncio.CancelledError:
         if pipeline is not None:
             pipeline.finish(wire_status=200, outcome=client_cancelled_outcome())
@@ -736,20 +758,14 @@ async def stream_response(
                 body_summary="Internal server error",
             )
         logger.error("Unexpected error in Anthropic stream", exc_info=True)
-        yield _sse_error_event("Internal server error")
+        yield _sse_error_event(RuntimeError("Internal server error"))
     finally:
         await close_async_iterator(stream)
 
 
-def _sse_error_event(message: str) -> str:
+def _sse_error_event(error: Exception) -> str:
     """Format an Anthropic SSE error event."""
-    error_event = {
-        "type": "error",
-        "error": {
-            "type": "api_error",
-            "message": message,
-        },
-    }
+    error_event = postcommit_error_data(error, "anthropic")
     return f"event: error\ndata: {json.dumps(error_event)}\n\n"
 
 

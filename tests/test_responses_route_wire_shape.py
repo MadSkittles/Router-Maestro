@@ -773,7 +773,7 @@ class TestNativeStreamingTerminalStatus:
         assert response["output"][0]["content"][0]["text"] == "partial"
         assert response["usage"]["total_tokens"] == 3
         assert response["error"] == {
-            "type": "server_error",
+            "code": "overloaded",
             "message": "Overloaded: please retry",
         }
 

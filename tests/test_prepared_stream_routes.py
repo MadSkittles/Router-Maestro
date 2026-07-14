@@ -59,6 +59,7 @@ def client() -> TestClient:
 def _chat_router(plan: object) -> MagicMock:
     router = MagicMock()
     router.prepare_chat_completion_stream = AsyncMock(return_value=plan)
+    router.chat_completion_stream = AsyncMock(return_value=(_empty_stream(), "test"))
     router.plan_chat_completion = AsyncMock(return_value=plan)
     router.prepare_planned_chat_completion = MagicMock(return_value=plan)
     router.validate_chat_request = AsyncMock()
@@ -70,6 +71,7 @@ def _chat_router(plan: object) -> MagicMock:
 def _responses_router(plan: object) -> MagicMock:
     router = MagicMock()
     router.prepare_responses_completion_stream = AsyncMock(return_value=plan)
+    router.responses_completion_stream = AsyncMock(return_value=(_empty_stream(), "test"))
     router.validate_responses_request = AsyncMock()
     return router
 
@@ -77,10 +79,16 @@ def _responses_router(plan: object) -> MagicMock:
 def _capture_stream(captured: dict[str, object]):
     async def stream(*_args, prepared_plan=None, **_kwargs) -> AsyncIterator[str]:
         captured["plan"] = prepared_plan
+        captured.update(_kwargs)
         if False:
             yield ""
 
     return stream
+
+
+async def _empty_stream() -> AsyncIterator[ChatStreamChunk]:
+    if False:
+        yield ChatStreamChunk()
 
 
 class _PreparedProvider(BaseProvider):
@@ -576,8 +584,12 @@ def test_openai_chat_stream_reuses_prepared_plan(client: TestClient) -> None:
 
     assert response.status_code == 200
     mocked_router.prepare_chat_completion_stream.assert_awaited_once()
+    mocked_router.chat_completion_stream.assert_awaited_once_with(
+        mocked_router.chat_completion_stream.await_args.args[0],
+        prepared_plan=plan,
+    )
     mocked_router.validate_chat_request.assert_not_awaited()
-    assert captured["plan"] is plan
+    assert captured["opened_provider_name"] == "test"
 
 
 def test_anthropic_stream_reuses_prepared_plan(client: TestClient) -> None:
@@ -627,8 +639,9 @@ def test_gemini_stream_reuses_prepared_plan(client: TestClient) -> None:
 
     assert response.status_code == 200
     mocked_router.prepare_chat_completion_stream.assert_awaited_once()
+    mocked_router.chat_completion_stream.assert_awaited_once()
     mocked_router.validate_chat_request.assert_not_awaited()
-    assert captured["plan"] is plan
+    assert captured["opened_provider_name"] == "test"
 
 
 def test_responses_stream_reuses_prepared_plan(client: TestClient) -> None:
@@ -646,8 +659,9 @@ def test_responses_stream_reuses_prepared_plan(client: TestClient) -> None:
 
     assert response.status_code == 200
     mocked_router.prepare_responses_completion_stream.assert_awaited_once()
+    mocked_router.responses_completion_stream.assert_awaited_once()
     mocked_router.validate_responses_request.assert_not_awaited()
-    assert captured["plan"] is plan
+    assert captured["opened_provider_name"] == "test"
 
 
 @pytest.mark.asyncio
@@ -1194,7 +1208,11 @@ def test_protocol_stream_never_opens_option_incompatible_fallback(
     with patch(patch_target, return_value=router):
         response = client.post(path, json=payload)
 
-    assert response.status_code == 200
+    expected_status = 200 if protocol == "anthropic" else 503
+    assert response.status_code == expected_status
+    if protocol != "anthropic":
+        assert response.headers["content-type"].startswith("application/json")
+        assert "data:" not in response.text
     router._plan_completion_route.assert_awaited_once()
     if protocol == "responses":
         assert rejected.responses_validations == ["fallback-1-model"]
