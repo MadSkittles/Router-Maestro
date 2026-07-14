@@ -1,22 +1,60 @@
 """Authentication management commands."""
 
 import asyncio
+from collections.abc import Callable
+from typing import Protocol
 
 import typer
 from rich.console import Console
 from rich.prompt import Prompt
 from rich.table import Table
 
+from router_maestro.auth.discovery import (
+    BUILTIN_PROVIDER_AUTH_DEFINITIONS,
+    ProviderAuthDefinition,
+    provider_auth_definitions,
+)
 from router_maestro.cli.client import AdminClient, ServerNotRunningError, get_admin_client
+from router_maestro.config.providers import ProvidersConfig
+from router_maestro.config.settings import load_providers_config
 
 app = typer.Typer(no_args_is_help=True)
 console = Console()
 
 PROVIDERS = {
-    "github-copilot": {"name": "GitHub Copilot", "auth_type": "oauth"},
-    "openai": {"name": "OpenAI", "auth_type": "api"},
-    "anthropic": {"name": "Anthropic", "auth_type": "api"},
+    definition.provider: {
+        "name": definition.display_name,
+        "auth_type": definition.auth_type.value,
+    }
+    for definition in BUILTIN_PROVIDER_AUTH_DEFINITIONS
 }
+
+
+class AuthProviderDiscoveryClient(Protocol):
+    """Adapter supplied by the shared AdminClient integration."""
+
+    async def list_auth_providers(self) -> list[dict]: ...
+
+
+async def discover_auth_providers(
+    client: AuthProviderDiscoveryClient,
+    *,
+    context_name: str,
+    load_local_config: Callable[[], ProvidersConfig] = load_providers_config,
+) -> tuple[ProviderAuthDefinition, ...]:
+    """Prefer server definitions; only local connection failure may use local config."""
+    try:
+        records = await client.list_auth_providers()
+    except ServerNotRunningError:
+        if context_name != "local":
+            raise
+        return provider_auth_definitions(load_local_config())
+    return tuple(
+        record
+        if isinstance(record, ProviderAuthDefinition)
+        else ProviderAuthDefinition.from_mapping(record)
+        for record in records
+    )
 
 
 def _handle_server_error(e: Exception) -> None:

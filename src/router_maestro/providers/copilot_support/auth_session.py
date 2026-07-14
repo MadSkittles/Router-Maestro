@@ -9,7 +9,7 @@ from typing import Any, NoReturn
 
 import httpx
 
-from router_maestro.auth import AuthManager, AuthType
+from router_maestro.auth import AuthManager, AuthType, CredentialRepository
 from router_maestro.auth.github_oauth import GitHubOAuthError, get_copilot_token
 from router_maestro.auth.storage import OAuthCredential
 from router_maestro.providers.base import ProviderError, ProviderFailureKind
@@ -26,8 +26,9 @@ class CopilotAuthSession:
 
     provider_name = "github-copilot"
 
-    def __init__(self) -> None:
-        self.auth_manager = AuthManager()
+    def __init__(self, credential_repository: CredentialRepository | None = None) -> None:
+        self.credential_repository = credential_repository or CredentialRepository()
+        self.auth_manager = AuthManager(self.credential_repository)
         self.cached_token: str | None = None
         self.token_expires: int = 0
         self.api_base = COPILOT_BASE_URL
@@ -150,8 +151,15 @@ class CopilotAuthSession:
 
     async def persist_credential(self, credential: OAuthCredential) -> None:
         """Store and flush a credential without blocking the event loop."""
-        self.auth_manager.storage.set(self.provider_name, credential)
-        await asyncio.to_thread(self.auth_manager.save)
+        if self.auth_manager.uses_legacy_storage:
+            self.auth_manager.storage.set(self.provider_name, credential)
+            await asyncio.to_thread(self.auth_manager.save)
+            return
+        await asyncio.to_thread(
+            self.auth_manager.repository.update_provider,
+            self.provider_name,
+            credential,
+        )
 
     async def refresh_for_auth_status(
         self,

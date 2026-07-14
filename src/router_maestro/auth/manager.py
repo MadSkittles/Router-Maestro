@@ -11,43 +11,92 @@ from router_maestro.auth.github_oauth import (
     poll_access_token,
     request_device_code,
 )
+from router_maestro.auth.repository import CredentialRepository
 from router_maestro.auth.storage import (
     ApiKeyCredential,
     AuthStorage,
+    Credential,
     OAuthCredential,
 )
 
 console = Console()
 
 
+class _RepositoryStorageAdapter:
+    """Compatibility surface for callers not yet migrated off ``manager.storage``."""
+
+    def __init__(self, repository: CredentialRepository) -> None:
+        self._repository = repository
+
+    def get(self, provider: str) -> Credential | None:
+        return self._repository.get_provider(provider)
+
+    def set(self, provider: str, credential: Credential) -> None:
+        self._repository.update_provider(provider, credential)
+
+    def remove(self, provider: str) -> bool:
+        return self._repository.remove_provider(provider)
+
+    def list_providers(self) -> list[str]:
+        return self._repository.list_providers()
+
+    def save(self) -> None:
+        """Mutations are already persisted atomically by ``set`` and ``remove``."""
+
+
 class AuthManager:
     """Manager for authentication with various providers."""
 
-    def __init__(self) -> None:
-        self.storage = AuthStorage.load()
+    def __init__(self, repository: CredentialRepository | None = None) -> None:
+        self.repository = repository or CredentialRepository()
+        self._storage_adapter = _RepositoryStorageAdapter(self.repository)
+
+    @property
+    def storage(self) -> _RepositoryStorageAdapter | AuthStorage:
+        """Compatibility adapter; new code should use repository-backed methods."""
+        legacy = getattr(self, "_legacy_storage", None)
+        if legacy is not None:
+            return legacy
+        return self._storage_adapter
+
+    @storage.setter
+    def storage(self, storage: AuthStorage) -> None:
+        """Retain the existing in-memory injection seam used by provider tests."""
+        self._legacy_storage = storage
+
+    @property
+    def uses_legacy_storage(self) -> bool:
+        return getattr(self, "_legacy_storage", None) is not None
 
     def save(self) -> None:
-        """Save credentials to storage."""
-        self.storage.save()
+        """Flush explicitly injected legacy storage; repository writes are immediate."""
+        if self.uses_legacy_storage:
+            self.storage.save()
 
     def list_authenticated(self) -> list[str]:
         """List all authenticated providers."""
-        return self.storage.list_providers()
+        if self.uses_legacy_storage:
+            return self.storage.list_providers()
+        return self.repository.list_providers()
 
     def is_authenticated(self, provider: str) -> bool:
         """Check if a provider is authenticated."""
-        return self.storage.get(provider) is not None
+        return self.get_credential(provider) is not None
 
-    def get_credential(self, provider: str):
+    def get_credential(self, provider: str) -> Credential | None:
         """Get credential for a provider."""
-        return self.storage.get(provider)
+        if self.uses_legacy_storage:
+            return self.storage.get(provider)
+        return self.repository.get_provider(provider)
 
     def logout(self, provider: str) -> bool:
         """Log out from a provider."""
-        result = self.storage.remove(provider)
-        if result:
-            self.save()
-        return result
+        if self.uses_legacy_storage:
+            result = self.storage.remove(provider)
+            if result:
+                self.save()
+            return result
+        return self.repository.remove_provider(provider)
 
     async def login_copilot(self) -> bool:
         """Authenticate with GitHub Copilot using Device Flow.
@@ -100,16 +149,17 @@ class AuthManager:
                 return False
 
             # Step 5: Save credentials
-            self.storage.set(
-                "github-copilot",
-                OAuthCredential(
-                    refresh=access_token.access_token,  # GitHub token for refresh
-                    access=copilot_token.token,  # Copilot token for API calls
-                    expires=copilot_token.expires_at,
-                    api_endpoint=copilot_token.api_endpoint,
-                ),
+            credential = OAuthCredential(
+                refresh=access_token.access_token,  # GitHub token for refresh
+                access=copilot_token.token,  # Copilot token for API calls
+                expires=copilot_token.expires_at,
+                api_endpoint=copilot_token.api_endpoint,
             )
-            self.save()
+            if self.uses_legacy_storage:
+                self.storage.set("github-copilot", credential)
+                self.save()
+            else:
+                self.repository.update_provider("github-copilot", credential)
 
             console.print(
                 "[bold green]Successfully authenticated with GitHub Copilot![/bold green]"
@@ -126,8 +176,12 @@ class AuthManager:
         Returns:
             True if authentication was successful
         """
-        self.storage.set(provider, ApiKeyCredential(key=api_key))
-        self.save()
+        credential = ApiKeyCredential(key=api_key)
+        if self.uses_legacy_storage:
+            self.storage.set(provider, credential)
+            self.save()
+        else:
+            self.repository.update_provider(provider, credential)
         console.print(f"[green]Successfully saved API key for {provider}[/green]")
         return True
 
