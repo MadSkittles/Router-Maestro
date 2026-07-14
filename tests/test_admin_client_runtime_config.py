@@ -68,3 +68,38 @@ async def test_admin_client_maps_revision_conflict():
             await client.patch_runtime_config(config={}, revision="a" * 64)
 
     assert exc_info.value.current_revision == "c" * 64
+
+
+@pytest.mark.asyncio
+async def test_admin_client_lists_typed_auth_provider_definitions():
+    captured = {}
+
+    async def get_request(url, **kwargs):
+        captured.update(url=url, **kwargs)
+        return httpx.Response(
+            200,
+            json={
+                "providers": [
+                    {
+                        "provider": "remote-custom",
+                        "display_name": "Remote Custom",
+                        "auth_type": "api",
+                        "credential_required": True,
+                        "source": "custom",
+                        "api_key_env": "REMOTE_CUSTOM_API_KEY",
+                    }
+                ]
+            },
+            request=httpx.Request("GET", url),
+        )
+
+    client = AdminClient("http://router.test", "secret")
+    with patch("router_maestro.cli.client.httpx.AsyncClient") as async_client:
+        async_client.return_value.__aenter__.return_value.get = AsyncMock(side_effect=get_request)
+        definitions = await client.list_auth_providers()
+
+    assert captured["url"] == "http://router.test/api/admin/auth/providers"
+    assert captured["headers"]["Authorization"] == "Bearer secret"
+    assert len(definitions) == 1
+    assert definitions[0].provider == "remote-custom"
+    assert definitions[0].credential_required is True

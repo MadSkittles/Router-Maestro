@@ -28,6 +28,7 @@ from router_maestro.server.protocols import (
     unrepresented_option_error,
 )
 from router_maestro.server.protocols.errors import postcommit_error_data, protocol_error_response
+from router_maestro.server.routes._outcomes import record_terminal_outcome
 from router_maestro.server.schemas import (
     ResponsesReasoningConfig,
     ResponsesRequest,
@@ -311,7 +312,9 @@ async def create_response(request: ResponsesRequest):
             if payload["usage"] is not None
             else None
         )
-        return ResponsesResponse.model_construct(**{**payload, "usage": usage})
+        downstream_response = ResponsesResponse.model_construct(**{**payload, "usage": usage})
+        record_terminal_outcome(snapshot.outcome)
+        return downstream_response
     except ProviderError as e:
         elapsed_ms = (time.time() - start_time) * 1000
         logger.error(

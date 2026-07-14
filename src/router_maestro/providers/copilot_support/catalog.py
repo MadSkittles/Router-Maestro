@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 from collections.abc import Awaitable, Callable, Mapping
+from contextvars import Context
 from copy import deepcopy
 from typing import Any, NoReturn
 
@@ -127,6 +130,9 @@ class CopilotCatalog:
 
     def __init__(self) -> None:
         self.models_ttl_cache: TTLCache[list[ModelInfo]] = TTLCache(MODELS_CACHE_TTL)
+        self._refresh_lock = asyncio.Lock()
+        self._refresh_task: asyncio.Task[list[ModelInfo]] | None = None
+        self._closed = False
 
     def effort_values(self, model: str) -> list[str] | None:
         cached = self.models_ttl_cache.get()
@@ -135,7 +141,7 @@ class CopilotCatalog:
         bare = model.split("/", 1)[1] if "/" in model else model
         for info in cached:
             if info.id == bare or info.id == model:
-                return info.reasoning_effort_values
+                return deepcopy(info.reasoning_effort_values)
         return None
 
     def operation_support(self, model: str, operation: Operation) -> bool | None:
@@ -257,12 +263,90 @@ class CopilotCatalog:
         derive_operations: Callable[[Mapping[str, Any]], dict[str, bool]],
         raise_protocol_error: Callable[..., NoReturn],
     ) -> list[ModelInfo]:
-        if not force_refresh:
-            cached = self.models_ttl_cache.get()
-            if cached is not None:
-                logger.debug("Using cached Copilot models (%d models)", len(cached))
-                return deepcopy(cached)
+        cached = self.models_ttl_cache.get()
+        if cached is not None and not force_refresh:
+            logger.debug("Using cached Copilot models (%d models)", len(cached))
+            return deepcopy(cached)
 
+        stale = self.models_ttl_cache.peek()
+        task = await self._get_or_start_refresh(
+            detached=stale is not None and not force_refresh,
+            provider_name=provider_name,
+            ensure_token=ensure_token,
+            send=send,
+            normalize_endpoints=normalize_endpoints,
+            derive_operations=derive_operations,
+            raise_protocol_error=raise_protocol_error,
+        )
+        if stale is not None and not force_refresh:
+            logger.debug("Serving stale Copilot models while refreshing")
+            return deepcopy(stale)
+        return deepcopy(await asyncio.shield(task))
+
+    async def _get_or_start_refresh(
+        self,
+        *,
+        detached: bool,
+        provider_name: str,
+        ensure_token: Callable[[], Awaitable[None]],
+        send: Callable[..., Awaitable[httpx.Response]],
+        normalize_endpoints: Callable[[Mapping[str, Any]], tuple[str, ...] | None],
+        derive_operations: Callable[[Mapping[str, Any]], dict[str, bool]],
+        raise_protocol_error: Callable[..., NoReturn],
+    ) -> asyncio.Task[list[ModelInfo]]:
+        async with self._refresh_lock:
+            if self._closed:
+                raise RuntimeError("Copilot catalog is closed")
+            if self._refresh_task is not None and not self._refresh_task.done():
+                return self._refresh_task
+            refresh = self._refresh(
+                provider_name=provider_name,
+                ensure_token=ensure_token,
+                send=send,
+                normalize_endpoints=normalize_endpoints,
+                derive_operations=derive_operations,
+                raise_protocol_error=raise_protocol_error,
+            )
+            task = (
+                asyncio.create_task(refresh, context=Context())
+                if detached
+                else asyncio.create_task(refresh)
+            )
+            task.add_done_callback(self._observe_refresh_result)
+            self._refresh_task = task
+            return task
+
+    @staticmethod
+    def _observe_refresh_result(task: asyncio.Task[list[ModelInfo]]) -> None:
+        """Retrieve detached refresh failures even when stale callers do not await them."""
+        if task.cancelled():
+            return
+        error = task.exception()
+        if error is not None:
+            logger.warning("Background Copilot catalog refresh failed", exc_info=error)
+
+    async def aclose(self) -> None:
+        """Cancel and join the detached refresh before its transport is closed."""
+        async with self._refresh_lock:
+            self._closed = True
+            task = self._refresh_task
+            self._refresh_task = None
+            if task is not None and not task.done():
+                task.cancel()
+        if task is not None:
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await task
+
+    async def _refresh(
+        self,
+        *,
+        provider_name: str,
+        ensure_token: Callable[[], Awaitable[None]],
+        send: Callable[..., Awaitable[httpx.Response]],
+        normalize_endpoints: Callable[[Mapping[str, Any]], tuple[str, ...] | None],
+        derive_operations: Callable[[Mapping[str, Any]], dict[str, bool]],
+        raise_protocol_error: Callable[..., NoReturn],
+    ) -> list[ModelInfo]:
         logger.debug("Fetching Copilot models from API")
         try:
             await ensure_token()
@@ -282,7 +366,7 @@ class CopilotCatalog:
             logger.info("Fetched %d Copilot models", len(models))
             return deepcopy(models)
         except (httpx.HTTPError, ProviderError) as error:
-            stale = self.models_ttl_cache._value
+            stale = self.models_ttl_cache.peek()
             if stale is not None:
                 logger.warning(
                     "Failed to refresh Copilot models, using stale cache (%s)",

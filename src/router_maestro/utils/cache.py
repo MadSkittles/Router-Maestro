@@ -21,7 +21,7 @@ class TTLCache(Generic[T]):
     @property
     def is_valid(self) -> bool:
         """Check if the cached value is present and not expired."""
-        return self._value is not None and (time.time() - self._timestamp) < self._ttl
+        return self._value is not None and (time.monotonic() - self._timestamp) < self._ttl
 
     def get(self) -> T | None:
         """Return the cached value if valid, otherwise None."""
@@ -32,7 +32,11 @@ class TTLCache(Generic[T]):
     def set(self, value: T) -> None:
         """Store a value with the current timestamp."""
         self._value = value
-        self._timestamp = time.time()
+        self._timestamp = time.monotonic()
+
+    def peek(self) -> T | None:
+        """Return the stored value regardless of TTL freshness."""
+        return self._value
 
     def clear(self) -> None:
         """Clear the cached value and timestamp."""

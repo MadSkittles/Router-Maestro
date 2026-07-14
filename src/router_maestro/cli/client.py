@@ -6,6 +6,7 @@ This ensures consistent behavior between local and remote contexts.
 
 import httpx
 
+from router_maestro.auth.discovery import ProviderAuthDefinition
 from router_maestro.config import load_contexts_config
 
 
@@ -75,6 +76,21 @@ class AdminClient:
         except httpx.HTTPError as e:
             self._handle_connection_error(e)
             return []  # unreachable, for type checker
+
+    async def list_auth_providers(self) -> tuple[ProviderAuthDefinition, ...]:
+        """List typed provider authentication definitions exposed by the server."""
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.get(
+                    f"{self.endpoint}/api/admin/auth/providers",
+                    headers=self._get_headers(),
+                )
+                response.raise_for_status()
+                records = response.json().get("providers", [])
+                return tuple(ProviderAuthDefinition.from_mapping(record) for record in records)
+        except httpx.HTTPError as e:
+            self._handle_connection_error(e)
+            return ()  # unreachable, for type checker
 
     async def login_oauth(self, provider: str) -> dict:
         """Initiate OAuth login.

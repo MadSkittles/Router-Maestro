@@ -151,7 +151,12 @@ class CopilotAuthSession:
 
     async def persist_credential(self, credential: OAuthCredential) -> None:
         """Store and flush a credential without blocking the event loop."""
-        if self.auth_manager.uses_legacy_storage:
+        uses_legacy_storage = getattr(
+            self.auth_manager,
+            "uses_legacy_storage",
+            not hasattr(self.auth_manager, "repository"),
+        )
+        if uses_legacy_storage:
             self.auth_manager.storage.set(self.provider_name, credential)
             await asyncio.to_thread(self.auth_manager.save)
             return

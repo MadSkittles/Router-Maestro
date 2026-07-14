@@ -57,3 +57,24 @@ class CredentialRepository:
                 return False
             storage.save(self.path)
             return True
+
+    def compare_and_swap_provider(
+        self,
+        provider: str,
+        *,
+        expected: Credential | None,
+        replacement: Credential | None,
+    ) -> bool:
+        """Conditionally replace one credential without disturbing concurrent writers."""
+        with self._lock:
+            storage = AuthStorage.load(self.path)
+            if storage.get(provider) != expected:
+                return False
+            if replacement is None:
+                if expected is None:
+                    return True
+                storage.remove(provider)
+            else:
+                storage.set(provider, replacement.model_copy(deep=True))
+            storage.save(self.path)
+            return True

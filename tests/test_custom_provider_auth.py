@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from types import SimpleNamespace
 
 import pytest
+import typer
 from pydantic import ValidationError
 
 from router_maestro.auth.discovery import (
@@ -14,6 +16,7 @@ from router_maestro.auth.discovery import (
 )
 from router_maestro.auth.repository import CredentialRepository
 from router_maestro.auth.storage import ApiKeyCredential, AuthType, OAuthCredential
+from router_maestro.cli import auth as auth_cli
 from router_maestro.cli.auth import discover_auth_providers
 from router_maestro.cli.client import ServerNotRunningError
 from router_maestro.config.providers import (
@@ -40,6 +43,12 @@ def _config(**options) -> CustomProviderConfig:
 def test_custom_provider_options_reject_unknown_fields() -> None:
     with pytest.raises(ValidationError, match="unused"):
         CustomProviderOptions.model_validate({"unused": True})
+
+
+@pytest.mark.parametrize("provider", ["github-copilot", "GITHUB-COPILOT", "openai", "Anthropic"])
+def test_custom_provider_names_reject_reserved_builtins(provider: str) -> None:
+    with pytest.raises(ValidationError, match="reserved for a built-in provider"):
+        ProvidersConfig(providers={provider: _config()})
 
 
 @pytest.mark.parametrize("value", ["", "9INVALID", "HAS-DASH", "HAS SPACE"])
@@ -279,3 +288,58 @@ async def test_cli_remote_connection_failure_never_reads_local_config() -> None:
     assert exc_info.value is error
     assert client.calls == 1
     assert local_calls == []
+
+
+def test_cli_explicit_login_discovers_provider_from_server_first(monkeypatch) -> None:
+    class _Client:
+        def __init__(self) -> None:
+            self.discovery_calls = 0
+            self.logins = []
+
+        async def list_auth_providers(self):
+            self.discovery_calls += 1
+            return [
+                ProviderAuthDefinition(
+                    provider="remote-custom",
+                    display_name="Remote Custom",
+                    auth_type=AuthType.API_KEY,
+                    credential_required=True,
+                    source=ProviderAuthSource.CUSTOM,
+                    api_key_env="REMOTE_CUSTOM_API_KEY",
+                )
+            ]
+
+        async def login_api_key(self, provider: str, api_key: str) -> bool:
+            self.logins.append((provider, api_key))
+            return True
+
+    client = _Client()
+    monkeypatch.setattr(auth_cli, "get_admin_client", lambda: client)
+    monkeypatch.setattr(
+        auth_cli,
+        "load_contexts_config",
+        lambda: SimpleNamespace(current="remote"),
+        raising=False,
+    )
+    monkeypatch.setattr(auth_cli.Prompt, "ask", lambda *args, **kwargs: "remote-key")
+
+    auth_cli.login("remote-custom")
+
+    assert client.discovery_calls == 1
+    assert client.logins == [("remote-custom", "remote-key")]
+
+
+def test_cli_explicit_unknown_provider_still_queries_server(monkeypatch) -> None:
+    client = _DiscoveryClient([])
+    monkeypatch.setattr(auth_cli, "get_admin_client", lambda: client)
+    monkeypatch.setattr(
+        auth_cli,
+        "load_contexts_config",
+        lambda: SimpleNamespace(current="remote"),
+        raising=False,
+    )
+
+    with pytest.raises(typer.Exit):
+        auth_cli.login("not-configured")
+
+    assert client.calls == 1

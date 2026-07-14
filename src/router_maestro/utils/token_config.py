@@ -22,6 +22,13 @@ import httpx
 logger = logging.getLogger("router_maestro.utils.token_config")
 
 
+def _request_audit():
+    from router_maestro.runtime import get_current_request_context
+
+    context = get_current_request_context()
+    return context.audit if context is not None else None
+
+
 @dataclass(frozen=True)
 class TokenCountingConfig:
     """Parameterises the token counting constants by provider.
@@ -160,9 +167,18 @@ async def count_tokens_via_anthropic_api(
         "anthropic-version": "2023-06-01",
         "content-type": "application/json",
     }
+    audit = _request_audit()
+    if audit is not None:
+        audit.record_upstream("POST", url, headers, payload)
 
     async with httpx.AsyncClient(timeout=30.0) as client:
         response = await client.post(url, json=payload, headers=headers)
+        if audit is not None:
+            audit.record_upstream_response(
+                response.status_code,
+                dict(response.headers),
+                response.content,
+            )
         response.raise_for_status()
         data = response.json()
 

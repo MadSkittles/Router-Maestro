@@ -1,5 +1,6 @@
 """Tests for the Anthropic beta passthrough route."""
 
+import asyncio
 import json
 import logging
 from collections.abc import AsyncIterator
@@ -13,7 +14,13 @@ from fastapi.responses import JSONResponse
 from fastapi.testclient import TestClient
 
 from router_maestro.config import PrioritiesConfig, ThinkingBudgetConfig
-from router_maestro.providers.base import ModelInfo, ProviderError, ProviderFailureKind
+from router_maestro.providers.base import (
+    ModelInfo,
+    ProviderError,
+    ProviderFailureKind,
+    ResponseStatus,
+    TransportTermination,
+)
 from router_maestro.providers.copilot import CopilotProvider
 from router_maestro.routing.capabilities import (
     CapabilitySupport,
@@ -28,6 +35,7 @@ from router_maestro.server.routes.anthropic import ANTHROPIC_PING_FRAME
 from router_maestro.server.routes.anthropic_beta import (
     _apply_thinking_budget_native,
     _clean_stream_frame,
+    _encode_native_stream_errors,
     _is_native_eligible,
     _is_signature_error,
     _iter_sse_frames,
@@ -957,6 +965,62 @@ def _native_provider() -> MagicMock:
     return provider
 
 
+def _guard_config(
+    *,
+    leak_enabled: bool,
+    runaway_enabled: bool,
+    max_bytes: int = 100_000,
+) -> PrioritiesConfig:
+    return PrioritiesConfig.model_validate(
+        {
+            "guards": {
+                "leak_guard": {"enabled": leak_enabled},
+                "runaway_guard": {
+                    "enabled": runaway_enabled,
+                    "max_bytes": max_bytes,
+                    "max_deltas": 1_000,
+                },
+            }
+        }
+    )
+
+
+class _CapturedGuardContext:
+    """Small RequestContext surface used to prove pipeline snapshot binding."""
+
+    def __init__(self, configs: list[PrioritiesConfig], router=None) -> None:
+        self.request_id = "req-beta-guard"
+        self._configs = configs
+        self.router = router or MagicMock(_models_cache={})
+        self.pipeline = None
+        self.audit = None
+
+    @property
+    def config(self) -> PrioritiesConfig:
+        return self._configs[0]
+
+
+class _GuardSnapshot:
+    def __init__(self, config: PrioritiesConfig) -> None:
+        self.revision = "guard-revision"
+        self._config = config
+
+    @property
+    def config(self) -> PrioritiesConfig:
+        return self._config.model_copy(deep=True)
+
+
+class _GuardLease:
+    def __init__(self, config: PrioritiesConfig) -> None:
+        self.generation_id = 1
+        self.router = MagicMock(_models_cache={})
+        self.config_snapshot = _GuardSnapshot(config)
+        self.release_count = 0
+
+    async def release(self) -> None:
+        self.release_count += 1
+
+
 def _real_native_router(provider, models: list[ModelInfo], priorities: list[str]):
     from router_maestro.routing.router import CACHE_TTL_SECONDS, Router
     from router_maestro.utils.cache import TTLCache
@@ -1053,6 +1117,738 @@ class TestBetaMessagesEndpoint:
             fallbacks=(),
             explicit=True,
         )
+
+    @pytest.mark.parametrize("path", ["legacy", "planned"])
+    @pytest.mark.parametrize("guard", ["leak", "runaway"])
+    @pytest.mark.parametrize("initially_enabled", [False, True])
+    def test_native_stream_guards_use_frozen_enable_flags_on_both_paths(
+        self,
+        client,
+        path,
+        guard,
+        initially_enabled,
+    ):
+        leak_enabled = guard == "leak" and initially_enabled
+        runaway_enabled = guard == "runaway" and initially_enabled
+        configs = [
+            _guard_config(
+                leak_enabled=leak_enabled,
+                runaway_enabled=runaway_enabled,
+            )
+        ]
+        provider = _native_provider()
+        plan = self._native_plan(
+            provider,
+            CapabilitySupport.SUPPORTED,
+            model="guarded-model",
+        )
+        resolution = _NativeModelResolution(
+            _ResolvedModel("github-copilot", "guarded-model", provider),
+            CapabilitySupport.SUPPORTED,
+            plan if path == "planned" else None,
+        )
+        context = _CapturedGuardContext(configs)
+        delta = (
+            {"type": "text_delta", "text": "<tick>control</tick>"}
+            if guard == "leak"
+            else {"type": "text_delta", "text": "x" * 100_001}
+        )
+
+        async def selected_stream():
+            yield f"event: message_start\ndata: {json.dumps(_VALID_MESSAGE_START)}\n\n"
+            # Simulate a live config replacement after the request pipeline has
+            # captured its initial snapshot. The active stream must not change.
+            configs[0] = _guard_config(
+                leak_enabled=guard == "leak" and not initially_enabled,
+                runaway_enabled=guard == "runaway" and not initially_enabled,
+            )
+            payload = {"type": "content_block_delta", "index": 0, "delta": delta}
+            yield f"event: content_block_delta\ndata: {json.dumps(payload)}\n\n"
+            yield 'event: message_stop\ndata: {"type":"message_stop"}\n\n'
+
+        patches = [
+            patch(
+                "router_maestro.server.routes.anthropic_beta._resolve_native_model",
+                new_callable=AsyncMock,
+                return_value=resolution,
+            ),
+            patch(
+                "router_maestro.runtime.request_context.get_current_request_context",
+                return_value=context,
+            ),
+        ]
+        if path == "planned":
+            patches.append(
+                patch(
+                    "router_maestro.server.routes.anthropic_beta.Router.execute_plan_stream",
+                    new_callable=AsyncMock,
+                    return_value=(selected_stream(), "github-copilot"),
+                )
+            )
+        else:
+            patches.append(
+                patch(
+                    "router_maestro.server.routes.anthropic_beta._stream_passthrough",
+                    return_value=selected_stream(),
+                )
+            )
+
+        with patches[0], patches[1], patches[2]:
+            downstream = client.post(
+                "/api/anthropic/beta/v1/messages",
+                json={
+                    "model": "guarded-model",
+                    "max_tokens": 100,
+                    "stream": True,
+                    "messages": [{"role": "user", "content": "Hi"}],
+                },
+            )
+
+        event_types = [
+            line.removeprefix("event: ")
+            for line in downstream.text.splitlines()
+            if line.startswith("event: ")
+        ]
+        assert context.pipeline is not None
+        assert context.pipeline.outcome is not None
+        assert (context.pipeline.leak_guard is not None) is leak_enabled
+        if initially_enabled:
+            assert event_types == ["message_start", "error"]
+            assert context.pipeline.outcome.transport is TransportTermination.EXCEPTION
+            assert context.pipeline.outcome.response_status is ResponseStatus.FAILED
+            assert context.pipeline.outcome.error.code == "overloaded"
+        else:
+            assert event_types == ["message_start", "content_block_delta", "message_stop"]
+            assert context.pipeline.outcome.transport is TransportTermination.EXPLICIT_TERMINAL
+            assert context.pipeline.outcome.response_status is ResponseStatus.COMPLETED
+
+    @pytest.mark.asyncio
+    async def test_native_stream_with_both_guards_disabled_never_invokes_raw_leak_guard(self):
+        from router_maestro.pipeline import RequestPipeline
+
+        config = _guard_config(leak_enabled=False, runaway_enabled=False)
+        context = _CapturedGuardContext([config])
+        with patch(
+            "router_maestro.runtime.request_context.get_current_request_context",
+            return_value=context,
+        ):
+            pipeline = RequestPipeline.create(
+                request_id="req-no-native-guards",
+                model="guarded-model",
+            )
+
+        async def stream():
+            payload = {
+                "type": "content_block_delta",
+                "index": 0,
+                "delta": {
+                    "type": "text_delta",
+                    "text": "<tick>control</tick>" + "x" * 100_001,
+                },
+            }
+            yield f"event: content_block_delta\ndata: {json.dumps(payload)}\n\n"
+            yield 'event: message_stop\ndata: {"type":"message_stop"}\n\n'
+
+        with patch(
+            "router_maestro.pipeline.leak_guard.RawFrameLeakGuard",
+            side_effect=AssertionError("disabled leak guard must not be constructed"),
+        ):
+            frames = [
+                frame
+                async for frame in _encode_native_stream_errors(
+                    stream(),
+                    pipeline=pipeline,
+                )
+            ]
+
+        assert [
+            line.removeprefix("event: ")
+            for frame in frames
+            for line in frame.splitlines()
+            if line.startswith("event: ")
+        ] == ["content_block_delta", "message_stop"]
+        assert pipeline.outcome is not None
+        assert pipeline.outcome.response_status is ResponseStatus.COMPLETED
+
+    @pytest.mark.parametrize(
+        "delta",
+        [
+            pytest.param(
+                {"type": "thinking_delta", "thinking": "x" * 100_001},
+                id="thinking-delta",
+            ),
+            pytest.param(
+                {"type": "input_json_delta", "partial_json": "x" * 100_001},
+                id="tool-input-delta",
+            ),
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_native_runaway_guard_counts_non_text_raw_deltas(self, delta):
+        from router_maestro.pipeline import RequestPipeline
+
+        config = _guard_config(leak_enabled=False, runaway_enabled=True)
+        context = _CapturedGuardContext([config])
+        with patch(
+            "router_maestro.runtime.request_context.get_current_request_context",
+            return_value=context,
+        ):
+            pipeline = RequestPipeline.create(
+                request_id="req-raw-delta",
+                model="guarded-model",
+            )
+
+        async def stream():
+            payload = {"type": "content_block_delta", "index": 0, "delta": delta}
+            yield f"event: content_block_delta\ndata: {json.dumps(payload)}\n\n"
+            yield 'event: message_stop\ndata: {"type":"message_stop"}\n\n'
+
+        frames = [
+            frame
+            async for frame in _encode_native_stream_errors(
+                stream(),
+                pipeline=pipeline,
+            )
+        ]
+
+        assert [
+            line.removeprefix("event: ")
+            for frame in frames
+            for line in frame.splitlines()
+            if line.startswith("event: ")
+        ] == ["error"]
+        assert pipeline.outcome is not None
+        assert pipeline.outcome.error.code == "overloaded"
+
+    @pytest.mark.asyncio
+    async def test_native_leak_guard_scans_raw_thinking_delta(self):
+        from router_maestro.pipeline import RequestPipeline
+
+        config = _guard_config(leak_enabled=True, runaway_enabled=False)
+        context = _CapturedGuardContext([config])
+        with patch(
+            "router_maestro.runtime.request_context.get_current_request_context",
+            return_value=context,
+        ):
+            pipeline = RequestPipeline.create(
+                request_id="req-raw-thinking-leak",
+                model="guarded-model",
+            )
+
+        async def stream():
+            payload = {
+                "type": "content_block_delta",
+                "index": 0,
+                "delta": {
+                    "type": "thinking_delta",
+                    "thinking": "<tick>private control</tick>",
+                },
+            }
+            yield f"event: content_block_delta\ndata: {json.dumps(payload)}\n\n"
+            yield 'event: message_stop\ndata: {"type":"message_stop"}\n\n'
+
+        frames = [
+            frame
+            async for frame in _encode_native_stream_errors(
+                stream(),
+                pipeline=pipeline,
+            )
+        ]
+
+        assert [
+            line.removeprefix("event: ")
+            for frame in frames
+            for line in frame.splitlines()
+            if line.startswith("event: ")
+        ] == ["error"]
+        assert pipeline.outcome is not None
+        assert pipeline.outcome.error.code == "overloaded"
+
+    @pytest.mark.parametrize(
+        ("terminal", "expected_transport", "expected_status", "expected_code"),
+        [
+            pytest.param(
+                "error",
+                TransportTermination.EXPLICIT_TERMINAL,
+                ResponseStatus.FAILED,
+                "overloaded_error",
+                id="upstream-error",
+            ),
+            pytest.param(
+                "incomplete",
+                TransportTermination.EXPLICIT_TERMINAL,
+                ResponseStatus.INCOMPLETE,
+                None,
+                id="incomplete",
+            ),
+            pytest.param(
+                "unexpected-eof",
+                TransportTermination.UNEXPECTED_EOF,
+                ResponseStatus.UNKNOWN,
+                "unexpected_eof",
+                id="unexpected-eof",
+            ),
+            pytest.param(
+                "provider-error",
+                TransportTermination.EXCEPTION,
+                ResponseStatus.FAILED,
+                "provider_error",
+                id="postcommit-provider-error",
+            ),
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_native_stream_records_non_success_semantic_outcome(
+        self,
+        terminal,
+        expected_transport,
+        expected_status,
+        expected_code,
+    ):
+        from router_maestro.pipeline import RequestPipeline
+
+        pipeline = RequestPipeline(
+            request_id="req-native-terminal",
+            guards=[],
+            leak_guard=None,
+            audit=None,
+            config=PrioritiesConfig(),
+        )
+
+        async def stream():
+            yield f"event: message_start\ndata: {json.dumps(_VALID_MESSAGE_START)}\n\n"
+            if terminal == "error":
+                error = {
+                    "type": "error",
+                    "error": {"type": "overloaded_error", "message": "retry"},
+                }
+                yield f"event: error\ndata: {json.dumps(error)}\n\n"
+            elif terminal == "incomplete":
+                delta = {
+                    "type": "message_delta",
+                    "delta": {"stop_reason": "max_tokens", "stop_sequence": None},
+                    "usage": {"output_tokens": 3},
+                }
+                yield f"event: message_delta\ndata: {json.dumps(delta)}\n\n"
+                yield 'event: message_stop\ndata: {"type":"message_stop"}\n\n'
+            elif terminal == "provider-error":
+                raise ProviderError(
+                    "safe postcommit failure",
+                    status_code=502,
+                    kind=ProviderFailureKind.TRANSPORT,
+                )
+
+        frames = [
+            frame
+            async for frame in _encode_native_stream_errors(
+                stream(),
+                pipeline=pipeline,
+            )
+        ]
+
+        assert frames
+        if terminal == "error":
+            assert sum(frame.count("event: error") for frame in frames) == 1
+        assert pipeline.outcome is not None
+        assert pipeline.outcome.transport is expected_transport
+        assert pipeline.outcome.response_status is expected_status
+        assert (pipeline.outcome.error.code if pipeline.outcome.error else None) == expected_code
+
+    @pytest.mark.asyncio
+    async def test_native_stream_records_cancelled_semantic_outcome(self):
+        from router_maestro.pipeline import RequestPipeline
+
+        pipeline = RequestPipeline(
+            request_id="req-native-cancel",
+            guards=[],
+            leak_guard=None,
+            audit=None,
+            config=PrioritiesConfig(),
+        )
+
+        async def stream():
+            yield f"event: message_start\ndata: {json.dumps(_VALID_MESSAGE_START)}\n\n"
+            raise asyncio.CancelledError
+
+        encoded = _encode_native_stream_errors(stream(), pipeline=pipeline)
+        await anext(encoded)
+        with pytest.raises(asyncio.CancelledError):
+            await anext(encoded)
+
+        assert pipeline.outcome is not None
+        assert pipeline.outcome.transport is TransportTermination.CLIENT_CANCELLED
+        assert pipeline.outcome.response_status is ResponseStatus.CANCELLED
+
+    @pytest.mark.parametrize(
+        ("terminal", "expected_transport", "expected_status"),
+        [
+            pytest.param(
+                "error",
+                TransportTermination.EXPLICIT_TERMINAL,
+                ResponseStatus.FAILED,
+                id="upstream-error",
+            ),
+            pytest.param(
+                "incomplete",
+                TransportTermination.EXPLICIT_TERMINAL,
+                ResponseStatus.INCOMPLETE,
+                id="incomplete",
+            ),
+            pytest.param(
+                "unexpected-eof",
+                TransportTermination.UNEXPECTED_EOF,
+                ResponseStatus.UNKNOWN,
+                id="unexpected-eof",
+            ),
+            pytest.param(
+                "provider-error",
+                TransportTermination.EXCEPTION,
+                ResponseStatus.FAILED,
+                id="postcommit-provider-error",
+            ),
+        ],
+    )
+    def test_native_stream_terminal_reaches_request_context(
+        self,
+        app,
+        terminal,
+        expected_transport,
+        expected_status,
+    ):
+        from router_maestro.runtime import RequestContextMiddleware
+
+        config = _guard_config(leak_enabled=False, runaway_enabled=False)
+        snapshot = _GuardSnapshot(config)
+        lease = _GuardLease(config)
+        captured_contexts = []
+
+        class Repository:
+            def read(self):
+                return snapshot
+
+        class Owner:
+            async def start(self, _snapshot):
+                return None
+
+            async def acquire(self):
+                return lease
+
+        app.state.runtime_config_repository = Repository()
+        app.state.router_owner = Owner()
+        app.add_middleware(RequestContextMiddleware)
+
+        async def selected_stream():
+            from router_maestro.runtime import current_request_context
+
+            captured_contexts.append(current_request_context())
+            yield f"event: message_start\ndata: {json.dumps(_VALID_MESSAGE_START)}\n\n"
+            if terminal == "error":
+                error = {
+                    "type": "error",
+                    "error": {"type": "overloaded_error", "message": "retry"},
+                }
+                yield f"event: error\ndata: {json.dumps(error)}\n\n"
+            elif terminal == "incomplete":
+                delta = {
+                    "type": "message_delta",
+                    "delta": {"stop_reason": "max_tokens", "stop_sequence": None},
+                    "usage": {"output_tokens": 3},
+                }
+                yield f"event: message_delta\ndata: {json.dumps(delta)}\n\n"
+                yield 'event: message_stop\ndata: {"type":"message_stop"}\n\n'
+            elif terminal == "provider-error":
+                raise ProviderError(
+                    "safe postcommit failure",
+                    status_code=502,
+                    kind=ProviderFailureKind.TRANSPORT,
+                )
+
+        provider = _native_provider()
+        resolution = _NativeModelResolution(
+            _ResolvedModel("github-copilot", "context-model", provider),
+            CapabilitySupport.SUPPORTED,
+            self._native_plan(
+                provider,
+                CapabilitySupport.SUPPORTED,
+                model="context-model",
+            ),
+        )
+        with (
+            patch(
+                "router_maestro.server.routes.anthropic_beta._resolve_native_model",
+                new_callable=AsyncMock,
+                return_value=resolution,
+            ),
+            patch(
+                "router_maestro.server.routes.anthropic_beta.Router.execute_plan_stream",
+                new_callable=AsyncMock,
+                return_value=(selected_stream(), "github-copilot"),
+            ),
+            TestClient(app) as context_client,
+        ):
+            downstream = context_client.post(
+                "/api/anthropic/beta/v1/messages",
+                json={
+                    "model": "context-model",
+                    "max_tokens": 100,
+                    "stream": True,
+                    "messages": [{"role": "user", "content": "Hi"}],
+                },
+            )
+
+        assert downstream.status_code == 200
+        assert len(captured_contexts) == 1
+        assert captured_contexts[0].outcome is not None
+        assert captured_contexts[0].outcome.transport is expected_transport
+        assert captured_contexts[0].outcome.response_status is expected_status
+        assert captured_contexts[0].pipeline is not None
+        assert captured_contexts[0].pipeline.outcome == captured_contexts[0].outcome
+        assert lease.release_count == 1
+
+    @pytest.mark.parametrize("path", ["planned", "legacy"])
+    @pytest.mark.parametrize(
+        ("terminal", "expected_transport", "expected_status", "expected_code"),
+        [
+            pytest.param(
+                "clean-eof",
+                TransportTermination.UNEXPECTED_EOF,
+                ResponseStatus.UNKNOWN,
+                "unexpected_eof",
+                id="clean-eof",
+            ),
+            pytest.param(
+                "provider-error",
+                TransportTermination.EXCEPTION,
+                ResponseStatus.FAILED,
+                "provider_error",
+                id="provider-error",
+            ),
+            pytest.param(
+                "native-error",
+                TransportTermination.EXPLICIT_TERMINAL,
+                ResponseStatus.FAILED,
+                "overloaded_error",
+                id="native-error",
+            ),
+        ],
+    )
+    def test_native_transport_terminal_reaches_canonical_context(
+        self,
+        app,
+        path,
+        terminal,
+        expected_transport,
+        expected_status,
+        expected_code,
+    ):
+        from router_maestro.runtime import RequestContextMiddleware, current_request_context
+
+        config = _guard_config(leak_enabled=False, runaway_enabled=False)
+        snapshot = _GuardSnapshot(config)
+        lease = _GuardLease(config)
+        captured_contexts = []
+
+        class Repository:
+            def read(self):
+                return snapshot
+
+        class Owner:
+            async def start(self, _snapshot):
+                return None
+
+            async def acquire(self):
+                return lease
+
+        class StreamResponse:
+            status_code = 200
+
+            async def aiter_lines(self):
+                captured_contexts.append(current_request_context())
+                lines = [
+                    "event: message_start",
+                    f"data: {json.dumps(_VALID_MESSAGE_START)}",
+                    "",
+                ]
+                if terminal == "native-error":
+                    error = {
+                        "type": "error",
+                        "error": {"type": "overloaded_error", "message": "retry"},
+                    }
+                    lines.extend(("event: error", f"data: {json.dumps(error)}", ""))
+                else:
+                    lines.extend(
+                        (
+                            "event: content_block_start",
+                            'data: {"type":"content_block_start","index":0,'
+                            '"content_block":{"type":"text","text":""}}',
+                            "",
+                            "event: content_block_delta",
+                            'data: {"type":"content_block_delta","index":0,'
+                            '"delta":{"type":"text_delta","text":"partial"}}',
+                            "",
+                        )
+                    )
+                for line in lines:
+                    yield line
+                if terminal == "provider-error":
+                    raise ProviderError(
+                        "safe upstream transport failure",
+                        status_code=502,
+                        kind=ProviderFailureKind.TRANSPORT,
+                    )
+
+        @asynccontextmanager
+        async def stream_context():
+            yield StreamResponse()
+
+        provider = _native_provider()
+        provider._stream_with_auth_retry = MagicMock(return_value=stream_context())
+        plan = self._native_plan(
+            provider,
+            CapabilitySupport.SUPPORTED,
+            model="clean-eof-context",
+        )
+        resolution = _NativeModelResolution(
+            _ResolvedModel("github-copilot", "clean-eof-context", provider),
+            CapabilitySupport.SUPPORTED,
+            plan if path == "planned" else None,
+        )
+        app.state.runtime_config_repository = Repository()
+        app.state.router_owner = Owner()
+        app.add_middleware(RequestContextMiddleware)
+
+        with (
+            patch(
+                "router_maestro.server.routes.anthropic_beta._resolve_native_model",
+                new_callable=AsyncMock,
+                return_value=resolution,
+            ),
+            TestClient(app) as context_client,
+        ):
+            downstream = context_client.post(
+                "/api/anthropic/beta/v1/messages",
+                json={
+                    "model": "clean-eof-context",
+                    "max_tokens": 100,
+                    "stream": True,
+                    "messages": [{"role": "user", "content": "Hi"}],
+                },
+            )
+
+        assert downstream.status_code == 200
+        assert downstream.text.count("event: error") == 1
+        assert len(captured_contexts) == 1
+        context = captured_contexts[0]
+        assert context.outcome is not None
+        assert context.outcome.transport is expected_transport
+        assert context.outcome.response_status is expected_status
+        assert context.outcome.error.code == expected_code
+        assert context.pipeline is not None
+        assert context.pipeline.outcome == context.outcome
+        assert context.pipeline.wire_status == 200
+        assert lease.release_count == 1
+
+    @pytest.mark.asyncio
+    async def test_native_stream_disconnect_reaches_request_context_as_cancelled(self, app):
+        from router_maestro.runtime import RequestContextMiddleware
+
+        config = _guard_config(leak_enabled=False, runaway_enabled=False)
+        snapshot = _GuardSnapshot(config)
+        lease = _GuardLease(config)
+        captured_contexts = []
+
+        class Repository:
+            def read(self):
+                return snapshot
+
+        class Owner:
+            async def start(self, _snapshot):
+                return None
+
+            async def acquire(self):
+                return lease
+
+        app.state.runtime_config_repository = Repository()
+        app.state.router_owner = Owner()
+        app.add_middleware(RequestContextMiddleware)
+
+        async def selected_stream():
+            from router_maestro.runtime import current_request_context
+
+            captured_contexts.append(current_request_context())
+            yield f"event: message_start\ndata: {json.dumps(_VALID_MESSAGE_START)}\n\n"
+            await asyncio.Event().wait()
+
+        provider = _native_provider()
+        resolution = _NativeModelResolution(
+            _ResolvedModel("github-copilot", "context-model", provider),
+            CapabilitySupport.SUPPORTED,
+            self._native_plan(
+                provider,
+                CapabilitySupport.SUPPORTED,
+                model="context-model",
+            ),
+        )
+        with (
+            patch(
+                "router_maestro.server.routes.anthropic_beta._resolve_native_model",
+                new_callable=AsyncMock,
+                return_value=resolution,
+            ),
+            patch(
+                "router_maestro.server.routes.anthropic_beta.Router.execute_plan_stream",
+                new_callable=AsyncMock,
+                return_value=(selected_stream(), "github-copilot"),
+            ),
+        ):
+            scope = {
+                "type": "http",
+                "asgi": {"spec_version": "2.3"},
+                "http_version": "1.1",
+                "method": "POST",
+                "scheme": "http",
+                "path": "/api/anthropic/beta/v1/messages",
+                "raw_path": b"/api/anthropic/beta/v1/messages",
+                "query_string": b"",
+                "headers": [(b"content-type", b"application/json")],
+                "client": ("test", 1),
+                "server": ("test", 80),
+                "state": {"request_id": "req-beta-cancel"},
+                "app": app,
+            }
+            request_body = json.dumps(
+                {
+                    "model": "context-model",
+                    "max_tokens": 100,
+                    "stream": True,
+                    "messages": [{"role": "user", "content": "Hi"}],
+                }
+            ).encode()
+            received_request = False
+
+            async def receive():
+                nonlocal received_request
+                if not received_request:
+                    received_request = True
+                    return {
+                        "type": "http.request",
+                        "body": request_body,
+                        "more_body": False,
+                    }
+                return {"type": "http.disconnect"}
+
+            async def send(_message):
+                return None
+
+            await app(scope, receive, send)
+
+        assert len(captured_contexts) == 1
+        assert captured_contexts[0].outcome is not None
+        assert captured_contexts[0].outcome.transport is TransportTermination.CLIENT_CANCELLED
+        assert captured_contexts[0].outcome.response_status is ResponseStatus.CANCELLED
+        assert captured_contexts[0].pipeline is not None
+        assert captured_contexts[0].pipeline.outcome == captured_contexts[0].outcome
+        assert lease.release_count == 1
 
     @pytest.mark.parametrize("transport", ["native", "translated"])
     @pytest.mark.parametrize("stream", [False, True], ids=["nonstream", "stream"])
@@ -4869,10 +5665,12 @@ class TestBetaMessagesEndpoint:
         forwarded = mock_stream.call_args.args[1]
         assert forwarded["thinking"] == {"type": "adaptive"}
         assert forwarded["output_config"] == {"effort": "xhigh"}
-        mock_sse_response.assert_called_once_with(
-            stream_marker,
-            keepalive_frame=ANTHROPIC_PING_FRAME,
-        )
+        mock_sse_response.assert_called_once()
+        guarded_stream = mock_sse_response.call_args.args[0]
+        assert guarded_stream.__name__ == "_encode_native_stream_errors"
+        assert mock_sse_response.call_args.kwargs == {
+            "keepalive_frame": ANTHROPIC_PING_FRAME,
+        }
 
     @patch("router_maestro.server.routes.anthropic_beta.sse_streaming_response")
     @patch("router_maestro.server.routes.anthropic_beta._stream_passthrough")

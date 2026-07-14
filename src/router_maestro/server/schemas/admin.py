@@ -2,6 +2,8 @@
 
 from pydantic import BaseModel, Field
 
+from router_maestro.auth.discovery import ProviderAuthSource
+from router_maestro.auth.storage import AuthType
 from router_maestro.config.priorities import PrioritiesConfig
 
 
@@ -17,6 +19,23 @@ class AuthListResponse(BaseModel):
     """Response for listing authenticated providers."""
 
     providers: list[AuthProviderInfo] = Field(default_factory=list)
+
+
+class AuthProviderDefinitionInfo(BaseModel):
+    """Non-secret provider authentication metadata exposed by this server."""
+
+    provider: str
+    display_name: str
+    auth_type: AuthType
+    credential_required: bool
+    source: ProviderAuthSource
+    api_key_env: str | None = None
+
+
+class AuthProviderDefinitionsResponse(BaseModel):
+    """Provider login definitions configured for this server."""
+
+    providers: list[AuthProviderDefinitionInfo] = Field(default_factory=list)
 
 
 class LoginRequest(BaseModel):

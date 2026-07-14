@@ -101,6 +101,10 @@ class RuntimeConfigRepository:
             config = load_config(self.path, PrioritiesConfig, PrioritiesConfig.get_default)
             return _snapshot(config)
 
+    def prepare(self, replacement: PrioritiesConfig) -> RuntimeConfigSnapshot:
+        """Validate and canonicalize a candidate without persisting it."""
+        return _snapshot(replacement)
+
     def compare_and_swap(
         self,
         *,

@@ -1,11 +1,19 @@
 """Admin API routes for remote management."""
 
+import asyncio
 import logging
 
 import httpx
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, Response
 
-from router_maestro.auth import AuthManager, AuthType
+from router_maestro.auth import (
+    ApiKeyCredential,
+    AuthManager,
+    AuthType,
+    Credential,
+    CredentialRepository,
+    provider_auth_definitions,
+)
 from router_maestro.auth.github_oauth import (
     GitHubOAuthError,
     get_copilot_token,
@@ -18,11 +26,13 @@ from router_maestro.config.repository import (
     RuntimeConfigRepository,
     RuntimeConfigSnapshot,
 )
-from router_maestro.routing import get_router, reset_router
+from router_maestro.config.settings import load_providers_config
 from router_maestro.routing.model_ref import catalog_model_public_id
 from router_maestro.server.oauth_sessions import oauth_sessions
 from router_maestro.server.schemas.admin import (
     AuthListResponse,
+    AuthProviderDefinitionInfo,
+    AuthProviderDefinitionsResponse,
     AuthProviderInfo,
     LoginRequest,
     ModelInfo,
@@ -54,6 +64,75 @@ def _runtime_config_response(snapshot: RuntimeConfigSnapshot) -> PrioritiesRespo
 
 def _set_revision_etag(response: Response, revision: str) -> None:
     response.headers["ETag"] = f'"{revision}"'
+
+
+async def _wait_for_task_ignoring_cancellation(task: asyncio.Task) -> bool:
+    """Wait for a task to finish and report whether its caller was cancelled."""
+    cancelled = False
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            cancelled = True
+    return cancelled
+
+
+async def _compensate_cancelled_credential_write(
+    *,
+    provider: str,
+    previous: Credential | None,
+    replacement: Credential,
+    credential_repository: CredentialRepository,
+) -> None:
+    """Conditionally undo a cancelled write without letting more cancellation interrupt it."""
+    compensation_task = asyncio.create_task(
+        asyncio.to_thread(
+            credential_repository.compare_and_swap_provider,
+            provider,
+            expected=replacement,
+            replacement=previous,
+        )
+    )
+    await _wait_for_task_ignoring_cancellation(compensation_task)
+    try:
+        restored = compensation_task.result()
+        if not restored:
+            logger.info(
+                "Credential compensation skipped for %s because it changed concurrently",
+                provider,
+            )
+    except Exception:
+        logger.exception("Failed to compensate cancelled credential mutation for %s", provider)
+
+
+async def _rebuild_after_credential_mutation(
+    *,
+    provider: str,
+    previous: Credential | None,
+    replacement: Credential | None,
+    credential_repository: CredentialRepository,
+    runtime_config_repository: RuntimeConfigRepository,
+    router_owner,
+) -> None:
+    """Rebuild for one credential mutation, compensating only our own write on failure."""
+    try:
+        snapshot = runtime_config_repository.read()
+        await router_owner.rebuild(config_snapshot=snapshot)
+    except BaseException:
+        try:
+            restored = credential_repository.compare_and_swap_provider(
+                provider,
+                expected=replacement,
+                replacement=previous,
+            )
+            if not restored:
+                logger.info(
+                    "Credential compensation skipped for %s because it changed concurrently",
+                    provider,
+                )
+        except Exception:
+            logger.exception("Failed to compensate credential mutation for %s", provider)
+        raise
 
 
 # ============================================================================
@@ -90,17 +169,39 @@ async def list_auth() -> AuthListResponse:
     return AuthListResponse(providers=providers)
 
 
+@router.get("/auth/providers", response_model=AuthProviderDefinitionsResponse)
+def list_auth_providers() -> AuthProviderDefinitionsResponse:
+    """List non-secret authentication definitions configured on this server."""
+    definitions = provider_auth_definitions(load_providers_config())
+    return AuthProviderDefinitionsResponse(
+        providers=[
+            AuthProviderDefinitionInfo(
+                provider=definition.provider,
+                display_name=definition.display_name,
+                auth_type=definition.auth_type,
+                credential_required=definition.credential_required,
+                source=definition.source,
+                api_key_env=definition.api_key_env,
+            )
+            for definition in definitions
+        ]
+    )
+
+
 @router.post("/auth/login")
 async def login(
     request: LoginRequest,
     background_tasks: BackgroundTasks,
+    router_owner=Depends(get_router_owner),
+    runtime_config_repository: RuntimeConfigRepository = Depends(get_runtime_config_repository),
 ) -> OAuthInitResponse | dict:
     """Initiate login for a provider.
 
     For OAuth providers (github-copilot): Returns session info for device flow polling.
     For API key providers: Saves the key and returns success.
     """
-    manager = AuthManager()
+    credential_repository = CredentialRepository()
+    manager = AuthManager(credential_repository)
 
     if request.provider == "github-copilot":
         # OAuth device flow
@@ -126,6 +227,9 @@ async def login(
             session.session_id,
             device_code.device_code,
             device_code.interval,
+            router_owner,
+            credential_repository,
+            runtime_config_repository,
         )
 
         return OAuthInitResponse(
@@ -137,9 +241,17 @@ async def login(
 
     elif request.api_key:
         # API key auth
+        previous = credential_repository.get_provider(request.provider)
+        replacement = ApiKeyCredential(key=request.api_key)
         manager.login_api_key(request.provider, request.api_key)
-        # Reset router to pick up new authentication
-        reset_router()
+        await _rebuild_after_credential_mutation(
+            provider=request.provider,
+            previous=previous,
+            replacement=replacement,
+            credential_repository=credential_repository,
+            runtime_config_repository=runtime_config_repository,
+            router_owner=router_owner,
+        )
         return {"success": True, "provider": request.provider}
 
     else:
@@ -153,10 +265,11 @@ async def _poll_oauth_completion(
     session_id: str,
     device_code: str,
     interval: int,
+    router_owner,
+    credential_repository: CredentialRepository,
+    runtime_config_repository: RuntimeConfigRepository,
 ) -> None:
     """Background task to poll for OAuth completion and save credentials."""
-    manager = AuthManager()
-
     async with httpx.AsyncClient() as client:
         try:
             # Poll for access token
@@ -171,16 +284,42 @@ async def _poll_oauth_completion(
             copilot_token = await get_copilot_token(client, access_token.access_token)
 
             # Save credentials
-            manager.storage.set(
-                "github-copilot",
-                OAuthCredential(
-                    refresh=access_token.access_token,
-                    access=copilot_token.token,
-                    expires=copilot_token.expires_at,
-                    api_endpoint=copilot_token.api_endpoint,
-                ),
+            credential = OAuthCredential(
+                refresh=access_token.access_token,
+                access=copilot_token.token,
+                expires=copilot_token.expires_at,
+                api_endpoint=copilot_token.api_endpoint,
             )
-            manager.save()
+            previous = await asyncio.to_thread(
+                credential_repository.get_provider,
+                "github-copilot",
+            )
+            update_task = asyncio.create_task(
+                asyncio.to_thread(
+                    credential_repository.update_provider,
+                    "github-copilot",
+                    credential,
+                )
+            )
+            cancelled = await _wait_for_task_ignoring_cancellation(update_task)
+            if cancelled:
+                await _compensate_cancelled_credential_write(
+                    provider="github-copilot",
+                    previous=previous,
+                    replacement=credential,
+                    credential_repository=credential_repository,
+                )
+                raise asyncio.CancelledError
+            update_task.result()
+
+            await _rebuild_after_credential_mutation(
+                provider="github-copilot",
+                previous=previous,
+                replacement=credential,
+                credential_repository=credential_repository,
+                runtime_config_repository=runtime_config_repository,
+                router_owner=router_owner,
+            )
 
             # Update session status
             await oauth_sessions.update_session_status(
@@ -189,9 +328,6 @@ async def _poll_oauth_completion(
                 access_token=copilot_token.token,
                 refresh_token=access_token.access_token,
             )
-
-            # Reset router to pick up new authentication
-            reset_router()
 
         except GitHubOAuthError as e:
             await oauth_sessions.update_session_status(
@@ -221,13 +357,25 @@ async def get_oauth_status(session_id: str) -> OAuthStatusResponse:
 
 
 @router.delete("/auth/{provider}")
-async def logout(provider: str) -> dict:
+async def logout(
+    provider: str,
+    router_owner=Depends(get_router_owner),
+    runtime_config_repository: RuntimeConfigRepository = Depends(get_runtime_config_repository),
+) -> dict:
     """Log out from a provider."""
-    manager = AuthManager()
+    credential_repository = CredentialRepository()
+    manager = AuthManager(credential_repository)
+    previous = credential_repository.get_provider(provider)
 
     if manager.logout(provider):
-        # Reset router to reflect authentication change
-        reset_router()
+        await _rebuild_after_credential_mutation(
+            provider=provider,
+            previous=previous,
+            replacement=None,
+            credential_repository=credential_repository,
+            runtime_config_repository=runtime_config_repository,
+            router_owner=router_owner,
+        )
         return {"success": True, "provider": provider}
     else:
         raise HTTPException(status_code=404, detail=f"Not authenticated with {provider}")
@@ -239,47 +387,54 @@ async def logout(provider: str) -> dict:
 
 
 @router.get("/models", response_model=ModelsResponse)
-async def list_models() -> ModelsResponse:
+async def list_models(router_owner=Depends(get_router_owner)) -> ModelsResponse:
     """List all available models from authenticated providers."""
-    router_instance = get_router()
+    lease = await router_owner.acquire()
 
     try:
-        models = await router_instance.list_models()
+        models = await lease.router.list_models()
+        model_list = [
+            ModelInfo(
+                provider=model.provider,
+                id=catalog_model_public_id(
+                    model.provider,
+                    model.id,
+                    id_is_qualified=model.id_is_qualified,
+                ),
+                name=model.name,
+                max_prompt_tokens=model.max_prompt_tokens,
+                max_output_tokens=model.max_output_tokens,
+                max_context_window_tokens=model.max_context_window_tokens,
+            )
+            for model in models
+        ]
+        return ModelsResponse(models=model_list)
     except Exception:
         logger.error("Failed to list models", exc_info=True)
         raise HTTPException(status_code=500, detail="Failed to list models")
-
-    model_list = [
-        ModelInfo(
-            provider=model.provider,
-            id=catalog_model_public_id(
-                model.provider,
-                model.id,
-                id_is_qualified=model.id_is_qualified,
-            ),
-            name=model.name,
-            max_prompt_tokens=model.max_prompt_tokens,
-            max_output_tokens=model.max_output_tokens,
-            max_context_window_tokens=model.max_context_window_tokens,
-        )
-        for model in models
-    ]
-
-    return ModelsResponse(models=model_list)
+    finally:
+        await lease.release()
 
 
 @router.post("/models/refresh")
-async def refresh_models() -> dict:
+async def refresh_models(
+    router_owner=Depends(get_router_owner),
+    runtime_config_repository: RuntimeConfigRepository = Depends(get_runtime_config_repository),
+) -> dict:
     """Force refresh the models cache."""
-    router_instance = get_router()
-    router_instance.invalidate_cache()
-    # Trigger re-population
+    lease = None
     try:
-        models = await router_instance.list_models()
+        snapshot = runtime_config_repository.read()
+        await router_owner.rebuild(config_snapshot=snapshot)
+        lease = await router_owner.acquire()
+        models = await lease.router.list_models()
         return {"success": True, "models_count": len(models)}
     except Exception:
         logger.error("Failed to refresh models", exc_info=True)
         raise HTTPException(status_code=500, detail="Failed to refresh models")
+    finally:
+        if lease is not None:
+            await lease.release()
 
 
 # ============================================================================
@@ -308,10 +463,32 @@ async def update_priorities(
 ) -> PrioritiesResponse:
     """Replace runtime configuration using content-revision compare-and-swap."""
     replacement = request.model_dump(exclude={"revision"})
+    persisted_snapshot: RuntimeConfigSnapshot | None = None
+
     try:
-        snapshot = repository.compare_and_swap(
-            expected_revision=request.revision,
-            replacement=repository.read().config.model_validate(replacement),
+        current = repository.read()
+        if current.revision != request.revision:
+            raise RuntimeConfigConflictError(
+                expected_revision=request.revision,
+                current_revision=current.revision,
+            )
+        replacement_config = current.config.model_validate(replacement)
+        candidate = repository.prepare(replacement_config)
+        if candidate.revision == current.revision:
+            _set_revision_etag(response, current.revision)
+            return _runtime_config_response(current)
+
+        def commit_candidate() -> RuntimeConfigSnapshot:
+            nonlocal persisted_snapshot
+            persisted_snapshot = repository.compare_and_swap(
+                expected_revision=request.revision,
+                replacement=replacement_config,
+            )
+            return persisted_snapshot
+
+        await router_owner.rebuild(
+            config_snapshot=candidate,
+            before_swap=commit_candidate,
         )
     except RuntimeConfigConflictError as error:
         raise HTTPException(
@@ -324,7 +501,7 @@ async def update_priorities(
             headers={"ETag": f'"{error.current_revision}"'},
         ) from error
 
-    if snapshot.revision != request.revision:
-        await router_owner.rebuild(config_snapshot=snapshot)
-    _set_revision_etag(response, snapshot.revision)
-    return _runtime_config_response(snapshot)
+    if persisted_snapshot is None:
+        raise RuntimeError("Router owner did not commit the runtime configuration candidate")
+    _set_revision_etag(response, persisted_snapshot.revision)
+    return _runtime_config_response(persisted_snapshot)

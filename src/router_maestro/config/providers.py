@@ -6,6 +6,8 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from router_maestro.routing.model_ref import validate_provider_id
 
+RESERVED_PROVIDER_NAMES = frozenset({"github-copilot", "openai", "anthropic"})
+
 
 def default_custom_api_key_env(provider: str) -> str:
     """Derive ``MY_PROVIDER_API_KEY`` from one public provider identifier."""
@@ -69,6 +71,10 @@ class ProvidersConfig(BaseModel):
         for provider_name in providers:
             validate_provider_id(provider_name)
             canonical_name = provider_name.casefold()
+            if canonical_name in RESERVED_PROVIDER_NAMES:
+                raise ValueError(
+                    f"provider name '{provider_name}' is reserved for a built-in provider"
+                )
             duplicate = canonical_names.get(canonical_name)
             if duplicate is not None:
                 raise ValueError(

@@ -1,8 +1,8 @@
 """Authentication management commands."""
 
 import asyncio
-from collections.abc import Callable
-from typing import Protocol
+from collections.abc import Callable, Mapping, Sequence
+from typing import Any, Protocol
 
 import typer
 from rich.console import Console
@@ -10,30 +10,24 @@ from rich.prompt import Prompt
 from rich.table import Table
 
 from router_maestro.auth.discovery import (
-    BUILTIN_PROVIDER_AUTH_DEFINITIONS,
     ProviderAuthDefinition,
     provider_auth_definitions,
 )
 from router_maestro.cli.client import AdminClient, ServerNotRunningError, get_admin_client
+from router_maestro.config import load_contexts_config
 from router_maestro.config.providers import ProvidersConfig
 from router_maestro.config.settings import load_providers_config
 
 app = typer.Typer(no_args_is_help=True)
 console = Console()
 
-PROVIDERS = {
-    definition.provider: {
-        "name": definition.display_name,
-        "auth_type": definition.auth_type.value,
-    }
-    for definition in BUILTIN_PROVIDER_AUTH_DEFINITIONS
-}
-
 
 class AuthProviderDiscoveryClient(Protocol):
     """Adapter supplied by the shared AdminClient integration."""
 
-    async def list_auth_providers(self) -> list[dict]: ...
+    async def list_auth_providers(
+        self,
+    ) -> Sequence[ProviderAuthDefinition | Mapping[str, Any]]: ...
 
 
 async def discover_auth_providers(
@@ -73,6 +67,15 @@ def login(
     """Authenticate with a provider (interactive selection if not specified)."""
     client = get_admin_client()
 
+    try:
+        context_name = load_contexts_config().current
+        definitions = asyncio.run(discover_auth_providers(client, context_name=context_name))
+    except Exception as e:
+        _handle_server_error(e)
+        return
+
+    providers = {definition.provider: definition for definition in definitions}
+
     if provider is None:
         # Interactive selection - get current status from server
         try:
@@ -83,32 +86,36 @@ def login(
             return
 
         console.print("\n[bold]Available providers:[/bold]")
-        for i, (key, info) in enumerate(PROVIDERS.items(), 1):
-            status = "[green]✓[/green]" if key in auth_providers else "[dim]○[/dim]"
-            console.print(f"  {i}. {status} {info['name']} ({key})")
+        for i, definition in enumerate(definitions, 1):
+            status = "[green]✓[/green]" if definition.provider in auth_providers else "[dim]○[/dim]"
+            console.print(f"  {i}. {status} {definition.display_name} ({definition.provider})")
 
         console.print()
         choice = Prompt.ask(
             "Select provider",
-            choices=[str(i) for i in range(1, len(PROVIDERS) + 1)],
+            choices=[str(i) for i in range(1, len(definitions) + 1)],
         )
-        provider = list(PROVIDERS.keys())[int(choice) - 1]
+        provider = definitions[int(choice) - 1].provider
 
-    if provider not in PROVIDERS:
+    if provider not in providers:
         console.print(f"[red]Unknown provider: {provider}[/red]")
-        console.print(f"[dim]Available: {', '.join(PROVIDERS.keys())}[/dim]")
+        console.print(f"[dim]Available: {', '.join(providers)}[/dim]")
         raise typer.Exit(1)
 
-    provider_info = PROVIDERS[provider]
-    console.print(f"\n[bold]Authenticating with {provider_info['name']}...[/bold]\n")
+    provider_info = providers[provider]
+    console.print(f"\n[bold]Authenticating with {provider_info.display_name}...[/bold]\n")
 
     asyncio.run(_do_login(client, provider, provider_info))
 
 
-async def _do_login(client: AdminClient, provider: str, provider_info: dict) -> None:
+async def _do_login(
+    client: AdminClient,
+    provider: str,
+    provider_info: ProviderAuthDefinition,
+) -> None:
     """Handle authentication flow via HTTP API."""
     try:
-        if provider_info["auth_type"] == "oauth":
+        if provider_info.auth_type.value == "oauth":
             # OAuth device flow
             result = await client.login_oauth(provider)
 
@@ -137,7 +144,7 @@ async def _do_login(client: AdminClient, provider: str, provider_info: dict) -> 
                 # status == "pending" - continue polling
         else:
             # API key auth
-            api_key = Prompt.ask(f"Enter API key for {provider_info['name']}", password=True)
+            api_key = Prompt.ask(f"Enter API key for {provider_info.display_name}", password=True)
             if not api_key:
                 console.print("[red]API key cannot be empty[/red]")
                 raise typer.Exit(1)

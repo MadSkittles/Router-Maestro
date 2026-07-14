@@ -466,7 +466,7 @@ Following XDG Base Directory specification:
 | | `priorities.json` | Model priorities and fallback |
 | | `contexts.json` | Deployment contexts |
 | **Data** | `~/.local/share/router-maestro/` | |
-| | `auth.json` | OAuth tokens |
+| | `auth.json` | Provider OAuth and API-key credentials |
 | | `server.json` | Legacy server state; current server API keys are stored in `contexts.json` |
 
 ### Custom Providers
@@ -482,17 +482,36 @@ Add OpenAI-compatible providers in `~/.config/router-maestro/providers.json`:
       "models": {
         "llama3": {"name": "Llama 3"},
         "mistral": {"name": "Mistral 7B"}
+      },
+      "options": {
+        "allow_unauthenticated": true
       }
     }
   }
 }
 ```
 
-Set API keys via environment variables (uppercase, hyphens → underscores):
+Custom-provider credentials are resolved in this order:
+
+1. A non-empty environment variable. By default its name is the provider ID in
+   uppercase with punctuation replaced by underscores, followed by `_API_KEY`.
+2. An API key saved in Router-Maestro's credential repository with
+   `router-maestro auth login <provider>`.
+3. No credential, only when `options.allow_unauthenticated` is explicitly
+   `true`. Anonymous requests do not include an `Authorization` header.
+
+For example, `ollama` uses `OLLAMA_API_KEY` and `my-provider` uses
+`MY_PROVIDER_API_KEY`:
 
 ```bash
 export OLLAMA_API_KEY="sk-..."
 ```
+
+Set `options.api_key_env` to a valid environment-variable name when a provider
+needs a different name. Provider definitions and their authentication
+requirements are obtained from the active server, so the same login command
+works for local and remote contexts. Only a local context may fall back to the
+local `providers.json` while its server is unavailable.
 
 ### Hot-Reload
 

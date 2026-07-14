@@ -563,7 +563,10 @@ class CopilotProvider(BaseProvider):
 
     async def close(self) -> None:
         """Close the HTTP client. Called during app shutdown."""
-        await self._transport.close()
+        try:
+            await self._catalog.aclose()
+        finally:
+            await self._transport.close()
 
     async def count_native_anthropic_tokens(
         self,

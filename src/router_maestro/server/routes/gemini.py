@@ -24,6 +24,7 @@ from router_maestro.routing import get_router
 from router_maestro.routing.model_ref import qualify_model_id
 from router_maestro.server.protocols import client_error_response, unrepresented_option_error
 from router_maestro.server.protocols.errors import postcommit_error_data, protocol_error_response
+from router_maestro.server.routes._outcomes import record_chat_response_outcome
 from router_maestro.server.schemas.gemini import (
     GeminiCandidate,
     GeminiContent,
@@ -116,7 +117,7 @@ async def generate_content(
     try:
         response, provider_name = await model_router.chat_completion(chat_request)
         estimated_tokens = _estimate_input_tokens(request)
-        return translate_openai_to_gemini(
+        downstream_response = translate_openai_to_gemini(
             response,
             (
                 response.selected_model.qualified_id
@@ -125,6 +126,8 @@ async def generate_content(
             ),
             input_tokens=estimated_tokens,
         ).model_dump(by_alias=True, exclude_none=True)
+        record_chat_response_outcome(response)
+        return downstream_response
     except ProviderError as e:
         logger.error("Gemini generateContent request failed: %s", e)
         if isinstance(e, RequestOptionError):

@@ -3,7 +3,7 @@
 import httpx
 
 from router_maestro.providers.base import ModelInfo
-from router_maestro.providers.openai_base import OpenAIChatProvider
+from router_maestro.providers.openai_base import OpenAIChatProvider, _request_audit
 from router_maestro.utils import get_logger
 
 logger = get_logger("providers.openai_compat")
@@ -59,13 +59,24 @@ class OpenAICompatibleProvider(OpenAIChatProvider):
             ]
 
         # Try to fetch from API
+        url = f"{self.base_url}/models"
+        headers = self._get_headers()
+        audit = _request_audit()
+        if audit is not None:
+            audit.record_upstream("GET", url, headers, None)
         async with httpx.AsyncClient() as client:
             try:
                 response = await client.get(
-                    f"{self.base_url}/models",
-                    headers=self._get_headers(),
+                    url,
+                    headers=headers,
                     timeout=30.0,
                 )
+                if audit is not None:
+                    audit.record_upstream_response(
+                        response.status_code,
+                        dict(response.headers),
+                        response.content,
+                    )
                 response.raise_for_status()
                 model_ids = self._parse_model_catalog(response)
 
