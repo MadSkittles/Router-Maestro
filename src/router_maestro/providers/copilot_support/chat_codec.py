@@ -158,6 +158,18 @@ class CopilotChatCodec:
                 break
         return text, signature
 
+    @staticmethod
+    def _is_provisional_zero_usage(usage: dict[str, Any] | None, choices: list[Any] | None) -> bool:
+        """Recognize Copilot's all-zero usage attached to non-terminal reasoning deltas."""
+        if not usage or not choices:
+            return False
+        if any(choice.get("finish_reason") is not None for choice in choices):
+            return False
+        return all(
+            usage.get(field) == 0
+            for field in ("prompt_tokens", "completion_tokens", "total_tokens")
+        )
+
     def decode_response(
         self,
         data: dict[str, Any],
@@ -372,6 +384,9 @@ class CopilotChatCodec:
                     model=request.model,
                     cause=error,
                 ) from error
+
+            if observed_usage is None and self._is_provisional_zero_usage(usage, choices):
+                usage = None
 
             usage_to_emit = None
             if usage:

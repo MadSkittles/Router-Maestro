@@ -2276,6 +2276,8 @@ def _stream_for_codec(
     codec: str,
     body: bytes,
     monkeypatch: pytest.MonkeyPatch,
+    *,
+    copilot_chat_model: str = "gpt-4o",
 ) -> tuple[AsyncIterator[ChatStreamChunk | ResponsesStreamChunk], str, str]:
     def handler(_request: httpx.Request) -> httpx.Response:
         return httpx.Response(
@@ -2307,7 +2309,7 @@ def _stream_for_codec(
         provider._client = client
         provider.ensure_token = _noop  # type: ignore[method-assign]
         provider._get_headers = lambda *args, **kwargs: {}  # type: ignore[method-assign]
-        model = "gpt-4o"
+        model = copilot_chat_model
         stream = provider.chat_completion_stream(_chat_request(model=model, stream=True))
         return stream, provider.name, model
     if codec == "copilot-responses":
@@ -2815,6 +2817,65 @@ async def test_copilot_chat_emits_identical_usage_once_across_all_stream_phases(
     assert [chunk.usage for chunk in chunks if chunk.usage] == [
         {"prompt_tokens": 2, "completion_tokens": 1, "total_tokens": 3}
     ]
+
+
+@pytest.mark.asyncio
+async def test_copilot_chat_ignores_provisional_zero_usage_before_final_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Gemini-family chat streams can attach all-zero usage to reasoning deltas."""
+    provisional = (
+        '{"choices":[{"index":0,"delta":{"content":null,'
+        '"reasoning_text":"hidden"},"finish_reason":null}],'
+        '"usage":{"prompt_tokens":0,"completion_tokens":0,"total_tokens":0,'
+        '"prompt_tokens_details":{"cached_tokens":0}}}'
+    )
+    final = (
+        '{"choices":[{"index":0,"delta":{"content":"pong"},"finish_reason":"stop"}],'
+        '"usage":{"prompt_tokens":16,"completion_tokens":1,"total_tokens":184}}'
+    )
+    stream, _provider, _model = _stream_for_codec(
+        "copilot-chat",
+        _sse_body(provisional, provisional, final, "[DONE]"),
+        monkeypatch,
+        copilot_chat_model="gemini-2.5-pro",
+    )
+
+    chunks = [chunk async for chunk in stream]
+
+    assert [chunk.content for chunk in chunks if chunk.content] == ["pong"]
+    assert [chunk.finish_reason for chunk in chunks if chunk.finish_reason] == ["stop"]
+    assert [chunk.usage for chunk in chunks if chunk.usage] == [
+        {"prompt_tokens": 16, "completion_tokens": 1, "total_tokens": 184}
+    ]
+
+
+@pytest.mark.asyncio
+async def test_copilot_chat_rejects_provisional_zero_after_observed_usage(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observed = (
+        '{"choices":[{"index":0,"delta":{"content":"first"},'
+        '"finish_reason":null}],'
+        '"usage":{"prompt_tokens":2,"completion_tokens":1,"total_tokens":3}}'
+    )
+    regressed = (
+        '{"choices":[{"index":0,"delta":{"content":null,'
+        '"reasoning_text":"hidden"},"finish_reason":null}],'
+        '"usage":{"prompt_tokens":0,"completion_tokens":0,"total_tokens":0}}'
+    )
+    stream, provider, model = _stream_for_codec(
+        "copilot-chat",
+        _sse_body(observed, regressed, "[DONE]"),
+        monkeypatch,
+        copilot_chat_model="gemini-2.5-pro",
+    )
+
+    with pytest.raises(ProviderError) as exc_info:
+        async for _chunk in stream:
+            pass
+
+    _assert_protocol_failure(exc_info.value, provider=provider, model=model)
 
 
 @pytest.mark.asyncio
