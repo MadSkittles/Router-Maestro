@@ -107,12 +107,16 @@ def save_providers_config(config: ProvidersConfig) -> None:
 
 def load_priorities_config() -> PrioritiesConfig:
     """Load priorities configuration."""
-    return load_config(PRIORITIES_FILE, PrioritiesConfig, PrioritiesConfig.get_default)
+    from router_maestro.config.repository import RuntimeConfigRepository
+
+    return RuntimeConfigRepository(PRIORITIES_FILE).read().config
 
 
 def save_priorities_config(config: PrioritiesConfig) -> None:
     """Save priorities configuration."""
-    save_config(PRIORITIES_FILE, config)
+    from router_maestro.config.repository import RuntimeConfigRepository
+
+    RuntimeConfigRepository(PRIORITIES_FILE).write_compat(config)
 
 
 def load_contexts_config() -> ContextsConfig:
