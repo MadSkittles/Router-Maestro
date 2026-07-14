@@ -662,11 +662,21 @@ async def test_concurrent_cold_catalog_requests_share_one_refresh() -> None:
 
 
 @pytest.mark.asyncio
-async def test_stale_catalog_is_served_while_one_refresh_runs() -> None:
+async def test_stale_catalog_is_served_while_one_refresh_runs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from router_maestro.utils import cache as cache_module
+
+    class FreshRunnerClock:
+        @staticmethod
+        def monotonic() -> float:
+            return 100.0
+
+    monkeypatch.setattr(cache_module, "time", FreshRunnerClock)
     catalog = CopilotCatalog()
     stale = [ModelInfo(id="stale", name="Stale", provider="github-copilot")]
     catalog.models_ttl_cache.set(stale)
-    catalog.models_ttl_cache._timestamp = 0
+    catalog.models_ttl_cache._timestamp -= catalog.models_ttl_cache._ttl + 1
     send_started = asyncio.Event()
     release_send = asyncio.Event()
     send_count = 0
@@ -686,7 +696,7 @@ async def test_stale_catalog_is_served_while_one_refresh_runs() -> None:
         derive_operations=_operations,
         raise_protocol_error=_protocol_error,
     )
-    await send_started.wait()
+    await asyncio.wait_for(send_started.wait(), timeout=1)
     second = await catalog.list_models(
         provider_name="github-copilot",
         ensure_token=_noop_token,
@@ -720,7 +730,7 @@ async def test_stale_catalog_refresh_runs_without_request_context() -> None:
     catalog = CopilotCatalog()
     stale = [ModelInfo(id="stale", name="Stale", provider="github-copilot")]
     catalog.models_ttl_cache.set(stale)
-    catalog.models_ttl_cache._timestamp = 0
+    catalog.models_ttl_cache._timestamp -= catalog.models_ttl_cache._ttl + 1
     refresh_contexts: list[RequestContext | None] = []
     refresh_finished = asyncio.Event()
 
@@ -785,7 +795,7 @@ async def test_catalog_aclose_cancels_and_awaits_active_refresh() -> None:
     catalog = CopilotCatalog()
     stale = [ModelInfo(id="stale", name="Stale", provider="github-copilot")]
     catalog.models_ttl_cache.set(stale)
-    catalog.models_ttl_cache._timestamp = 0
+    catalog.models_ttl_cache._timestamp -= catalog.models_ttl_cache._ttl + 1
     refresh_started = asyncio.Event()
     refresh_finished = asyncio.Event()
 

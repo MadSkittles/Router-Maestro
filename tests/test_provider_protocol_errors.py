@@ -506,7 +506,7 @@ async def test_copilot_padded_model_id_serves_and_renews_defensive_stale_snapsho
     provider = CopilotProvider()
     stale = [ModelInfo(id="known", name="Known", provider="github-copilot")]
     provider._models_ttl_cache.set(stale)
-    provider._models_ttl_cache._timestamp = 0
+    provider._models_ttl_cache._timestamp -= provider._models_ttl_cache._ttl + 1
     provider.ensure_token = AsyncMock()  # type: ignore[method-assign]
     provider._send_with_auth_retry = AsyncMock(  # type: ignore[method-assign]
         return_value=_response_for_payload({"data": [{"id": " padded-model "}]})
@@ -531,7 +531,7 @@ async def test_copilot_malformed_supported_endpoints_serves_and_renews_stale_sna
     provider = CopilotProvider()
     stale = [ModelInfo(id="known", name="Known", provider="github-copilot")]
     provider._models_ttl_cache.set(stale)
-    provider._models_ttl_cache._timestamp = 0
+    provider._models_ttl_cache._timestamp -= provider._models_ttl_cache._ttl + 1
     provider.ensure_token = AsyncMock()  # type: ignore[method-assign]
     provider._send_with_auth_retry = AsyncMock(  # type: ignore[method-assign]
         return_value=_response_for_payload(
@@ -555,7 +555,7 @@ async def test_copilot_malformed_strict_catalog_field_serves_and_renews_stale_sn
     provider = CopilotProvider()
     stale = [ModelInfo(id="known", name="Known", provider="github-copilot")]
     provider._models_ttl_cache.set(stale)
-    provider._models_ttl_cache._timestamp = 0
+    provider._models_ttl_cache._timestamp -= provider._models_ttl_cache._ttl + 1
     provider.ensure_token = AsyncMock()  # type: ignore[method-assign]
     provider._send_with_auth_retry = AsyncMock(  # type: ignore[method-assign]
         return_value=_response_for_payload(
