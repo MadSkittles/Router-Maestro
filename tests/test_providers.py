@@ -21,7 +21,7 @@ from router_maestro.providers import (
     OpenAIProvider,
     ResponsesRequest,
 )
-from router_maestro.providers.base import ProviderError
+from router_maestro.providers.base import ProviderError, ProviderFailureKind
 
 
 class TestProviderBase:
@@ -50,6 +50,140 @@ class TestProviderBase:
         provider._api_base = "https://api.enterprise.githubcopilot.com/"
 
         assert provider._url("/models") == "https://api.enterprise.githubcopilot.com/models"
+
+    @pytest.mark.asyncio
+    async def test_copilot_counts_native_anthropic_tokens_via_public_method(self):
+        """Native token counting is a provider operation, not a route transport seam."""
+        provider = CopilotProvider()
+        provider.ensure_token = AsyncMock()  # type: ignore[method-assign]
+        provider._send_with_auth_retry = AsyncMock(  # type: ignore[method-assign]
+            return_value=httpx.Response(
+                200,
+                json={"input_tokens": 42},
+                request=httpx.Request(
+                    "POST", "https://api.githubcopilot.com/v1/messages/count_tokens"
+                ),
+            )
+        )
+        payload = {
+            "model": "claude-sonnet-4.5",
+            "messages": [{"role": "user", "content": "Hello"}],
+        }
+
+        result = await provider.count_native_anthropic_tokens(
+            payload,
+            model="claude-sonnet-4.5",
+        )
+
+        assert result == 42
+        provider.ensure_token.assert_awaited_once_with()
+        provider._send_with_auth_retry.assert_awaited_once_with(
+            "POST",
+            "/v1/messages/count_tokens",
+            json=payload,
+            model="claude-sonnet-4.5",
+        )
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "upstream_payload",
+        [
+            {},
+            [],
+            {"input_tokens": True},
+            {"input_tokens": -1},
+            {"input_tokens": 1.5},
+            {"input_tokens": "1"},
+        ],
+        ids=["missing", "non-object", "boolean", "negative", "float", "string"],
+    )
+    async def test_copilot_native_token_count_rejects_malformed_success(
+        self,
+        upstream_payload,
+    ):
+        provider = CopilotProvider()
+        provider.ensure_token = AsyncMock()  # type: ignore[method-assign]
+        provider._send_with_auth_retry = AsyncMock(  # type: ignore[method-assign]
+            return_value=httpx.Response(
+                200,
+                json=upstream_payload,
+                request=httpx.Request(
+                    "POST", "https://api.githubcopilot.com/v1/messages/count_tokens"
+                ),
+            )
+        )
+
+        with pytest.raises(ProviderError) as exc_info:
+            await provider.count_native_anthropic_tokens(
+                {"model": "claude-sonnet-4.5", "messages": []},
+                model="claude-sonnet-4.5",
+            )
+
+        error = exc_info.value
+        assert error.kind is ProviderFailureKind.UPSTREAM_PROTOCOL
+        assert error.status_code == 502
+        assert error.upstream_status_code == 200
+        assert error.provider == "github-copilot"
+        assert error.model == "claude-sonnet-4.5"
+
+    @pytest.mark.asyncio
+    async def test_copilot_native_token_count_maps_upstream_status_to_provider_failure(self):
+        provider = CopilotProvider()
+        provider.ensure_token = AsyncMock()  # type: ignore[method-assign]
+        provider._send_with_auth_retry = AsyncMock(  # type: ignore[method-assign]
+            return_value=httpx.Response(
+                429,
+                json={"type": "error", "error": {"type": "rate_limit_error"}},
+                request=httpx.Request(
+                    "POST", "https://api.githubcopilot.com/v1/messages/count_tokens"
+                ),
+            )
+        )
+
+        with pytest.raises(ProviderError) as exc_info:
+            await provider.count_native_anthropic_tokens(
+                {"model": "claude-sonnet-4.5", "messages": []},
+                model="claude-sonnet-4.5",
+            )
+
+        error = exc_info.value
+        assert error.kind is ProviderFailureKind.RATE_LIMIT
+        assert error.status_code == 429
+        assert error.upstream_status_code == 429
+        assert error.provider == "github-copilot"
+        assert error.model == "claude-sonnet-4.5"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("upstream_error", "expected_status"),
+        [
+            (httpx.ReadTimeout("slow upstream"), 504),
+            (httpx.ReadError("broken transport"), 502),
+        ],
+        ids=["timeout", "http-error"],
+    )
+    async def test_copilot_native_token_count_maps_transport_failures(
+        self,
+        upstream_error,
+        expected_status,
+    ):
+        provider = CopilotProvider()
+        provider.ensure_token = AsyncMock()  # type: ignore[method-assign]
+        provider._send_with_auth_retry = AsyncMock(  # type: ignore[method-assign]
+            side_effect=upstream_error
+        )
+
+        with pytest.raises(ProviderError) as exc_info:
+            await provider.count_native_anthropic_tokens(
+                {"model": "claude-sonnet-4.5", "messages": []},
+                model="claude-sonnet-4.5",
+            )
+
+        error = exc_info.value
+        assert error.kind is ProviderFailureKind.TRANSPORT
+        assert error.status_code == expected_status
+        assert error.provider == "github-copilot"
+        assert error.model == "claude-sonnet-4.5"
 
     @pytest.mark.asyncio
     async def test_copilot_api_base_uses_persisted_endpoint_metadata(self):

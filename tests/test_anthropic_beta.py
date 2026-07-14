@@ -953,6 +953,7 @@ def _native_provider() -> MagicMock:
         "usage": {"input_tokens": 5, "output_tokens": 2},
     }
     provider._send_with_auth_retry = AsyncMock(return_value=response)
+    provider.count_native_anthropic_tokens = AsyncMock(return_value=42)
     return provider
 
 
@@ -4961,7 +4962,7 @@ class TestBetaCountTokensEndpoint:
     ):
         marker = "private-count-tokens-cause-marker"
         provider = _native_provider()
-        provider._send_with_auth_retry.side_effect = ProviderError(
+        provider.count_native_anthropic_tokens.side_effect = ProviderError(
             "Safe count tokens failure",
             status_code=502,
             retryable=True,
@@ -4999,9 +5000,7 @@ class TestBetaCountTokensEndpoint:
 
     def test_count_tokens_does_not_request_completion_route_plan(self, client):
         provider = _native_provider()
-        response = MagicMock(status_code=200)
-        response.json.return_value = {"input_tokens": 42}
-        provider._send_with_auth_retry = AsyncMock(return_value=response)
+        provider.count_native_anthropic_tokens = AsyncMock(return_value=42)
         model_router = MagicMock()
         model_router._resolve_provider = AsyncMock(
             return_value=("github-copilot", "claude-sonnet-4.5", provider)
@@ -5031,10 +5030,7 @@ class TestBetaCountTokensEndpoint:
         mock_provider = MagicMock(spec=CopilotProvider)
         mock_provider.ensure_token = AsyncMock()
 
-        mock_response = MagicMock()
-        mock_response.status_code = 200
-        mock_response.json.return_value = {"input_tokens": 42}
-        mock_provider._send_with_auth_retry = AsyncMock(return_value=mock_response)
+        mock_provider.count_native_anthropic_tokens = AsyncMock(return_value=42)
         mock_resolve.return_value = _ResolvedModel(
             "github-copilot", "claude-sonnet-4.5", mock_provider
         )
@@ -5049,3 +5045,10 @@ class TestBetaCountTokensEndpoint:
 
         assert resp.status_code == 200
         assert resp.json() == {"input_tokens": 42}
+        mock_provider.count_native_anthropic_tokens.assert_awaited_once_with(
+            {
+                "model": "claude-sonnet-4.5",
+                "messages": [{"role": "user", "content": "Hello"}],
+            },
+            model="claude-sonnet-4.5",
+        )

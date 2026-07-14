@@ -46,7 +46,6 @@ logger = get_logger("server.routes.anthropic_beta")
 router = APIRouter()
 
 COPILOT_MESSAGES_PATH = "/v1/messages"
-COPILOT_COUNT_TOKENS_PATH = "/v1/messages/count_tokens"
 
 _STRIP_RESPONSE_KEYS = frozenset({"copilot_usage", "stop_details"})
 _STRIP_STREAM_MESSAGE_STOP_KEYS = frozenset({"copilot_usage", "amazon-bedrock-invocationMetrics"})
@@ -1039,14 +1038,10 @@ async def beta_count_tokens(raw_request: FastAPIRequest):
         request = AnthropicCountTokensRequest.model_validate(body)
         return await count_tokens(request)
 
-    body["model"] = actual_model
-    await copilot_provider.ensure_token()
-
     try:
-        response = await copilot_provider._send_with_auth_retry(
-            "POST",
-            COPILOT_COUNT_TOKENS_PATH,
-            json=body,
+        body["model"] = actual_model
+        input_tokens = await copilot_provider.count_native_anthropic_tokens(
+            body,
             model=actual_model,
         )
     except ProviderError as e:
@@ -1057,25 +1052,12 @@ async def beta_count_tokens(raw_request: FastAPIRequest):
         )
         return protocol_error_response(e, "anthropic")
 
-    if response.status_code >= 400:
-        logger.warning(
-            "Beta count_tokens upstream %d for model=%s",
-            response.status_code,
-            actual_model,
-        )
-        try:
-            error_body = response.json()
-        except Exception:
-            error_body = {"error": {"type": "api_error", "message": response.text}}
-        return JSONResponse(content=error_body, status_code=response.status_code)
-
-    result = response.json()
     logger.debug(
         "Beta count_tokens: model=%s, input_tokens=%s",
         actual_model,
-        result.get("input_tokens"),
+        input_tokens,
     )
-    return JSONResponse(content=result)
+    return JSONResponse(content={"input_tokens": input_tokens})
 
 
 async def _stream_passthrough(
