@@ -562,6 +562,12 @@ class ProviderFailureKind(StrEnum):
     UNKNOWN = "unknown"
 
 
+class ProviderFailureSignal(StrEnum):
+    """Closed, non-sensitive classifications for narrowly handled failures."""
+
+    COPILOT_BARE_BAD_REQUEST = "copilot_bare_bad_request"
+
+
 class ProviderError(Exception):
     """Safe, typed error raised by a provider adapter.
 
@@ -581,6 +587,7 @@ class ProviderError(Exception):
         model: str | None = None,
         cause: BaseException | None = None,
         parameter: str | None = None,
+        signal: ProviderFailureSignal | None = None,
     ) -> None:
         super().__init__(message)
         self.safe_message = message
@@ -592,6 +599,7 @@ class ProviderError(Exception):
         self.model = model
         self.cause = cause
         self.parameter = parameter
+        self.signal = signal
         self._attempts: tuple[AttemptRecord, ...] = ()
 
     @property
@@ -799,6 +807,7 @@ class BaseProvider(ABC):
         include_body: bool = False,
         provider: str | None = None,
         model: str | None = None,
+        signal: ProviderFailureSignal | None = None,
     ) -> NoReturn:
         """Raise a ProviderError from an HTTP status error.
 
@@ -841,6 +850,7 @@ class BaseProvider(ABC):
                 provider=provider or label,
                 model=model,
                 cause=error,
+                signal=signal,
             ) from error
         logger.error("%s%s API error: %d", label, suffix, error.response.status_code)
         raise ProviderError(
@@ -852,6 +862,7 @@ class BaseProvider(ABC):
             provider=provider or label,
             model=model,
             cause=error,
+            signal=signal,
         ) from error
 
     @staticmethod

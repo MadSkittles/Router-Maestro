@@ -3,27 +3,18 @@
 import json
 import re
 
-from router_maestro.providers import ChatRequest, Message
+from router_maestro.providers import ChatRequest, ChatStreamChunk, Message
+from router_maestro.server.protocols.anthropic_reducer import AnthropicReducer
 from router_maestro.server.schemas.anthropic import (
-    AnthropicAssistantContentBlock,
     AnthropicAssistantMessage,
     AnthropicMessagesRequest,
-    AnthropicMessagesResponse,
     AnthropicStreamState,
     AnthropicTextBlock,
-    AnthropicThinkingBlock,
-    AnthropicToolCallAccumulator,
-    AnthropicToolUseBlock,
-    AnthropicUsage,
     AnthropicUserMessage,
 )
-from router_maestro.utils import get_logger, map_openai_stop_reason_to_anthropic
+from router_maestro.utils import get_logger
 
 logger = get_logger("server.translation")
-
-
-class AnthropicStreamProtocolError(Exception):
-    """An upstream Chat stream cannot be represented as legal Anthropic SSE."""
 
 
 def _get_block_field(block, field: str, default=None):
@@ -399,464 +390,50 @@ def _extract_multimodal_content(blocks: list) -> str | list:
     return content_parts
 
 
-def translate_openai_to_anthropic(
-    openai_response: dict, model: str, request_id: str
-) -> AnthropicMessagesResponse:
-    """Translate OpenAI ChatCompletion response to Anthropic Messages response."""
-    content: list[AnthropicAssistantContentBlock] = []
-
-    # Extract content from choices
-    if "choices" in openai_response:
-        for choice in openai_response["choices"]:
-            message = choice.get("message", {})
-
-            # Reasoning trace, if any, comes before text per Anthropic ordering
-            think_text = ""
-            think_sig: str | None = None
-            for key in ("reasoning_text", "cot_summary", "thinking"):
-                val = message.get(key)
-                if isinstance(val, str) and val:
-                    think_text = val
-                    break
-                if isinstance(val, dict):
-                    inner = val.get("text") or val.get("content")
-                    if isinstance(inner, str) and inner:
-                        think_text = inner
-                        break
-            for key in ("reasoning_opaque", "cot_id", "signature"):
-                val = message.get(key)
-                if isinstance(val, str) and val:
-                    think_sig = val
-                    break
-            if think_text or think_sig:
-                content.append(
-                    AnthropicThinkingBlock(
-                        type="thinking",
-                        thinking=think_text,
-                        signature=think_sig,
-                    )
-                )
-
-            msg_content = message.get("content")
-            if msg_content:
-                content.append(AnthropicTextBlock(type="text", text=msg_content))
-
-            # Handle tool calls if present
-            tool_calls = message.get("tool_calls", [])
-            for tool_call in tool_calls:
-                arguments = tool_call.get("function", {}).get("arguments", {})
-                if isinstance(arguments, str):
-                    try:
-                        arguments = json.loads(arguments)
-                    except (json.JSONDecodeError, TypeError):
-                        arguments = {}
-                content.append(
-                    AnthropicToolUseBlock(
-                        type="tool_use",
-                        id=tool_call.get("id", ""),
-                        name=tool_call.get("function", {}).get("name", ""),
-                        input=arguments,
-                    )
-                )
-
-    # Map finish reason
-    finish_reason = None
-    if openai_response.get("choices"):
-        openai_reason = openai_response["choices"][0].get("finish_reason")
-        finish_reason = map_openai_stop_reason_to_anthropic(openai_reason)
-
-    # Extract usage
-    openai_usage = openai_response.get("usage", {})
-    usage = AnthropicUsage(
-        input_tokens=openai_usage.get("prompt_tokens", 0),
-        output_tokens=openai_usage.get("completion_tokens", 0),
-    )
-
-    return AnthropicMessagesResponse(
-        id=request_id,
-        type="message",
-        role="assistant",
-        content=content,
-        model=model,
-        stop_reason=finish_reason,
-        stop_sequence=None,
-        usage=usage,
-    )
-
-
-def build_message_start_event(
-    state: AnthropicStreamState, model: str, response_id: str = ""
-) -> dict | None:
-    """Build an Anthropic ``message_start`` event and mark state as sent.
-
-    Returns ``None`` when ``message_start`` has already been emitted, allowing
-    callers to safely call this in multiple places (e.g. eagerly at stream
-    open AND from the chunk translator) without double-sending.
-    """
-    if state.message_start_sent:
-        return None
-
-    input_tokens = 0
-    if state.last_usage:
-        input_tokens = state.last_usage.get("prompt_tokens", 0)
-    elif state.estimated_input_tokens:
-        input_tokens = state.estimated_input_tokens
-
-    state.message_start_sent = True
-    return {
-        "type": "message_start",
-        "message": {
-            "id": response_id,
-            "type": "message",
-            "role": "assistant",
-            "content": [],
-            "model": model,
-            "stop_reason": None,
-            "stop_sequence": None,
-            "usage": {
-                "input_tokens": input_tokens,
-                "output_tokens": 1,
-                "cache_creation_input_tokens": None,
-                "cache_read_input_tokens": None,
-                "server_tool_use": None,
-                "service_tier": "standard",
-            },
-        },
-    }
-
-
 def translate_openai_chunk_to_anthropic_events(
     chunk: dict, state: AnthropicStreamState, model: str
 ) -> list[dict]:
-    """Translate OpenAI streaming chunk to Anthropic SSE events."""
-    events: list[dict] = []
-
-    # Don't process any more chunks after message is complete
+    """Adapt a legacy OpenAI chunk dict to the canonical Anthropic reducer."""
     if state.message_complete:
-        return events
+        return []
 
-    # Track latest usage info from any chunk that contains it
-    if chunk.get("usage"):
-        usage = chunk["usage"]
-        state.last_usage = usage
-        ct = usage.get("completion_tokens", 0)
-        if ct > 0:
-            state.accumulated_completion_tokens = max(state.accumulated_completion_tokens, ct)
-        pt = usage.get("prompt_tokens", 0)
-        if pt > 0:
-            state.accumulated_prompt_tokens = max(state.accumulated_prompt_tokens, pt)
-        if usage.get("completion_tokens_details"):
-            state.completion_tokens_details = usage["completion_tokens_details"]
-        if usage.get("prompt_tokens_details"):
-            state.prompt_tokens_details = usage["prompt_tokens_details"]
+    reducer = AnthropicReducer(
+        response_id=chunk.get("id", ""),
+        model=model,
+        state=state,
+    )
+    choices = chunk.get("choices") or []
+    if not choices:
+        reducer.observe_usage(chunk.get("usage"))
+        return []
 
-    if not chunk.get("choices"):
-        return events
-
-    choice = chunk["choices"][0]
-    delta = choice.get("delta", {})
-
-    # Send message_start if not sent yet
-    start_event = build_message_start_event(state, model, response_id=chunk.get("id", ""))
-    if start_event is not None:
-        events.append(start_event)
-
-    # Handle reasoning / thinking deltas. Copilot streams reasoning under
-    # several legacy field names (reasoning_text / cot_summary / thinking).
-    # Anthropic streaming requires a thinking content_block to be opened
-    # before its deltas are emitted, and closed before any text/tool block.
-    thinking_text = ""
+    choice = choices[0]
+    delta = choice.get("delta") or {}
+    thinking = None
     for key in ("reasoning_text", "cot_summary", "thinking"):
-        val = delta.get(key)
-        if isinstance(val, str) and val:
-            thinking_text = val
+        value = delta.get(key)
+        if isinstance(value, str) and value:
+            thinking = value
             break
-        if isinstance(val, dict):
-            inner = val.get("text") or val.get("content")
+        if isinstance(value, dict):
+            inner = value.get("text") or value.get("content")
             if isinstance(inner, str) and inner:
-                thinking_text = inner
+                thinking = inner
                 break
     thinking_signature = None
     for key in ("reasoning_opaque", "cot_id", "signature"):
-        val = delta.get(key)
-        if isinstance(val, str) and val:
-            thinking_signature = val
+        value = delta.get(key)
+        if isinstance(value, str) and value:
+            thinking_signature = value
             break
-
-    if thinking_text or thinking_signature:
-        # Open thinking block if one isn't already open
-        if not state.thinking_block_open:
-            # Close any other open block (text/tool) first
-            if state.content_block_open:
-                events.append(
-                    {
-                        "type": "content_block_stop",
-                        "index": state.content_block_index,
-                    }
-                )
-                state.content_block_index += 1
-                state.content_block_open = False
-            events.append(
-                {
-                    "type": "content_block_start",
-                    "index": state.content_block_index,
-                    "content_block": {
-                        "type": "thinking",
-                        "thinking": "",
-                    },
-                }
-            )
-            state.thinking_block_open = True
-            state.content_block_open = True
-
-        if thinking_text:
-            events.append(
-                {
-                    "type": "content_block_delta",
-                    "index": state.content_block_index,
-                    "delta": {
-                        "type": "thinking_delta",
-                        "thinking": thinking_text,
-                    },
-                }
-            )
-        if thinking_signature:
-            events.append(
-                {
-                    "type": "content_block_delta",
-                    "index": state.content_block_index,
-                    "delta": {
-                        "type": "signature_delta",
-                        "signature": thinking_signature,
-                    },
-                }
-            )
-
-    # Tool fragments are only buffered, so they do not displace the live
-    # thinking block. Text is emitted immediately and must close thinking.
-    if state.thinking_block_open and delta.get("content"):
-        events.append(
-            {
-                "type": "content_block_stop",
-                "index": state.content_block_index,
-            }
+    return reducer.reduce(
+        ChatStreamChunk(
+            content=delta.get("content") or "",
+            refusal=delta.get("refusal") or None,
+            finish_reason=choice.get("finish_reason"),
+            usage=chunk.get("usage"),
+            tool_calls=delta.get("tool_calls"),
+            thinking=thinking,
+            thinking_signature=thinking_signature,
         )
-        state.content_block_index += 1
-        state.content_block_open = False
-        state.thinking_block_open = False
-
-    # Handle text content
-    if delta.get("content"):
-        # Start text block if not open
-        if not state.content_block_open:
-            events.append(
-                {
-                    "type": "content_block_start",
-                    "index": state.content_block_index,
-                    "content_block": {
-                        "type": "text",
-                        "text": "",
-                    },
-                }
-            )
-            state.content_block_open = True
-
-        # Send text delta
-        events.append(
-            {
-                "type": "content_block_delta",
-                "index": state.content_block_index,
-                "delta": {
-                    "type": "text_delta",
-                    "text": delta["content"],
-                },
-            }
-        )
-
-    # Tool calls cannot be emitted incrementally in Anthropic format when
-    # upstream interleaves their argument deltas: Anthropic permits only one
-    # open content block at a time. Buffer them transactionally and flush only
-    # after an explicit message terminal proves every call is complete.
-    if delta.get("tool_calls"):
-        for tool_call in delta["tool_calls"]:
-            _accumulate_tool_call(state, tool_call)
-
-    # Handle finish
-    finish_reason = choice.get("finish_reason")
-    if finish_reason:
-        validated_tool_calls = _validated_tool_calls(state)
-
-        if state.content_block_open:
-            events.append(
-                {
-                    "type": "content_block_stop",
-                    "index": state.content_block_index,
-                }
-            )
-            state.content_block_open = False
-            state.thinking_block_open = False
-            if validated_tool_calls:
-                state.content_block_index += 1
-
-        for tool_call in validated_tool_calls:
-            block_index = state.content_block_index
-            events.extend(
-                [
-                    {
-                        "type": "content_block_start",
-                        "index": block_index,
-                        "content_block": {
-                            "type": "tool_use",
-                            "id": tool_call.tool_id,
-                            "name": tool_call.name,
-                            "input": {},
-                        },
-                    },
-                    {
-                        "type": "content_block_delta",
-                        "index": block_index,
-                        "delta": {
-                            "type": "input_json_delta",
-                            "partial_json": "".join(tool_call.argument_fragments),
-                        },
-                    },
-                    {"type": "content_block_stop", "index": block_index},
-                ]
-            )
-            state.content_block_index += 1
-
-        # Get usage from accumulated values, chunk, or tracked last_usage
-        prompt_tokens = state.accumulated_prompt_tokens or (
-            chunk.get("usage") or state.last_usage or {}
-        ).get("prompt_tokens", 0)
-        completion_tokens = state.accumulated_completion_tokens or (
-            chunk.get("usage") or state.last_usage or {}
-        ).get("completion_tokens", 0)
-
-        # Prefer actual tokens from API when available
-        # This gives Claude Code accurate context percentage based on actual API usage
-        input_tokens_for_display = (
-            prompt_tokens if prompt_tokens > 0 else state.estimated_input_tokens
-        )
-
-        events.append(
-            {
-                "type": "message_delta",
-                "delta": {
-                    "stop_reason": map_openai_stop_reason_to_anthropic(finish_reason),
-                    "stop_sequence": None,
-                },
-                "usage": {
-                    "input_tokens": input_tokens_for_display,
-                    "output_tokens": completion_tokens,
-                    "cache_creation_input_tokens": 0,
-                    "cache_read_input_tokens": 0,
-                    "server_tool_use": None,
-                },
-            }
-        )
-        events.append({"type": "message_stop"})
-        state.message_complete = True
-
-    return events
-
-
-def _accumulate_tool_call(state: AnthropicStreamState, tool_call: dict) -> None:
-    """Merge one OpenAI tool delta using index/id identity without guessing."""
-    if not isinstance(tool_call, dict):
-        raise AnthropicStreamProtocolError("tool call delta must be an object")
-    upstream_index = tool_call.get("index")
-    tool_id = tool_call.get("id")
-    function = tool_call.get("function")
-    if function is None:
-        function = {}
-    if not isinstance(function, dict):
-        raise AnthropicStreamProtocolError("tool call function must be an object")
-    name = function.get("name")
-    arguments = function.get("arguments")
-
-    if upstream_index is None and not tool_id:
-        raise AnthropicStreamProtocolError("tool call delta missing both index and id")
-    if upstream_index is not None and (
-        isinstance(upstream_index, bool)
-        or not isinstance(upstream_index, int)
-        or upstream_index < 0
-    ):
-        raise AnthropicStreamProtocolError("tool call index must be a non-negative integer")
-    for field_name, value in (("id", tool_id), ("name", name), ("arguments", arguments)):
-        if value is not None and not isinstance(value, str):
-            raise AnthropicStreamProtocolError(f"tool call {field_name} must be a string")
-
-    by_index = (
-        next(
-            (call for call in state.tool_calls if call.upstream_index == upstream_index),
-            None,
-        )
-        if upstream_index is not None
-        else None
     )
-    by_id = (
-        next(
-            (call for call in state.tool_calls if call.tool_id == tool_id),
-            None,
-        )
-        if tool_id
-        else None
-    )
-
-    if by_index is not None and by_id is not None and by_index is not by_id:
-        raise AnthropicStreamProtocolError("tool call has conflicting index and id")
-    call = by_index or by_id
-    if call is None:
-        call = AnthropicToolCallAccumulator(
-            upstream_index=upstream_index,
-            tool_id=tool_id or None,
-            name=name or None,
-            arrival_ordinal=state.next_tool_arrival_ordinal,
-        )
-        state.next_tool_arrival_ordinal += 1
-        state.tool_calls.append(call)
-    else:
-        if upstream_index is not None:
-            if call.upstream_index is not None and call.upstream_index != upstream_index:
-                raise AnthropicStreamProtocolError("tool call has conflicting index")
-            call.upstream_index = upstream_index
-        if tool_id:
-            if call.tool_id is not None and call.tool_id != tool_id:
-                raise AnthropicStreamProtocolError("tool call has conflicting id")
-            call.tool_id = tool_id
-
-    if name:
-        if call.name is not None and call.name != name:
-            raise AnthropicStreamProtocolError("tool call has conflicting name")
-        call.name = name
-    if arguments:
-        call.argument_fragments.append(arguments)
-
-
-def _validated_tool_calls(state: AnthropicStreamState) -> list[AnthropicToolCallAccumulator]:
-    """Validate all buffered calls before any tool wire event is emitted."""
-    for call in state.tool_calls:
-        if not call.tool_id:
-            raise AnthropicStreamProtocolError("tool call missing id")
-        if not call.name:
-            raise AnthropicStreamProtocolError("tool call missing name")
-        arguments = "".join(call.argument_fragments)
-        try:
-            parsed = json.loads(arguments)
-        except (json.JSONDecodeError, TypeError) as exc:
-            raise AnthropicStreamProtocolError(
-                "tool call arguments must be a valid JSON object"
-            ) from exc
-        if not isinstance(parsed, dict):
-            raise AnthropicStreamProtocolError("tool call arguments must be a JSON object")
-
-    explicitly_indexed = sorted(
-        (call for call in state.tool_calls if call.upstream_index is not None),
-        key=lambda call: call.upstream_index,
-    )
-    indexless = sorted(
-        (call for call in state.tool_calls if call.upstream_index is None),
-        key=lambda call: call.arrival_ordinal,
-    )
-    return explicitly_indexed + indexless

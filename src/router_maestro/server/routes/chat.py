@@ -6,13 +6,14 @@ import time
 import uuid
 from collections.abc import AsyncGenerator
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter
 from pydantic import ValidationError
 
 from router_maestro.providers import (
     ChatRequest,
     Message,
     ProviderError,
+    ProviderFailureKind,
     RequestOptionError,
     ResponseStatus,
     TerminalOutcome,
@@ -25,6 +26,7 @@ from router_maestro.providers import (
 from router_maestro.routing import Router, get_router
 from router_maestro.routing.model_ref import qualify_model_id
 from router_maestro.server.protocols import client_error_response, unrepresented_option_error
+from router_maestro.server.protocols.errors import postcommit_error_data, protocol_error_response
 from router_maestro.server.schemas import (
     ChatCompletionChoice,
     ChatCompletionChunk,
@@ -200,22 +202,32 @@ async def chat_completions(request: ChatCompletionRequest):
         )
 
     if request.stream:
+        stream = None
         try:
             prepared_plan = await model_router.prepare_chat_completion_stream(chat_request)
+            stream, provider_name = await model_router.chat_completion_stream(
+                chat_request,
+                prepared_plan=prepared_plan,
+            )
         except ProviderError as e:
             if isinstance(e, RequestOptionError):
                 return client_error_response(e, "openai")
-            raise HTTPException(status_code=e.status_code, detail=str(e)) from e
-        return sse_streaming_response(
-            stream_response(
-                model_router,
-                chat_request,
-                include_usage=(
-                    stream_options.include_usage if stream_options is not None else None
-                ),
-                prepared_plan=prepared_plan,
+            return protocol_error_response(e, "openai_chat")
+        try:
+            return sse_streaming_response(
+                stream_response(
+                    model_router,
+                    chat_request,
+                    include_usage=(
+                        stream_options.include_usage if stream_options is not None else None
+                    ),
+                    opened_stream=stream,
+                    opened_provider_name=provider_name,
+                )
             )
-        )
+        except Exception:
+            await close_async_iterator(stream)
+            raise
 
     try:
         response, provider_name = await model_router.chat_completion(chat_request)
@@ -253,7 +265,7 @@ async def chat_completions(request: ChatCompletionRequest):
         logger.error("Chat completion request failed: %s", e)
         if isinstance(e, RequestOptionError):
             return client_error_response(e, "openai")
-        raise HTTPException(status_code=e.status_code, detail=str(e)) from e
+        return protocol_error_response(e, "openai_chat")
 
 
 async def stream_response(
@@ -262,6 +274,8 @@ async def stream_response(
     *,
     include_usage: bool | None = None,
     prepared_plan=None,
+    opened_stream=None,
+    opened_provider_name: str | None = None,
 ) -> AsyncGenerator[str, None]:
     """Stream chat completion response with an optional explicit usage policy.
 
@@ -270,17 +284,21 @@ async def stream_response(
     provider is asked to collect.
     """
     pipeline = None
-    stream = None
+    stream = opened_stream
     terminal_outcome: TerminalOutcome | None = None
     terminal_usage: ChatCompletionUsage | None = None
     try:
-        if prepared_plan is None:
+        if stream is not None:
+            provider_name = opened_provider_name
+        elif prepared_plan is None:
             stream, provider_name = await model_router.chat_completion_stream(request)
         else:
             stream, provider_name = await model_router.chat_completion_stream(
                 request,
                 prepared_plan=prepared_plan,
             )
+        if provider_name is None:
+            raise RuntimeError("Opened Chat stream is missing provider identity")
         selected_model = getattr(stream, "selected_model", None)
         response_model = (
             selected_model.qualified_id
@@ -344,9 +362,14 @@ async def stream_response(
             abort_reason = pipeline.feed_stream(chunk)
             if abort_reason:
                 terminal_outcome = exception_outcome(abort_reason, code="overloaded")
-                error_data = {
-                    "error": {"message": "Server overloaded, retry", "type": "overloaded"}
-                }
+                error_data = postcommit_error_data(
+                    ProviderError(
+                        "Server overloaded, retry",
+                        status_code=529,
+                        kind=ProviderFailureKind.RATE_LIMIT,
+                    ),
+                    "openai_chat",
+                )
                 yield f"data: {json.dumps(error_data)}\n\n"
                 pipeline.finish(
                     wire_status=200,
@@ -457,7 +480,7 @@ async def stream_response(
                 outcome=terminal_outcome,
                 body_summary=str(e),
             )
-        yield _stream_error(str(e), "provider_error")
+        yield f"data: {json.dumps(postcommit_error_data(e, 'openai_chat'))}\n\n"
     except asyncio.CancelledError:
         if pipeline is not None:
             pipeline.finish(wire_status=200, outcome=client_cancelled_outcome())

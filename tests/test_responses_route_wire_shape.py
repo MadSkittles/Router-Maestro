@@ -30,9 +30,12 @@ from router_maestro.providers.base import (
 from router_maestro.providers.base import (
     ResponsesResponse as InternalResponsesResponse,
 )
-from router_maestro.server.routes.responses import (
+from router_maestro.server.protocols.responses_reducer import (
+    ResponsesReducer,
     _IndexedOutputScheduler,
     _StreamMessageState,
+)
+from router_maestro.server.routes.responses import (
     create_response,
     stream_response,
 )
@@ -118,7 +121,10 @@ def _parse_sse(events: list[str]) -> list[dict[str, Any]]:
 
 
 async def _drive(chunks: list[ResponsesStreamChunk]) -> list[dict[str, Any]]:
-    router = _StubRouter(chunks)
+    return await _drive_router(_StubRouter(chunks))
+
+
+async def _drive_router(router) -> list[dict[str, Any]]:
     req = InternalResponsesRequest(model="gpt-5.5", input="hi", stream=True)
     raw_events: list[str] = []
     async for evt in stream_response(router, req, request_id="req-test", start_time=0.0):  # type: ignore[arg-type]
@@ -542,6 +548,65 @@ class TestNativeRefusalWireShape:
 class TestNativeNonStreamingTerminalStatus:
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
+        "thinking", [None, "plan"], ids=["signature-only", "thinking-signature"]
+    )
+    async def test_reasoning_signature_without_id_is_protocol_failed_response(
+        self,
+        monkeypatch,
+        thinking,
+    ):
+        internal = InternalResponsesResponse(
+            content="",
+            model="github-copilot/gpt-5",
+            thinking=thinking,
+            thinking_signature="encrypted",
+        )
+        monkeypatch.setattr(
+            "router_maestro.server.routes.responses.get_router",
+            lambda: _NonStreamStubRouter(internal),
+        )
+
+        response = await create_response(
+            ResponsesRequest(model="github-copilot/gpt-5", input="hi", stream=False)
+        )
+
+        assert response.status == "failed"
+        assert response.output == []
+        assert response.error == {
+            "code": "upstream_protocol_error",
+            "message": "Reasoning signature is missing its upstream item id",
+        }
+
+    @pytest.mark.asyncio
+    async def test_reasoning_signature_with_upstream_id_is_preserved(self, monkeypatch):
+        internal = InternalResponsesResponse(
+            content="",
+            model="github-copilot/gpt-5",
+            thinking="plan",
+            thinking_id="rs-upstream",
+            thinking_signature="encrypted",
+        )
+        monkeypatch.setattr(
+            "router_maestro.server.routes.responses.get_router",
+            lambda: _NonStreamStubRouter(internal),
+        )
+
+        response = await create_response(
+            ResponsesRequest(model="github-copilot/gpt-5", input="hi", stream=False)
+        )
+
+        assert response.status == "completed"
+        assert response.output == [
+            {
+                "type": "reasoning",
+                "id": "rs-upstream",
+                "summary": [{"type": "summary_text", "text": "plan"}],
+                "encrypted_content": "encrypted",
+            }
+        ]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
         ("status", "details", "error"),
         [
             (ResponseStatus.COMPLETED, None, None),
@@ -667,6 +732,235 @@ class TestNativeNonStreamingTerminalStatus:
 
 
 class TestNativeStreamingTerminalStatus:
+    @staticmethod
+    def _terminal_events(events):
+        return [
+            event
+            for event in events
+            if event.get("type") in {"response.completed", "response.incomplete", "response.failed"}
+        ]
+
+    @pytest.mark.asyncio
+    async def test_overload_preserves_partial_reducer_snapshot(self, monkeypatch):
+        class OverloadPipeline:
+            calls = 0
+
+            @classmethod
+            def create(cls, **_kwargs):
+                return cls()
+
+            def feed_stream(self, _chunk):
+                self.calls += 1
+                return "guard limit" if self.calls == 2 else None
+
+            def finish(self, **_kwargs):
+                return None
+
+        monkeypatch.setattr("router_maestro.pipeline.RequestPipeline", OverloadPipeline)
+        events = await _drive(
+            [
+                ResponsesStreamChunk(
+                    content="partial",
+                    usage={"input_tokens": 2, "output_tokens": 1},
+                ),
+                ResponsesStreamChunk(content="overflow"),
+            ]
+        )
+
+        terminal_events = self._terminal_events(events)
+        assert len(terminal_events) == 1
+        response = terminal_events[0]["response"]
+        assert response["output"][0]["content"][0]["text"] == "partial"
+        assert response["usage"]["total_tokens"] == 3
+        assert response["error"] == {
+            "code": "overloaded",
+            "message": "Overloaded: please retry",
+        }
+
+    @pytest.mark.asyncio
+    async def test_reducer_protocol_error_preserves_partial_snapshot(self):
+        events = await _drive(
+            [
+                ResponsesStreamChunk(
+                    content="partial",
+                    usage={"input_tokens": 2, "output_tokens": 1},
+                ),
+                ResponsesStreamChunk(
+                    content="indexed",
+                    output_index=0,
+                    content_index=0,
+                    output_item_type="message",
+                ),
+            ]
+        )
+
+        terminal_events = self._terminal_events(events)
+        assert len(terminal_events) == 1
+        response = terminal_events[0]["response"]
+        assert response["output"][0]["content"][0]["text"] == "partial"
+        assert response["usage"]["total_tokens"] == 3
+        assert response["error"] == {
+            "code": "upstream_protocol_error",
+            "message": "Responses stream mixed indexed and unindexed output items",
+        }
+
+    @pytest.mark.asyncio
+    async def test_internal_failure_preserves_partial_snapshot(self):
+        class ExplodingRouter:
+            async def responses_completion_stream(self, _request, fallback=True):
+                async def chunks():
+                    yield ResponsesStreamChunk(
+                        content="partial",
+                        usage={"input_tokens": 2, "output_tokens": 1},
+                    )
+                    raise RuntimeError("private failure")
+
+                return chunks(), "github-copilot"
+
+        events = await _drive_router(ExplodingRouter())
+
+        terminal_events = self._terminal_events(events)
+        assert len(terminal_events) == 1
+        response = terminal_events[0]["response"]
+        assert response["output"][0]["content"][0]["text"] == "partial"
+        assert response["usage"]["total_tokens"] == 3
+        assert response["error"] == {
+            "code": "server_error",
+            "message": "Internal server error",
+        }
+
+    @pytest.mark.asyncio
+    async def test_provider_error_preserves_deferred_mixed_chunk(self):
+        class FailingRouter:
+            async def responses_completion_stream(self, _request, fallback=True):
+                async def chunks():
+                    yield ResponsesStreamChunk(
+                        content="answer",
+                        thinking="plan",
+                        usage={"input_tokens": 4, "output_tokens": 2},
+                    )
+                    raise ProviderError("upstream failed", status_code=503)
+
+                return chunks(), "github-copilot"
+
+        events = await _drive_router(FailingRouter())
+
+        terminal_events = self._terminal_events(events)
+        assert len(terminal_events) == 1
+        assert terminal_events[0]["type"] == "response.failed"
+        response = terminal_events[0]["response"]
+        assert [item["type"] for item in response["output"]] == ["reasoning", "message"]
+        assert response["output"][0]["summary"] == [{"type": "summary_text", "text": "plan"}]
+        assert response["output"][1]["content"] == [
+            {"type": "output_text", "text": "answer", "annotations": []}
+        ]
+        assert response["usage"]["total_tokens"] == 6
+        assert response["error"] == {
+            "code": "server_error",
+            "message": "upstream failed",
+        }
+
+    @pytest.mark.asyncio
+    async def test_provider_error_finalizes_contiguous_indexed_output(self):
+        class FailingRouter:
+            async def responses_completion_stream(self, _request, fallback=True):
+                async def chunks():
+                    yield ResponsesStreamChunk(
+                        content="future",
+                        output_index=1,
+                        content_index=0,
+                        output_item_type="message",
+                        output_item_done=True,
+                    )
+                    yield ResponsesStreamChunk(
+                        content="active",
+                        output_index=0,
+                        content_index=0,
+                        output_item_type="message",
+                    )
+                    raise ProviderError("upstream failed", status_code=503)
+
+                return chunks(), "github-copilot"
+
+        events = await _drive_router(FailingRouter())
+
+        terminal_events = self._terminal_events(events)
+        assert len(terminal_events) == 1
+        assert terminal_events[0]["type"] == "response.failed"
+        assert [
+            item["content"][0]["text"] for item in terminal_events[0]["response"]["output"]
+        ] == ["active", "future"]
+
+    @pytest.mark.asyncio
+    async def test_provider_error_drops_invalid_indexed_suffix(self):
+        class FailingRouter:
+            async def responses_completion_stream(self, _request, fallback=True):
+                async def chunks():
+                    yield ResponsesStreamChunk(
+                        content="future-invalid",
+                        output_index=1,
+                        content_index=1,
+                        output_item_type="message",
+                        output_item_done=True,
+                    )
+                    yield ResponsesStreamChunk(
+                        content="safe-prefix",
+                        output_index=0,
+                        content_index=0,
+                        output_item_type="message",
+                    )
+                    raise ProviderError("upstream failed", status_code=503)
+
+                return chunks(), "github-copilot"
+
+        events = await _drive_router(FailingRouter())
+
+        terminal_events = self._terminal_events(events)
+        assert len(terminal_events) == 1
+        assert terminal_events[0]["type"] == "response.failed"
+        response = terminal_events[0]["response"]
+        assert [item["content"][0]["text"] for item in response["output"]] == ["safe-prefix"]
+        assert response["error"] == {
+            "code": "server_error",
+            "message": "upstream failed",
+        }
+
+    @pytest.mark.asyncio
+    async def test_provider_error_terminates_reducer_before_finishing_pipeline(self, monkeypatch):
+        order: list[str] = []
+
+        class OrderingPipeline:
+            @classmethod
+            def create(cls, **_kwargs):
+                return cls()
+
+            def feed_stream(self, _chunk):
+                return None
+
+            def finish(self, **_kwargs):
+                order.append("pipeline.finish")
+
+        original_terminate = ResponsesReducer.terminate
+
+        def recording_terminate(self, *args, **kwargs):
+            order.append("reducer.terminate")
+            return original_terminate(self, *args, **kwargs)
+
+        class FailingRouter:
+            async def responses_completion_stream(self, _request, fallback=True):
+                async def chunks():
+                    yield ResponsesStreamChunk(content="partial")
+                    raise ProviderError("upstream failed", status_code=503)
+
+                return chunks(), "github-copilot"
+
+        monkeypatch.setattr("router_maestro.pipeline.RequestPipeline", OrderingPipeline)
+        monkeypatch.setattr(ResponsesReducer, "terminate", recording_terminate)
+
+        await _drive_router(FailingRouter())
+
+        assert order == ["reducer.terminate", "pipeline.finish"]
+
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
         ("status", "details", "error", "event_type"),
@@ -1552,7 +1846,7 @@ class TestResponsesStreamItemStateIsolation:
 
         assert state.flush_reasoning_scan_count == 1
         assert len(events) == 1
-        assert '"summary_index": 731' in events[0]
+        assert events[0]["summary_index"] == 731
         assert state.dirty_reasoning_indices == []
         assert not hasattr(state, "dirty_reasoning_fragments")
 

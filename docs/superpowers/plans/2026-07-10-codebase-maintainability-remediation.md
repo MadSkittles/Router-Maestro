@@ -38,6 +38,26 @@ This document is the approved implementation plan. Decisions A–C were approved
 - Create the PR only after all local gates pass. Merge only after the PR checks pass, then branch the next phase from the updated `master`.
 - Do not tag, publish, or otherwise create a release as part of this remediation.
 
+### Phase-level execution workflow (approved 2026-07-14)
+
+Phase 3 and Phase 4 use phase-level batching rather than repeating the review
+chain for every task:
+
+1. Implement the whole phase, parallelizing independent file-ownership tracks.
+2. Run one phase-wide specification/scope review.
+3. Run one phase-wide engineering-quality review, in parallel with other
+   independent review work where possible.
+4. Consolidate and fix all accepted findings.
+5. Re-review only the findings and affected boundaries; do not restart full
+   task-level review loops.
+6. Run the complete unit, Ruff/format, build/packaging where applicable, and
+   unbounded live-integration gates on the exact acceptance tree.
+7. Land one pull request for the phase after CI is green.
+
+Task 19 remains excluded from the Phase 3 implementation batch while Decision D
+is pending. Its files and credential-selection/authentication contracts are out
+of scope for all other Phase 3 tracks.
+
 ## Guiding constraints
 
 1. Preserve the current public API unless a decision is explicitly called out below.
@@ -922,7 +942,13 @@ auth/repository.py
 
 **Suggested commit boundary:** `fix: make custom provider authentication usable`
 
-### Phase 3 gate: Verify lifecycle and state changes together
+### Phase 3 gate: Review and verify lifecycle and state changes together
+
+- [ ] **Phase-wide implementation review:** After Tasks 15, 16, 17, 18, and 20
+  are integrated (Task 19 excluded), run one independent specification/scope
+  review and one independent engineering-quality review over the complete
+  Phase 3 diff. Consolidate accepted findings and perform targeted re-review of
+  only those findings and affected boundaries.
 
 - [ ] **Step 6: Verify Phase 3 as a system**
 
@@ -932,14 +958,22 @@ auth/repository.py
   uv run pytest tests/ -q
   uv run ruff check src/ tests/
   uv run ruff format --check src/ tests/
-  RM_INTEGRATION_MAX_MODELS=8 make integration-test
+  env -u RM_INTEGRATION_MAX_MODELS \
+      -u RM_INTEGRATION_MAX_REASONING_MODELS \
+      make integration-test
   ```
 
-  The bounded live run is required here because this phase changes every inference route's request lifetime, authentication, Router ownership, and provider resource lifetime.
+  The unbounded live run is required because this phase changes every inference
+  route's request lifetime, Router ownership, and provider resource lifetime.
 
 ---
 
 ## Phase 4: Documentation, live validation, and cleanup
+
+Phase 4 Tasks 21–23 are implemented as one phase batch. After the implementation
+batch, run one phase-wide specification/scope review and one phase-wide
+engineering-quality review, fix their consolidated findings, and perform only
+targeted re-review before the final acceptance gates below.
 
 ### Task 21: Align documentation with actual contracts
 

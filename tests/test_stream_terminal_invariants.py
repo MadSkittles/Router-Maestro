@@ -28,6 +28,7 @@ class _FinishCall:
 
 class _PipelineSpy:
     instances: list[_PipelineSpy] = []
+    abort_reason: str | None = None
 
     def __init__(self, request_id: str, model: str, tool_names: set[str] | None = None):
         self.request_id = request_id
@@ -46,7 +47,7 @@ class _PipelineSpy:
         return cls(request_id=request_id, model=model, tool_names=tool_names)
 
     def feed_stream(self, chunk: Any) -> str | None:
-        return None
+        return self.abort_reason
 
     def check_invoke_at_finish(self) -> list[dict] | None:
         return None
@@ -256,14 +257,9 @@ def _assert_error_terminal(protocol: str, events: list[str], expected: str) -> N
         )
         assert expected in json.dumps(error)
     else:
-        terminal_candidates = [
-            candidate
-            for payload in _json_payloads(events)
-            for candidate in payload.get("candidates", [])
-            if candidate.get("finishReason") == "OTHER"
-        ]
-        assert len(terminal_candidates) == 1
-        assert expected in json.dumps(terminal_candidates[0])
+        errors = [payload["error"] for payload in _json_payloads(events) if "error" in payload]
+        assert len(errors) == 1
+        assert expected in json.dumps(errors[0])
 
 
 def _assert_pipeline_outcome(
@@ -297,6 +293,7 @@ async def _collect_chat_sequence(
 @pytest.fixture(autouse=True)
 def pipeline_spy(monkeypatch):
     _PipelineSpy.instances.clear()
+    _PipelineSpy.abort_reason = None
     monkeypatch.setattr("router_maestro.pipeline.RequestPipeline", _PipelineSpy)
 
 
@@ -506,6 +503,79 @@ async def test_exception_is_failed_without_success_terminal(protocol: str):
     _assert_error_terminal(protocol, events, "Internal server error")
     _assert_no_success_terminal(protocol, events)
     _assert_pipeline_outcome("exception", "failed")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("protocol", ["chat", "responses", "anthropic", "gemini"])
+async def test_typed_rate_limit_is_native_without_success_terminal(protocol: str):
+    error = ProviderError(
+        "late rate limit",
+        status_code=429,
+        kind=provider_base.ProviderFailureKind.RATE_LIMIT,
+    )
+
+    events, status_code = await _collect(protocol, error=error)
+
+    assert status_code == 200
+    _assert_error_terminal(protocol, events, "late rate limit")
+    _assert_no_success_terminal(protocol, events)
+    if protocol == "chat":
+        terminal = next(
+            payload["error"] for payload in _json_payloads(events) if "error" in payload
+        )
+        assert terminal["type"] == "rate_limit_error"
+        assert terminal["code"] == "rate_limit_exceeded"
+    elif protocol == "responses":
+        terminal = next(
+            payload
+            for payload in _json_payloads(events)
+            if payload.get("type") == "response.failed"
+        )
+        assert terminal["response"]["error"]["code"] == "rate_limit_exceeded"
+    elif protocol == "anthropic":
+        terminal = next(
+            payload for payload in _json_payloads(events) if payload.get("type") == "error"
+        )
+        assert terminal["error"]["type"] == "rate_limit_error"
+    else:
+        terminal = next(
+            payload["error"] for payload in _json_payloads(events) if "error" in payload
+        )
+        assert terminal["status"] == "RESOURCE_EXHAUSTED"
+    _assert_pipeline_outcome("exception", "failed")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("protocol", ["chat", "responses", "anthropic", "gemini"])
+async def test_guard_overload_is_native_without_success_terminal(protocol: str):
+    _PipelineSpy.abort_reason = "guard overloaded"
+
+    events, status_code = await _collect(protocol)
+
+    assert status_code == 200
+    _assert_no_success_terminal(protocol, events)
+    if protocol == "chat":
+        error = next(payload["error"] for payload in _json_payloads(events) if "error" in payload)
+        assert error["type"] == "rate_limit_error"
+        assert error["code"] == "overloaded"
+    elif protocol == "responses":
+        terminal = next(
+            payload
+            for payload in _json_payloads(events)
+            if payload.get("type") == "response.failed"
+        )
+        assert terminal["response"]["error"]["code"] == "overloaded"
+    elif protocol == "anthropic":
+        terminal = next(
+            payload for payload in _json_payloads(events) if payload.get("type") == "error"
+        )
+        assert terminal["error"]["type"] == "overloaded_error"
+    else:
+        terminal = next(
+            payload["error"] for payload in _json_payloads(events) if "error" in payload
+        )
+        assert terminal["code"] == 529
+    _assert_pipeline_outcome("exception", "failed", error_code="overloaded")
 
 
 @pytest.mark.asyncio

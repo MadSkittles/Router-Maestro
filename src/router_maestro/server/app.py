@@ -5,9 +5,18 @@ import os
 from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI, HTTPException, Request, Response, status
+from fastapi.exception_handlers import (
+    http_exception_handler as default_http_exception_handler,
+)
+from fastapi.exception_handlers import (
+    request_validation_exception_handler as default_validation_exception_handler,
+)
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from router_maestro import __version__
+from router_maestro.providers import ProviderError
 from router_maestro.routing import get_router
 from router_maestro.server.middleware import (
     REQUEST_ID_HEADER,
@@ -18,6 +27,10 @@ from router_maestro.server.observability import (
     CONTENT_TYPE_LATEST,
     create_http_metrics,
     render_metrics,
+)
+from router_maestro.server.protocols.errors import (
+    protocol_error_response,
+    protocol_surface_for_path,
 )
 from router_maestro.server.routes import (
     admin_router,
@@ -99,13 +112,56 @@ def verify_metrics_access(request: Request) -> None:
 
 
 async def unhandled_exception_handler(request: Request, _exc: Exception) -> Response:
-    """Return the default 500 response with the existing request id header."""
+    """Encode protocol failures while retaining the existing non-protocol 500."""
+    surface = protocol_surface_for_path(request.url.path)
     request_id = getattr(request.state, "request_id", None)
     headers = {REQUEST_ID_HEADER: request_id} if isinstance(request_id, str) else None
+    if surface is not None:
+        response = protocol_error_response(_exc, surface)
+        if headers:
+            response.headers.update(headers)
+        return response
     return Response(
         content="Internal Server Error",
         status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
         headers=headers,
+        media_type="text/plain",
+    )
+
+
+async def protocol_http_exception_handler(
+    request: Request,
+    exc: StarletteHTTPException,
+) -> Response:
+    """Dispatch framework HTTP errors by public protocol namespace."""
+    surface = protocol_surface_for_path(request.url.path)
+    if surface is None:
+        return await default_http_exception_handler(request, exc)
+    return protocol_error_response(exc, surface)
+
+
+async def protocol_validation_exception_handler(
+    request: Request,
+    exc: RequestValidationError,
+) -> Response:
+    """Dispatch boundary validation failures by public protocol namespace."""
+    surface = protocol_surface_for_path(request.url.path)
+    if surface is None:
+        return await default_validation_exception_handler(request, exc)
+    return protocol_error_response(exc, surface)
+
+
+async def protocol_provider_exception_handler(
+    request: Request,
+    exc: ProviderError,
+) -> Response:
+    """Encode an uncaught provider failure for inference endpoints."""
+    surface = protocol_surface_for_path(request.url.path)
+    if surface is not None:
+        return protocol_error_response(exc, surface)
+    return Response(
+        content="Internal Server Error",
+        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
         media_type="text/plain",
     )
 
@@ -119,6 +175,9 @@ def create_app() -> FastAPI:
         lifespan=lifespan,
     )
     app.state.http_metrics = create_http_metrics()
+    app.add_exception_handler(RequestValidationError, protocol_validation_exception_handler)
+    app.add_exception_handler(StarletteHTTPException, protocol_http_exception_handler)
+    app.add_exception_handler(ProviderError, protocol_provider_exception_handler)
     app.add_exception_handler(Exception, unhandled_exception_handler)
 
     # Add CORS middleware

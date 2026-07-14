@@ -107,6 +107,7 @@ async def test_stream_text_and_thinking():
         model="claude-sonnet-4-5",
         messages=[Message(role="user", content="hi")],
         stream=True,
+        thinking_type="enabled",
     )
 
     with patch(

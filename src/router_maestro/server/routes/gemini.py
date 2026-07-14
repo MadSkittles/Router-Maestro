@@ -1,14 +1,16 @@
 """Gemini API-compatible routes."""
 
 import asyncio
+import json
 from collections.abc import AsyncGenerator
 from dataclasses import replace
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter
 
 from router_maestro.providers import (
     ChatRequest,
     ProviderError,
+    ProviderFailureKind,
     RequestOptionError,
     ResponseStatus,
     TerminalOutcome,
@@ -21,6 +23,7 @@ from router_maestro.providers import (
 from router_maestro.routing import get_router
 from router_maestro.routing.model_ref import qualify_model_id
 from router_maestro.server.protocols import client_error_response, unrepresented_option_error
+from router_maestro.server.protocols.errors import postcommit_error_data, protocol_error_response
 from router_maestro.server.schemas.gemini import (
     GeminiCandidate,
     GeminiContent,
@@ -126,16 +129,7 @@ async def generate_content(
         logger.error("Gemini generateContent request failed: %s", e)
         if isinstance(e, RequestOptionError):
             return client_error_response(e, "gemini")
-        raise HTTPException(
-            status_code=e.status_code,
-            detail={
-                "error": {
-                    "code": e.status_code,
-                    "message": str(e),
-                    "status": "INTERNAL",
-                }
-            },
-        )
+        return protocol_error_response(e, "gemini")
 
 
 # ============================================================================
@@ -174,21 +168,31 @@ async def stream_generate_content(
     chat_request = _maybe_enable_responses_api(chat_request, model)
 
     estimated_tokens = _estimate_input_tokens(request)
+    stream = None
     try:
         prepared_plan = await model_router.prepare_chat_completion_stream(chat_request)
+        stream, provider_name = await model_router.chat_completion_stream(
+            chat_request,
+            prepared_plan=prepared_plan,
+        )
     except ProviderError as e:
         if isinstance(e, RequestOptionError):
             return client_error_response(e, "gemini")
-        raise HTTPException(status_code=e.status_code, detail=str(e)) from e
-    return sse_streaming_response(
-        _stream_response(
-            model_router,
-            chat_request,
-            model,
-            estimated_tokens,
-            prepared_plan=prepared_plan,
-        ),
-    )
+        return protocol_error_response(e, "gemini")
+    try:
+        return sse_streaming_response(
+            _stream_response(
+                model_router,
+                chat_request,
+                model,
+                estimated_tokens,
+                opened_stream=stream,
+                opened_provider_name=provider_name,
+            ),
+        )
+    except Exception:
+        await close_async_iterator(stream)
+        raise
 
 
 # ============================================================================
@@ -286,19 +290,25 @@ async def _stream_response(
     estimated_input_tokens: int = 0,
     *,
     prepared_plan=None,
+    opened_stream=None,
+    opened_provider_name: str | None = None,
 ) -> AsyncGenerator[str, None]:
     """Stream Gemini-format SSE response from the upstream provider."""
     pipeline = None
-    stream = None
+    stream = opened_stream
     terminal_outcome: TerminalOutcome | None = None
     try:
-        if prepared_plan is None:
+        if stream is not None:
+            provider_name = opened_provider_name
+        elif prepared_plan is None:
             stream, provider_name = await model_router.chat_completion_stream(request)
         else:
             stream, provider_name = await model_router.chat_completion_stream(
                 request,
                 prepared_plan=prepared_plan,
             )
+        if provider_name is None:
+            raise RuntimeError("Opened Gemini stream is missing provider identity")
         selected_model = getattr(stream, "selected_model", None)
         response_model = (
             selected_model.qualified_id
@@ -321,7 +331,13 @@ async def _stream_response(
             if abort_reason:
                 terminal_outcome = exception_outcome(abort_reason, code="overloaded")
                 logger.warning("Gemini stream aborted: %s", abort_reason)
-                yield _sse_error_data("Overloaded: please retry this request")
+                yield _sse_error_data(
+                    ProviderError(
+                        "Overloaded: please retry this request",
+                        status_code=529,
+                        kind=ProviderFailureKind.RATE_LIMIT,
+                    )
+                )
                 pipeline.finish(
                     wire_status=200,
                     outcome=terminal_outcome,
@@ -341,7 +357,9 @@ async def _stream_response(
             }:
                 error = chunk_outcome.error
                 message = error.message if error is not None else "Upstream response failed"
-                yield _sse_error_data(message)
+                yield _sse_error_data(
+                    ProviderError(message, status_code=502, kind=ProviderFailureKind.UNKNOWN)
+                )
                 pipeline.finish(
                     wire_status=200,
                     outcome=chunk_outcome,
@@ -379,7 +397,13 @@ async def _stream_response(
                 return
 
         terminal_outcome = unexpected_eof_outcome()
-        yield _sse_error_data(terminal_outcome.error.code)
+        yield _sse_error_data(
+            ProviderError(
+                terminal_outcome.error.code,
+                status_code=502,
+                kind=ProviderFailureKind.UPSTREAM_PROTOCOL,
+            )
+        )
         pipeline.finish(
             wire_status=200,
             outcome=terminal_outcome,
@@ -394,7 +418,7 @@ async def _stream_response(
                 outcome=terminal_outcome,
                 body_summary=str(e),
             )
-        yield _sse_error_data(str(e))
+        yield _sse_error_data(e)
     except asyncio.CancelledError:
         if pipeline is not None:
             pipeline.finish(wire_status=200, outcome=client_cancelled_outcome())
@@ -409,23 +433,11 @@ async def _stream_response(
                 body_summary="Internal server error",
             )
         logger.error("Unexpected error in Gemini stream", exc_info=True)
-        yield _sse_error_data("Internal server error")
+        yield _sse_error_data(RuntimeError("Internal server error"))
     finally:
         await close_async_iterator(stream)
 
 
-def _sse_error_data(message: str) -> str:
+def _sse_error_data(error: Exception) -> str:
     """Format a Gemini SSE error event."""
-    error_response = GeminiGenerateContentResponse(
-        candidates=[
-            GeminiCandidate(
-                content=GeminiContent(
-                    parts=[GeminiPart(text=message)],
-                    role="model",
-                ),
-                finish_reason="OTHER",
-                index=0,
-            )
-        ],
-    )
-    return f"data: {error_response.model_dump_json(exclude_none=True, by_alias=True)}\r\n\r\n"
+    return f"data: {json.dumps(postcommit_error_data(error, 'gemini'))}\r\n\r\n"

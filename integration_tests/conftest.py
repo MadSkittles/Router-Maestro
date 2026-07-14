@@ -47,7 +47,9 @@ ANTHROPIC_THINKING_BUDGETS: tuple[int | None, ...] = (None, 1024, 4096, 16000)
 OPENAI_REASONING_EFFORTS: tuple[str | None, ...] = (None, "low", "medium", "high")
 STREAM_MODES: tuple[bool, ...] = (False, True)
 COMPAT_PROBE_BACKOFF_SECONDS = 0.25
-_EXACT_TRANSIENT_BAD_REQUEST = b"Bad Request\n"
+COMPAT_PROBE_MAX_ATTEMPTS = 3
+_PROVIDER_FAILURE_SIGNAL_HEADER = "X-Router-Maestro-Error-Signal"
+_COPILOT_BARE_BAD_REQUEST_SIGNAL = "copilot_bare_bad_request"
 _MAX_COMPAT_PROBE_DIAGNOSTIC_BODY = 256
 RESPONSES_ONLY_CHAT_MODELS = {
     "gpt-5.2-codex",
@@ -71,7 +73,7 @@ def post_gemini_generate_content_compat_probe(
     model: str,
 ) -> httpx.Response:
     """Run the fixed Gemini generateContent compatibility probe."""
-    return _post_compat_probe_with_exact_400_retry(
+    return _post_compat_probe_with_marked_400_retry(
         client,
         f"/api/gemini/v1beta/models/{gemini_model_path(model)}:generateContent",
         json_payload=gemini_compat_payload(),
@@ -83,7 +85,7 @@ def post_openai_chat_compat_probe(
     model: str,
 ) -> httpx.Response:
     """Run the fixed non-stream OpenAI Chat compatibility probe."""
-    return _post_compat_probe_with_exact_400_retry(
+    return _post_compat_probe_with_marked_400_retry(
         client,
         "/api/openai/v1/chat/completions",
         json_payload=openai_chat_usage_payload(model),
@@ -98,7 +100,7 @@ def stream_openai_chat_compat_probe(
     timeout: float,
 ) -> Iterator[httpx.Response]:
     """Run the fixed streaming OpenAI Chat compatibility probe."""
-    with _stream_compat_probe_with_exact_400_retry(
+    with _stream_compat_probe_with_marked_400_retry(
         client,
         "/api/openai/v1/chat/completions",
         json_payload=openai_chat_usage_payload(model, stream=True),
@@ -107,7 +109,7 @@ def stream_openai_chat_compat_probe(
         yield response
 
 
-def _post_compat_probe_with_exact_400_retry(
+def _post_compat_probe_with_marked_400_retry(
     client: httpx.Client,
     path: str,
     *,
@@ -115,28 +117,27 @@ def _post_compat_probe_with_exact_400_retry(
     backoff_seconds: float = COMPAT_PROBE_BACKOFF_SECONDS,
     sleep: Callable[[float], None] = time.sleep,
 ) -> httpx.Response:
-    """POST one fixed idempotent compatibility probe, retrying one exact bare 400."""
-    first = client.post(path, json=json_payload)
-    if not _is_exact_transient_bad_request(first):
-        return first
+    """POST one fixed idempotent probe, retrying only a marked Copilot bare 400."""
+    summaries: list[str] = []
+    for attempt in range(1, COMPAT_PROBE_MAX_ATTEMPTS + 1):
+        response = client.post(path, json=json_payload)
+        if not _is_marked_copilot_bare_bad_request(response):
+            return response
+        summaries.append(_compat_probe_response_summary(response))
+        response.close()
+        if attempt < COMPAT_PROBE_MAX_ATTEMPTS:
+            sleep(backoff_seconds)
 
-    first_summary = _compat_probe_response_summary(first)
-    first.close()
-    sleep(backoff_seconds)
-    second = client.post(path, json=json_payload)
-    if not _is_exact_transient_bad_request(second):
-        return second
-
-    second_summary = _compat_probe_response_summary(second)
-    second.close()
+    details = "; ".join(
+        f"attempt {attempt}: {summary}" for attempt, summary in enumerate(summaries, start=1)
+    )
     raise AssertionError(
-        "compatibility probe failed after 2 attempts; "
-        f"attempt 1: {first_summary}; attempt 2: {second_summary}"
+        f"compatibility probe failed after {COMPAT_PROBE_MAX_ATTEMPTS} attempts; {details}"
     )
 
 
 @contextmanager
-def _stream_compat_probe_with_exact_400_retry(
+def _stream_compat_probe_with_marked_400_retry(
     client: httpx.Client,
     path: str,
     *,
@@ -145,30 +146,31 @@ def _stream_compat_probe_with_exact_400_retry(
     backoff_seconds: float = COMPAT_PROBE_BACKOFF_SECONDS,
     sleep: Callable[[float], None] = time.sleep,
 ) -> Iterator[httpx.Response]:
-    """Open one fixed idempotent stream probe, retrying only before any SSE is parsed."""
-    with client.stream("POST", path, json=json_payload, timeout=timeout) as first:
-        if not _is_exact_transient_bad_request(first):
-            yield first
-            return
-        first_summary = _compat_probe_response_summary(first)
+    """Open one fixed idempotent stream probe, retrying only before yielding a response."""
+    summaries: list[str] = []
+    for attempt in range(1, COMPAT_PROBE_MAX_ATTEMPTS + 1):
+        with client.stream("POST", path, json=json_payload, timeout=timeout) as response:
+            if not _is_marked_copilot_bare_bad_request(response):
+                yield response
+                return
+            summaries.append(_compat_probe_response_summary(response))
+        if attempt < COMPAT_PROBE_MAX_ATTEMPTS:
+            sleep(backoff_seconds)
 
-    sleep(backoff_seconds)
-    with client.stream("POST", path, json=json_payload, timeout=timeout) as second:
-        if _is_exact_transient_bad_request(second):
-            second_summary = _compat_probe_response_summary(second)
-            raise AssertionError(
-                "stream compatibility probe failed after 2 attempts; "
-                f"attempt 1: {first_summary}; attempt 2: {second_summary}"
-            )
-        yield second
+    details = "; ".join(
+        f"attempt {attempt}: {summary}" for attempt, summary in enumerate(summaries, start=1)
+    )
+    raise AssertionError(
+        f"stream compatibility probe failed after {COMPAT_PROBE_MAX_ATTEMPTS} attempts; {details}"
+    )
 
 
-def _is_exact_transient_bad_request(response: httpx.Response) -> bool:
-    if response.status_code != 400:
-        return False
-    if not response.is_stream_consumed:
-        response.read()
-    return response.content == _EXACT_TRANSIENT_BAD_REQUEST
+def _is_marked_copilot_bare_bad_request(response: httpx.Response) -> bool:
+    return (
+        response.status_code == 400
+        and response.headers.get(_PROVIDER_FAILURE_SIGNAL_HEADER)
+        == _COPILOT_BARE_BAD_REQUEST_SIGNAL
+    )
 
 
 def _compat_probe_response_summary(response: httpx.Response) -> str:

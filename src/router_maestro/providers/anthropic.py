@@ -6,6 +6,11 @@ from collections.abc import AsyncIterator
 import httpx
 
 from router_maestro.auth import AuthManager, AuthType
+from router_maestro.providers.anthropic_codec import (
+    AnthropicCodecError,
+    AnthropicStreamDecoder,
+    decode_message_response,
+)
 from router_maestro.providers.base import (
     TIMEOUT_NON_STREAMING,
     TIMEOUT_STREAMING,
@@ -249,128 +254,16 @@ class AnthropicProvider(BaseProvider):
                 response.raise_for_status()
                 try:
                     data = response.json()
-                    if not isinstance(data, dict):
-                        raise TypeError("messages response must be an object")
-                    blocks = data["content"]
-                    if not isinstance(blocks, list) or not blocks:
-                        raise ValueError("messages content must be a non-empty list")
-                    model = self._validated_response_model(data, request.model)
-                    stop_reason = self._validated_optional_string(
-                        data, "stop_reason", default="stop"
+                    result = decode_message_response(
+                        data,
+                        fallback_model=request.model,
+                        include_reasoning=request.thinking_type in {"enabled", "adaptive"},
                     )
-                    usage = self._validated_token_usage(
-                        data.get("usage"),
-                        fields=("input_tokens", "output_tokens"),
-                        label="messages response",
-                    )
-                    usage_values = usage or {}
-                    input_tokens = usage_values.get("input_tokens", 0)
-                    output_tokens = usage_values.get("output_tokens", 0)
-                    for block in blocks:
-                        if not isinstance(block, dict):
-                            raise TypeError("content block must be an object")
-                        block_type = block.get("type")
-                        if not isinstance(block_type, str):
-                            raise TypeError("content block type must be a string")
-                        if block_type == "text" and not isinstance(block.get("text"), str):
-                            raise TypeError("text content block must contain text")
-                        if block_type == "tool_use" and not isinstance(
-                            block.get("input", {}), dict
-                        ):
-                            raise TypeError("tool use input must be an object")
-                        if block_type == "tool_use" and (
-                            not isinstance(block.get("id"), str)
-                            or not isinstance(block.get("name"), str)
-                        ):
-                            raise TypeError("tool use block requires string id and name")
-                        if block_type == "thinking":
-                            if not isinstance(block.get("thinking"), str):
-                                raise TypeError("thinking block must contain thinking text")
-                            signature = block.get("signature")
-                            if signature is not None and not isinstance(signature, str):
-                                raise TypeError("thinking signature must be a string or null")
-                        if block_type == "redacted_thinking" and not isinstance(
-                            block.get("data"), str
-                        ):
-                            raise TypeError("redacted thinking data must be a string")
-                except (json.JSONDecodeError, KeyError, TypeError, ValueError) as e:
+                except (json.JSONDecodeError, AnthropicCodecError) as e:
                     self._raise_protocol_error(self.name, request.model, e)
 
-                # Extract content from Anthropic response
-                content = ""
-                tool_calls = []
-                thinking = ""
-                thinking_signature: str | None = None
-                for block in blocks:
-                    if block.get("type") == "text":
-                        content += block.get("text", "")
-                    elif block.get("type") == "tool_use":
-                        tool_calls.append(
-                            {
-                                "id": block.get("id", ""),
-                                "type": "function",
-                                "function": {
-                                    "name": block.get("name", ""),
-                                    "arguments": json.dumps(block.get("input", {})),
-                                },
-                            }
-                        )
-                    elif block.get("type") == "thinking" and request.thinking_type in {
-                        "enabled",
-                        "adaptive",
-                    }:
-                        block_thinking = block.get("thinking")
-                        if not isinstance(block_thinking, str):
-                            self._raise_protocol_error(
-                                self.name,
-                                request.model,
-                                TypeError("thinking block must contain thinking text"),
-                            )
-                        thinking += block_thinking
-                        signature = block.get("signature")
-                        if signature is not None and not isinstance(signature, str):
-                            self._raise_protocol_error(
-                                self.name,
-                                request.model,
-                                TypeError("thinking signature must be a string or null"),
-                            )
-                        if signature and thinking_signature is None:
-                            thinking_signature = signature
-                    elif block.get("type") == "redacted_thinking" and request.thinking_type in {
-                        "enabled",
-                        "adaptive",
-                    }:
-                        redacted_data = block.get("data")
-                        if not isinstance(redacted_data, str):
-                            self._raise_protocol_error(
-                                self.name,
-                                request.model,
-                                TypeError("redacted thinking data must be a string"),
-                            )
-                        if redacted_data and thinking_signature is None:
-                            thinking_signature = redacted_data
-
-                if not content and not tool_calls and not thinking and not thinking_signature:
-                    self._raise_protocol_error(
-                        self.name,
-                        request.model,
-                        ValueError("messages response contains no deliverable output"),
-                    )
-
                 logger.debug("Anthropic chat completion successful")
-                return ChatResponse(
-                    content=content or None,
-                    model=model,
-                    finish_reason=stop_reason,
-                    usage={
-                        "prompt_tokens": input_tokens,
-                        "completion_tokens": output_tokens,
-                        "total_tokens": input_tokens + output_tokens,
-                    },
-                    tool_calls=tool_calls if tool_calls else None,
-                    thinking=thinking or None,
-                    thinking_signature=thinking_signature,
-                )
+                return result
             except httpx.HTTPStatusError as e:
                 self._raise_http_status_error(
                     "Anthropic", e, logger, provider=self.name, model=request.model
@@ -389,18 +282,9 @@ class AnthropicProvider(BaseProvider):
         payload = self._build_payload(request, stream=True)
 
         logger.debug("Anthropic streaming chat: model=%s", request.model)
-        # Anthropic native stop_reason -> internal OpenAI-style finish_reason.
-        stop_reason_map = {
-            "end_turn": "stop",
-            "stop_sequence": "stop",
-            "max_tokens": "length",
-            "tool_use": "tool_calls",
-        }
-        # Map an Anthropic content-block index to a sequential tool-call index so
-        # downstream consumers receive OpenAI-style tool_call deltas.
-        block_to_tool_index: dict[int, int] = {}
-        next_tool_index = 0
-        prompt_tokens = 0
+        decoder = AnthropicStreamDecoder(
+            include_reasoning=request.thinking_type in {"enabled", "adaptive"}
+        )
         async with httpx.AsyncClient() as client:
             try:
                 async with client.stream(
@@ -422,158 +306,17 @@ class AnthropicProvider(BaseProvider):
 
                         try:
                             data = json.loads(data_str)
-                            if not isinstance(data, dict):
-                                raise TypeError("stream event must be an object")
-                            event_type = data.get("type")
-                            if not isinstance(event_type, str):
-                                raise TypeError("stream event type must be a string")
-                            if event_type == "content_block_delta" and not isinstance(
-                                data.get("delta"), dict
-                            ):
-                                raise TypeError("content block delta must be an object")
-                            if event_type == "content_block_start" and not isinstance(
-                                data.get("content_block"), dict
-                            ):
-                                raise TypeError("content block must be an object")
-                            if event_type == "message_delta" and not isinstance(
-                                data.get("delta"), dict
-                            ):
-                                raise TypeError("message delta must be an object")
-                            index = data.get("index")
-                            if event_type in {"content_block_start", "content_block_delta"} and (
-                                not isinstance(index, int) or isinstance(index, bool)
-                            ):
-                                raise TypeError("content block index must be an integer")
-                            if event_type == "message_start":
-                                message = data.get("message")
-                                if not isinstance(message, dict):
-                                    raise TypeError("message_start message must be an object")
-                                usage = message.get("usage", {})
-                                if not isinstance(usage, dict):
-                                    raise TypeError("message_start usage must be an object")
-                                input_tokens = usage.get("input_tokens", 0)
-                                if not isinstance(input_tokens, int) or isinstance(
-                                    input_tokens, bool
-                                ):
-                                    raise TypeError("message_start input_tokens must be integer")
-                            if event_type == "content_block_start":
-                                block = data["content_block"]
-                                block_type = block.get("type")
-                                if not isinstance(block_type, str):
-                                    raise TypeError("content block type must be a string")
-                                if block_type == "tool_use":
-                                    if (
-                                        not isinstance(block.get("id"), str)
-                                        or not isinstance(block.get("name"), str)
-                                        or not isinstance(block.get("input", {}), dict)
-                                    ):
-                                        raise TypeError("tool use block is malformed")
-                            if event_type == "content_block_delta":
-                                delta = data["delta"]
-                                delta_type = delta.get("type")
-                                if not isinstance(delta_type, str):
-                                    raise TypeError("content delta type must be a string")
-                                field_by_type = {
-                                    "text_delta": "text",
-                                    "thinking_delta": "thinking",
-                                    "signature_delta": "signature",
-                                    "input_json_delta": "partial_json",
-                                }
-                                field = field_by_type.get(delta_type)
-                                if field is not None and not isinstance(delta.get(field), str):
-                                    raise TypeError(f"{delta_type} {field} must be a string")
-                            if event_type == "message_delta":
-                                delta = data["delta"]
-                                stop_reason = delta.get("stop_reason")
-                                if stop_reason is not None and not isinstance(stop_reason, str):
-                                    raise TypeError("message stop_reason must be a string or null")
-                                if not isinstance(data.get("usage", {}), dict):
-                                    raise TypeError("message_delta usage must be an object")
-                                output_tokens = data.get("usage", {}).get("output_tokens", 0)
-                                if not isinstance(output_tokens, int) or isinstance(
-                                    output_tokens, bool
-                                ):
-                                    raise TypeError("message_delta output_tokens must be integer")
-                        except (json.JSONDecodeError, TypeError) as e:
+                            chunks = decoder.decode_event(data)
+                        except (json.JSONDecodeError, AnthropicCodecError) as e:
                             self._raise_protocol_error(self.name, request.model, e)
 
-                        if event_type == "message_start":
-                            usage = data.get("message", {}).get("usage", {})
-                            prompt_tokens = usage.get("input_tokens", 0)
-                        elif event_type == "content_block_start":
-                            index = data.get("index", 0)
-                            block = data.get("content_block", {})
-                            if block.get("type") == "tool_use":
-                                tool_index = next_tool_index
-                                next_tool_index += 1
-                                block_to_tool_index[index] = tool_index
-                                yield ChatStreamChunk(
-                                    content="",
-                                    finish_reason=None,
-                                    tool_calls=[
-                                        {
-                                            "index": tool_index,
-                                            "id": block.get("id", ""),
-                                            "type": "function",
-                                            "function": {
-                                                "name": block.get("name", ""),
-                                                "arguments": "",
-                                            },
-                                        }
-                                    ],
-                                )
-                        elif event_type == "content_block_delta":
-                            index = data.get("index", 0)
-                            delta = data.get("delta", {})
-                            delta_type = delta.get("type")
-                            if delta_type == "text_delta":
-                                yield ChatStreamChunk(
-                                    content=delta.get("text", ""),
-                                    finish_reason=None,
-                                )
-                            elif delta_type == "thinking_delta":
-                                yield ChatStreamChunk(
-                                    content="",
-                                    finish_reason=None,
-                                    thinking=delta.get("thinking", "") or None,
-                                )
-                            elif delta_type == "signature_delta":
-                                yield ChatStreamChunk(
-                                    content="",
-                                    finish_reason=None,
-                                    thinking_signature=delta.get("signature") or None,
-                                )
-                            elif delta_type == "input_json_delta":
-                                tool_index = block_to_tool_index.get(index)
-                                if tool_index is not None:
-                                    yield ChatStreamChunk(
-                                        content="",
-                                        finish_reason=None,
-                                        tool_calls=[
-                                            {
-                                                "index": tool_index,
-                                                "function": {
-                                                    "arguments": delta.get("partial_json", ""),
-                                                },
-                                            }
-                                        ],
-                                    )
-                        elif event_type == "message_delta":
-                            delta = data.get("delta", {})
-                            stop_reason = delta.get("stop_reason")
-                            finish_reason = (
-                                stop_reason_map.get(stop_reason, "stop") if stop_reason else None
-                            )
-                            output_tokens = data.get("usage", {}).get("output_tokens", 0)
-                            yield ChatStreamChunk(
-                                content="",
-                                finish_reason=finish_reason,
-                                usage={
-                                    "prompt_tokens": prompt_tokens,
-                                    "completion_tokens": output_tokens,
-                                    "total_tokens": prompt_tokens + output_tokens,
-                                },
-                            )
+                        for chunk in chunks:
+                            yield chunk
+
+                    try:
+                        decoder.finalize()
+                    except AnthropicCodecError as e:
+                        self._raise_protocol_error(self.name, request.model, e)
             except httpx.HTTPStatusError as e:
                 self._raise_http_status_error(
                     "Anthropic",

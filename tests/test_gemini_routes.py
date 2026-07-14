@@ -37,6 +37,12 @@ from router_maestro.server.translation_gemini import (
     translate_openai_to_gemini,
 )
 
+
+async def _empty_async_iter():
+    if False:
+        yield ChatStreamChunk()
+
+
 # ============================================================================
 # Fixtures
 # ============================================================================
@@ -833,6 +839,7 @@ class TestStreamGenerateContentEndpoint:
         mock = AsyncMock()
         prepared = object()
         mock.prepare_chat_completion_stream = AsyncMock(return_value=prepared)
+        mock.chat_completion_stream = AsyncMock(return_value=(_empty_async_iter(), "second"))
 
         with (
             patch(

@@ -27,7 +27,12 @@ from router_maestro.providers import (
     TerminalOutcome,
     TransportTermination,
 )
-from router_maestro.providers.base import BaseProvider, ProviderError, ProviderFailureKind
+from router_maestro.providers.base import (
+    BaseProvider,
+    ProviderError,
+    ProviderFailureKind,
+    ProviderFailureSignal,
+)
 from router_maestro.providers.tool_parsing import recover_tool_calls_from_content
 from router_maestro.routing.capabilities import (
     CapabilitySupport,
@@ -1654,8 +1659,17 @@ async def test_copilot_chat_empty_reasoning_below_sent_output_cap_is_protocol_fa
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("max_tokens", [None, 0, -1])
+@pytest.mark.parametrize(
+    ("thinking_budget", "completion_tokens"),
+    [
+        pytest.param(1024, 4096, id="unrelated-completion"),
+        pytest.param(1024, 1024, id="completion-equals-budget"),
+    ],
+)
 async def test_copilot_chat_empty_reasoning_without_positive_output_cap_is_protocol_failure(
     max_tokens: int | None,
+    thinking_budget: int,
+    completion_tokens: int,
 ) -> None:
     provider = CopilotProvider()
     provider.ensure_token = AsyncMock()  # type: ignore[method-assign]
@@ -1663,7 +1677,7 @@ async def test_copilot_chat_empty_reasoning_without_positive_output_cap_is_proto
         return_value=_response_for_payload(
             {
                 "choices": [],
-                "usage": {"completion_tokens": 4096},
+                "usage": {"completion_tokens": completion_tokens},
                 "model": "claude-opus-4.8",
             }
         )
@@ -1675,7 +1689,7 @@ async def test_copilot_chat_empty_reasoning_without_positive_output_cap_is_proto
                 model="claude-opus-4.8",
                 max_tokens=max_tokens,
                 thinking_type="enabled",
-                thinking_budget=1024,
+                thinking_budget=thinking_budget,
             )
         )
 
@@ -1687,7 +1701,7 @@ async def test_copilot_chat_empty_reasoning_without_positive_output_cap_is_proto
 
 
 @pytest.mark.asyncio
-async def test_copilot_chat_empty_nonthinking_response_at_output_cap_is_protocol_failure() -> None:
+async def test_copilot_chat_empty_nonthinking_reasoning_response_at_output_cap_is_length() -> None:
     provider = CopilotProvider()
     provider.ensure_token = AsyncMock()  # type: ignore[method-assign]
     provider._send_with_auth_retry = AsyncMock(  # type: ignore[method-assign]
@@ -1700,13 +1714,72 @@ async def test_copilot_chat_empty_nonthinking_response_at_output_cap_is_protocol
         )
     )
 
+    response = await provider.chat_completion(
+        _chat_request(model="claude-opus-4.8", max_tokens=4096)
+    )
+
+    assert response.content == ""
+    assert response.finish_reason == "length"
+    assert response.usage == {"completion_tokens": 4096}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("model", "max_tokens", "thinking_type", "thinking_budget", "completion_tokens"),
+    [
+        pytest.param("claude-opus-4.8", 4096, None, None, 4097, id="implicit-above-cap"),
+        pytest.param(
+            "claude-opus-4.8",
+            4096,
+            "disabled",
+            None,
+            4096,
+            id="explicitly-disabled-at-cap",
+        ),
+        pytest.param("gpt-4o", 4096, None, None, 4096, id="non-reasoning-at-cap"),
+        pytest.param(
+            "claude-opus-4.8",
+            4096,
+            None,
+            1024,
+            1024,
+            id="budget-only-without-opt-in",
+        ),
+    ],
+)
+async def test_copilot_chat_empty_implicit_exception_remains_narrow(
+    model: str,
+    max_tokens: int,
+    thinking_type: str | None,
+    thinking_budget: int | None,
+    completion_tokens: int,
+) -> None:
+    provider = CopilotProvider()
+    provider.ensure_token = AsyncMock()  # type: ignore[method-assign]
+    provider._send_with_auth_retry = AsyncMock(  # type: ignore[method-assign]
+        return_value=_response_for_payload(
+            {
+                "choices": [],
+                "usage": {"completion_tokens": completion_tokens},
+                "model": model,
+            }
+        )
+    )
+
     with pytest.raises(ProviderError) as exc_info:
-        await provider.chat_completion(_chat_request(model="claude-opus-4.8", max_tokens=4096))
+        await provider.chat_completion(
+            _chat_request(
+                model=model,
+                max_tokens=max_tokens,
+                thinking_type=thinking_type,
+                thinking_budget=thinking_budget,
+            )
+        )
 
     _assert_protocol_failure(
         exc_info.value,
         provider="github-copilot",
-        model="claude-opus-4.8",
+        model=model,
     )
 
 
@@ -2276,6 +2349,8 @@ def _stream_for_codec(
     codec: str,
     body: bytes,
     monkeypatch: pytest.MonkeyPatch,
+    *,
+    copilot_chat_model: str = "gpt-4o",
 ) -> tuple[AsyncIterator[ChatStreamChunk | ResponsesStreamChunk], str, str]:
     def handler(_request: httpx.Request) -> httpx.Response:
         return httpx.Response(
@@ -2307,7 +2382,7 @@ def _stream_for_codec(
         provider._client = client
         provider.ensure_token = _noop  # type: ignore[method-assign]
         provider._get_headers = lambda *args, **kwargs: {}  # type: ignore[method-assign]
-        model = "gpt-4o"
+        model = copilot_chat_model
         stream = provider.chat_completion_stream(_chat_request(model=model, stream=True))
         return stream, provider.name, model
     if codec == "copilot-responses":
@@ -2338,7 +2413,10 @@ def _stream_for_codec(
         (
             "anthropic",
             '{"type":"future_event"}',
-            '{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"first"}}',
+            (
+                '{"type":"content_block_start","index":0,'
+                '"content_block":{"type":"text","text":"first"}}'
+            ),
         ),
         (
             "copilot-chat",
@@ -2664,7 +2742,8 @@ async def test_sse_known_event_with_malformed_shape_is_typed_protocol_failure(
     first_events = {
         "openai-compatible": '{"choices":[{"delta":{"content":"first"}}]}',
         "anthropic": (
-            '{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"first"}}'
+            '{"type":"content_block_start","index":0,'
+            '"content_block":{"type":"text","text":"first"}}'
         ),
         "copilot-chat": '{"choices":[{"delta":{"content":"first"}}]}',
         "copilot-responses": '{"type":"response.output_text.delta","delta":"first"}',
@@ -2694,7 +2773,26 @@ async def test_sse_known_event_with_malformed_shape_is_typed_protocol_failure(
             ],
             {"total_tokens": 3},
         ),
-        ("anthropic", ['{"type":"future_event"}'], None),
+        (
+            "anthropic",
+            [
+                '{"type":"future_event"}',
+                (
+                    '{"type":"content_block_start","index":0,'
+                    '"content_block":{"type":"text","text":""}}'
+                ),
+                (
+                    '{"type":"content_block_delta","index":0,'
+                    '"delta":{"type":"text_delta","text":"answer"}}'
+                ),
+                '{"type":"content_block_stop","index":0}',
+                (
+                    '{"type":"message_delta","delta":{"stop_reason":"end_turn"},'
+                    '"usage":{"output_tokens":1}}'
+                ),
+            ],
+            {"prompt_tokens": 0, "completion_tokens": 1, "total_tokens": 1},
+        ),
         (
             "copilot-chat",
             [
@@ -2792,6 +2890,65 @@ async def test_copilot_chat_emits_identical_usage_once_across_all_stream_phases(
     assert [chunk.usage for chunk in chunks if chunk.usage] == [
         {"prompt_tokens": 2, "completion_tokens": 1, "total_tokens": 3}
     ]
+
+
+@pytest.mark.asyncio
+async def test_copilot_chat_ignores_provisional_zero_usage_before_final_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Gemini-family chat streams can attach all-zero usage to reasoning deltas."""
+    provisional = (
+        '{"choices":[{"index":0,"delta":{"content":null,'
+        '"reasoning_text":"hidden"},"finish_reason":null}],'
+        '"usage":{"prompt_tokens":0,"completion_tokens":0,"total_tokens":0,'
+        '"prompt_tokens_details":{"cached_tokens":0}}}'
+    )
+    final = (
+        '{"choices":[{"index":0,"delta":{"content":"pong"},"finish_reason":"stop"}],'
+        '"usage":{"prompt_tokens":16,"completion_tokens":1,"total_tokens":184}}'
+    )
+    stream, _provider, _model = _stream_for_codec(
+        "copilot-chat",
+        _sse_body(provisional, provisional, final, "[DONE]"),
+        monkeypatch,
+        copilot_chat_model="gemini-2.5-pro",
+    )
+
+    chunks = [chunk async for chunk in stream]
+
+    assert [chunk.content for chunk in chunks if chunk.content] == ["pong"]
+    assert [chunk.finish_reason for chunk in chunks if chunk.finish_reason] == ["stop"]
+    assert [chunk.usage for chunk in chunks if chunk.usage] == [
+        {"prompt_tokens": 16, "completion_tokens": 1, "total_tokens": 184}
+    ]
+
+
+@pytest.mark.asyncio
+async def test_copilot_chat_rejects_provisional_zero_after_observed_usage(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observed = (
+        '{"choices":[{"index":0,"delta":{"content":"first"},'
+        '"finish_reason":null}],'
+        '"usage":{"prompt_tokens":2,"completion_tokens":1,"total_tokens":3}}'
+    )
+    regressed = (
+        '{"choices":[{"index":0,"delta":{"content":null,'
+        '"reasoning_text":"hidden"},"finish_reason":null}],'
+        '"usage":{"prompt_tokens":0,"completion_tokens":0,"total_tokens":0}}'
+    )
+    stream, provider, model = _stream_for_codec(
+        "copilot-chat",
+        _sse_body(observed, regressed, "[DONE]"),
+        monkeypatch,
+        copilot_chat_model="gemini-2.5-pro",
+    )
+
+    with pytest.raises(ProviderError) as exc_info:
+        async for _chunk in stream:
+            pass
+
+    _assert_protocol_failure(exc_info.value, provider=provider, model=model)
 
 
 @pytest.mark.asyncio
@@ -3026,6 +3183,84 @@ async def test_copilot_transport_failure_preserves_model_context() -> None:
     assert exc_info.value.kind is ProviderFailureKind.TRANSPORT
     assert exc_info.value.model == "gpt-4o"
     assert RAW_MARKER not in str(exc_info.value)
+
+
+@pytest.mark.asyncio
+async def test_copilot_exact_bare_400_sets_nonretryable_signal() -> None:
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(400, content=b"Bad Request\n")
+
+    provider = CopilotProvider()
+    provider._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    provider.ensure_token = _noop  # type: ignore[method-assign]
+    provider._get_headers = lambda *args, **kwargs: {}  # type: ignore[method-assign]
+
+    with pytest.raises(ProviderError) as exc_info:
+        await provider.chat_completion(_chat_request(model="claude-haiku-4.5"))
+
+    error = exc_info.value
+    assert error.kind is ProviderFailureKind.UPSTREAM_STATUS
+    assert error.status_code == 400
+    assert error.upstream_status_code == 400
+    assert error.retryable is False
+    assert getattr(error, "signal", None) is not None
+    assert error.signal.value == "copilot_bare_bad_request"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("status", "body"),
+    [
+        (400, b"Bad Request\r\n"),
+        (400, b"Bad Request"),
+        (400, b" Bad Request\n"),
+        (400, b"Bad Request\n "),
+        (400, b'{"error":"Bad Request"}'),
+        (500, b"Bad Request\n"),
+    ],
+)
+async def test_copilot_bare_400_signal_requires_exact_status_and_body(
+    status: int,
+    body: bytes,
+) -> None:
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(status, content=body)
+
+    provider = CopilotProvider()
+    provider._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    provider.ensure_token = _noop  # type: ignore[method-assign]
+    provider._get_headers = lambda *args, **kwargs: {}  # type: ignore[method-assign]
+
+    with pytest.raises(ProviderError) as exc_info:
+        await provider.chat_completion(_chat_request(model="claude-haiku-4.5"))
+
+    assert exc_info.value.signal is None
+
+
+@pytest.mark.asyncio
+async def test_copilot_stream_exact_bare_400_sets_signal_and_closes_once() -> None:
+    response = httpx.Response(400, stream=httpx.ByteStream(b"Bad Request\n"))
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return response
+
+    provider = CopilotProvider()
+    provider._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    provider.ensure_token = _noop  # type: ignore[method-assign]
+    provider._get_headers = lambda *args, **kwargs: {}  # type: ignore[method-assign]
+
+    with pytest.raises(ProviderError) as exc_info:
+        async for _chunk in provider.chat_completion_stream(
+            _chat_request(model="claude-haiku-4.5", stream=True)
+        ):
+            pass
+
+    error = exc_info.value
+    assert error.kind is ProviderFailureKind.UPSTREAM_STATUS
+    assert error.retryable is False
+    assert error.signal is ProviderFailureSignal.COPILOT_BARE_BAD_REQUEST
+    assert response.is_stream_consumed
+    assert response.is_closed
 
 
 @pytest.mark.asyncio
@@ -3577,6 +3812,69 @@ async def test_nonstream_plan_stops_on_secondary_fatal_failure() -> None:
     assert exc_info.value is not secondary_error
     assert exc_info.value.__cause__ is secondary_error
     assert calls == ["primary", "secondary"]
+
+
+@pytest.mark.asyncio
+async def test_marked_copilot_400_does_not_allow_router_fallback() -> None:
+    signal_error = ProviderError(
+        "Copilot API error: 400",
+        status_code=400,
+        retryable=False,
+        kind=ProviderFailureKind.UPSTREAM_STATUS,
+        upstream_status_code=400,
+        signal=ProviderFailureSignal.COPILOT_BARE_BAD_REQUEST,
+    )
+    calls: list[str] = []
+
+    class _Provider:
+        def __init__(self, name: str, error: ProviderError | None = None) -> None:
+            self.name = name
+            self.error = error
+
+        async def ensure_token(self) -> None:
+            return None
+
+    primary = _Provider("github-copilot", signal_error)
+    secondary = _Provider("secondary")
+    features = RequestFeatures()
+    candidates = []
+    for provider in (primary, secondary):
+        ref = ModelRef(provider.name, "model")
+        capabilities = ModelCapabilities(
+            model=ref,
+            operations={Operation.CHAT: CapabilitySupport.SUPPORTED},
+        )
+        candidates.append(
+            RouteCandidate(
+                model=ref,
+                provider=provider,  # type: ignore[arg-type]
+                capabilities=capabilities,
+                evaluated_operation=Operation.CHAT,
+                evaluated_features=features,
+                support=CapabilitySupport.SUPPORTED,
+            )
+        )
+    plan = RoutePlan(Operation.CHAT, features, candidates[0], (candidates[1],), False)
+
+    async def call(provider, _request):
+        calls.append(provider.name)
+        if provider.error is not None:
+            raise provider.error
+        return ChatResponse(content="unexpected", model="m2")
+
+    with pytest.raises(ProviderError) as exc_info:
+        await Router.__new__(Router)._execute_plan_nonstream(
+            plan,
+            object(),
+            True,
+            lambda request, _model: request,
+            call,
+        )
+
+    assert calls == ["github-copilot"]
+    assert exc_info.value.retryable is False
+    assert exc_info.value.signal is ProviderFailureSignal.COPILOT_BARE_BAD_REQUEST
+    assert len(exc_info.value.attempts) == 1
 
 
 @pytest.mark.asyncio

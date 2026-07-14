@@ -24,7 +24,11 @@ from router_maestro.routing.capabilities import CapabilitySupport, Operation, Re
 from router_maestro.routing.model_ref import qualify_model_id
 from router_maestro.routing.route_plan import NoCompatibleRouteError, RouteCandidate, RoutePlan
 from router_maestro.routing.router import Router
-from router_maestro.server.protocols.errors import client_error_response
+from router_maestro.server.protocols.errors import (
+    client_error_response,
+    postcommit_error_data,
+    protocol_error_response,
+)
 from router_maestro.server.routes.anthropic import (
     ANTHROPIC_PING_FRAME,
 )
@@ -42,7 +46,6 @@ logger = get_logger("server.routes.anthropic_beta")
 router = APIRouter()
 
 COPILOT_MESSAGES_PATH = "/v1/messages"
-COPILOT_COUNT_TOKENS_PATH = "/v1/messages/count_tokens"
 
 _STRIP_RESPONSE_KEYS = frozenset({"copilot_usage", "stop_details"})
 _STRIP_STREAM_MESSAGE_STOP_KEYS = frozenset({"copilot_usage", "amazon-bedrock-invocationMetrics"})
@@ -570,13 +573,10 @@ async def _resolve_model(model: str) -> _ResolvedModel:
     """Resolve model to (provider_name, actual_model_id, provider_if_copilot).
 
     Returns (provider_name, actual_model, None) for non-Copilot providers.
-    Raises HTTPException(404) if the model can't be resolved at all.
+    Raises ProviderError if the model cannot be resolved.
     """
     model_router = get_router()
-    try:
-        provider_name, actual_model, provider = await model_router._resolve_provider(model)
-    except ProviderError as e:
-        raise HTTPException(status_code=e.status_code or 404, detail=str(e))
+    provider_name, actual_model, provider = await model_router._resolve_provider(model)
     if isinstance(provider, CopilotProvider):
         return _ResolvedModel(provider_name, actual_model, provider)
     return _ResolvedModel(provider_name, actual_model, None)
@@ -598,8 +598,8 @@ async def _resolve_native_model(
             model=await _resolve_model(model),
             support=CapabilitySupport.UNSUPPORTED,
         )
-    except ProviderError as e:
-        raise HTTPException(status_code=e.status_code or 404, detail=str(e)) from e
+    except ProviderError:
+        raise
 
     candidate = plan.primary
     provider = candidate.provider
@@ -715,7 +715,7 @@ async def _encode_native_stream_errors(
         async for frame in stream:
             yield frame
     except ProviderError as error:
-        yield _sse_error_event(error.safe_message)
+        yield _sse_error_event(error)
     finally:
         await close_async_iterator(stream)
 
@@ -783,7 +783,10 @@ async def beta_messages(raw_request: FastAPIRequest):
     )
 
     # Resolve provider and check native eligibility
-    native_resolution = await _resolve_native_model(model, features)
+    try:
+        native_resolution = await _resolve_native_model(model, features)
+    except ProviderError as error:
+        return protocol_error_response(error, "anthropic")
     provider_name = native_resolution.model.provider_name
     actual_model = native_resolution.model.actual_model
     copilot_provider = native_resolution.model.copilot_provider
@@ -890,16 +893,7 @@ async def beta_messages(raw_request: FastAPIRequest):
                     e.kind.value,
                     str(e.retryable).lower(),
                 )
-                return JSONResponse(
-                    status_code=e.status_code or 502,
-                    content={
-                        "type": "error",
-                        "error": {
-                            "type": "api_error",
-                            "message": e.safe_message,
-                        },
-                    },
-                )
+                return protocol_error_response(e, "anthropic")
             return sse_streaming_response(
                 _encode_native_stream_errors(selected_stream),
                 keepalive_frame=ANTHROPIC_PING_FRAME,
@@ -1023,7 +1017,10 @@ async def beta_count_tokens(raw_request: FastAPIRequest):
     if not model:
         raise HTTPException(status_code=400, detail="'model' field is required")
 
-    resolution = await _resolve_model(model)
+    try:
+        resolution = await _resolve_model(model)
+    except ProviderError as error:
+        return protocol_error_response(error, "anthropic")
     provider_name = resolution.provider_name
     actual_model = resolution.actual_model
     copilot_provider = resolution.copilot_provider
@@ -1041,14 +1038,10 @@ async def beta_count_tokens(raw_request: FastAPIRequest):
         request = AnthropicCountTokensRequest.model_validate(body)
         return await count_tokens(request)
 
-    body["model"] = actual_model
-    await copilot_provider.ensure_token()
-
     try:
-        response = await copilot_provider._send_with_auth_retry(
-            "POST",
-            COPILOT_COUNT_TOKENS_PATH,
-            json=body,
+        body["model"] = actual_model
+        input_tokens = await copilot_provider.count_native_anthropic_tokens(
+            body,
             model=actual_model,
         )
     except ProviderError as e:
@@ -1057,27 +1050,14 @@ async def beta_count_tokens(raw_request: FastAPIRequest):
             e.kind.value,
             str(e.retryable).lower(),
         )
-        raise HTTPException(status_code=e.status_code or 502, detail=str(e))
+        return protocol_error_response(e, "anthropic")
 
-    if response.status_code >= 400:
-        logger.warning(
-            "Beta count_tokens upstream %d for model=%s",
-            response.status_code,
-            actual_model,
-        )
-        try:
-            error_body = response.json()
-        except Exception:
-            error_body = {"error": {"type": "api_error", "message": response.text}}
-        return JSONResponse(content=error_body, status_code=response.status_code)
-
-    result = response.json()
     logger.debug(
         "Beta count_tokens: model=%s, input_tokens=%s",
         actual_model,
-        result.get("input_tokens"),
+        input_tokens,
     )
-    return JSONResponse(content=result)
+    return JSONResponse(content={"input_tokens": input_tokens})
 
 
 async def _stream_passthrough(
@@ -1202,15 +1182,15 @@ async def _iter_sse_frames(response, *, leak_guard=None) -> AsyncGenerator[str, 
                 if leak_guard:
                     abort_reason = leak_guard.feed_frame(current_event, cleaned)
                     if abort_reason:
-                        error_event = {
-                            "type": "error",
-                            "error": {
-                                "type": "overloaded",
-                                "message": "Overloaded: please retry this request",
-                            },
-                        }
                         terminal_received = True
-                        yield f"event: error\ndata: {json.dumps(error_event)}\n\n"
+                        yield _sse_error_event(
+                            ProviderError(
+                                "Overloaded: please retry this request",
+                                status_code=529,
+                                retryable=True,
+                                kind=ProviderFailureKind.RATE_LIMIT,
+                            )
+                        )
                         return
 
                 if current_event in {"message_stop", "error"}:
@@ -1358,15 +1338,19 @@ def _clean_stream_frame(event_type: str, data_str: str) -> str | None:
     return json.dumps(data)
 
 
-def _sse_error_event(message: str) -> str:
+def _sse_error_event(error: Exception | str) -> str:
     """Format an Anthropic SSE error event."""
-    error_event = {
-        "type": "error",
-        "error": {
-            "type": "api_error",
-            "message": message,
-        },
-    }
+    error_event = (
+        postcommit_error_data(error, "anthropic")
+        if isinstance(error, Exception)
+        else {
+            "type": "error",
+            "error": {
+                "type": "api_error",
+                "message": error,
+            },
+        }
+    )
     return f"event: error\ndata: {json.dumps(error_event)}\n\n"
 
 
