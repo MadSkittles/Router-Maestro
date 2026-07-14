@@ -4,6 +4,11 @@ import json
 
 import pytest
 
+from router_maestro.providers import ChatResponse
+from router_maestro.server.protocols.anthropic_reducer import (
+    AnthropicStreamProtocolError,
+    build_anthropic_response,
+)
 from router_maestro.server.schemas.anthropic import (
     AnthropicAssistantMessage,
     AnthropicImageBlock,
@@ -15,7 +20,6 @@ from router_maestro.server.schemas.anthropic import (
     AnthropicUserMessage,
 )
 from router_maestro.server.translation import (
-    AnthropicStreamProtocolError,
     _extract_multimodal_content,
     _extract_text_content,
     _extract_tool_calls,
@@ -27,7 +31,6 @@ from router_maestro.server.translation import (
     _translate_tool_choice,
     _translate_tools,
     translate_openai_chunk_to_anthropic_events,
-    translate_openai_to_anthropic,
 )
 
 
@@ -618,15 +621,17 @@ class TestTranslateMessages:
 
 
 class TestTranslateOpenAIToAnthropic:
-    """Tests for OpenAI to Anthropic response translation."""
+    """Tests for canonical Chat to Anthropic response reduction."""
 
     def test_translate_simple_response(self):
         """Test translating a simple response."""
-        openai_response = {
-            "choices": [{"message": {"content": "Hello world"}, "finish_reason": "stop"}],
-            "usage": {"prompt_tokens": 10, "completion_tokens": 5},
-        }
-        result = translate_openai_to_anthropic(openai_response, "claude-3", "req-123")
+        response = ChatResponse(
+            content="Hello world",
+            model="claude-3",
+            finish_reason="stop",
+            usage={"prompt_tokens": 10, "completion_tokens": 5},
+        )
+        result = build_anthropic_response(response, model="claude-3", response_id="req-123")
 
         assert result.id == "req-123"
         assert result.model == "claude-3"
@@ -637,39 +642,36 @@ class TestTranslateOpenAIToAnthropic:
 
     def test_translate_response_with_no_content(self):
         """Test translating response with no content."""
-        openai_response = {
-            "choices": [{"message": {"content": None}, "finish_reason": "stop"}],
-            "usage": {"prompt_tokens": 10, "completion_tokens": 0},
-        }
-        result = translate_openai_to_anthropic(openai_response, "claude-3", "req-123")
+        response = ChatResponse(
+            content=None,
+            model="claude-3",
+            finish_reason="stop",
+            usage={"prompt_tokens": 10, "completion_tokens": 0},
+        )
+        result = build_anthropic_response(response, model="claude-3", response_id="req-123")
 
         assert result.id == "req-123"
         assert len(result.content) == 0
 
     def test_translate_response_with_tool_calls(self):
         """Test translating response with tool_calls produces AnthropicToolUseBlock."""
-        openai_response = {
-            "choices": [
+        response = ChatResponse(
+            content=None,
+            model="claude-3",
+            finish_reason="tool_calls",
+            usage={"prompt_tokens": 100, "completion_tokens": 20},
+            tool_calls=[
                 {
-                    "message": {
-                        "content": None,
-                        "tool_calls": [
-                            {
-                                "id": "call_abc",
-                                "type": "function",
-                                "function": {
-                                    "name": "exec",
-                                    "arguments": '{"command": "hostname"}',
-                                },
-                            }
-                        ],
+                    "id": "call_abc",
+                    "type": "function",
+                    "function": {
+                        "name": "exec",
+                        "arguments": '{"command": "hostname"}',
                     },
-                    "finish_reason": "tool_calls",
                 }
             ],
-            "usage": {"prompt_tokens": 100, "completion_tokens": 20},
-        }
-        result = translate_openai_to_anthropic(openai_response, "claude-3", "req-456")
+        )
+        result = build_anthropic_response(response, model="claude-3", response_id="req-456")
 
         assert result.stop_reason == "tool_use"
         tool_blocks = [b for b in result.content if b.type == "tool_use"]

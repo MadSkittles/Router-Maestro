@@ -14,6 +14,7 @@ from fastapi.responses import JSONResponse
 from router_maestro.providers import (
     AnthropicProvider,
     ChatRequest,
+    ChatStreamChunk,
     ProviderError,
     RequestOptionError,
     ResponseStatus,
@@ -29,30 +30,23 @@ from router_maestro.routing.capabilities import CapabilitySupport, Feature
 from router_maestro.routing.model_ref import catalog_model_public_id, qualify_model_id
 from router_maestro.routing.route_plan import RouteCandidate
 from router_maestro.server.protocols import client_error_response, unrepresented_option_error
+from router_maestro.server.protocols.anthropic_reducer import (
+    AnthropicReducer,
+    AnthropicStreamProtocolError,
+    build_anthropic_response,
+)
 from router_maestro.server.schemas.anthropic import (
     AnthropicCountTokensRequest,
     AnthropicMessagesRequest,
     AnthropicMessagesResponse,
     AnthropicModelInfo,
     AnthropicModelList,
-    AnthropicStreamState,
     AnthropicTextBlock,
-    AnthropicThinkingBlock,
-    AnthropicToolUseBlock,
     AnthropicUsage,
 )
 from router_maestro.server.streaming import sse_streaming_response
-from router_maestro.server.translation import (
-    AnthropicStreamProtocolError,
-    build_message_start_event,
-    translate_anthropic_to_openai,
-    translate_openai_chunk_to_anthropic_events,
-)
-from router_maestro.utils import (
-    count_anthropic_request_tokens,
-    get_logger,
-    map_openai_stop_reason_to_anthropic,
-)
+from router_maestro.server.translation import translate_anthropic_to_openai
+from router_maestro.utils import count_anthropic_request_tokens, get_logger
 from router_maestro.utils.async_iterators import close_async_iterator
 from router_maestro.utils.context_window import resolve_thinking_budget
 from router_maestro.utils.responses_bridge import (
@@ -415,6 +409,16 @@ async def messages(request: AnthropicMessagesRequest, raw_request: FastAPIReques
             chat_request,
             prepared_plan=prepared_plan,
         )
+        response_model = (
+            response.selected_model.qualified_id
+            if response.selected_model is not None
+            else qualify_model_id(provider_name, response.model)
+        )
+        downstream_response = build_anthropic_response(
+            response,
+            response_id=f"msg_{uuid.uuid4().hex[:24]}",
+            model=response_model,
+        )
 
         logger.info(
             "Upstream response from %s: content_len=%s, tool_calls=%s, finish_reason=%s",
@@ -423,64 +427,7 @@ async def messages(request: AnthropicMessagesRequest, raw_request: FastAPIReques
             len(response.tool_calls) if response.tool_calls else 0,
             response.finish_reason,
         )
-
-        # Build Anthropic response. Per spec, thinking blocks must come
-        # BEFORE the text block they reasoned about.
-        content = []
-        if response.thinking:
-            content.append(
-                AnthropicThinkingBlock(
-                    type="thinking",
-                    thinking=response.thinking,
-                    signature=response.thinking_signature,
-                )
-            )
-        if response.content:
-            content.append(AnthropicTextBlock(type="text", text=response.content))
-        if response.refusal:
-            content.append(AnthropicTextBlock(type="text", text=response.refusal))
-
-        # Convert OpenAI-format tool_calls to Anthropic tool_use blocks
-        if response.tool_calls:
-            for tc in response.tool_calls:
-                func = tc.get("function", {})
-                arguments = func.get("arguments", "{}")
-                if isinstance(arguments, str):
-                    try:
-                        arguments = json.loads(arguments)
-                    except (json.JSONDecodeError, TypeError):
-                        arguments = {}
-                content.append(
-                    AnthropicToolUseBlock(
-                        type="tool_use",
-                        id=tc.get("id", ""),
-                        name=func.get("name", ""),
-                        input=arguments,
-                    )
-                )
-
-        usage = AnthropicUsage(
-            input_tokens=response.usage.get("prompt_tokens", 0) if response.usage else 0,
-            output_tokens=response.usage.get("completion_tokens", 0) if response.usage else 0,
-        )
-
-        # Map finish reason
-        stop_reason = map_openai_stop_reason_to_anthropic(response.finish_reason)
-
-        return AnthropicMessagesResponse(
-            id=f"msg_{uuid.uuid4().hex[:24]}",
-            type="message",
-            role="assistant",
-            content=content,
-            model=(
-                response.selected_model.qualified_id
-                if response.selected_model is not None
-                else qualify_model_id(provider_name, response.model)
-            ),
-            stop_reason=stop_reason,
-            stop_sequence=None,
-            usage=usage,
-        )
+        return downstream_response
     except ProviderError as e:
         logger.error(
             "Anthropic messages request failed: model=%s, status=%s, error=%s",
@@ -600,7 +547,7 @@ async def stream_response(
 ) -> AsyncGenerator[str, None]:
     """Stream Anthropic Messages API response."""
     response_id = f"msg_{uuid.uuid4().hex[:24]}"
-    state = AnthropicStreamState(estimated_input_tokens=estimated_input_tokens)
+    reducer: AnthropicReducer | None = None
 
     # Emit a protocol ping before opening the upstream stream. The shared SSE
     # wrapper continues emitting pings while Router primes the first chunk, so
@@ -624,7 +571,7 @@ async def stream_response(
             selected_provider = (
                 selected_model.provider if selected_model is not None else provider_name
             )
-            state.estimated_input_tokens = _estimate_input_tokens(
+            estimated_input_tokens = _estimate_input_tokens(
                 token_estimation_request,
                 selected_provider,
             )
@@ -633,12 +580,12 @@ async def stream_response(
             if selected_model is not None
             else qualify_model_id(provider_name, original_model)
         )
-        start_event = build_message_start_event(
-            state,
-            response_model,
+        reducer = AnthropicReducer(
             response_id=response_id,
+            model=response_model,
+            estimated_input_tokens=estimated_input_tokens,
         )
-        if start_event is not None:
+        for start_event in reducer.start():
             yield f"event: {start_event['type']}\ndata: {json.dumps(start_event)}\n\n"
 
         # Track state needed to recover tool calls that the upstream model
@@ -699,6 +646,15 @@ async def stream_response(
                 if leaked:
                     recovered_tool_calls = leaked
                     finish_reason = "tool_calls"
+                    if (
+                        chunk_outcome is not None
+                        and chunk_outcome.response_status is ResponseStatus.COMPLETED
+                    ):
+                        chunk_outcome = replace(
+                            chunk_outcome,
+                            finish_reason="tool_calls",
+                        )
+                        terminal_outcome = chunk_outcome
 
             if chunk_outcome is not None and chunk_outcome.response_status not in {
                 ResponseStatus.COMPLETED,
@@ -714,30 +670,19 @@ async def stream_response(
                 )
                 return
 
-            # Build OpenAI-style chunk for translation. Forward reasoning
-            # under both legacy field names so the translator can pick it up.
-            delta: dict = {
-                "content": chunk.content or chunk.refusal or None,
-                "tool_calls": recovered_tool_calls,
-            }
-            if chunk.thinking:
-                delta["reasoning_text"] = chunk.thinking
-            if chunk.thinking_signature:
-                delta["reasoning_opaque"] = chunk.thinking_signature
-            openai_chunk = {
-                "id": response_id,
-                "choices": [
-                    {
-                        "delta": delta,
-                        "finish_reason": finish_reason,
-                    }
-                ],
-                "usage": chunk.usage,  # Pass through usage info
-            }
-
             try:
-                events = translate_openai_chunk_to_anthropic_events(
-                    openai_chunk, state, response_model
+                events = reducer.reduce(
+                    ChatStreamChunk(
+                        content=chunk.content,
+                        refusal=chunk.refusal,
+                        finish_reason=finish_reason,
+                        usage=chunk.usage,
+                        tool_calls=recovered_tool_calls,
+                        thinking=chunk.thinking,
+                        thinking_signature=chunk.thinking_signature,
+                        thinking_id=chunk.thinking_id,
+                        terminal_outcome=chunk_outcome,
+                    )
                 )
             except AnthropicStreamProtocolError:
                 terminal_outcome = exception_outcome(

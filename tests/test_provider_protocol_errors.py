@@ -2338,7 +2338,10 @@ def _stream_for_codec(
         (
             "anthropic",
             '{"type":"future_event"}',
-            '{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"first"}}',
+            (
+                '{"type":"content_block_start","index":0,'
+                '"content_block":{"type":"text","text":"first"}}'
+            ),
         ),
         (
             "copilot-chat",
@@ -2664,7 +2667,8 @@ async def test_sse_known_event_with_malformed_shape_is_typed_protocol_failure(
     first_events = {
         "openai-compatible": '{"choices":[{"delta":{"content":"first"}}]}',
         "anthropic": (
-            '{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"first"}}'
+            '{"type":"content_block_start","index":0,'
+            '"content_block":{"type":"text","text":"first"}}'
         ),
         "copilot-chat": '{"choices":[{"delta":{"content":"first"}}]}',
         "copilot-responses": '{"type":"response.output_text.delta","delta":"first"}',
@@ -2694,7 +2698,26 @@ async def test_sse_known_event_with_malformed_shape_is_typed_protocol_failure(
             ],
             {"total_tokens": 3},
         ),
-        ("anthropic", ['{"type":"future_event"}'], None),
+        (
+            "anthropic",
+            [
+                '{"type":"future_event"}',
+                (
+                    '{"type":"content_block_start","index":0,'
+                    '"content_block":{"type":"text","text":""}}'
+                ),
+                (
+                    '{"type":"content_block_delta","index":0,'
+                    '"delta":{"type":"text_delta","text":"answer"}}'
+                ),
+                '{"type":"content_block_stop","index":0}',
+                (
+                    '{"type":"message_delta","delta":{"stop_reason":"end_turn"},'
+                    '"usage":{"output_tokens":1}}'
+                ),
+            ],
+            {"prompt_tokens": 0, "completion_tokens": 1, "total_tokens": 1},
+        ),
         (
             "copilot-chat",
             [

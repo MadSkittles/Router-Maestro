@@ -50,7 +50,10 @@ def _base_response() -> dict[str, Any]:
 
 def test_protocol_package_exports_only_cross_module_production_api() -> None:
     assert protocols.__all__ == [
+        "AnthropicReducer",
+        "AnthropicStreamProtocolError",
         "ResponsesReducer",
+        "build_anthropic_response",
         "build_nonstream_snapshot",
         "client_error_response",
         "unrepresented_option_error",
