@@ -1,13 +1,16 @@
 """Per-request audit tracing.
 
-When enabled, captures the full request/response cycle for each API call
-as JSON files for debugging. Each request gets a directory under the trace
-dir containing up to 4 files:
+When enabled, captures the request/response lifecycle for each API call as JSON
+files for debugging. Each request gets a directory under the trace directory;
+early failures may omit upstream records, while retries and fallback add
+independently numbered upstream request and response observations:
 
     {trace_dir}/{request_id}/
         inbound.json        — client request (method, path, headers, body)
-        upstream.json       — request sent to provider
-        upstream_resp.json  — provider response (status, headers, body summary)
+        upstream.json, upstream_2.json, ...
+                           — requests sent to providers, in observation order
+        upstream_resp.json, upstream_resp_2.json, ...
+                           — responses received, independently numbered
         outbound.json       — response sent to client
 
 Activation:

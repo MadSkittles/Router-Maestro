@@ -33,6 +33,10 @@ class RunawayGuard:
 
     def feed_chunk(self, chunk) -> str | None:
         """Feed a chunk and check volume thresholds."""
+        opaque_payload = getattr(chunk, "opaque_payload", None)
+        if isinstance(opaque_payload, str) and opaque_payload:
+            return self._record_payloads([opaque_payload])
+
         payloads: list[str] = []
         has_payload_event = False
         for field in (
@@ -68,6 +72,10 @@ class RunawayGuard:
 
         if not has_payload_event:
             return None
+        return self._record_payloads(payloads)
+
+    def _record_payloads(self, payloads: list[str]) -> str | None:
+        """Record one logical emitted payload event and apply circuit-breaker limits."""
         self._delta_count += 1
         self._total_bytes += sum(len(payload.encode("utf-8")) for payload in payloads)
 

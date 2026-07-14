@@ -376,6 +376,9 @@ class ChatStreamChunk:
     terminal_outcome: TerminalOutcome | None = None
     # OpenAI refusal delta. Appended to preserve the legacy positional constructor.
     refusal: str | None = None
+    # Internal-only payload projection for forward-compatible protocol events.
+    # Routes never emit this field; RunawayGuard counts its serialized bytes.
+    opaque_payload: str | None = None
 
 
 @dataclass

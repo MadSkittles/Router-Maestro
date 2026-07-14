@@ -30,6 +30,16 @@ All notable changes to Router-Maestro are documented here.
   is distinct from model capability. An explicitly selected model without the
   native transport is served through the standard translated path for that
   same model; this is not model fallback.
+- **Authoritative request lifecycle and audit documentation.** Document the
+  pre-commit non-2xx versus post-commit in-stream error boundary, native
+  Responses `incomplete`/`failed`/`cancelled` HTTP semantics, and the shared
+  request context that owns configuration, Router leases, audit, and cleanup
+  through final ASGI body delivery. Audit traces now retain numbered upstream
+  request and response observations instead of assuming one fixed four-file
+  bundle; the two observation streams are numbered independently. The
+  documented authentication contract
+  remains the current one: `ROUTER_MAESTRO_API_KEY` protects both inference and
+  administration routes.
 
 ### Fixes
 

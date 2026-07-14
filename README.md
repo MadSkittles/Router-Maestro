@@ -97,7 +97,7 @@ Get a local server running in 3 steps. The server (started locally or via Docker
 > router-maestro context update local --endpoint http://localhost:8123
 > ```
 
-> **About the Router-Maestro API key.** Router-Maestro has **one server key** (format `sk-rm-...`) that every client must send on every request. It is **not** an OpenAI / Anthropic / Gemini / GitHub token — it only authenticates clients to *your* Router-Maestro server. The server auto-generates and persists this key on first start (in `~/.config/router-maestro/contexts.json` or its Docker-mounted equivalent), so you usually never type it by hand: the CLI reads it from the active context and the `config claude-code/codex/gemini` wizards write it into each tool's settings for you. The two times you do touch it explicitly are (1) `router-maestro server show-key` to copy it into a raw `curl` or environment variable like `ROUTER_MAESTRO_API_KEY`, and (2) `router-maestro context add ... --api-key sk-rm-...` when pointing a client machine at a **remote** server (see [Deployment](#deployment)). If a client returns `401`, it almost always means the key it sent doesn't match what the server expects — re-run `server show-key` and compare.
+> **About the Router-Maestro API key.** Router-Maestro has **one server key** (format `sk-rm-...`) that clients must send on inference, administration, and remote-management requests. Public health/docs and the independently configured metrics endpoint are exceptions. It is **not** an OpenAI / Anthropic / Gemini / GitHub token — it only authenticates clients to *your* Router-Maestro server. The server auto-generates and persists this key on first start (in `~/.config/router-maestro/contexts.json` or its Docker-mounted equivalent), so you usually never type it by hand: the CLI reads it from the active context and the `config claude-code/codex/gemini` wizards write it into each tool's settings for you. The two times you do touch it explicitly are (1) `router-maestro server show-key` to copy it into a raw `curl` or environment variable like `ROUTER_MAESTRO_API_KEY`, and (2) `router-maestro context add ... --api-key sk-rm-...` when pointing a client machine at a **remote** server (see [Deployment](#deployment)). If an authenticated request returns `401`, it almost always means the key it sent doesn't match what the server expects — re-run `server show-key` and compare.
 
 <https://github.com/user-attachments/assets/8f60ec7a-4fbe-4342-9408-084073a4d48d>
 
@@ -267,6 +267,24 @@ capability mismatches and invalid or unsupported request options return the
 entry protocol's native `400` response and do not switch models. Once a stream
 has emitted its first provider chunk, a later failure is surfaced in that same
 stream and Router-Maestro never replays the request on another candidate.
+
+Streaming has a strict terminal contract. A stream succeeds only after an
+explicit successful provider terminal; clean EOF without one is an
+`unexpected_eof`, not success. Failures discovered before an SSE response is
+returned use the entry protocol's non-2xx JSON error. After the HTTP response
+has started, its status is already committed (normally `200`), so an error,
+incomplete result, or unexpected EOF is encoded as exactly one protocol-native
+in-stream terminal instead. The standard Anthropic route may send a `ping`
+before opening a slow upstream stream; a failure after that ping is therefore
+post-commit even though no model content has arrived yet.
+
+OpenAI Responses preserves the upstream response's business status. A native
+Responses result with `status: "incomplete"`, `"failed"`, or `"cancelled"`
+remains an HTTP `200` Responses object/event with that status; it is not
+manufactured into `completed`. Transport failures and malformed provider
+payloads remain errors. When a failed/cancelled Responses result is bridged to
+Chat, Anthropic, or Gemini, whose non-stream response schemas cannot represent
+that native status, Router-Maestro returns that entry protocol's error envelope.
 
 ### Cross-Provider Translation
 
@@ -570,11 +588,16 @@ graph TD
 ```
 
 - **Traefik** — reverse proxy that handles TLS termination and auto-renews HTTPS certificates via Let's Encrypt. Only needed for public-facing deployments.
-- **Router-Maestro** — the API server. Listens on port 8080, requires an API key for all requests, and routes them to configured LLM providers.
+- **Router-Maestro** — the API server. Listens on port 8080, requires its API key for inference and administration requests, and routes inference to configured LLM providers. Health/docs are public; metrics has its own optional token.
 
 ### Server and Client API Keys
 
-Router-Maestro has one server API key. The server uses it to protect every API route except public health/status endpoints, and every client must send that same key.
+Router-Maestro currently has one server API key. The same
+`ROUTER_MAESTRO_API_KEY` protects inference routes and `/api/admin/*`; every
+inference client and remote CLI management command must send that key. A
+separate administrator key is not currently supported. Public health/docs and
+the independently configured metrics endpoint are the exceptions described in
+their respective sections.
 
 You can provide the key explicitly with `ROUTER_MAESTRO_API_KEY` or `router-maestro server start --api-key ...`. If you do not, the server generates a `sk-rm-...` key on first start and persists it in the `local` context inside `contexts.json` (the Docker image runs the same `server start` command, so the same behavior applies there). To read it later:
 
@@ -808,6 +831,16 @@ Configure in `~/.config/router-maestro/priorities.json`:
 }
 ```
 
+The five streaming encoders (OpenAI Chat, OpenAI Responses, standard
+Anthropic, beta-native Anthropic, and Gemini) attach these guards to their
+stream processing. `beta_strip` is also live: matching tokens are removed from
+the inbound `anthropic-beta` header before Copilot transport, and remaining
+tokens are forwarded. The broader request context is separate from this stream
+pipeline: it owns one immutable config/router generation, request ID, audit,
+terminal outcome, and cleanup for streaming and non-stream inference and token
+counting routes. Streaming cleanup finishes at the final ASGI body frame, not
+when the endpoint returns a stream object.
+
 **Audit Tracing** (opt-in, for debugging):
 
 ```bash
@@ -818,11 +851,22 @@ ROUTER_MAESTRO_TRACE=1 router-maestro server start
 { "audit": { "enabled": true } }
 ```
 
-Each request writes JSON trace files to `~/.local/share/router-maestro/traces/{request_id}/`:
-- `inbound.json` — what the client sent
-- `upstream.json` — what was forwarded to the provider
-- `upstream_resp.json` — provider response
-- `outbound.json` — what was returned to the client (with timing)
+Each traced request writes a directory under
+`~/.local/share/router-maestro/traces/{request_id}/`. Artifacts are lifecycle
+records, not a fixed four-file bundle:
+
+- `inbound.json` — the client request
+- `upstream.json`, `upstream_2.json`, ... — upstream request observations in order
+- `upstream_resp.json`, `upstream_resp_2.json`, ... — upstream response
+  observations, numbered independently in response order
+- `outbound.json` — wire status, timing, and semantic terminal outcome
+
+Some early failures have no upstream artifact, while fallback, authentication
+retry, catalog, or token-count traffic may produce multiple attempt records.
+The recognized `Authorization`, `X-API-Key`, and `X-Goog-API-Key` headers and
+common credential-shaped payload keys are redacted before the trace is written
+asynchronously. Treat traces as sensitive because prompts, model output, and
+unrecognized application-specific headers can still contain private data.
 
 For Docker, mount a volume to persist traces:
 ```bash

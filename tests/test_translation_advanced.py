@@ -4,8 +4,9 @@ import json
 
 import pytest
 
-from router_maestro.providers import ChatResponse
+from router_maestro.providers import ChatResponse, ChatStreamChunk
 from router_maestro.server.protocols.anthropic_reducer import (
+    AnthropicReducer,
     AnthropicStreamProtocolError,
     build_anthropic_response,
 )
@@ -30,7 +31,6 @@ from router_maestro.server.translation import (
     _translate_model_name,
     _translate_tool_choice,
     _translate_tools,
-    translate_openai_chunk_to_anthropic_events,
 )
 
 
@@ -39,16 +39,12 @@ def _stream_chunk(
     content: str | None = None,
     tool_calls: list[dict] | None = None,
     finish_reason: str | None = None,
-) -> dict:
-    delta: dict = {}
-    if content is not None:
-        delta["content"] = content
-    if tool_calls is not None:
-        delta["tool_calls"] = tool_calls
-    return {
-        "id": "chunk-test",
-        "choices": [{"delta": delta, "finish_reason": finish_reason}],
-    }
+) -> ChatStreamChunk:
+    return ChatStreamChunk(
+        content=content or "",
+        tool_calls=tool_calls,
+        finish_reason=finish_reason,
+    )
 
 
 def _tool_delta(
@@ -681,15 +677,15 @@ class TestTranslateOpenAIToAnthropic:
         assert tool_blocks[0].input == {"command": "hostname"}
 
 
-class TestTranslateOpenAIChunkToAnthropicEvents:
-    """Tests for streaming chunk translation."""
+class TestAnthropicReducerStreaming:
+    """Tests for canonical Anthropic stream reduction."""
 
     def test_message_start_event(self):
         """Test that first chunk generates message_start."""
         state = AnthropicStreamState()
-        chunk = {"id": "chunk-1", "choices": [{"delta": {"content": "Hi"}, "finish_reason": None}]}
+        reducer = AnthropicReducer(response_id="chunk-1", model="claude-3", state=state)
 
-        events = translate_openai_chunk_to_anthropic_events(chunk, state, "claude-3")
+        events = reducer.reduce(ChatStreamChunk(content="Hi"))
 
         # Should have message_start
         assert any(e["type"] == "message_start" for e in events)
@@ -699,13 +695,9 @@ class TestTranslateOpenAIChunkToAnthropicEvents:
         """Test content delta event generation."""
         state = AnthropicStreamState()
         state.message_start_sent = True
+        reducer = AnthropicReducer(response_id="chunk-1", model="claude-3", state=state)
 
-        chunk = {
-            "id": "chunk-1",
-            "choices": [{"delta": {"content": "Hello"}, "finish_reason": None}],
-        }
-
-        events = translate_openai_chunk_to_anthropic_events(chunk, state, "claude-3")
+        events = reducer.reduce(ChatStreamChunk(content="Hello"))
 
         # Should have content_block_start and content_block_delta
         delta_events = [e for e in events if e["type"] == "content_block_delta"]
@@ -717,10 +709,9 @@ class TestTranslateOpenAIChunkToAnthropicEvents:
         state = AnthropicStreamState()
         state.message_start_sent = True
         state.content_block_open = True
+        reducer = AnthropicReducer(response_id="chunk-1", model="claude-3", state=state)
 
-        chunk = {"id": "chunk-1", "choices": [{"delta": {}, "finish_reason": "stop"}]}
-
-        events = translate_openai_chunk_to_anthropic_events(chunk, state, "claude-3")
+        events = reducer.reduce(ChatStreamChunk(content="", finish_reason="stop"))
 
         # Should have message_delta and message_stop
         assert any(e["type"] == "message_delta" for e in events)
@@ -731,34 +722,24 @@ class TestTranslateOpenAIChunkToAnthropicEvents:
         """Tool blocks are transactional and cannot be exposed before validation."""
         state = AnthropicStreamState()
         state.message_start_sent = True
+        reducer = AnthropicReducer(response_id="chunk-1", model="claude-3", state=state)
 
-        chunk = {
-            "id": "chunk-1",
-            "choices": [
-                {
-                    "delta": {
-                        "tool_calls": [
-                            {
-                                "index": 0,
-                                "id": "tc-1",
-                                "function": {"name": "test", "arguments": "{}"},
-                            }
-                        ]
-                    },
-                    "finish_reason": None,
-                }
-            ],
-        }
-
-        events = translate_openai_chunk_to_anthropic_events(chunk, state, "claude-3")
+        events = reducer.reduce(
+            ChatStreamChunk(
+                content="",
+                tool_calls=[
+                    {
+                        "index": 0,
+                        "id": "tc-1",
+                        "function": {"name": "test", "arguments": "{}"},
+                    }
+                ],
+            )
+        )
 
         assert events == []
 
-        terminal = {
-            "id": "chunk-2",
-            "choices": [{"delta": {}, "finish_reason": "tool_calls"}],
-        }
-        events = translate_openai_chunk_to_anthropic_events(terminal, state, "claude-3")
+        events = reducer.reduce(ChatStreamChunk(content="", finish_reason="tool_calls"))
 
         assert [event["type"] for event in events] == [
             "content_block_start",
@@ -780,6 +761,7 @@ class TestTranslateOpenAIChunkToAnthropicEvents:
 
     def test_interleaved_parallel_tools_flush_in_stable_explicit_index_order(self):
         state = AnthropicStreamState(message_start_sent=True)
+        reducer = AnthropicReducer(response_id="chunk-test", model="claude-3", state=state)
 
         chunks = [
             _stream_chunk(
@@ -793,14 +775,8 @@ class TestTranslateOpenAIChunkToAnthropicEvents:
             _stream_chunk(tool_calls=[_tool_delta(index=7, arguments="1}")]),
         ]
 
-        before_terminal = [
-            event
-            for chunk in chunks
-            for event in translate_openai_chunk_to_anthropic_events(chunk, state, "claude-3")
-        ]
-        terminal = translate_openai_chunk_to_anthropic_events(
-            _stream_chunk(finish_reason="tool_calls"), state, "claude-3"
-        )
+        before_terminal = [event for chunk in chunks for event in reducer.reduce(chunk)]
+        terminal = reducer.reduce(_stream_chunk(finish_reason="tool_calls"))
 
         assert before_terminal == []
         blocks = _tool_blocks(terminal)
@@ -812,6 +788,7 @@ class TestTranslateOpenAIChunkToAnthropicEvents:
 
     def test_indexless_calls_use_id_identity_and_arrival_order(self):
         state = AnthropicStreamState(message_start_sent=True)
+        reducer = AnthropicReducer(response_id="chunk-test", model="claude-3", state=state)
 
         chunks = [
             _stream_chunk(
@@ -823,11 +800,9 @@ class TestTranslateOpenAIChunkToAnthropicEvents:
             _stream_chunk(tool_calls=[_tool_delta(tool_id="tool-a", arguments="1}")]),
         ]
         for chunk in chunks:
-            assert translate_openai_chunk_to_anthropic_events(chunk, state, "claude-3") == []
+            assert reducer.reduce(chunk) == []
 
-        events = translate_openai_chunk_to_anthropic_events(
-            _stream_chunk(finish_reason="tool_calls"), state, "claude-3"
-        )
+        events = reducer.reduce(_stream_chunk(finish_reason="tool_calls"))
 
         assert [(block["id"], block["json"]) for block in _tool_blocks(events)] == [
             ("tool-a", '{"a":1}'),
@@ -836,37 +811,30 @@ class TestTranslateOpenAIChunkToAnthropicEvents:
 
     def test_tool_text_tool_keeps_text_live_and_flushes_tools_after_text(self):
         state = AnthropicStreamState(message_start_sent=True)
+        reducer = AnthropicReducer(response_id="chunk-test", model="claude-3", state=state)
 
         assert (
-            translate_openai_chunk_to_anthropic_events(
+            reducer.reduce(
                 _stream_chunk(
                     tool_calls=[
                         _tool_delta(index=1, tool_id="tool-a", name="alpha", arguments="{}")
                     ]
-                ),
-                state,
-                "claude-3",
+                )
             )
             == []
         )
-        text_events = translate_openai_chunk_to_anthropic_events(
-            _stream_chunk(content="still working"), state, "claude-3"
-        )
+        text_events = reducer.reduce(_stream_chunk(content="still working"))
         assert any(event.get("delta", {}).get("text") == "still working" for event in text_events)
         assert (
-            translate_openai_chunk_to_anthropic_events(
+            reducer.reduce(
                 _stream_chunk(
                     tool_calls=[_tool_delta(index=0, tool_id="tool-b", name="beta", arguments="{}")]
-                ),
-                state,
-                "claude-3",
+                )
             )
             == []
         )
 
-        terminal = translate_openai_chunk_to_anthropic_events(
-            _stream_chunk(finish_reason="tool_calls"), state, "claude-3"
-        )
+        terminal = reducer.reduce(_stream_chunk(finish_reason="tool_calls"))
 
         assert terminal[0] == {"type": "content_block_stop", "index": 0}
         blocks = _tool_blocks(terminal)
@@ -878,34 +846,19 @@ class TestTranslateOpenAIChunkToAnthropicEvents:
 
     def test_tool_fragment_does_not_close_live_thinking_block(self):
         state = AnthropicStreamState(message_start_sent=True)
-        first_thinking = translate_openai_chunk_to_anthropic_events(
-            {
-                "id": "chunk-thinking-1",
-                "choices": [{"delta": {"reasoning_text": "first"}, "finish_reason": None}],
-            },
-            state,
-            "claude-3",
-        )
+        reducer = AnthropicReducer(response_id="chunk-thinking", model="claude-3", state=state)
+        first_thinking = reducer.reduce(ChatStreamChunk(content="", thinking="first"))
         assert [event["type"] for event in first_thinking] == [
             "content_block_start",
             "content_block_delta",
         ]
 
-        tool_events = translate_openai_chunk_to_anthropic_events(
+        tool_events = reducer.reduce(
             _stream_chunk(
                 tool_calls=[_tool_delta(index=0, tool_id="tool-a", name="alpha", arguments="{}")]
-            ),
-            state,
-            "claude-3",
+            )
         )
-        second_thinking = translate_openai_chunk_to_anthropic_events(
-            {
-                "id": "chunk-thinking-2",
-                "choices": [{"delta": {"reasoning_text": "second"}, "finish_reason": None}],
-            },
-            state,
-            "claude-3",
-        )
+        second_thinking = reducer.reduce(ChatStreamChunk(content="", thinking="second"))
 
         assert tool_events == []
         assert second_thinking == [
@@ -916,9 +869,7 @@ class TestTranslateOpenAIChunkToAnthropicEvents:
             }
         ]
 
-        terminal = translate_openai_chunk_to_anthropic_events(
-            _stream_chunk(finish_reason="tool_calls"), state, "claude-3"
-        )
+        terminal = reducer.reduce(_stream_chunk(finish_reason="tool_calls"))
         assert terminal[0] == {"type": "content_block_stop", "index": 0}
         tool_block = _tool_blocks(terminal)[0]
         assert tool_block["id"] == "tool-a"
@@ -948,71 +899,54 @@ class TestTranslateOpenAIChunkToAnthropicEvents:
     )
     def test_terminal_validation_is_transactional(self, tool_calls, match):
         state = AnthropicStreamState(message_start_sent=True)
-        assert (
-            translate_openai_chunk_to_anthropic_events(
-                _stream_chunk(tool_calls=tool_calls), state, "claude-3"
-            )
-            == []
-        )
+        reducer = AnthropicReducer(response_id="chunk-test", model="claude-3", state=state)
+        assert reducer.reduce(_stream_chunk(tool_calls=tool_calls)) == []
 
         with pytest.raises(AnthropicStreamProtocolError, match=match):
-            translate_openai_chunk_to_anthropic_events(
-                _stream_chunk(finish_reason="tool_calls"), state, "claude-3"
-            )
+            reducer.reduce(_stream_chunk(finish_reason="tool_calls"))
 
         assert state.message_complete is False
         assert state.content_block_open is False
 
     def test_explicit_incomplete_terminal_still_validates_tool_arguments(self):
         state = AnthropicStreamState(message_start_sent=True)
-        translate_openai_chunk_to_anthropic_events(
+        reducer = AnthropicReducer(response_id="chunk-test", model="claude-3", state=state)
+        reducer.reduce(
             _stream_chunk(
                 tool_calls=[_tool_delta(index=0, tool_id="tool-a", name="alpha", arguments="{")]
-            ),
-            state,
-            "claude-3",
+            )
         )
 
         with pytest.raises(AnthropicStreamProtocolError, match="valid JSON object"):
-            translate_openai_chunk_to_anthropic_events(
-                _stream_chunk(finish_reason="length"), state, "claude-3"
-            )
+            reducer.reduce(_stream_chunk(finish_reason="length"))
 
     def test_conflicting_tool_identity_is_protocol_error(self):
         state = AnthropicStreamState(message_start_sent=True)
-        translate_openai_chunk_to_anthropic_events(
+        reducer = AnthropicReducer(response_id="chunk-test", model="claude-3", state=state)
+        reducer.reduce(
             _stream_chunk(
                 tool_calls=[_tool_delta(index=0, tool_id="tool-a", name="alpha", arguments="{")]
-            ),
-            state,
-            "claude-3",
+            )
         )
 
         with pytest.raises(AnthropicStreamProtocolError, match="conflicting id"):
-            translate_openai_chunk_to_anthropic_events(
+            reducer.reduce(
                 _stream_chunk(
                     tool_calls=[_tool_delta(index=0, tool_id="tool-b", name="alpha", arguments="}")]
-                ),
-                state,
-                "claude-3",
+                )
             )
 
     def test_indexless_tool_is_upgraded_when_later_delta_adds_index(self):
         state = AnthropicStreamState(message_start_sent=True)
-        translate_openai_chunk_to_anthropic_events(
-            _stream_chunk(tool_calls=[_tool_delta(tool_id="tool-a", name="alpha", arguments="{")]),
-            state,
-            "claude-3",
+        reducer = AnthropicReducer(response_id="chunk-test", model="claude-3", state=state)
+        reducer.reduce(
+            _stream_chunk(tool_calls=[_tool_delta(tool_id="tool-a", name="alpha", arguments="{")])
         )
-        translate_openai_chunk_to_anthropic_events(
-            _stream_chunk(tool_calls=[_tool_delta(index=4, tool_id="tool-a", arguments='"a":1}')]),
-            state,
-            "claude-3",
+        reducer.reduce(
+            _stream_chunk(tool_calls=[_tool_delta(index=4, tool_id="tool-a", arguments='"a":1}')])
         )
 
-        events = translate_openai_chunk_to_anthropic_events(
-            _stream_chunk(finish_reason="tool_calls"), state, "claude-3"
-        )
+        events = reducer.reduce(_stream_chunk(finish_reason="tool_calls"))
 
         assert [(block["id"], json.loads(block["json"])) for block in _tool_blocks(events)] == [
             ("tool-a", {"a": 1})
@@ -1020,22 +954,17 @@ class TestTranslateOpenAIChunkToAnthropicEvents:
 
     def test_indexed_tool_is_completed_by_later_id_only_delta(self):
         state = AnthropicStreamState(message_start_sent=True)
-        translate_openai_chunk_to_anthropic_events(
+        reducer = AnthropicReducer(response_id="chunk-test", model="claude-3", state=state)
+        reducer.reduce(
             _stream_chunk(
                 tool_calls=[_tool_delta(index=4, tool_id="tool-a", name="alpha", arguments="{")]
-            ),
-            state,
-            "claude-3",
+            )
         )
-        translate_openai_chunk_to_anthropic_events(
-            _stream_chunk(tool_calls=[_tool_delta(tool_id="tool-a", arguments='"a":1}')]),
-            state,
-            "claude-3",
+        reducer.reduce(
+            _stream_chunk(tool_calls=[_tool_delta(tool_id="tool-a", arguments='"a":1}')])
         )
 
-        events = translate_openai_chunk_to_anthropic_events(
-            _stream_chunk(finish_reason="tool_calls"), state, "claude-3"
-        )
+        events = reducer.reduce(_stream_chunk(finish_reason="tool_calls"))
 
         assert [(block["id"], json.loads(block["json"])) for block in _tool_blocks(events)] == [
             ("tool-a", {"a": 1})
@@ -1043,8 +972,9 @@ class TestTranslateOpenAIChunkToAnthropicEvents:
 
     def test_empty_object_split_across_multiple_argument_fragments(self):
         state = AnthropicStreamState(message_start_sent=True)
+        reducer = AnthropicReducer(response_id="chunk-test", model="claude-3", state=state)
         for fragment in ("{", "", "}"):
-            translate_openai_chunk_to_anthropic_events(
+            reducer.reduce(
                 _stream_chunk(
                     tool_calls=[
                         _tool_delta(
@@ -1054,14 +984,10 @@ class TestTranslateOpenAIChunkToAnthropicEvents:
                             arguments=fragment,
                         )
                     ]
-                ),
-                state,
-                "claude-3",
+                )
             )
 
-        events = translate_openai_chunk_to_anthropic_events(
-            _stream_chunk(finish_reason="tool_calls"), state, "claude-3"
-        )
+        events = reducer.reduce(_stream_chunk(finish_reason="tool_calls"))
 
         assert _tool_blocks(events)[0]["json"] == "{}"
 
@@ -1076,15 +1002,14 @@ class TestTranslateOpenAIChunkToAnthropicEvents:
     )
     def test_conflicting_index_id_or_name_is_protocol_error(self, second_delta):
         state = AnthropicStreamState(message_start_sent=True)
-        translate_openai_chunk_to_anthropic_events(
+        reducer = AnthropicReducer(response_id="chunk-test", model="claude-3", state=state)
+        reducer.reduce(
             _stream_chunk(
                 tool_calls=[_tool_delta(index=0, tool_id="tool-a", name="alpha", arguments="{")]
-            ),
-            state,
-            "claude-3",
+            )
         )
         if second_delta["index"] == 1:
-            translate_openai_chunk_to_anthropic_events(
+            reducer.reduce(
                 _stream_chunk(
                     tool_calls=[
                         _tool_delta(
@@ -1094,25 +1019,18 @@ class TestTranslateOpenAIChunkToAnthropicEvents:
                             arguments="{}",
                         )
                     ]
-                ),
-                state,
-                "claude-3",
+                )
             )
 
         with pytest.raises(AnthropicStreamProtocolError, match="conflicting"):
-            translate_openai_chunk_to_anthropic_events(
-                _stream_chunk(tool_calls=[second_delta]), state, "claude-3"
-            )
+            reducer.reduce(_stream_chunk(tool_calls=[second_delta]))
 
     def test_fragment_without_index_or_id_is_protocol_error(self):
         state = AnthropicStreamState(message_start_sent=True)
+        reducer = AnthropicReducer(response_id="chunk-test", model="claude-3", state=state)
 
         with pytest.raises(AnthropicStreamProtocolError, match="missing both index and id"):
-            translate_openai_chunk_to_anthropic_events(
-                _stream_chunk(tool_calls=[_tool_delta(arguments='{"a":1}')]),
-                state,
-                "claude-3",
-            )
+            reducer.reduce(_stream_chunk(tool_calls=[_tool_delta(arguments='{"a":1}')]))
 
     @pytest.mark.parametrize(
         "tool_call",
@@ -1126,23 +1044,18 @@ class TestTranslateOpenAIChunkToAnthropicEvents:
     )
     def test_malformed_tool_delta_shape_is_protocol_error(self, tool_call):
         state = AnthropicStreamState(message_start_sent=True)
+        reducer = AnthropicReducer(response_id="chunk-test", model="claude-3", state=state)
 
         with pytest.raises(AnthropicStreamProtocolError):
-            translate_openai_chunk_to_anthropic_events(
-                _stream_chunk(tool_calls=[tool_call]), state, "claude-3"
-            )
+            reducer.reduce(_stream_chunk(tool_calls=[tool_call]))
 
     def test_no_events_after_complete(self):
         """Test that no events are generated after message is complete."""
         state = AnthropicStreamState()
         state.message_complete = True
+        reducer = AnthropicReducer(response_id="chunk-1", model="claude-3", state=state)
 
-        chunk = {
-            "id": "chunk-1",
-            "choices": [{"delta": {"content": "More"}, "finish_reason": None}],
-        }
-
-        events = translate_openai_chunk_to_anthropic_events(chunk, state, "claude-3")
+        events = reducer.reduce(ChatStreamChunk(content="More"))
         assert len(events) == 0
 
 

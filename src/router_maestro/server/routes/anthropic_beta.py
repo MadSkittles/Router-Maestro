@@ -741,20 +741,15 @@ async def _encode_native_stream_errors(
     """Apply raw stream guards and preserve native semantic terminal state."""
     terminal_outcome: TerminalOutcome | None = None
     response_status = ResponseStatus.COMPLETED
-    raw_leak_guard = None
-    if pipeline is not None and pipeline.leak_guard is not None:
-        from router_maestro.pipeline.leak_guard import RawFrameLeakGuard
-
-        raw_leak_guard = RawFrameLeakGuard(inner=pipeline.leak_guard)
     try:
         async for frame in stream:
             event_type, data = _parse_native_frame(frame)
             if pipeline is not None:
                 abort_reason = _feed_native_frame_guards(
                     pipeline,
-                    raw_leak_guard,
                     event_type,
                     data,
+                    frame,
                 )
                 if abort_reason is not None:
                     terminal_outcome = exception_outcome(abort_reason, code="overloaded")
@@ -855,35 +850,161 @@ def _parse_native_frame(frame: str) -> tuple[str | None, dict | None]:
 
 def _feed_native_frame_guards(
     pipeline,
-    raw_leak_guard,
     event_type: str | None,
     data: dict | None,
+    wire_frame: str,
 ) -> str | None:
-    """Project native content deltas onto the shared guard input contract."""
-    if event_type != "content_block_delta" or data is None:
-        return None
-    delta = data.get("delta")
-    if not isinstance(delta, dict):
-        return None
+    """Project payload-bearing native events onto the shared guard contract."""
+    for chunk in _native_guard_chunks(event_type, data, wire_frame):
+        abort_reason = pipeline.feed_stream(chunk)
+        if abort_reason is not None:
+            return abort_reason
+    return None
+
+
+def _native_guard_chunks(
+    event_type: str | None,
+    data: dict | None,
+    wire_frame: str,
+):
+    """Project one raw frame into visible fields plus exact wire-volume payload."""
     from router_maestro.providers.base import ChatStreamChunk
 
+    if data is None:
+        return []
+
+    if not _native_frame_has_guard_payload(event_type, data):
+        return []
+
+    if event_type == "message_start":
+        message = data.get("message")
+        content = message.get("content") if isinstance(message, dict) else None
+        if not isinstance(content, list):
+            return [ChatStreamChunk(content="", opaque_payload=wire_frame)]
+        chunks = [
+            chunk
+            for block in content
+            if isinstance(block, dict)
+            for chunk in _native_content_block_guard_chunks(block)
+        ]
+        return [_combine_native_guard_chunks(chunks, wire_frame)]
+
+    if event_type == "content_block_start":
+        block = data.get("content_block")
+        chunks = _native_content_block_guard_chunks(block) if isinstance(block, dict) else []
+        return [_combine_native_guard_chunks(chunks, wire_frame)]
+
+    if event_type != "content_block_delta":
+        return [ChatStreamChunk(content="", opaque_payload=wire_frame)]
+    delta = data.get("delta")
+    if not isinstance(delta, dict):
+        return [ChatStreamChunk(content="", opaque_payload=wire_frame)]
     delta_type = delta.get("type")
     if delta_type == "text_delta":
-        chunk = ChatStreamChunk(content=delta.get("text", ""))
-    elif delta_type == "thinking_delta":
-        if raw_leak_guard is not None:
-            leak_reason = raw_leak_guard.feed_frame(event_type, json.dumps(data))
-            if leak_reason is not None:
-                return leak_reason
-        chunk = ChatStreamChunk(content="", thinking=delta.get("thinking", ""))
-    elif delta_type == "input_json_delta":
-        chunk = ChatStreamChunk(
-            content="",
-            tool_calls=[{"function": {"arguments": delta.get("partial_json", "")}}],
+        return [ChatStreamChunk(content=delta.get("text", ""), opaque_payload=wire_frame)]
+    if delta_type == "thinking_delta":
+        return [
+            ChatStreamChunk(
+                content="",
+                thinking=delta.get("thinking", ""),
+                opaque_payload=wire_frame,
+            )
+        ]
+    if delta_type == "signature_delta":
+        return [
+            ChatStreamChunk(
+                content="",
+                thinking_signature=delta.get("signature", ""),
+                opaque_payload=wire_frame,
+            )
+        ]
+    if delta_type == "input_json_delta":
+        return [
+            ChatStreamChunk(
+                content="",
+                tool_calls=[{"function": {"arguments": delta.get("partial_json", "")}}],
+                opaque_payload=wire_frame,
+            )
+        ]
+    return [ChatStreamChunk(content="", opaque_payload=wire_frame)]
+
+
+def _native_content_block_guard_chunks(block: dict):
+    """Project one initial native content block without scanning opaque payloads."""
+    from router_maestro.providers.base import ChatStreamChunk
+
+    block_type = block.get("type")
+    if block_type == "text":
+        return [ChatStreamChunk(content=block.get("text", ""))]
+    if block_type == "thinking":
+        return [
+            ChatStreamChunk(
+                content="",
+                thinking=block.get("thinking", ""),
+                thinking_signature=block.get("signature"),
+            )
+        ]
+    if block_type == "redacted_thinking":
+        return [ChatStreamChunk(content="", thinking_signature=block.get("data", ""))]
+    if block_type == "tool_use":
+        tool_input = block.get("input")
+        if not isinstance(tool_input, dict):
+            return []
+        return [
+            ChatStreamChunk(
+                content="",
+                tool_calls=[
+                    {
+                        "function": {
+                            "arguments": json.dumps(
+                                tool_input,
+                                ensure_ascii=False,
+                                separators=(",", ":"),
+                            )
+                        }
+                    }
+                ],
+            )
+        ]
+    return []
+
+
+def _combine_native_guard_chunks(chunks, wire_frame: str):
+    """Collapse initial block projections so one emitted frame is counted once."""
+    from router_maestro.providers.base import ChatStreamChunk
+
+    if not chunks:
+        return ChatStreamChunk(content="", opaque_payload=wire_frame)
+    return ChatStreamChunk(
+        content="".join(chunk.content for chunk in chunks if chunk.content),
+        thinking="".join(chunk.thinking for chunk in chunks if chunk.thinking) or None,
+        thinking_signature="".join(
+            chunk.thinking_signature for chunk in chunks if chunk.thinking_signature
         )
-    else:
-        return None
-    return pipeline.feed_stream(chunk)
+        or None,
+        tool_calls=[tool_call for chunk in chunks for tool_call in (chunk.tool_calls or [])]
+        or None,
+        opaque_payload=wire_frame,
+    )
+
+
+def _native_frame_has_guard_payload(event_type: str | None, data: dict) -> bool:
+    """Select emitted frames that carry output or forward-compatible extensions."""
+    if event_type in {
+        "message_start",
+        "content_block_start",
+        "content_block_delta",
+        "message_delta",
+        "error",
+    }:
+        return True
+    baseline_fields = {
+        "content_block_stop": {"type", "index"},
+        "message_stop": {"type"},
+        "ping": {"type"},
+    }
+    baseline = baseline_fields.get(event_type)
+    return baseline is not None and bool(set(data) - baseline)
 
 
 def _native_frame_outcome(

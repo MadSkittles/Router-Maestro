@@ -25,8 +25,7 @@ accumulating the full response text. Memory is O(max_tag_length), not O(response
 Invoke recovery still accumulates text (it needs the full content at finish).
 """
 
-import json
-
+from router_maestro.pipeline.guards import GuardTextKind
 from router_maestro.providers.base import ChatStreamChunk
 from router_maestro.providers.tool_parsing import recover_invoke_tool_calls
 from router_maestro.utils import get_logger
@@ -47,6 +46,18 @@ _CONTROL_TAGS: list[tuple[str, str, str]] = [
     ("<cross-session-message", "</cross-session-message>", "cross-session-message"),
     ("<tick>", "</tick>", "tick"),
 ]
+
+
+class _VisibleTextScanner:
+    """Independent control-envelope and code-fence state for one text kind."""
+
+    def __init__(self) -> None:
+        self.in_fence = False
+        self.backtick_run = 0
+        self.matchers = [
+            _TagMatcher(open_prefix, close_tag, tag_name)
+            for open_prefix, close_tag, tag_name in _CONTROL_TAGS
+        ]
 
 
 class _TagMatcher:
@@ -192,14 +203,7 @@ class LeakGuard:
         self._tool_names = allowed_tool_names
         self._tripped = False
         self._trip_reason: str | None = None
-        self._in_fence = False
-        self._backtick_run = 0
-
-        # Character-fed matchers for control envelopes
-        self._matchers = [
-            _TagMatcher(open_prefix, close_tag, tag_name)
-            for open_prefix, close_tag, tag_name in _CONTROL_TAGS
-        ]
+        self._scanners = {kind: _VisibleTextScanner() for kind in GuardTextKind}
 
         # Invoke recovery still needs accumulated text
         self._invoke_text = ""
@@ -208,28 +212,35 @@ class LeakGuard:
         return None
 
     def feed_text(self, text: str) -> str | None:
-        """Feed a text delta. Returns abort reason if control envelope detected."""
+        """Feed recoverable content text using the compatibility API."""
+        return self.feed_visible_text(text, GuardTextKind.CONTENT)
+
+    def feed_visible_text(self, text: str, kind: GuardTextKind) -> str | None:
+        """Control-scan visible text while recovering invokes from content only."""
         if self._tripped:
             return self._trip_reason
 
-        # Accumulate for invoke recovery (unavoidable — recovery needs full text)
-        self._invoke_text += text
+        if kind is GuardTextKind.CONTENT:
+            # Recovery needs complete ordinary content, but private thinking and
+            # refusal text must never be promoted to downstream tool calls.
+            self._invoke_text += text
 
+        scanner = self._scanners[kind]
         # Feed character-by-character to matchers
         for c in text:
             # Track code fences (``` toggles)
             if c == "`":
-                self._backtick_run += 1
+                scanner.backtick_run += 1
             else:
-                if self._backtick_run >= 3:
-                    self._in_fence = not self._in_fence
-                self._backtick_run = 0
+                if scanner.backtick_run >= 3:
+                    scanner.in_fence = not scanner.in_fence
+                scanner.backtick_run = 0
 
             # Skip detection inside code fences
-            if self._in_fence:
+            if scanner.in_fence:
                 continue
 
-            for matcher in self._matchers:
+            for matcher in scanner.matchers:
                 if matcher.feed(c):
                     self._tripped = True
                     self._trip_reason = f"response_leak:control_envelope:{matcher.tag_name}"
@@ -250,44 +261,3 @@ class LeakGuard:
     @property
     def accumulated_text(self) -> str:
         return self._invoke_text
-
-
-class RawFrameLeakGuard:
-    """Leak guard for the anthropic_beta passthrough route.
-
-    Operates on raw SSE frame data strings. Extracts text from
-    content_block_delta events and feeds them to an inner LeakGuard.
-    """
-
-    def __init__(
-        self,
-        allowed_tool_names: set[str] | None = None,
-        *,
-        inner: LeakGuard | None = None,
-    ):
-        self._inner = inner or LeakGuard(allowed_tool_names=allowed_tool_names)
-
-    def feed_frame(self, event_type: str, data_str: str) -> str | None:
-        """Feed a raw SSE frame. Returns abort reason if leak detected."""
-        if event_type != "content_block_delta":
-            return None
-
-        text = self._extract_text(data_str)
-        if text:
-            return self._inner.feed_text(text)
-        return None
-
-    @staticmethod
-    def _extract_text(data_str: str) -> str | None:
-        """Extract text content from a content_block_delta payload."""
-        try:
-            data = json.loads(data_str)
-            delta = data.get("delta", {})
-            delta_type = delta.get("type", "")
-            if delta_type == "text_delta":
-                return delta.get("text")
-            if delta_type == "thinking_delta":
-                return delta.get("thinking")
-        except (json.JSONDecodeError, TypeError, AttributeError):
-            pass
-        return None

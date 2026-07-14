@@ -195,6 +195,14 @@ docker compose exec router-maestro router-maestro server show-key
 
 Use that same key in remote client contexts and raw API calls. If deployment automation needs a stable pre-provisioned value, set `ROUTER_MAESTRO_API_KEY` in `.env` before starting the service.
 
+This is currently also the administrator credential: `/api/admin/*` and
+inference routes use the same `ROUTER_MAESTRO_API_KEY`, and remote CLI
+management reads that key from the active context. There is no separate
+administrator-key environment variable in the current release. Protect this
+key as both inference and configuration authority, expose admin routes only on
+trusted networks or behind an appropriate access-control layer, and rotate the
+single key consistently across all clients when required.
+
 ### Complete .env Example
 
 ```bash

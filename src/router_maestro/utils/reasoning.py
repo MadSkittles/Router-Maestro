@@ -27,10 +27,6 @@ EFFORT_TO_BUDGET: dict[str, int] = {
 EFFORT_ORDER: tuple[str, ...] = ("minimal", "low", "medium", "high", "xhigh", "max")
 VALID_EFFORTS: tuple[str, ...] = EFFORT_ORDER
 
-# Effort tiers eligible for transparent variant rewriting (e.g. claude-opus-4.7
-# → claude-opus-4.7-high). low/medium are passed through as reasoning_effort.
-VARIANT_EFFORTS: tuple[str, ...] = ("high", "xhigh", "max")
-
 # Effort levels that vanilla OpenAI / Copilot upstreams accept directly.
 UPSTREAM_NATIVE_EFFORTS: tuple[str, ...] = ("minimal", "low", "medium", "high")
 

@@ -1223,7 +1223,7 @@ class TestBetaMessagesEndpoint:
             assert context.pipeline.outcome.response_status is ResponseStatus.COMPLETED
 
     @pytest.mark.asyncio
-    async def test_native_stream_with_both_guards_disabled_never_invokes_raw_leak_guard(self):
+    async def test_native_stream_with_both_guards_disabled_passes_payloads_through(self):
         from router_maestro.pipeline import RequestPipeline
 
         config = _guard_config(leak_enabled=False, runaway_enabled=False)
@@ -1249,17 +1249,13 @@ class TestBetaMessagesEndpoint:
             yield f"event: content_block_delta\ndata: {json.dumps(payload)}\n\n"
             yield 'event: message_stop\ndata: {"type":"message_stop"}\n\n'
 
-        with patch(
-            "router_maestro.pipeline.leak_guard.RawFrameLeakGuard",
-            side_effect=AssertionError("disabled leak guard must not be constructed"),
-        ):
-            frames = [
-                frame
-                async for frame in _encode_native_stream_errors(
-                    stream(),
-                    pipeline=pipeline,
-                )
-            ]
+        frames = [
+            frame
+            async for frame in _encode_native_stream_errors(
+                stream(),
+                pipeline=pipeline,
+            )
+        ]
 
         assert [
             line.removeprefix("event: ")
@@ -1363,6 +1359,329 @@ class TestBetaMessagesEndpoint:
         ] == ["error"]
         assert pipeline.outcome is not None
         assert pipeline.outcome.error.code == "overloaded"
+
+    @pytest.mark.parametrize(
+        ("event_type", "payload"),
+        [
+            pytest.param(
+                "message_start",
+                {
+                    **_VALID_MESSAGE_START,
+                    "message": {
+                        **_VALID_MESSAGE_START["message"],
+                        "content": [{"type": "text", "text": "x" * 100_001}],
+                    },
+                },
+                id="message-start-text",
+            ),
+            pytest.param(
+                "content_block_start",
+                {
+                    "type": "content_block_start",
+                    "index": 0,
+                    "content_block": {"type": "thinking", "thinking": "x" * 100_001},
+                },
+                id="content-block-start-thinking",
+            ),
+            pytest.param(
+                "content_block_start",
+                {
+                    "type": "content_block_start",
+                    "index": 0,
+                    "content_block": {"type": "redacted_thinking", "data": "x" * 100_001},
+                },
+                id="content-block-start-redacted-thinking",
+            ),
+            pytest.param(
+                "content_block_start",
+                {
+                    "type": "content_block_start",
+                    "index": 0,
+                    "content_block": {
+                        "type": "tool_use",
+                        "id": "tool-1",
+                        "name": "lookup",
+                        "input": {"value": "x" * 100_001},
+                    },
+                },
+                id="content-block-start-tool-input",
+            ),
+            pytest.param(
+                "content_block_delta",
+                {
+                    "type": "content_block_delta",
+                    "index": 0,
+                    "delta": {"type": "signature_delta", "signature": "x" * 100_001},
+                },
+                id="signature-delta",
+            ),
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_native_runaway_guard_covers_all_payload_bearing_raw_events(
+        self,
+        event_type,
+        payload,
+    ):
+        from router_maestro.pipeline import RequestPipeline
+
+        config = _guard_config(leak_enabled=False, runaway_enabled=True)
+        context = _CapturedGuardContext([config])
+        with patch(
+            "router_maestro.runtime.request_context.get_current_request_context",
+            return_value=context,
+        ):
+            pipeline = RequestPipeline.create(
+                request_id="req-raw-payload",
+                model="guarded-model",
+            )
+
+        async def stream():
+            yield f"event: {event_type}\ndata: {json.dumps(payload)}\n\n"
+            yield 'event: message_stop\ndata: {"type":"message_stop"}\n\n'
+
+        frames = [
+            frame
+            async for frame in _encode_native_stream_errors(
+                stream(),
+                pipeline=pipeline,
+            )
+        ]
+
+        assert [
+            line.removeprefix("event: ")
+            for frame in frames
+            for line in frame.splitlines()
+            if line.startswith("event: ")
+        ] == ["error"]
+        assert pipeline.outcome is not None
+        assert pipeline.outcome.error.code == "overloaded"
+
+    @pytest.mark.parametrize(
+        ("event_type", "payload"),
+        [
+            pytest.param(
+                "content_block_start",
+                {
+                    "type": "content_block_start",
+                    "index": 0,
+                    "content_block": {
+                        "type": "future_block",
+                        "future": "x" * 100_001,
+                    },
+                },
+                id="future-block",
+            ),
+            pytest.param(
+                "content_block_delta",
+                {
+                    "type": "content_block_delta",
+                    "index": 0,
+                    "delta": {
+                        "type": "future_delta",
+                        "future": "x" * 100_001,
+                    },
+                },
+                id="future-delta",
+            ),
+            pytest.param(
+                "content_block_start",
+                {
+                    "type": "content_block_start",
+                    "index": 0,
+                    "content_block": {
+                        "type": "text",
+                        "text": "small",
+                        "future": "x" * 100_001,
+                    },
+                },
+                id="known-block-extension",
+            ),
+            pytest.param(
+                "content_block_delta",
+                {
+                    "type": "content_block_delta",
+                    "index": 0,
+                    "delta": {
+                        "type": "text_delta",
+                        "text": "small",
+                        "future": "x" * 100_001,
+                    },
+                },
+                id="known-delta-extension",
+            ),
+            pytest.param(
+                "message_delta",
+                {
+                    "type": "message_delta",
+                    "delta": {"stop_reason": None, "stop_sequence": None},
+                    "usage": {"output_tokens": 1},
+                    "future": "x" * 100_001,
+                },
+                id="top-level-extension",
+            ),
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_native_runaway_guard_counts_forward_compatible_payloads(
+        self,
+        event_type,
+        payload,
+    ):
+        from router_maestro.pipeline import RequestPipeline
+
+        config = _guard_config(leak_enabled=False, runaway_enabled=True)
+        context = _CapturedGuardContext([config])
+        with patch(
+            "router_maestro.runtime.request_context.get_current_request_context",
+            return_value=context,
+        ):
+            pipeline = RequestPipeline.create(
+                request_id="req-future-native-payload",
+                model="guarded-model",
+            )
+
+        async def stream():
+            yield f"event: {event_type}\ndata: {json.dumps(payload)}\n\n"
+            yield 'event: message_stop\ndata: {"type":"message_stop"}\n\n'
+
+        frames = [
+            frame
+            async for frame in _encode_native_stream_errors(
+                stream(),
+                pipeline=pipeline,
+            )
+        ]
+
+        assert [
+            line.removeprefix("event: ")
+            for frame in frames
+            for line in frame.splitlines()
+            if line.startswith("event: ")
+        ] == ["error"]
+        assert pipeline.outcome is not None
+        assert pipeline.outcome.error.code == "overloaded"
+
+    @pytest.mark.parametrize(
+        ("event_type", "payload"),
+        [
+            pytest.param(
+                "message_start",
+                {
+                    **_VALID_MESSAGE_START,
+                    "message": {
+                        **_VALID_MESSAGE_START["message"],
+                        "content": [
+                            {
+                                "type": "thinking",
+                                "thinking": "<tick>private control</tick>",
+                            }
+                        ],
+                    },
+                },
+                id="message-start-thinking",
+            ),
+            pytest.param(
+                "content_block_start",
+                {
+                    "type": "content_block_start",
+                    "index": 0,
+                    "content_block": {
+                        "type": "text",
+                        "text": "<tick>private control</tick>",
+                    },
+                },
+                id="content-block-start-text",
+            ),
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_native_leak_guard_scans_human_readable_start_payloads(
+        self,
+        event_type,
+        payload,
+    ):
+        from router_maestro.pipeline import RequestPipeline
+
+        config = _guard_config(leak_enabled=True, runaway_enabled=False)
+        context = _CapturedGuardContext([config])
+        with patch(
+            "router_maestro.runtime.request_context.get_current_request_context",
+            return_value=context,
+        ):
+            pipeline = RequestPipeline.create(
+                request_id="req-raw-start-leak",
+                model="guarded-model",
+            )
+
+        async def stream():
+            yield f"event: {event_type}\ndata: {json.dumps(payload)}\n\n"
+            yield 'event: message_stop\ndata: {"type":"message_stop"}\n\n'
+
+        frames = [
+            frame
+            async for frame in _encode_native_stream_errors(
+                stream(),
+                pipeline=pipeline,
+            )
+        ]
+
+        assert [
+            line.removeprefix("event: ")
+            for frame in frames
+            for line in frame.splitlines()
+            if line.startswith("event: ")
+        ] == ["error"]
+        assert pipeline.outcome is not None
+        assert pipeline.outcome.error.code == "overloaded"
+
+    @pytest.mark.asyncio
+    async def test_native_guard_projection_feeds_each_payload_once(self):
+        class RecordingPipeline:
+            def __init__(self):
+                self.chunks = []
+
+            def feed_stream(self, chunk):
+                self.chunks.append(chunk)
+                return None
+
+            def finish(self, *, wire_status, outcome, body_summary=None):
+                return None
+
+        pipeline = RecordingPipeline()
+        start = {
+            "type": "content_block_start",
+            "index": 0,
+            "content_block": {
+                "type": "thinking",
+                "thinking": "visible",
+                "signature": "opaque",
+            },
+        }
+        signature = {
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": {"type": "signature_delta", "signature": "more-opaque"},
+        }
+
+        async def stream():
+            yield f"event: content_block_start\ndata: {json.dumps(start)}\n\n"
+            yield f"event: content_block_delta\ndata: {json.dumps(signature)}\n\n"
+            yield 'event: message_stop\ndata: {"type":"message_stop"}\n\n'
+
+        frames = [
+            frame
+            async for frame in _encode_native_stream_errors(
+                stream(),
+                pipeline=pipeline,
+            )
+        ]
+
+        assert len(frames) == 3
+        assert len(pipeline.chunks) == 2
+        assert pipeline.chunks[0].thinking == "visible"
+        assert pipeline.chunks[0].thinking_signature == "opaque"
+        assert pipeline.chunks[1].thinking_signature == "more-opaque"
 
     @pytest.mark.parametrize(
         ("terminal", "expected_transport", "expected_status", "expected_code"),

@@ -3,12 +3,10 @@
 import json
 import re
 
-from router_maestro.providers import ChatRequest, ChatStreamChunk, Message
-from router_maestro.server.protocols.anthropic_reducer import AnthropicReducer
+from router_maestro.providers import ChatRequest, Message
 from router_maestro.server.schemas.anthropic import (
     AnthropicAssistantMessage,
     AnthropicMessagesRequest,
-    AnthropicStreamState,
     AnthropicTextBlock,
     AnthropicUserMessage,
 )
@@ -388,52 +386,3 @@ def _extract_multimodal_content(blocks: list) -> str | list:
     content_parts.extend(image_parts)
 
     return content_parts
-
-
-def translate_openai_chunk_to_anthropic_events(
-    chunk: dict, state: AnthropicStreamState, model: str
-) -> list[dict]:
-    """Adapt a legacy OpenAI chunk dict to the canonical Anthropic reducer."""
-    if state.message_complete:
-        return []
-
-    reducer = AnthropicReducer(
-        response_id=chunk.get("id", ""),
-        model=model,
-        state=state,
-    )
-    choices = chunk.get("choices") or []
-    if not choices:
-        reducer.observe_usage(chunk.get("usage"))
-        return []
-
-    choice = choices[0]
-    delta = choice.get("delta") or {}
-    thinking = None
-    for key in ("reasoning_text", "cot_summary", "thinking"):
-        value = delta.get(key)
-        if isinstance(value, str) and value:
-            thinking = value
-            break
-        if isinstance(value, dict):
-            inner = value.get("text") or value.get("content")
-            if isinstance(inner, str) and inner:
-                thinking = inner
-                break
-    thinking_signature = None
-    for key in ("reasoning_opaque", "cot_id", "signature"):
-        value = delta.get(key)
-        if isinstance(value, str) and value:
-            thinking_signature = value
-            break
-    return reducer.reduce(
-        ChatStreamChunk(
-            content=delta.get("content") or "",
-            refusal=delta.get("refusal") or None,
-            finish_reason=choice.get("finish_reason"),
-            usage=chunk.get("usage"),
-            tool_calls=delta.get("tool_calls"),
-            thinking=thinking,
-            thinking_signature=thinking_signature,
-        )
-    )
