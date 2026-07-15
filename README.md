@@ -531,6 +531,12 @@ requirements are obtained from the active server, so the same login command
 works for local and remote contexts. Only a local context may fall back to the
 local `providers.json` while its server is unavailable.
 
+The supported runtime options are `api_key_env` and
+`allow_unauthenticated`. Router-Maestro preserves unknown option keys from
+older `providers.json` files when loading and saving, but ignores them at
+runtime. If one provider definition is invalid, it is skipped with a sanitized
+diagnostic while other valid custom providers remain available.
+
 ### Hot-Reload
 
 Configuration files are automatically reloaded every 5 minutes:

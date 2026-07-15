@@ -584,29 +584,15 @@ async def test_admin_models_returns_unique_provider_qualified_public_ids(monkeyp
                 ProviderModelInfo(id="shared-model", name="Shared", provider="second"),
             ]
 
-    class _Lease:
-        router = _ModelRouter()
-        released = False
+    model_router = _ModelRouter()
 
-        async def release(self):
-            self.released = True
-
-    class _Owner:
-        lease = _Lease()
-
-        async def acquire(self):
-            return self.lease
-
-    owner = _Owner()
-
-    response = await admin.list_models(owner)
+    response = await admin.list_models(model_router)
 
     assert [model.id for model in response.models] == [
         "first/shared-model",
         "second/shared-model",
     ]
     assert [model.provider for model in response.models] == ["first", "second"]
-    assert owner.lease.released is True
 
 
 @pytest.mark.asyncio

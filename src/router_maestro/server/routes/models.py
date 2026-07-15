@@ -2,19 +2,19 @@
 
 import time
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 
-from router_maestro.routing import get_router
 from router_maestro.routing.model_ref import catalog_model_public_id
+from router_maestro.routing.router import Router
+from router_maestro.server.dependencies import get_app_router
 from router_maestro.server.schemas import ModelList, ModelObject
 
 router = APIRouter()
 
 
 @router.get("/api/openai/v1/models")
-async def list_models() -> ModelList:
+async def list_models(model_router: Router = Depends(get_app_router)) -> ModelList:
     """List available models."""
-    model_router = get_router()
     models = await model_router.list_models()
 
     return ModelList(

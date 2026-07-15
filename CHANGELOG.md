@@ -43,6 +43,16 @@ All notable changes to Router-Maestro are documented here.
 
 ### Fixes
 
+- **Consistent application-owned model catalogs.** OpenAI, Anthropic, and Admin
+  model-list endpoints now acquire the active application-owned Router
+  generation under a lease. Catalogs immediately observe generation rebuilds,
+  while an in-flight listing safely retains its old provider resources until
+  completion instead of consulting a stale module singleton.
+- **Backward-compatible custom-provider options.** Preserve unknown legacy
+  `providers.json` option keys across load/save without activating them at
+  runtime. Provider definitions are validated independently, so one invalid,
+  reserved, or case-insensitive duplicate entry is skipped with secret-safe
+  diagnostics instead of hiding every healthy custom provider.
 - **Consistent fallback and provider failure semantics.** Normalize transport,
   authentication, rate-limit, upstream-status, upstream-protocol, unsupported,
   and client-request failures into one typed contract and record every planned

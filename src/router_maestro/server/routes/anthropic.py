@@ -7,7 +7,7 @@ from collections.abc import AsyncGenerator
 from dataclasses import replace
 from datetime import UTC, datetime
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 from fastapi import Request as FastAPIRequest
 from fastapi.responses import JSONResponse
 
@@ -30,6 +30,7 @@ from router_maestro.routing import Router, get_router
 from router_maestro.routing.capabilities import CapabilitySupport, Feature
 from router_maestro.routing.model_ref import catalog_model_public_id, qualify_model_id
 from router_maestro.routing.route_plan import RouteCandidate
+from router_maestro.server.dependencies import get_app_router
 from router_maestro.server.protocols import client_error_response, unrepresented_option_error
 from router_maestro.server.protocols.anthropic_reducer import (
     AnthropicReducer,
@@ -818,6 +819,7 @@ async def list_models(
     limit: int = 20,
     after_id: str | None = None,
     before_id: str | None = None,
+    model_router: Router = Depends(get_app_router),
 ) -> AnthropicModelList:
     """List available models in Anthropic format.
 
@@ -826,7 +828,6 @@ async def list_models(
         after_id: Return models after this ID (for forward pagination)
         before_id: Return models before this ID (for backward pagination)
     """
-    model_router = get_router()
     models = await model_router.list_models()
 
     # Generate ISO 8601 timestamp for created_at
