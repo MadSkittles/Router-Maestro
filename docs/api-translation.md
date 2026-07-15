@@ -244,13 +244,18 @@ if request.temperature is not None: payload["temperature"] = request.temperature
 if request.max_tokens is not None: payload["max_tokens"] = ...
 if request.tools: payload["tools"] = ...
 if request.tool_choice: payload["tool_choice"] = ...
-apply_copilot_chat_reasoning(
-    payload,
-    request.model,
-    request.thinking_budget,
-    request.reasoning_effort,
-    catalog_effort_values=...,
+# Reasoning effort is resolved by the provider's outbound contract
+# (CopilotOutboundContract.resolve_reasoning). See "Reasoning-Effort
+# Resolution" below.
+resolution = provider.outbound_contract.resolve_reasoning(
+    model=request.model,
+    reasoning_effort=request.reasoning_effort,
+    thinking_budget=request.thinking_budget,
+    catalog_effort_values=provider._catalog_effort_values(request.model),
+    operation=Operation.CHAT,
 )
+if resolution.effort is not None:
+    payload["reasoning_effort"] = resolution.effort
 ```
 
 #### Anthropic Native (`providers/anthropic.py`)
@@ -286,6 +291,61 @@ remains usable, but `none` is not a public request tier, has no budget mapping,
 and is ignored by exact/downward tier selection. An allowlist containing only
 `none` therefore cannot satisfy a positive reasoning-effort request. Other
 unknown catalog strings remain strict upstream-protocol errors.
+
+##### Reasoning-Effort Resolution: catalog-first, hardcode fallback
+
+The Copilot provider's outbound contract
+(`CopilotOutboundContract.resolve_reasoning` in `providers/copilot.py`) owns the
+single reasoning-effort rule for Chat, Responses, and — via the shared
+`pick_closest_effort` primitive — the native beta route. It chooses one of two
+paths per request, decided solely by whether `catalog_effort_values` is `None`.
+
+**`catalog_effort_values` comes from the in-memory model cache only**
+(`CopilotCatalog.effort_values`); it never blocks the request on a network
+fetch. It returns a tier list when the model advertises `reasoning_effort` in
+its catalog `capabilities.supports`, and returns `None` in **two** distinct
+cases:
+
+1. the catalog cache is cold (the model list has not been fetched yet), or
+2. the cache is warm but that model's `supports` block carries no
+   `reasoning_effort` field at all.
+
+Both cases fall back to the hardcoded family heuristic — so "the cache is warm"
+is *not* sufficient to guarantee the catalog path; the model must also advertise
+the field.
+
+**Path A — catalog advertises tiers (`effort_values` returns a list):**
+`pick_closest_effort(desired, tiers)` selects the highest advertised tier not
+exceeding the request. An exact match is preserved; an above-catalog request
+(e.g. `max` when the catalog tops out at `high`) is downgraded to the highest
+tier at or below it; if no tier is at or below the request, it is rejected with
+HTTP 400 (never substituted upward). An empty advertised list means the model
+declares no reasoning support, so any explicit effort/budget is rejected. This
+path uses **no** family heuristic — Copilot's advertisement is authoritative, so
+newly opened tiers are adopted without a code change.
+
+**Path B — no catalog reasoning info (`effort_values` returns `None`):** the
+static family heuristic `_known_reasoning_support(model)` decides support
+(`claude-opus-4.{6,7,8}` / `claude-sonnet-4.6` and `gpt-5*`/`o1`/`o3`/`o4` →
+supported; `claude-*-4.5` and older, `gpt-4*`, `gemini-2.5` → unsupported →
+reject; otherwise unknown). Chat then applies family-specific downgrades
+(`claude-*` `xhigh`/`max` → `high`; other models `max` → `xhigh`; unknown-family
+`xhigh` → `high`), while Responses applies the generic `downgrade_for_upstream`
+(native tiers pass through, `xhigh`/`max` → `high`). This path is the
+startup-window and no-advertised-field safety net, not the steady-state path.
+
+**Observed catalog state (live probe, 2026-07-16, 21 Copilot models):** every
+reasoning-capable model advertises tiers and therefore uses Path A — for
+example `claude-opus-4.6`/`sonnet-4.6` advertise `[low, medium, high, max]`,
+`claude-opus-4.7/4.8`/`sonnet-5` add `xhigh`, the `gpt-5.4/5.5` family advertises
+`[none, low, medium, high, xhigh]`, and `gpt-5.6-*` adds `max`. Only four models
+lack the field and fall to Path B — `claude-haiku-4.5`, `claude-opus-4.5`,
+`claude-sonnet-4.5`, and `gemini-2.5-pro` — and all four resolve to
+`known=False`, so Path B rejects reasoning for them rather than downgrading.
+Concrete downgrade examples: `claude-opus-4.6` (no `xhigh` advertised) maps a
+requested `xhigh` down to `high`; `gpt-5-mini` (tops at `high`) maps `max`/`xhigh`
+down to `high`; `gpt-5.6-*` (advertises `max`) preserves a requested `max`
+unchanged.
 
 Standard Anthropic routing first freezes a `RoutePlan`, then resolves thinking
 budget and reasoning support separately from every candidate's immutable
