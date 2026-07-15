@@ -22,7 +22,7 @@ from router_maestro.providers import (
 )
 from router_maestro.routing import get_router
 from router_maestro.routing.model_ref import qualify_model_id
-from router_maestro.server.protocols import client_error_response, unrepresented_option_error
+from router_maestro.server.protocols import client_error_response
 from router_maestro.server.protocols.errors import postcommit_error_data, protocol_error_response
 from router_maestro.server.routes._outcomes import record_chat_response_outcome
 from router_maestro.server.schemas.gemini import (
@@ -103,8 +103,6 @@ async def generate_content(
     """Handle Gemini generateContent (non-streaming) requests."""
     model = _extract_model_from_path(model_method)
     logger.info("Received Gemini generateContent request: model=%s", model)
-    if error := unrepresented_option_error(request):
-        return client_error_response(error, "gemini")
 
     # Handle test model
     if model == "test":
@@ -148,8 +146,6 @@ async def stream_generate_content(
     """Handle Gemini streamGenerateContent (streaming) requests."""
     model = _extract_model_from_path(model_method)
     logger.info("Received Gemini streamGenerateContent request: model=%s", model)
-    if error := unrepresented_option_error(request):
-        return client_error_response(error, "gemini")
 
     # Handle test model
     if model == "test":
@@ -209,8 +205,6 @@ async def count_tokens(
     request: GeminiGenerateContentRequest,
 ):
     """Handle Gemini countTokens requests."""
-    if error := unrepresented_option_error(request):
-        return client_error_response(error, "gemini")
     model = _extract_model_from_path(model_method)
     logger.info("Received Gemini countTokens request: model=%s", model)
 

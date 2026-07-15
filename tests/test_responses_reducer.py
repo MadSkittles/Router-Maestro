@@ -56,7 +56,6 @@ def test_protocol_package_exports_only_cross_module_production_api() -> None:
         "build_anthropic_response",
         "build_nonstream_snapshot",
         "client_error_response",
-        "unrepresented_option_error",
     ]
 
 

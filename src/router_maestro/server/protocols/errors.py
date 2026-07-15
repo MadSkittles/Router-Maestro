@@ -5,7 +5,6 @@ from typing import Literal
 
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from router_maestro.providers import (
@@ -34,52 +33,6 @@ class NormalizedProtocolError:
     parameter: str | None = None
     code: str | None = None
     headers: dict[str, str] | None = None
-
-
-def unrepresented_option_error(request: BaseModel) -> RequestOptionError | None:
-    """Reject retained extras on an explicitly extensible request/config model."""
-    parameter = _first_unrepresented_option(request)
-    if parameter is None:
-        return None
-    return RequestOptionError(
-        f"Unsupported request option '{parameter}'",
-        parameter=parameter,
-    )
-
-
-def _first_unrepresented_option(value: object, prefix: str = "") -> str | None:
-    if isinstance(value, BaseModel):
-        extras = value.model_extra or {}
-        if extras:
-            name = next(iter(extras))
-            return f"{prefix}.{name}" if prefix else name
-
-        for name, field in type(value).model_fields.items():
-            wire_name = field.alias or name
-            nested_prefix = f"{prefix}.{wire_name}" if prefix else wire_name
-            if parameter := _first_unrepresented_option(
-                getattr(value, name, None),
-                nested_prefix,
-            ):
-                return parameter
-        return None
-
-    if isinstance(value, (list, tuple)):
-        for index, item in enumerate(value):
-            nested_prefix = f"{prefix}[{index}]"
-            if parameter := _first_unrepresented_option(item, nested_prefix):
-                return parameter
-        return None
-
-    if isinstance(value, dict):
-        # Plain dictionaries are opaque vendor payloads. Recurse only so a
-        # model nested inside a typed mapping cannot hide retained extras;
-        # dictionary keys themselves are not interpreted as request options.
-        for name, item in value.items():
-            nested_prefix = f"{prefix}.{name}" if prefix else str(name)
-            if parameter := _first_unrepresented_option(item, nested_prefix):
-                return parameter
-    return None
 
 
 def protocol_surface_for_path(path: str) -> ProtocolSurface | None:

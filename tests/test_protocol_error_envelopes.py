@@ -716,7 +716,7 @@ def test_openai_option_rejection_uses_native_envelope(client: TestClient) -> Non
     ],
 )
 @pytest.mark.parametrize("stream", [False, True])
-def test_unrepresented_openai_semantic_option_is_native_400_before_router_or_sse(
+def test_unrepresented_openai_semantic_option_reaches_router_not_400(
     client: TestClient,
     path: str,
     base_payload: dict,
@@ -725,11 +725,22 @@ def test_unrepresented_openai_semantic_option_is_native_400_before_router_or_sse
     router_method: str,
     stream: bool,
 ) -> None:
+    """Options Router-Maestro does not model (``response_format``, ``n``, ``store``,
+    ``include``) are NOT rejected at the route. A transparent proxy forwards or
+    ignores them, so the request reaches routing instead of a native 400."""
+    sentinel = ProviderError(
+        "reached routing sentinel",
+        status_code=503,
+        retryable=False,
+        kind=ProviderFailureKind.UPSTREAM_STATUS,
+    )
     model_router = MagicMock()
-    model_router.chat_completion = AsyncMock()
-    model_router.prepare_chat_completion_stream = AsyncMock()
-    model_router.responses_completion = AsyncMock()
-    model_router.prepare_responses_completion_stream = AsyncMock()
+    model_router.chat_completion = AsyncMock(side_effect=sentinel)
+    model_router.prepare_chat_completion_stream = AsyncMock(side_effect=sentinel)
+    model_router.chat_completion_stream = AsyncMock(side_effect=sentinel)
+    model_router.responses_completion = AsyncMock(side_effect=sentinel)
+    model_router.prepare_responses_completion_stream = AsyncMock(side_effect=sentinel)
+    model_router.responses_completion_stream = AsyncMock(side_effect=sentinel)
     patch_target = (
         "router_maestro.server.routes.chat.get_router"
         if router_method == "chat_completion"
@@ -740,21 +751,8 @@ def test_unrepresented_openai_semantic_option_is_native_400_before_router_or_sse
     with patch(patch_target, return_value=model_router):
         response = client.post(path, json=payload)
 
-    assert response.status_code == 400
-    assert response.headers["content-type"].startswith("application/json")
-    assert response.json() == {
-        "error": {
-            "message": f"Unsupported request option '{parameter}'",
-            "type": "invalid_request_error",
-            "param": parameter,
-            "code": "unsupported_parameter",
-        }
-    }
-    assert "data:" not in response.text
-    model_router.chat_completion.assert_not_awaited()
-    model_router.prepare_chat_completion_stream.assert_not_awaited()
-    model_router.responses_completion.assert_not_awaited()
-    model_router.prepare_responses_completion_stream.assert_not_awaited()
+    assert response.status_code != 400, response.text
+    assert "Unsupported request option" not in response.text
 
 
 def test_anthropic_option_rejection_uses_native_envelope(client: TestClient) -> None:
@@ -827,15 +825,23 @@ def test_gemini_option_rejection_uses_native_envelope(client: TestClient) -> Non
         ),
     ],
 )
-def test_unrepresented_gemini_option_is_native_400_before_router_or_sse(
+def test_unrepresented_gemini_option_reaches_router_not_400(
     client: TestClient,
     path: str,
     parameter: str,
     payload_option: dict,
 ) -> None:
+    """Unknown Gemini options are forwarded/ignored, not rejected at the route."""
+    sentinel = ProviderError(
+        "reached routing sentinel",
+        status_code=503,
+        retryable=False,
+        kind=ProviderFailureKind.UPSTREAM_STATUS,
+    )
     model_router = MagicMock()
-    model_router.chat_completion = AsyncMock()
-    model_router.prepare_chat_completion_stream = AsyncMock()
+    model_router.chat_completion = AsyncMock(side_effect=sentinel)
+    model_router.prepare_chat_completion_stream = AsyncMock(side_effect=sentinel)
+    model_router.chat_completion_stream = AsyncMock(side_effect=sentinel)
     payload = {
         "contents": [{"role": "user", "parts": [{"text": "hi"}]}],
         **payload_option,
@@ -844,22 +850,12 @@ def test_unrepresented_gemini_option_is_native_400_before_router_or_sse(
     with patch("router_maestro.server.routes.gemini.get_router", return_value=model_router):
         response = client.post(path, json=payload)
 
-    assert response.status_code == 400
-    assert response.headers["content-type"].startswith("application/json")
-    assert response.json() == {
-        "error": {
-            "code": 400,
-            "message": f"Unsupported request option '{parameter}'",
-            "status": "INVALID_ARGUMENT",
-            "details": [{"reason": "unsupported_parameter", "parameter": parameter}],
-        }
-    }
-    assert "data:" not in response.text
-    model_router.chat_completion.assert_not_awaited()
-    model_router.prepare_chat_completion_stream.assert_not_awaited()
+    assert response.status_code != 400, response.text
+    assert "Unsupported request option" not in response.text
 
 
-def test_unrepresented_gemini_count_tokens_option_is_native_400(client: TestClient) -> None:
+def test_unrepresented_gemini_count_tokens_option_is_ignored_not_400(client: TestClient) -> None:
+    """count_tokens estimates locally; an unknown option must not 400 the request."""
     response = client.post(
         "/api/gemini/v1beta/models/m:countTokens",
         json={
@@ -868,13 +864,8 @@ def test_unrepresented_gemini_count_tokens_option_is_native_400(client: TestClie
         },
     )
 
-    assert response.status_code == 400
-    assert response.json()["error"]["details"] == [
-        {
-            "reason": "unsupported_parameter",
-            "parameter": "generationConfig.unknownOption",
-        }
-    ]
+    assert response.status_code != 400, response.text
+    assert "Unsupported request option" not in response.text
 
 
 @pytest.mark.parametrize(
@@ -919,15 +910,24 @@ def test_unrepresented_gemini_count_tokens_option_is_native_400(client: TestClie
         ),
     ],
 )
-def test_nested_unrepresented_gemini_option_is_native_400_before_provider_io(
+def test_nested_unrepresented_gemini_option_reaches_router_not_400(
     client: TestClient,
     path: str,
     payload_option: dict,
     parameter: str,
 ) -> None:
+    """Nested Gemini fields Router-Maestro does not model (``allowedFunctionNames``,
+    ``fileData``) are forwarded/ignored rather than rejected at the route."""
+    sentinel = ProviderError(
+        "reached routing sentinel",
+        status_code=503,
+        retryable=False,
+        kind=ProviderFailureKind.UPSTREAM_STATUS,
+    )
     model_router = MagicMock()
-    model_router.chat_completion = AsyncMock()
-    model_router.prepare_chat_completion_stream = AsyncMock()
+    model_router.chat_completion = AsyncMock(side_effect=sentinel)
+    model_router.prepare_chat_completion_stream = AsyncMock(side_effect=sentinel)
+    model_router.chat_completion_stream = AsyncMock(side_effect=sentinel)
     payload = {
         "contents": [{"role": "user", "parts": [{"text": "hi"}]}],
         **payload_option,
@@ -936,19 +936,8 @@ def test_nested_unrepresented_gemini_option_is_native_400_before_provider_io(
     with patch("router_maestro.server.routes.gemini.get_router", return_value=model_router):
         response = client.post(path, json=payload)
 
-    assert response.status_code == 400
-    assert response.headers["content-type"].startswith("application/json")
-    assert response.json() == {
-        "error": {
-            "code": 400,
-            "message": f"Unsupported request option '{parameter}'",
-            "status": "INVALID_ARGUMENT",
-            "details": [{"reason": "unsupported_parameter", "parameter": parameter}],
-        }
-    }
-    assert "data:" not in response.text
-    model_router.chat_completion.assert_not_awaited()
-    model_router.prepare_chat_completion_stream.assert_not_awaited()
+    assert response.status_code != 400, response.text
+    assert "Unsupported request option" not in response.text
 
 
 @pytest.mark.parametrize("stream", [False, True])
@@ -959,14 +948,26 @@ def test_nested_unrepresented_gemini_option_is_native_400_before_provider_io(
         ("output_config.format", {"output_config": {"format": {"type": "json_schema"}}}),
     ],
 )
-def test_unrepresented_anthropic_option_is_native_400_before_router_or_sse(
+def test_unrepresented_anthropic_option_reaches_router_not_400(
     client: TestClient,
     stream: bool,
     parameter: str,
     payload_option: dict,
 ) -> None:
+    """Unknown options on the standard Anthropic route are forwarded/ignored,
+    not rejected. The request reaches routing instead of a native 400."""
+    sentinel = ProviderError(
+        "reached routing sentinel",
+        status_code=503,
+        retryable=False,
+        kind=ProviderFailureKind.UPSTREAM_STATUS,
+    )
     model_router = MagicMock()
-    model_router.plan_chat_completion = AsyncMock()
+    model_router.get_model_info = AsyncMock(return_value=None)
+    model_router.chat_completion = AsyncMock(side_effect=sentinel)
+    model_router.plan_chat_completion = AsyncMock(side_effect=sentinel)
+    model_router.prepare_chat_completion_stream = AsyncMock(side_effect=sentinel)
+    model_router.chat_completion_stream = AsyncMock(side_effect=sentinel)
     payload = {
         "model": "m",
         "max_tokens": 32,
@@ -978,26 +979,28 @@ def test_unrepresented_anthropic_option_is_native_400_before_router_or_sse(
     with patch("router_maestro.server.routes.anthropic.get_router", return_value=model_router):
         response = client.post("/v1/messages", json=payload)
 
-    assert response.status_code == 400
-    assert response.headers["content-type"].startswith("application/json")
-    assert response.json() == {
-        "type": "error",
-        "error": {
-            "type": "invalid_request_error",
-            "message": f"Unsupported request option '{parameter}'",
-        },
-    }
-    assert "event:" not in response.text
-    model_router.plan_chat_completion.assert_not_awaited()
+    assert response.status_code != 400, response.text
+    assert "Unsupported request option" not in response.text
 
 
 @pytest.mark.parametrize("stream", [False, True])
-def test_nested_unrepresented_anthropic_tool_choice_is_native_400_before_provider_io(
+def test_nested_unrepresented_anthropic_tool_choice_reaches_router_not_400(
     client: TestClient,
     stream: bool,
 ) -> None:
+    """A nested unmodeled tool_choice field is forwarded/ignored, not rejected."""
+    sentinel = ProviderError(
+        "reached routing sentinel",
+        status_code=503,
+        retryable=False,
+        kind=ProviderFailureKind.UPSTREAM_STATUS,
+    )
     model_router = MagicMock()
-    model_router.plan_chat_completion = AsyncMock()
+    model_router.get_model_info = AsyncMock(return_value=None)
+    model_router.chat_completion = AsyncMock(side_effect=sentinel)
+    model_router.plan_chat_completion = AsyncMock(side_effect=sentinel)
+    model_router.prepare_chat_completion_stream = AsyncMock(side_effect=sentinel)
+    model_router.chat_completion_stream = AsyncMock(side_effect=sentinel)
     payload = {
         "model": "m",
         "max_tokens": 32,
@@ -1009,23 +1012,14 @@ def test_nested_unrepresented_anthropic_tool_choice_is_native_400_before_provide
     with patch("router_maestro.server.routes.anthropic.get_router", return_value=model_router):
         response = client.post("/v1/messages", json=payload)
 
-    parameter = "tool_choice.disable_parallel_tool_use"
-    assert response.status_code == 400
-    assert response.headers["content-type"].startswith("application/json")
-    assert response.json() == {
-        "type": "error",
-        "error": {
-            "type": "invalid_request_error",
-            "message": f"Unsupported request option '{parameter}'",
-        },
-    }
-    assert "event:" not in response.text
-    model_router.plan_chat_completion.assert_not_awaited()
+    assert response.status_code != 400, response.text
+    assert "Unsupported request option" not in response.text
 
 
-def test_nested_unrepresented_anthropic_count_tokens_option_is_native_400_before_io(
+def test_nested_unrepresented_anthropic_count_tokens_option_is_ignored_not_400(
     client: TestClient,
 ) -> None:
+    """count_tokens tolerates an unmodeled nested field instead of returning 400."""
     payload = {
         "model": "m",
         "messages": [{"role": "user", "content": "hi"}],
@@ -1041,20 +1035,12 @@ def test_nested_unrepresented_anthropic_count_tokens_option_is_native_400_before
     with patch(
         "router_maestro.server.routes.anthropic._resolve_provider_name",
         new_callable=AsyncMock,
-    ) as resolve_provider:
+        return_value="github-copilot",
+    ):
         response = client.post("/v1/messages/count_tokens", json=payload)
 
-    parameter = "tools[0].strict"
-    assert response.status_code == 400
-    assert response.headers["content-type"].startswith("application/json")
-    assert response.json() == {
-        "type": "error",
-        "error": {
-            "type": "invalid_request_error",
-            "message": f"Unsupported request option '{parameter}'",
-        },
-    }
-    resolve_provider.assert_not_awaited()
+    assert response.status_code != 400, response.text
+    assert "Unsupported request option" not in response.text
 
 
 def test_anthropic_content_vendor_payload_is_not_treated_as_request_option(
@@ -1082,6 +1068,84 @@ def test_anthropic_content_vendor_payload_is_not_treated_as_request_option(
 
     assert response.status_code == 200
     assert response.json()["type"] == "message"
+
+
+def _reaches_routing_router() -> MagicMock:
+    """A router that raises a sentinel as soon as the route reaches provider work.
+
+    The test asserts the request got PAST the option gate (no 400 option error).
+    Any downstream call short-circuits with a distinct sentinel so we can prove
+    routing was reached without reproducing the full response-encoding path.
+    """
+    sentinel = ProviderError(
+        "reached routing sentinel",
+        status_code=503,
+        retryable=False,
+        kind=ProviderFailureKind.UPSTREAM_STATUS,
+    )
+    model_router = MagicMock()
+    model_router.get_model_info = AsyncMock(return_value=None)
+    for method in (
+        "chat_completion",
+        "plan_chat_completion",
+        "prepare_chat_completion_stream",
+        "chat_completion_stream",
+        "responses_completion",
+        "prepare_responses_completion_stream",
+        "responses_completion_stream",
+    ):
+        setattr(model_router, method, AsyncMock(side_effect=sentinel))
+    return model_router
+
+
+@pytest.mark.parametrize(
+    ("path", "base_payload", "option", "patch_target"),
+    [
+        (
+            "/api/openai/v1/chat/completions",
+            {"model": "m", "messages": [{"role": "user", "content": "hi"}]},
+            {"context_management": {"enabled": True}},
+            "router_maestro.server.routes.chat.get_router",
+        ),
+        (
+            "/v1/messages",
+            {
+                "model": "m",
+                "max_tokens": 32,
+                "messages": [{"role": "user", "content": "hi"}],
+            },
+            {"context_management": {"edits": []}},
+            "router_maestro.server.routes.anthropic.get_router",
+        ),
+        (
+            "/api/openai/v1/responses",
+            {"model": "m", "input": "hi"},
+            {"store": True},
+            "router_maestro.server.routes.responses.get_router",
+        ),
+    ],
+)
+def test_unmodeled_client_option_passes_through_instead_of_400(
+    client: TestClient,
+    path: str,
+    base_payload: dict,
+    option: dict,
+    patch_target: str,
+) -> None:
+    """Options Router-Maestro does not model as typed fields (e.g. ``context_management``
+    from Claude Code, ``store`` from Codex) must NOT be hard-rejected. A transparent
+    proxy forwards or ignores them; it does not 400 on an unknown top-level key."""
+    model_router = _reaches_routing_router()
+    payload = {**base_payload, **option}
+
+    with patch(patch_target, return_value=model_router):
+        response = client.post(path, json=payload)
+
+    # The request must reach routing, not be short-circuited by an option-gate 400.
+    assert "Unsupported request option" not in response.text
+    assert "is not supported by the beta" not in response.text
+    # It got past the gate and hit the sentinel provider failure (502/503), not a 400.
+    assert response.status_code != 400, response.text
 
 
 def _routing_error(

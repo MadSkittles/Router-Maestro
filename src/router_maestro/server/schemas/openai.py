@@ -50,8 +50,8 @@ class OpenAIThinkingConfig(BaseModel):
 class ChatCompletionStreamOptions(BaseModel):
     """Client-facing encoding options for a Chat Completions stream."""
 
-    # Retain unknown nested options so the route can return an OpenAI-native
-    # 400 through ``unrepresented_option_error`` instead of FastAPI's 422.
+    # Retain unknown nested options rather than raising FastAPI's 422; a
+    # transparent proxy forwards or ignores options it does not model.
     model_config = ConfigDict(extra="allow")
 
     include_usage: Annotated[bool, Field(strict=True)] = False
@@ -60,10 +60,11 @@ class ChatCompletionStreamOptions(BaseModel):
 class ChatCompletionRequest(BaseModel):
     """Request for chat completion."""
 
-    # Preserve unknown top-level options long enough for the route to return an
-    # OpenAI-native 400. Pydantic's default ``extra=ignore`` would silently
-    # discard requested semantics; ``extra=forbid`` would bypass the route with
-    # FastAPI's generic 422 envelope.
+    # Preserve unknown top-level options rather than rejecting them: Router-
+    # Maestro is a transparent proxy, so options it does not model are ignored
+    # (or forwarded by the provider) instead of failing the request. ``extra=
+    # allow`` keeps them addressable; the default ``extra=ignore`` would also
+    # work, while ``extra=forbid`` would wrongly 422 on unknown client options.
     model_config = ConfigDict(extra="allow")
 
     model: str

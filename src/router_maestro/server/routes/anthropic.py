@@ -31,7 +31,7 @@ from router_maestro.routing.capabilities import CapabilitySupport, Feature
 from router_maestro.routing.model_ref import catalog_model_public_id, qualify_model_id
 from router_maestro.routing.route_plan import RouteCandidate
 from router_maestro.server.dependencies import get_app_router
-from router_maestro.server.protocols import client_error_response, unrepresented_option_error
+from router_maestro.server.protocols import client_error_response
 from router_maestro.server.protocols.anthropic_reducer import (
     AnthropicReducer,
     AnthropicStreamProtocolError,
@@ -329,8 +329,6 @@ def _mid_conv_system_rejection_response() -> JSONResponse:
 @router.post("/api/anthropic/v1/messages")
 async def messages(request: AnthropicMessagesRequest, raw_request: FastAPIRequest):
     """Handle Anthropic Messages API requests."""
-    if error := unrepresented_option_error(request):
-        return client_error_response(error, "anthropic")
     parsed_thinking = request.thinking.model_dump(exclude_none=True) if request.thinking else None
     effort = request.output_config.effort if request.output_config else None
     raw_thinking = await _raw_body_thinking(raw_request)
@@ -467,8 +465,6 @@ async def count_tokens(request: AnthropicCountTokensRequest):
     token-counting configuration. For native Anthropic, attempts an upstream
     API call for an exact count before falling back to local estimation.
     """
-    if error := unrepresented_option_error(request):
-        return client_error_response(error, "anthropic")
     logger.debug("count_tokens request: model=%s, provider=%s", request.model, None)
     provider_name = await _resolve_provider_name(request.model)
     logger.debug("count_tokens resolved provider=%s for model=%s", provider_name, request.model)

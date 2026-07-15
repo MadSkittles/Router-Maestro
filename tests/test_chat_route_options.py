@@ -183,12 +183,6 @@ def test_openai_chat_accepts_typed_stream_options_without_provider_passthrough(
     [
         pytest.param(
             True,
-            {"include_usage": True, "include_obfuscation": True},
-            "stream_options.include_obfuscation",
-            id="unknown-nested-option",
-        ),
-        pytest.param(
-            True,
             {"include_usage": "true"},
             "stream_options.include_usage",
             id="string-include-usage",
@@ -240,6 +234,31 @@ def test_openai_chat_rejects_invalid_stream_options_before_router_calls(
     assert response.json()["error"]["param"] == parameter
     assert "data:" not in response.text
     assert router.request is None
+
+
+def test_openai_chat_unknown_stream_option_passes_through(monkeypatch):
+    """An unknown nested ``stream_options`` field (e.g. OpenAI's ``include_obfuscation``)
+    is forwarded/ignored, not rejected — Router-Maestro is a transparent proxy."""
+    app = FastAPI()
+    app.include_router(chat_router)
+    client = TestClient(app, raise_server_exceptions=False)
+    router = _CapturingRouter()
+    monkeypatch.setattr("router_maestro.server.routes.chat.get_router", lambda: router)
+
+    response = client.post(
+        "/api/openai/v1/chat/completions",
+        json={
+            "model": "openai/gpt-4o",
+            "messages": [{"role": "user", "content": "hello"}],
+            "stream": True,
+            "stream_options": {"include_usage": True, "include_obfuscation": True},
+        },
+    )
+
+    assert response.status_code != 400, response.text
+    assert "Unsupported request option" not in response.text
+    # The request reached routing rather than being rejected at the option gate.
+    assert router.request is not None
 
 
 class _RejectingOptionRouter:
