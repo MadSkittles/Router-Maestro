@@ -8,8 +8,22 @@ currently scattered across each provider's ``_build_payload``.
 """
 
 from abc import ABC
+from dataclasses import dataclass
 
 from router_maestro.routing.capabilities import Operation
+
+
+@dataclass(frozen=True, slots=True)
+class ReasoningResolution:
+    """Outcome of a provider's reasoning-effort resolution.
+
+    ``effort`` is the upstream effort to send (``None`` to omit reasoning).
+    ``rewrite_max_tokens_to_completion`` requests the Copilot gpt-5.4 payload-key
+    rewrite (``max_tokens`` -> ``max_completion_tokens``).
+    """
+
+    effort: str | None
+    rewrite_max_tokens_to_completion: bool = False
 
 
 class OutboundContract(ABC):
@@ -22,6 +36,36 @@ class OutboundContract(ABC):
         rejects unknown top-level fields returns an explicit allowlist.
         """
         return None
+
+    def resolve_reasoning(
+        self,
+        *,
+        model: str,
+        reasoning_effort: str | None,
+        thinking_budget: int | None,
+        catalog_effort_values: list[str] | None,
+        operation: Operation,
+    ) -> ReasoningResolution:
+        """Resolve the upstream reasoning effort for this provider/operation.
+
+        Default: forward the requested effort unchanged with no rewrite.
+        Providers whose upstream downgrades or rejects tiers override this.
+        """
+        return ReasoningResolution(effort=reasoning_effort)
+
+    def filter_tools(
+        self,
+        tools: list[dict] | None,
+        *,
+        operation: Operation,
+        model: str | None = None,
+    ) -> list[dict] | None:
+        """Filter tools this upstream cannot express. Default: pass through."""
+        return tools
+
+    def allows_temperature(self, operation: Operation) -> bool:
+        """Whether the upstream accepts explicit ``temperature``. Default: yes."""
+        return True
 
 
 class PermissiveOutboundContract(OutboundContract):

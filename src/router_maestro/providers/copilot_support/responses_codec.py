@@ -19,7 +19,6 @@ from router_maestro.providers.base import (
     resolve_terminal_outcome,
 )
 from router_maestro.utils import get_logger
-from router_maestro.utils.reasoning import downgrade_for_upstream, pick_closest_effort
 
 logger = get_logger("providers.copilot.responses_codec")
 
@@ -42,8 +41,6 @@ class CopilotResponsesCodec:
 
     name = "github-copilot"
 
-    unsupported_tool_types = frozenset({"web_search", "web_search_preview", "code_interpreter"})
-
     @staticmethod
     def input_has_vision(value: Any, depth: int = 0) -> bool:
         if depth > 32 or value is None:
@@ -62,42 +59,6 @@ class CopilotResponsesCodec:
             return any(CopilotResponsesCodec.input_has_vision(item, depth + 1) for item in content)
         return False
 
-    def filter_unsupported_tools(
-        self,
-        tools: list[dict] | None,
-        *,
-        provider_name: str,
-        model: str | None = None,
-    ) -> list[dict] | None:
-        if not tools:
-            return None
-        validated = []
-        for tool in tools:
-            tool_type = tool.get("type", "function")
-            if tool_type == "function":
-                validated.append(tool)
-            elif tool_type == "namespace":
-                inner = tool.get("tools")
-                if isinstance(inner, list) and inner:
-                    validated.append(tool)
-                else:
-                    raise RequestOptionError(
-                        "GitHub Copilot requires namespace tools to contain a non-empty tools list",
-                        provider=provider_name,
-                        model=model,
-                        parameter="tools",
-                    )
-            elif tool_type not in self.unsupported_tool_types:
-                validated.append(tool)
-            else:
-                raise RequestOptionError(
-                    f"GitHub Copilot does not support Responses tool type '{tool_type}'",
-                    provider=provider_name,
-                    model=model,
-                    parameter="tools",
-                )
-        return validated or None
-
     def build_payload(
         self,
         request: ResponsesRequest,
@@ -105,10 +66,14 @@ class CopilotResponsesCodec:
         provider_name: str,
         validate_extensions: Callable[[ResponsesRequest], None],
         catalog_effort_values: list[str] | None,
-        known_reasoning_support: bool | None,
+        resolve_reasoning: Callable[..., Any],
+        allows_temperature: Callable[..., bool],
+        filter_tools: Callable[..., list[dict] | None],
     ) -> dict:
+        from router_maestro.routing.capabilities import Operation
+
         validate_extensions(request)
-        if request.temperature is not None:
+        if request.temperature is not None and not allows_temperature(Operation.RESPONSES):
             raise RequestOptionError(
                 "GitHub Copilot Responses does not support request option 'temperature'",
                 provider=provider_name,
@@ -124,9 +89,9 @@ class CopilotResponsesCodec:
             payload["instructions"] = request.instructions
         if request.max_output_tokens:
             payload["max_output_tokens"] = request.max_output_tokens
-        filtered_tools = self.filter_unsupported_tools(
+        filtered_tools = filter_tools(
             request.tools,
-            provider_name=provider_name,
+            operation=Operation.RESPONSES,
             model=request.model,
         )
         if filtered_tools:
@@ -143,56 +108,15 @@ class CopilotResponsesCodec:
             if value is not None:
                 payload[key] = value
 
-        if catalog_effort_values is not None:
-            if not catalog_effort_values:
-                if request.reasoning_effort is not None:
-                    raise RequestOptionError(
-                        "GitHub Copilot does not support reasoning for this model",
-                        provider=provider_name,
-                        model=request.model,
-                        parameter="reasoning_effort",
-                    )
-                upstream_effort = None
-            elif request.reasoning_effort is None:
-                upstream_effort = None
-            else:
-                upstream_effort = pick_closest_effort(
-                    request.reasoning_effort,
-                    catalog_effort_values,
-                )
-                if upstream_effort is None:
-                    raise RequestOptionError(
-                        "GitHub Copilot has no reasoning tier at or below the requested tier",
-                        provider=provider_name,
-                        model=request.model,
-                        parameter="reasoning_effort",
-                    )
-        else:
-            if request.reasoning_effort is not None and known_reasoning_support is False:
-                raise RequestOptionError(
-                    "GitHub Copilot does not support reasoning for this model",
-                    provider=provider_name,
-                    model=request.model,
-                    parameter="reasoning_effort",
-                )
-            upstream_effort = (
-                request.reasoning_effort
-                if known_reasoning_support is True
-                else downgrade_for_upstream(request.reasoning_effort)
-            )
-            if (
-                known_reasoning_support is None
-                and request.reasoning_effort in ("xhigh", "max")
-                and upstream_effort == "high"
-            ):
-                logger.warning(
-                    "Copilot Responses catalog cold for %s; "
-                    "downgrading reasoning_effort=%s to high as a precaution",
-                    request.model,
-                    request.reasoning_effort,
-                )
-        if upstream_effort is not None:
-            payload["reasoning"] = {"effort": upstream_effort, "summary": "auto"}
+        resolution = resolve_reasoning(
+            model=request.model,
+            reasoning_effort=request.reasoning_effort,
+            thinking_budget=None,
+            catalog_effort_values=catalog_effort_values,
+            operation=Operation.RESPONSES,
+        )
+        if resolution.effort is not None:
+            payload["reasoning"] = {"effort": resolution.effort, "summary": "auto"}
             payload["include"] = ["reasoning.encrypted_content"]
         return payload
 

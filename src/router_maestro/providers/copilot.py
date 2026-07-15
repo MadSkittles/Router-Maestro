@@ -41,11 +41,12 @@ from router_maestro.providers.copilot_support.catalog import (
 from router_maestro.providers.copilot_support.chat_codec import CopilotChatCodec
 from router_maestro.providers.copilot_support.responses_codec import CopilotResponsesCodec
 from router_maestro.providers.copilot_support.transport import CopilotTransport
-from router_maestro.providers.outbound_contract import OutboundContract
+from router_maestro.providers.outbound_contract import OutboundContract, ReasoningResolution
 from router_maestro.routing.capabilities import Operation, ProviderCapabilities
 from router_maestro.utils import get_logger
 from router_maestro.utils.reasoning import (
     budget_to_effort,
+    downgrade_for_upstream,
     pick_closest_effort,
 )
 
@@ -149,84 +150,20 @@ def apply_copilot_chat_reasoning(
 ) -> None:
     """Inject reasoning fields into a Copilot ``/chat/completions`` payload.
 
-    When ``catalog_effort_values`` is provided (from the model's
-    ``capabilities.supports.reasoning_effort`` advertisement), it is the
-    authoritative allowlist — we map the desired effort onto the catalog's
-    enum and send it. This means we automatically pick up new tiers (e.g.
-    if Copilot opens ``high`` on opus-4.7) without a code change.
-
-    When the catalog says nothing (``None``), we fall back to the hardcoded
-    per-family heuristic:
-
-    * ``claude-opus-4.6+`` / ``claude-sonnet-4.6`` accept ``low``/``medium``/``high``
-      (and tolerate ``max`` being downgraded into the same set).
-    * Older Claudes (4.5 / sonnet-4 / haiku) take no reasoning field.
-    * ``gpt-5*`` / ``o1`` / ``o3`` / ``o4`` accept ``low``/``medium``/``high``/``xhigh``
-      (``max`` is downgraded to ``xhigh``).
-    * ``gpt-4*``, ``gemini-*`` take no reasoning field.
-
-    For ``gpt-5.4*`` the gateway also requires ``max_completion_tokens`` instead
-    of ``max_tokens``; this function performs that rewrite when present.
+    Thin adapter over ``CopilotOutboundContract.resolve_reasoning`` (the single
+    source of Copilot's effort rule). Applies the resolved effort and the gpt-5.4
+    ``max_tokens`` -> ``max_completion_tokens`` rewrite to ``payload`` in place.
     """
-    bare = model.split("/", 1)[1] if "/" in model else model
-    bare_lower = bare.lower()
-
-    known_reasoning_support = _known_reasoning_support(model)
-
-    def unsupported_reasoning() -> NoReturn:
-        parameter = "reasoning_effort" if reasoning_effort is not None else "thinking_budget"
-        raise RequestOptionError(
-            "GitHub Copilot does not support the requested reasoning option for this model",
-            provider="github-copilot",
-            model=model,
-            parameter=parameter,
-        )
-
-    # Catalog-driven path: trust whatever Copilot advertises.
-    if catalog_effort_values is not None:
-        if not catalog_effort_values:
-            if reasoning_effort is not None or thinking_budget is not None:
-                unsupported_reasoning()
-        else:
-            desired = reasoning_effort or budget_to_effort(thinking_budget)
-            if desired is None and thinking_budget is not None:
-                unsupported_reasoning()
-            if desired is not None:
-                picked = pick_closest_effort(desired, catalog_effort_values)
-                if picked is None:
-                    raise RequestOptionError(
-                        "GitHub Copilot has no reasoning tier at or below the requested tier",
-                        provider="github-copilot",
-                        model=model,
-                        parameter=(
-                            "reasoning_effort"
-                            if reasoning_effort is not None
-                            else "thinking_budget"
-                        ),
-                    )
-                payload["reasoning_effort"] = picked
-        if bare_lower.startswith("gpt-5.4") and "max_tokens" in payload:
-            payload["max_completion_tokens"] = payload.pop("max_tokens")
-        return
-
-    # Hardcoded fallback when the catalog hasn't been fetched yet.
-    if known_reasoning_support is False:
-        if reasoning_effort is not None or thinking_budget is not None:
-            unsupported_reasoning()
-    elif known_reasoning_support is True or known_reasoning_support is None:
-        effort = reasoning_effort or budget_to_effort(thinking_budget)
-        if bare_lower.startswith("claude-") and effort in ("xhigh", "max"):
-            effort = "high"
-        elif effort == "max":
-            effort = "xhigh"
-        elif known_reasoning_support is None and effort == "xhigh":
-            effort = "high"
-        if effort is None and thinking_budget is not None:
-            unsupported_reasoning()
-        if effort in ("minimal", "low", "medium", "high", "xhigh"):
-            payload["reasoning_effort"] = effort
-
-    if bare_lower.startswith("gpt-5.4") and "max_tokens" in payload:
+    resolution = CopilotOutboundContract().resolve_reasoning(
+        model=model,
+        reasoning_effort=reasoning_effort,
+        thinking_budget=thinking_budget,
+        catalog_effort_values=catalog_effort_values,
+        operation=Operation.CHAT,
+    )
+    if resolution.effort is not None:
+        payload["reasoning_effort"] = resolution.effort
+    if resolution.rewrite_max_tokens_to_completion and "max_tokens" in payload:
         payload["max_completion_tokens"] = payload.pop("max_tokens")
 
 
@@ -290,6 +227,198 @@ class CopilotOutboundContract(OutboundContract):
         if operation is Operation.NATIVE_ANTHROPIC:
             return _COPILOT_NATIVE_ANTHROPIC_FORWARD_FIELDS
         return None
+
+    def resolve_reasoning(
+        self,
+        *,
+        model: str,
+        reasoning_effort: str | None,
+        thinking_budget: int | None,
+        catalog_effort_values: list[str] | None,
+        operation: Operation,
+    ) -> ReasoningResolution:
+        """The single Copilot effort rule: catalog-first, family-fallback.
+
+        Reproduces the previously-scattered logic in ``apply_copilot_chat_reasoning``
+        (chat) and ``responses_codec.build_payload`` (responses). The two operations
+        differ only in the cold-catalog path and the gpt-5.4 max_tokens rewrite, both
+        preserved here.
+        """
+        if operation in (Operation.RESPONSES, Operation.RESPONSES_STREAM):
+            return self._resolve_reasoning_responses(
+                model=model,
+                reasoning_effort=reasoning_effort,
+                catalog_effort_values=catalog_effort_values,
+            )
+        return self._resolve_reasoning_chat(
+            model=model,
+            reasoning_effort=reasoning_effort,
+            thinking_budget=thinking_budget,
+            catalog_effort_values=catalog_effort_values,
+        )
+
+    @staticmethod
+    def _resolve_reasoning_chat(
+        *,
+        model: str,
+        reasoning_effort: str | None,
+        thinking_budget: int | None,
+        catalog_effort_values: list[str] | None,
+    ) -> ReasoningResolution:
+        bare_lower = (model.split("/", 1)[1] if "/" in model else model).lower()
+        rewrite = bare_lower.startswith("gpt-5.4")
+        known_reasoning_support = _known_reasoning_support(model)
+
+        def unsupported_reasoning() -> NoReturn:
+            parameter = "reasoning_effort" if reasoning_effort is not None else "thinking_budget"
+            raise RequestOptionError(
+                "GitHub Copilot does not support the requested reasoning option for this model",
+                provider="github-copilot",
+                model=model,
+                parameter=parameter,
+            )
+
+        # Catalog-driven path: trust whatever Copilot advertises.
+        if catalog_effort_values is not None:
+            if not catalog_effort_values:
+                if reasoning_effort is not None or thinking_budget is not None:
+                    unsupported_reasoning()
+                return ReasoningResolution(effort=None, rewrite_max_tokens_to_completion=rewrite)
+            desired = reasoning_effort or budget_to_effort(thinking_budget)
+            if desired is None and thinking_budget is not None:
+                unsupported_reasoning()
+            if desired is None:
+                return ReasoningResolution(effort=None, rewrite_max_tokens_to_completion=rewrite)
+            picked = pick_closest_effort(desired, catalog_effort_values)
+            if picked is None:
+                raise RequestOptionError(
+                    "GitHub Copilot has no reasoning tier at or below the requested tier",
+                    provider="github-copilot",
+                    model=model,
+                    parameter=(
+                        "reasoning_effort" if reasoning_effort is not None else "thinking_budget"
+                    ),
+                )
+            return ReasoningResolution(effort=picked, rewrite_max_tokens_to_completion=rewrite)
+
+        # Hardcoded fallback when the catalog hasn't been fetched yet.
+        if known_reasoning_support is False:
+            if reasoning_effort is not None or thinking_budget is not None:
+                unsupported_reasoning()
+            return ReasoningResolution(effort=None, rewrite_max_tokens_to_completion=rewrite)
+
+        effort = reasoning_effort or budget_to_effort(thinking_budget)
+        if bare_lower.startswith("claude-") and effort in ("xhigh", "max"):
+            effort = "high"
+        elif effort == "max":
+            effort = "xhigh"
+        elif known_reasoning_support is None and effort == "xhigh":
+            effort = "high"
+        if effort is None and thinking_budget is not None:
+            unsupported_reasoning()
+        if effort in ("minimal", "low", "medium", "high", "xhigh"):
+            return ReasoningResolution(effort=effort, rewrite_max_tokens_to_completion=rewrite)
+        return ReasoningResolution(effort=None, rewrite_max_tokens_to_completion=rewrite)
+
+    @staticmethod
+    def _resolve_reasoning_responses(
+        *,
+        model: str,
+        reasoning_effort: str | None,
+        catalog_effort_values: list[str] | None,
+    ) -> ReasoningResolution:
+        known_reasoning_support = _known_reasoning_support(model)
+        if catalog_effort_values is not None:
+            if not catalog_effort_values:
+                if reasoning_effort is not None:
+                    raise RequestOptionError(
+                        "GitHub Copilot does not support reasoning for this model",
+                        provider="github-copilot",
+                        model=model,
+                        parameter="reasoning_effort",
+                    )
+                return ReasoningResolution(effort=None)
+            if reasoning_effort is None:
+                return ReasoningResolution(effort=None)
+            upstream_effort = pick_closest_effort(reasoning_effort, catalog_effort_values)
+            if upstream_effort is None:
+                raise RequestOptionError(
+                    "GitHub Copilot has no reasoning tier at or below the requested tier",
+                    provider="github-copilot",
+                    model=model,
+                    parameter="reasoning_effort",
+                )
+            return ReasoningResolution(effort=upstream_effort)
+
+        if reasoning_effort is not None and known_reasoning_support is False:
+            raise RequestOptionError(
+                "GitHub Copilot does not support reasoning for this model",
+                provider="github-copilot",
+                model=model,
+                parameter="reasoning_effort",
+            )
+        upstream_effort = (
+            reasoning_effort
+            if known_reasoning_support is True
+            else downgrade_for_upstream(reasoning_effort)
+        )
+        if (
+            known_reasoning_support is None
+            and reasoning_effort in ("xhigh", "max")
+            and upstream_effort == "high"
+        ):
+            logger.warning(
+                "Copilot Responses catalog cold for %s; "
+                "downgrading reasoning_effort=%s to high as a precaution",
+                model,
+                reasoning_effort,
+            )
+        return ReasoningResolution(effort=upstream_effort)
+
+    _RESPONSES_UNSUPPORTED_TOOL_TYPES = frozenset(
+        {"web_search", "web_search_preview", "code_interpreter"}
+    )
+
+    def filter_tools(
+        self,
+        tools: list[dict] | None,
+        *,
+        operation: Operation,
+        model: str | None = None,
+    ) -> list[dict] | None:
+        """Drop/reject tool types Copilot Responses cannot express."""
+        if not tools:
+            return None
+        validated = []
+        for tool in tools:
+            tool_type = tool.get("type", "function")
+            if tool_type == "function":
+                validated.append(tool)
+            elif tool_type == "namespace":
+                inner = tool.get("tools")
+                if isinstance(inner, list) and inner:
+                    validated.append(tool)
+                else:
+                    raise RequestOptionError(
+                        "GitHub Copilot requires namespace tools to contain a non-empty tools list",
+                        provider="github-copilot",
+                        model=model,
+                        parameter="tools",
+                    )
+            elif tool_type not in self._RESPONSES_UNSUPPORTED_TOOL_TYPES:
+                validated.append(tool)
+            else:
+                raise RequestOptionError(
+                    f"GitHub Copilot does not support Responses tool type '{tool_type}'",
+                    provider="github-copilot",
+                    model=model,
+                    parameter="tools",
+                )
+        return validated or None
+
+    def allows_temperature(self, operation: Operation) -> bool:
+        """Copilot Responses rejects explicit temperature; Chat forwards it."""
+        return operation not in (Operation.RESPONSES, Operation.RESPONSES_STREAM)
 
 
 class CopilotProvider(BaseProvider):
@@ -978,15 +1107,12 @@ class CopilotProvider(BaseProvider):
     ) -> list[dict] | None:
         """Validate and preserve tools supported by the Copilot Responses API.
 
-        Args:
-            tools: List of tool definitions
-
-        Returns:
-            Validated list of tools, or None if empty
+        Delegates to the provider's outbound contract (the single source of the
+        Copilot tool-filter rule).
         """
-        return self._responses_codec.filter_unsupported_tools(
+        return self.outbound_contract.filter_tools(
             tools,
-            provider_name=self.name,
+            operation=Operation.RESPONSES,
             model=model,
         )
 
@@ -1004,7 +1130,9 @@ class CopilotProvider(BaseProvider):
             provider_name=self.name,
             validate_extensions=self._validate_provider_extensions,
             catalog_effort_values=self._catalog_effort_values(request.model),
-            known_reasoning_support=_known_reasoning_support(request.model),
+            resolve_reasoning=self.outbound_contract.resolve_reasoning,
+            allows_temperature=self.outbound_contract.allows_temperature,
+            filter_tools=self.outbound_contract.filter_tools,
         )
 
     def validate_responses_request(self, request: ResponsesRequest) -> None:
