@@ -61,42 +61,6 @@ class CopilotResponsesCodec:
             return any(CopilotResponsesCodec.input_has_vision(item, depth + 1) for item in content)
         return False
 
-    def filter_unsupported_tools(
-        self,
-        tools: list[dict] | None,
-        *,
-        provider_name: str,
-        model: str | None = None,
-    ) -> list[dict] | None:
-        if not tools:
-            return None
-        validated = []
-        for tool in tools:
-            tool_type = tool.get("type", "function")
-            if tool_type == "function":
-                validated.append(tool)
-            elif tool_type == "namespace":
-                inner = tool.get("tools")
-                if isinstance(inner, list) and inner:
-                    validated.append(tool)
-                else:
-                    raise RequestOptionError(
-                        "GitHub Copilot requires namespace tools to contain a non-empty tools list",
-                        provider=provider_name,
-                        model=model,
-                        parameter="tools",
-                    )
-            elif tool_type not in self.unsupported_tool_types:
-                validated.append(tool)
-            else:
-                raise RequestOptionError(
-                    f"GitHub Copilot does not support Responses tool type '{tool_type}'",
-                    provider=provider_name,
-                    model=model,
-                    parameter="tools",
-                )
-        return validated or None
-
     def build_payload(
         self,
         request: ResponsesRequest,
@@ -105,9 +69,13 @@ class CopilotResponsesCodec:
         validate_extensions: Callable[[ResponsesRequest], None],
         catalog_effort_values: list[str] | None,
         resolve_reasoning: Callable[..., Any],
+        allows_temperature: Callable[..., bool],
+        filter_tools: Callable[..., list[dict] | None],
     ) -> dict:
+        from router_maestro.routing.capabilities import Operation
+
         validate_extensions(request)
-        if request.temperature is not None:
+        if request.temperature is not None and not allows_temperature(Operation.RESPONSES):
             raise RequestOptionError(
                 "GitHub Copilot Responses does not support request option 'temperature'",
                 provider=provider_name,
@@ -123,9 +91,9 @@ class CopilotResponsesCodec:
             payload["instructions"] = request.instructions
         if request.max_output_tokens:
             payload["max_output_tokens"] = request.max_output_tokens
-        filtered_tools = self.filter_unsupported_tools(
+        filtered_tools = filter_tools(
             request.tools,
-            provider_name=provider_name,
+            operation=Operation.RESPONSES,
             model=request.model,
         )
         if filtered_tools:
@@ -141,8 +109,6 @@ class CopilotResponsesCodec:
         }.items():
             if value is not None:
                 payload[key] = value
-
-        from router_maestro.routing.capabilities import Operation
 
         resolution = resolve_reasoning(
             model=request.model,

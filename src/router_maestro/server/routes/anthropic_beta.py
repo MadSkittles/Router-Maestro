@@ -206,7 +206,15 @@ def _resolve_native_effort(
     provider: str | None = None,
     model: str | None = None,
 ) -> str:
-    """Resolve a native effort exactly or downward, preserving unknown catalogs."""
+    """Resolve a native effort exactly or downward, preserving unknown catalogs.
+
+    The native passthrough resolves ``output_config.effort`` with its own
+    catalog-or-passthrough rule (distinct error surface and no family fallback),
+    so it is intentionally NOT routed through
+    ``CopilotOutboundContract.resolve_reasoning`` (the chat/responses orchestration).
+    Both share the ``pick_closest_effort`` primitive as the single source of the
+    downgrade math.
+    """
     if allowed is None:
         return effort
     mapped_effort = pick_closest_effort(effort, list(allowed))

@@ -125,3 +125,57 @@ def test_copilot_resolve_reasoning_responses_unsupported_model_rejects():
             catalog_effort_values=None,
             operation=Operation.RESPONSES,
         )
+
+
+# --- Round 2: tool filtering + temperature verdict ---
+
+
+def test_copilot_filter_tools_keeps_function_rejects_web_search():
+    import pytest
+
+    from router_maestro.providers import RequestOptionError
+
+    c = _copilot_contract()
+    # A function tool and an unknown/other type are kept; a known-unsupported
+    # type raises (behavior preserved from filter_unsupported_tools).
+    kept = c.filter_tools(
+        [{"type": "function", "name": "echo"}, {"type": "custom_future"}],
+        operation=Operation.RESPONSES,
+        model="github-copilot/gpt-5.5",
+    )
+    assert kept == [{"type": "function", "name": "echo"}, {"type": "custom_future"}]
+    with pytest.raises(RequestOptionError):
+        c.filter_tools(
+            [{"type": "web_search"}],
+            operation=Operation.RESPONSES,
+            model="github-copilot/gpt-5.5",
+        )
+
+
+def test_copilot_filter_tools_rejects_empty_namespace():
+    import pytest
+
+    from router_maestro.providers import RequestOptionError
+
+    c = _copilot_contract()
+    with pytest.raises(RequestOptionError):
+        c.filter_tools(
+            [{"type": "namespace", "tools": []}],
+            operation=Operation.RESPONSES,
+            model="github-copilot/gpt-5.5",
+        )
+
+
+def test_copilot_allows_temperature_chat_but_not_responses():
+    c = _copilot_contract()
+    assert c.allows_temperature(Operation.CHAT) is True
+    assert c.allows_temperature(Operation.RESPONSES) is False
+
+
+def test_permissive_defaults_for_tools_and_temperature():
+    from router_maestro.providers.outbound_contract import PermissiveOutboundContract
+
+    c = PermissiveOutboundContract()
+    tools = [{"type": "anything"}]
+    assert c.filter_tools(tools, operation=Operation.CHAT, model="m") == tools
+    assert c.allows_temperature(Operation.RESPONSES) is True

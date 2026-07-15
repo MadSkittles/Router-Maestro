@@ -375,6 +375,51 @@ class CopilotOutboundContract(OutboundContract):
             )
         return ReasoningResolution(effort=upstream_effort)
 
+    _RESPONSES_UNSUPPORTED_TOOL_TYPES = frozenset(
+        {"web_search", "web_search_preview", "code_interpreter"}
+    )
+
+    def filter_tools(
+        self,
+        tools: list[dict] | None,
+        *,
+        operation: Operation,
+        model: str | None = None,
+    ) -> list[dict] | None:
+        """Drop/reject tool types Copilot Responses cannot express."""
+        if not tools:
+            return None
+        validated = []
+        for tool in tools:
+            tool_type = tool.get("type", "function")
+            if tool_type == "function":
+                validated.append(tool)
+            elif tool_type == "namespace":
+                inner = tool.get("tools")
+                if isinstance(inner, list) and inner:
+                    validated.append(tool)
+                else:
+                    raise RequestOptionError(
+                        "GitHub Copilot requires namespace tools to contain a non-empty tools list",
+                        provider="github-copilot",
+                        model=model,
+                        parameter="tools",
+                    )
+            elif tool_type not in self._RESPONSES_UNSUPPORTED_TOOL_TYPES:
+                validated.append(tool)
+            else:
+                raise RequestOptionError(
+                    f"GitHub Copilot does not support Responses tool type '{tool_type}'",
+                    provider="github-copilot",
+                    model=model,
+                    parameter="tools",
+                )
+        return validated or None
+
+    def allows_temperature(self, operation: Operation) -> bool:
+        """Copilot Responses rejects explicit temperature; Chat forwards it."""
+        return operation not in (Operation.RESPONSES, Operation.RESPONSES_STREAM)
+
 
 class CopilotProvider(BaseProvider):
     """GitHub Copilot provider."""
@@ -1062,15 +1107,12 @@ class CopilotProvider(BaseProvider):
     ) -> list[dict] | None:
         """Validate and preserve tools supported by the Copilot Responses API.
 
-        Args:
-            tools: List of tool definitions
-
-        Returns:
-            Validated list of tools, or None if empty
+        Delegates to the provider's outbound contract (the single source of the
+        Copilot tool-filter rule).
         """
-        return self._responses_codec.filter_unsupported_tools(
+        return self.outbound_contract.filter_tools(
             tools,
-            provider_name=self.name,
+            operation=Operation.RESPONSES,
             model=model,
         )
 
@@ -1089,6 +1131,8 @@ class CopilotProvider(BaseProvider):
             validate_extensions=self._validate_provider_extensions,
             catalog_effort_values=self._catalog_effort_values(request.model),
             resolve_reasoning=self.outbound_contract.resolve_reasoning,
+            allows_temperature=self.outbound_contract.allows_temperature,
+            filter_tools=self.outbound_contract.filter_tools,
         )
 
     def validate_responses_request(self, request: ResponsesRequest) -> None:

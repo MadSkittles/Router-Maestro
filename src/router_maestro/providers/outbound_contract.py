@@ -53,6 +53,20 @@ class OutboundContract(ABC):
         """
         return ReasoningResolution(effort=reasoning_effort)
 
+    def filter_tools(
+        self,
+        tools: list[dict] | None,
+        *,
+        operation: Operation,
+        model: str | None = None,
+    ) -> list[dict] | None:
+        """Filter tools this upstream cannot express. Default: pass through."""
+        return tools
+
+    def allows_temperature(self, operation: Operation) -> bool:
+        """Whether the upstream accepts explicit ``temperature``. Default: yes."""
+        return True
+
 
 class PermissiveOutboundContract(OutboundContract):
     """Default contract: forward everything.
