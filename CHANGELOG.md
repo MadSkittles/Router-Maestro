@@ -4,6 +4,19 @@ All notable changes to Router-Maestro are documented here.
 
 ---
 
+## v0.7.1 (2026-07-15)
+
+### Changes
+
+- **Provider-bound option policy (round 2).** GitHub Copilot's outbound value
+  policy — reasoning-effort orchestration (previously duplicated across the chat
+  and responses paths), tool filtering, and the operation-specific `temperature`
+  verdict — is consolidated into a single `CopilotOutboundContract`. One provider
+  now has one contract object as the sole authority for what its upstream
+  accepts. OpenAI and Anthropic providers keep their own distinct rules. This is
+  a behavior-preserving refactor: the full live integration matrix passes with no
+  changes to outbound wire payloads.
+
 ## v0.7.0 (2026-07-15)
 
 ### Changes
