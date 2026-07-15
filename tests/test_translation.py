@@ -326,7 +326,10 @@ class TestPermissiveRequestParsing:
                 "model": "claude-sonnet-4.5",
                 "max_tokens": 64,
                 "messages": [
-                    {"role": "user", "content": [{"type": "future_block_2026", "payload": {"k": 1}}]},
+                    {
+                        "role": "user",
+                        "content": [{"type": "future_block_2026", "payload": {"k": 1}}],
+                    },
                 ],
             }
         )

@@ -615,7 +615,6 @@ def test_openai_thinking_invalid_budget_still_rejected():
         OpenAIThinkingConfig.model_validate({"type": "enabled", "budget_tokens": -1})
 
 
-
 @pytest.mark.parametrize("stream", [False, True], ids=["nonstream", "stream"])
 @pytest.mark.parametrize(
     ("thinking", "expected_type", "expected_budget"),

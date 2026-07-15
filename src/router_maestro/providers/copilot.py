@@ -32,7 +32,6 @@ from router_maestro.providers.base import (
 )
 from router_maestro.providers.copilot_support.auth_session import CopilotAuthSession
 from router_maestro.providers.copilot_support.catalog import CopilotCatalog
-from router_maestro.providers.outbound_contract import OutboundContract
 from router_maestro.providers.copilot_support.catalog import (
     normalize_supported_endpoints as _catalog_normalize_supported_endpoints,
 )
@@ -42,6 +41,7 @@ from router_maestro.providers.copilot_support.catalog import (
 from router_maestro.providers.copilot_support.chat_codec import CopilotChatCodec
 from router_maestro.providers.copilot_support.responses_codec import CopilotResponsesCodec
 from router_maestro.providers.copilot_support.transport import CopilotTransport
+from router_maestro.providers.outbound_contract import OutboundContract
 from router_maestro.routing.capabilities import Operation, ProviderCapabilities
 from router_maestro.utils import get_logger
 from router_maestro.utils.reasoning import (

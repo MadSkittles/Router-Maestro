@@ -1177,9 +1177,7 @@ async def beta_messages(raw_request: FastAPIRequest):
 
     # Defense in depth for fields introduced by internal transformations. Raw
     # client options have already passed the shallow beta option gate above.
-    forwardable = copilot_provider.outbound_contract.forwardable_fields(
-        Operation.NATIVE_ANTHROPIC
-    )
+    forwardable = copilot_provider.outbound_contract.forwardable_fields(Operation.NATIVE_ANTHROPIC)
     if forwardable is not None:
         unknown = set(body.keys()) - forwardable
         if unknown:

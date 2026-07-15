@@ -99,4 +99,3 @@ def test_guard_covers_the_route_revalidated_schemas():
         reachable |= _reachable_models(root)
     assert OpenAIThinkingConfig not in reachable
     assert ResponsesReasoningConfig not in reachable
-
