@@ -43,3 +43,46 @@ def test_copilot_contract_is_permissive_for_other_operations():
 
     contract = CopilotProvider().outbound_contract
     assert contract.forwardable_fields(Operation.CHAT) is None
+
+
+# --- Round 2: reasoning resolution ---
+
+
+def _copilot_contract():
+    from router_maestro.providers.copilot import CopilotProvider
+
+    return CopilotProvider().outbound_contract
+
+
+def test_copilot_resolve_reasoning_catalog_warm_picks_closest():
+    r = _copilot_contract().resolve_reasoning(
+        model="github-copilot/claude-sonnet-4.6",
+        reasoning_effort="max",
+        thinking_budget=None,
+        catalog_effort_values=["low", "medium", "high"],
+        operation=Operation.CHAT,
+    )
+    assert r.effort == "high"  # pick_closest_effort(max, [low,medium,high])
+
+
+def test_copilot_resolve_reasoning_cold_claude_downgrades_xhigh():
+    r = _copilot_contract().resolve_reasoning(
+        model="github-copilot/claude-opus-4.8",
+        reasoning_effort="xhigh",
+        thinking_budget=None,
+        catalog_effort_values=None,  # cold
+        operation=Operation.CHAT,
+    )
+    assert r.effort == "high"
+
+
+def test_copilot_resolve_reasoning_gpt54_rewrites_max_tokens_flag():
+    r = _copilot_contract().resolve_reasoning(
+        model="github-copilot/gpt-5.4",
+        reasoning_effort="high",
+        thinking_budget=None,
+        catalog_effort_values=["low", "medium", "high"],
+        operation=Operation.CHAT,
+    )
+    assert r.rewrite_max_tokens_to_completion is True
+    assert r.effort == "high"
