@@ -86,3 +86,42 @@ def test_copilot_resolve_reasoning_gpt54_rewrites_max_tokens_flag():
     )
     assert r.rewrite_max_tokens_to_completion is True
     assert r.effort == "high"
+
+
+def test_copilot_resolve_reasoning_responses_catalog_warm():
+    r = _copilot_contract().resolve_reasoning(
+        model="github-copilot/gpt-5.5",
+        reasoning_effort="max",
+        thinking_budget=None,
+        catalog_effort_values=["low", "medium", "high", "xhigh"],
+        operation=Operation.RESPONSES,
+    )
+    assert r.effort == "xhigh"  # pick_closest_effort(max, [...xhigh])
+    assert r.rewrite_max_tokens_to_completion is False  # responses never rewrites
+
+
+def test_copilot_resolve_reasoning_responses_cold_downgrades_via_upstream():
+    r = _copilot_contract().resolve_reasoning(
+        model="github-copilot/gpt-5.5",
+        reasoning_effort="max",
+        thinking_budget=None,
+        catalog_effort_values=None,  # cold; known_reasoning_support True for gpt-5
+        operation=Operation.RESPONSES,
+    )
+    # gpt-5 known-supported: cold path forwards verbatim (known_reasoning_support is True)
+    assert r.effort == "max"
+
+
+def test_copilot_resolve_reasoning_responses_unsupported_model_rejects():
+    import pytest
+
+    from router_maestro.providers import RequestOptionError
+
+    with pytest.raises(RequestOptionError):
+        _copilot_contract().resolve_reasoning(
+            model="github-copilot/gpt-4o",  # known_reasoning_support False
+            reasoning_effort="high",
+            thinking_budget=None,
+            catalog_effort_values=None,
+            operation=Operation.RESPONSES,
+        )

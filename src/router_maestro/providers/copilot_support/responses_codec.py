@@ -19,7 +19,6 @@ from router_maestro.providers.base import (
     resolve_terminal_outcome,
 )
 from router_maestro.utils import get_logger
-from router_maestro.utils.reasoning import downgrade_for_upstream, pick_closest_effort
 
 logger = get_logger("providers.copilot.responses_codec")
 
@@ -105,7 +104,7 @@ class CopilotResponsesCodec:
         provider_name: str,
         validate_extensions: Callable[[ResponsesRequest], None],
         catalog_effort_values: list[str] | None,
-        known_reasoning_support: bool | None,
+        resolve_reasoning: Callable[..., Any],
     ) -> dict:
         validate_extensions(request)
         if request.temperature is not None:
@@ -143,56 +142,17 @@ class CopilotResponsesCodec:
             if value is not None:
                 payload[key] = value
 
-        if catalog_effort_values is not None:
-            if not catalog_effort_values:
-                if request.reasoning_effort is not None:
-                    raise RequestOptionError(
-                        "GitHub Copilot does not support reasoning for this model",
-                        provider=provider_name,
-                        model=request.model,
-                        parameter="reasoning_effort",
-                    )
-                upstream_effort = None
-            elif request.reasoning_effort is None:
-                upstream_effort = None
-            else:
-                upstream_effort = pick_closest_effort(
-                    request.reasoning_effort,
-                    catalog_effort_values,
-                )
-                if upstream_effort is None:
-                    raise RequestOptionError(
-                        "GitHub Copilot has no reasoning tier at or below the requested tier",
-                        provider=provider_name,
-                        model=request.model,
-                        parameter="reasoning_effort",
-                    )
-        else:
-            if request.reasoning_effort is not None and known_reasoning_support is False:
-                raise RequestOptionError(
-                    "GitHub Copilot does not support reasoning for this model",
-                    provider=provider_name,
-                    model=request.model,
-                    parameter="reasoning_effort",
-                )
-            upstream_effort = (
-                request.reasoning_effort
-                if known_reasoning_support is True
-                else downgrade_for_upstream(request.reasoning_effort)
-            )
-            if (
-                known_reasoning_support is None
-                and request.reasoning_effort in ("xhigh", "max")
-                and upstream_effort == "high"
-            ):
-                logger.warning(
-                    "Copilot Responses catalog cold for %s; "
-                    "downgrading reasoning_effort=%s to high as a precaution",
-                    request.model,
-                    request.reasoning_effort,
-                )
-        if upstream_effort is not None:
-            payload["reasoning"] = {"effort": upstream_effort, "summary": "auto"}
+        from router_maestro.routing.capabilities import Operation
+
+        resolution = resolve_reasoning(
+            model=request.model,
+            reasoning_effort=request.reasoning_effort,
+            thinking_budget=None,
+            catalog_effort_values=catalog_effort_values,
+            operation=Operation.RESPONSES,
+        )
+        if resolution.effort is not None:
+            payload["reasoning"] = {"effort": resolution.effort, "summary": "auto"}
             payload["include"] = ["reasoning.encrypted_content"]
         return payload
 

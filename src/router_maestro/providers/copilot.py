@@ -1088,7 +1088,7 @@ class CopilotProvider(BaseProvider):
             provider_name=self.name,
             validate_extensions=self._validate_provider_extensions,
             catalog_effort_values=self._catalog_effort_values(request.model),
-            known_reasoning_support=_known_reasoning_support(request.model),
+            resolve_reasoning=self.outbound_contract.resolve_reasoning,
         )
 
     def validate_responses_request(self, request: ResponsesRequest) -> None:
