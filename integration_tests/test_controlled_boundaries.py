@@ -787,3 +787,63 @@ def test_standard_anthropic_enabled_budget_effort_payload_is_exact_in_both_modes
         if stream:
             expected["stream_options"] = {"include_usage": True}
         assert_exact_outbound_payload(request.payload, expected)
+
+
+def test_chat_reasoning_effort_downgraded_to_catalog_tier(tmp_path: Path):
+    """Round 2: the unified CopilotOutboundContract.resolve_reasoning downgrades an
+    above-catalog effort to the highest advertised tier on the Chat wire payload."""
+
+    def responder(request: RecordedUpstreamRequest):
+        if request.path == "/models":
+            return _models(_catalog_model("chat-model", endpoints=["/chat/completions"]))
+        if request.path == "/chat/completions":
+            return _chat_success(request.payload["model"])
+        return _json_reply(500, {"error": "wrong operation"})
+
+    with _controlled_copilot(
+        tmp_path,
+        responder,
+        priorities=["github-copilot/chat-model"],
+    ) as (client, upstream):
+        response = client.post(
+            "/api/openai/v1/chat/completions",
+            json={
+                "model": "router-maestro",
+                "messages": [{"role": "user", "content": "ping"}],
+                "reasoning_effort": "max",  # catalog advertises only up to high
+            },
+        )
+
+    assert response.status_code == 200, response.text
+    request = select_recorded_request(upstream.requests, method="POST", path="/chat/completions")
+    assert request.payload["reasoning_effort"] == "high"
+
+
+def test_responses_reasoning_effort_downgraded_to_catalog_tier(tmp_path: Path):
+    """Round 2: the same contract method downgrades effort on the Responses wire
+    payload — proving chat and responses now share one effort rule."""
+
+    def responder(request: RecordedUpstreamRequest):
+        if request.path == "/models":
+            return _models(_catalog_model("responses-model", endpoints=["/responses"]))
+        if request.path == "/responses":
+            return _responses_success(request.payload["model"])
+        return _json_reply(500, {"error": "wrong operation"})
+
+    with _controlled_copilot(
+        tmp_path,
+        responder,
+        priorities=["github-copilot/responses-model"],
+    ) as (client, upstream):
+        response = client.post(
+            "/api/openai/v1/responses",
+            json={
+                "model": "router-maestro",
+                "input": "ping",
+                "reasoning": {"effort": "max"},  # catalog advertises only up to high
+            },
+        )
+
+    assert response.status_code == 200, response.text
+    request = select_recorded_request(upstream.requests, method="POST", path="/responses")
+    assert request.payload["reasoning"]["effort"] == "high"
