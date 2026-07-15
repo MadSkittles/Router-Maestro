@@ -84,22 +84,23 @@ def test_beta_non_streaming_compat_fields(client: httpx.Client, chat_model: str)
 @pytest.mark.parametrize(
     ("option_payload", "parameter"),
     [
-        ({"context_management": {"enabled": True}}, "context_management"),
         (
             {"output_config": {"effort": "low", "format": "text"}},
             "output_config.format",
         ),
-        ({"service_tier": "standard_only"}, "service_tier"),
     ],
 )
-def test_beta_rejects_unknown_semantic_options(
+def test_beta_rejects_malformed_output_config(
     client: httpx.Client,
     chat_model: str,
     stream: bool,
     option_payload: dict[str, Any],
     parameter: str,
 ):
-    """Beta Messages rejects unrepresented options before SSE/provider commitment."""
+    """Beta Messages rejects a malformed output_config value (a consumed field)
+    before SSE/provider commitment. Unknown/unmodeled options are NOT rejected —
+    they are forwarded or stripped per the provider outbound contract (see
+    test_beta_forwards_unmodeled_options)."""
     payload = anthropic_payload(chat_model, stream=stream)
     payload.update(option_payload)
 
@@ -112,6 +113,46 @@ def test_beta_rejects_unknown_semantic_options(
     assert error["error"]["type"] == "invalid_request_error"
     assert parameter in error["error"]["message"]
     assert "event:" not in response.text
+
+
+def test_beta_strips_unmodeled_service_tier(client: httpx.Client, chat_model: str):
+    """service_tier is unmodeled on the native path; Router-Maestro strips it and
+    the request completes normally rather than being rejected."""
+    payload = anthropic_payload(chat_model, stream=False)
+    payload["service_tier"] = "standard_only"
+
+    response = client.post(BETA, json=payload, timeout=180.0)
+
+    assert response.status_code == 200, response.text
+    assert response.json()["type"] == "message"
+
+
+def test_beta_forwards_context_management_without_local_rejection(
+    client: httpx.Client, chat_model: str
+):
+    """Router-Maestro forwards context_management to the native transport rather
+    than rejecting it locally.
+
+    GHC load-balances a given model id across upstream backends (Bedrock/Vertex/…)
+    and only some accept the context-management beta, so the upstream verdict is
+    non-deterministic and NOT Router-Maestro's to assert. What we assert is what
+    RM controls: the option is not rejected by RM's own request-option gate. A
+    success (GHC applied it) or an upstream passthrough error are both acceptable;
+    RM's local ``invalid_request_error`` naming the option is not."""
+    payload = anthropic_payload(chat_model, stream=False)
+    payload["context_management"] = {"edits": [{"type": "clear_tool_uses_20250919"}]}
+
+    response = client.post(BETA, json=payload, timeout=180.0)
+
+    if response.status_code == 200:
+        assert response.json()["type"] == "message"
+        return
+    # If GHC's chosen backend rejected it, the error is the upstream's, not RM's
+    # local option gate — RM must not have short-circuited it before forwarding.
+    body = response.json()
+    message = body.get("error", {}).get("message", "")
+    assert "is not supported by the native Anthropic transport" not in message
+    assert "output_config" not in message
 
 
 def test_beta_streaming(client: httpx.Client, chat_model: str):

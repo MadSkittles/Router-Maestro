@@ -9,6 +9,10 @@ from typing import TYPE_CHECKING, Any, Literal, NoReturn, Self
 
 import httpx
 
+from router_maestro.providers.outbound_contract import (
+    OutboundContract,
+    PermissiveOutboundContract,
+)
 from router_maestro.routing.capabilities import Operation, ProviderCapabilities
 
 if TYPE_CHECKING:
@@ -643,6 +647,13 @@ class BaseProvider(ABC):
     """Abstract base class for model providers."""
 
     name: str = "base"
+
+    _default_outbound_contract: OutboundContract = PermissiveOutboundContract()
+
+    @property
+    def outbound_contract(self) -> OutboundContract:
+        """The provider's upstream wire contract (see OutboundContract)."""
+        return self._default_outbound_contract
 
     @property
     def capabilities(self) -> ProviderCapabilities:

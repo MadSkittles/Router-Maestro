@@ -109,9 +109,15 @@ class AnthropicThinkingBlock(BaseModel):
 
 
 AnthropicUserContentBlock = (
-    AnthropicTextBlock | AnthropicImageBlock | AnthropicDocumentBlock | AnthropicToolResultBlock
+    AnthropicTextBlock
+    | AnthropicImageBlock
+    | AnthropicDocumentBlock
+    | AnthropicToolResultBlock
+    | dict[str, Any]
 )
-AnthropicAssistantContentBlock = AnthropicTextBlock | AnthropicToolUseBlock | AnthropicThinkingBlock
+AnthropicAssistantContentBlock = (
+    AnthropicTextBlock | AnthropicToolUseBlock | AnthropicThinkingBlock | dict[str, Any]
+)
 
 
 class AnthropicUserMessage(BaseModel):
@@ -142,7 +148,7 @@ class AnthropicTool(BaseModel):
 
     name: str
     description: str | None = None
-    input_schema: dict
+    input_schema: dict | None = None
     cache_control: dict[str, Any] | None = None
 
 
