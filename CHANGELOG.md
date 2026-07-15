@@ -4,6 +4,18 @@ All notable changes to Router-Maestro are documented here.
 
 ---
 
+## v0.6.2 (2026-07-15)
+
+### Fixes
+
+- **Tolerate unknown reasoning siblings on Responses requests.** Codex sends
+  `reasoning.context` on gpt-5.6, which was rejected as
+  `Invalid request option 'reasoning.context'` (HTTP 400) by a strict reasoning
+  sub-schema. Router-Maestro only consumes `reasoning.effort`; unknown siblings
+  (`context`, `summary`, future extensions) are now ignored and dropped before
+  the upstream request instead of being rejected. The `effort` value is still
+  validated, so an invalid tier is still reported.
+
 ## v0.6.1 (2026-07-15)
 
 ### Fixes
