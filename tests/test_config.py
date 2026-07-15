@@ -25,6 +25,7 @@ from router_maestro.cli.config import (
     _prompt_endpoint_mode,
     _select_model,
 )
+from router_maestro.config import settings
 from router_maestro.config.contexts import ContextConfig, ContextsConfig
 from router_maestro.config.providers import CustomProviderConfig, ModelConfig, ProvidersConfig
 from router_maestro.config.settings import load_config, save_config
@@ -179,6 +180,240 @@ class TestConfigIO:
         assert json.loads(path.read_text()) == {"good": True}
         # No leftover temp files in the directory.
         assert list(tmp_path.glob("*.tmp")) == []
+
+
+class TestProvidersConfigIO:
+    """Compatibility and isolation behavior for on-disk custom providers."""
+
+    @staticmethod
+    def _provider(*, options=None):
+        return {
+            "type": "openai-compatible",
+            "baseURL": "https://example.invalid/v1",
+            "models": {"model": {"name": "Model"}},
+            "options": options or {},
+        }
+
+    @staticmethod
+    def _write(path: Path, providers) -> bytes:
+        path.write_text(json.dumps({"providers": providers}), encoding="utf-8")
+        return path.read_bytes()
+
+    def test_missing_providers_file_creates_default(self, tmp_path, monkeypatch):
+        path = tmp_path / "providers.json"
+        monkeypatch.setattr(settings, "PROVIDERS_FILE", path)
+
+        config = settings.load_providers_config()
+
+        assert config.providers == {}
+        assert json.loads(path.read_text(encoding="utf-8")) == {"providers": {}}
+
+    def test_unknown_options_round_trip_without_load_rewriting_source(
+        self,
+        tmp_path,
+        monkeypatch,
+        caplog,
+    ):
+        path = tmp_path / "providers.json"
+        original = self._write(
+            path,
+            {
+                "healthy": self._provider(options={"allow_unauthenticated": True}),
+                "legacy": self._provider(
+                    options={
+                        "api_key_env": "LEGACY_API_KEY",
+                        "request_timeout": 45,
+                        "compatibility": {"mode": "old"},
+                    }
+                ),
+            },
+        )
+        monkeypatch.setattr(settings, "PROVIDERS_FILE", path)
+
+        loaded = settings.load_providers_config()
+
+        assert set(loaded.providers) == {"healthy", "legacy"}
+        assert path.read_bytes() == original
+        assert loaded.providers["legacy"].options.model_dump(mode="json") == {
+            "api_key_env": "LEGACY_API_KEY",
+            "allow_unauthenticated": False,
+            "request_timeout": 45,
+            "compatibility": {"mode": "old"},
+        }
+        assert "legacy" in caplog.text
+        assert "compatibility" in caplog.text
+        assert "request_timeout" in caplog.text
+        assert "mode" not in caplog.text
+
+        settings.save_providers_config(loaded)
+        reloaded = settings.load_providers_config()
+
+        assert reloaded.model_dump(mode="json") == loaded.model_dump(mode="json")
+
+    def test_unknown_option_log_escapes_control_characters_without_values(
+        self,
+        tmp_path,
+        monkeypatch,
+        caplog,
+    ):
+        path = tmp_path / "providers.json"
+        legacy_key = "legacy\nFORGED\toption"
+        secret = "sk-secret-legacy-option-value"
+        self._write(
+            path,
+            {
+                "legacy": self._provider(
+                    options={legacy_key: {"nested-secret": secret}},
+                )
+            },
+        )
+        monkeypatch.setattr(settings, "PROVIDERS_FILE", path)
+
+        loaded = settings.load_providers_config()
+
+        assert loaded.providers["legacy"].options.model_dump(mode="json")[legacy_key] == {
+            "nested-secret": secret
+        }
+        assert repr(legacy_key) in caplog.text
+        assert "legacy\nFORGED" not in caplog.text
+        assert secret not in caplog.text
+        assert "nested-secret" not in caplog.text
+
+    def test_invalid_known_option_skips_only_that_provider_with_safe_diagnostics(
+        self,
+        tmp_path,
+        monkeypatch,
+        caplog,
+    ):
+        path = tmp_path / "providers.json"
+        secret = "sk-secret-invalid-env-name"
+        original = self._write(
+            path,
+            {
+                "healthy": self._provider(options={"allow_unauthenticated": True}),
+                "broken": self._provider(options={"api_key_env": secret}),
+            },
+        )
+        monkeypatch.setattr(settings, "PROVIDERS_FILE", path)
+
+        loaded = settings.load_providers_config()
+
+        assert set(loaded.providers) == {"healthy"}
+        assert path.read_bytes() == original
+        assert "broken" in caplog.text
+        assert "options.api_key_env" in caplog.text
+        assert "string_pattern_mismatch" in caplog.text
+        assert secret not in caplog.text
+        assert "input_value" not in caplog.text
+
+    def test_validation_log_redacts_dynamic_model_id_from_location(
+        self,
+        tmp_path,
+        monkeypatch,
+        caplog,
+    ):
+        path = tmp_path / "providers.json"
+        secret = "sk-secret-model-id"
+        malicious_model_id = f"model\nFORGED\t{secret}"
+        provider = self._provider()
+        provider["models"] = {malicious_model_id: {"name": {"invalid": True}}}
+        self._write(path, {"broken": provider})
+        monkeypatch.setattr(settings, "PROVIDERS_FILE", path)
+
+        loaded = settings.load_providers_config()
+
+        assert loaded.providers == {}
+        assert "models.<model-id>.name:string_type" in caplog.text
+        assert malicious_model_id not in caplog.text
+        assert "model\nFORGED" not in caplog.text
+        assert secret not in caplog.text
+        assert "input_value" not in caplog.text
+
+    def test_reserved_and_duplicate_names_are_isolated_deterministically(
+        self,
+        tmp_path,
+        monkeypatch,
+        caplog,
+    ):
+        path = tmp_path / "providers.json"
+        self._write(
+            path,
+            {
+                "healthy": self._provider(),
+                "OpenAI": self._provider(),
+                "First": self._provider(options={"api_key_env": "FIRST_API_KEY"}),
+                "first": self._provider(options={"api_key_env": "SECOND_API_KEY"}),
+                "later": self._provider(),
+            },
+        )
+        monkeypatch.setattr(settings, "PROVIDERS_FILE", path)
+
+        loaded = settings.load_providers_config()
+
+        assert list(loaded.providers) == ["healthy", "First", "later"]
+        assert loaded.providers["First"].options.api_key_env == "FIRST_API_KEY"
+        assert "OpenAI" in caplog.text
+        assert "reserved_provider_name" in caplog.text
+        assert "first" in caplog.text
+        assert "duplicate_provider_name" in caplog.text
+
+    @pytest.mark.parametrize(
+        "contents",
+        [
+            "{this is not json",
+            json.dumps(["not", "an", "object"]),
+            json.dumps({"providers": ["not", "a", "mapping"]}),
+        ],
+    )
+    def test_malformed_provider_documents_fall_back_without_rewriting(
+        self,
+        contents,
+        tmp_path,
+        monkeypatch,
+        caplog,
+    ):
+        path = tmp_path / "providers.json"
+        path.write_text(contents, encoding="utf-8")
+        original = path.read_bytes()
+        monkeypatch.setattr(settings, "PROVIDERS_FILE", path)
+
+        loaded = settings.load_providers_config()
+
+        assert loaded.providers == {}
+        assert path.read_bytes() == original
+        assert contents not in caplog.text
+
+    def test_non_utf8_provider_document_falls_back_without_rewriting(
+        self,
+        tmp_path,
+        monkeypatch,
+        caplog,
+    ):
+        path = tmp_path / "providers.json"
+        original = b"\xff\xfeinvalid-provider-config"
+        path.write_bytes(original)
+        monkeypatch.setattr(settings, "PROVIDERS_FILE", path)
+
+        loaded = settings.load_providers_config()
+
+        assert loaded.providers == {}
+        assert path.read_bytes() == original
+        assert "invalid_encoding" in caplog.text
+        assert "invalid-provider-config" not in caplog.text
+
+    def test_provider_file_os_error_falls_back_without_replacing_path(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        path = tmp_path / "providers.json"
+        path.mkdir()
+        monkeypatch.setattr(settings, "PROVIDERS_FILE", path)
+
+        loaded = settings.load_providers_config()
+
+        assert loaded.providers == {}
+        assert path.is_dir()
 
 
 class TestSelectModel:

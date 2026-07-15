@@ -40,9 +40,20 @@ def _config(**options) -> CustomProviderConfig:
     )
 
 
-def test_custom_provider_options_reject_unknown_fields() -> None:
-    with pytest.raises(ValidationError, match="unused"):
-        CustomProviderOptions.model_validate({"unused": True})
+def test_custom_provider_options_preserve_unknown_legacy_fields() -> None:
+    options = CustomProviderOptions.model_validate(
+        {
+            "api_key_env": "LOCAL_LLM_TOKEN",
+            "unused": {"nested": True},
+        }
+    )
+
+    assert options.api_key_env == "LOCAL_LLM_TOKEN"
+    assert options.model_dump(mode="json") == {
+        "api_key_env": "LOCAL_LLM_TOKEN",
+        "allow_unauthenticated": False,
+        "unused": {"nested": True},
+    }
 
 
 @pytest.mark.parametrize("provider", ["github-copilot", "GITHUB-COPILOT", "openai", "Anthropic"])
@@ -140,6 +151,17 @@ def test_required_custom_provider_without_key_is_skipped(tmp_path) -> None:
     provider = create_custom_provider(
         "ollama",
         _config(),
+        credential_repository=CredentialRepository(tmp_path / "auth.json"),
+        environ={},
+    )
+
+    assert provider is None
+
+
+def test_unknown_legacy_option_does_not_enable_runtime_behavior(tmp_path) -> None:
+    provider = create_custom_provider(
+        "ollama",
+        _config(anonymous=True),
         credential_repository=CredentialRepository(tmp_path / "auth.json"),
         environ={},
     )

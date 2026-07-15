@@ -1,12 +1,13 @@
 """Tests for the Anthropic models endpoint."""
 
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock
 
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from router_maestro.providers.base import ModelInfo
+from router_maestro.server.dependencies import get_app_router
 from router_maestro.server.routes.anthropic import (
     _generate_display_name,
     list_models,
@@ -148,8 +149,7 @@ class TestListModelsEndpoint:
     @pytest.mark.anyio
     async def test_list_models_response_format(self, mock_router):
         """Test that response matches Anthropic format."""
-        with patch("router_maestro.server.routes.anthropic.get_router", return_value=mock_router):
-            response = await list_models()
+        response = await list_models(model_router=mock_router)
 
         assert isinstance(response, AnthropicModelList)
         assert len(response.data) == 3
@@ -160,8 +160,7 @@ class TestListModelsEndpoint:
     @pytest.mark.anyio
     async def test_list_models_model_fields(self, mock_router):
         """Test that each model has required Anthropic fields."""
-        with patch("router_maestro.server.routes.anthropic.get_router", return_value=mock_router):
-            response = await list_models()
+        response = await list_models(model_router=mock_router)
 
         model = response.data[0]
         assert model.id == "github-copilot/claude-sonnet-4"
@@ -174,8 +173,7 @@ class TestListModelsEndpoint:
     @pytest.mark.anyio
     async def test_list_models_pagination_limit(self, mock_router):
         """Test pagination with limit parameter."""
-        with patch("router_maestro.server.routes.anthropic.get_router", return_value=mock_router):
-            response = await list_models(limit=2)
+        response = await list_models(limit=2, model_router=mock_router)
 
         assert len(response.data) == 2
         assert response.has_more is True
@@ -185,8 +183,10 @@ class TestListModelsEndpoint:
     @pytest.mark.anyio
     async def test_list_models_pagination_after_id(self, mock_router):
         """Test pagination with after_id parameter."""
-        with patch("router_maestro.server.routes.anthropic.get_router", return_value=mock_router):
-            response = await list_models(after_id="github-copilot/claude-sonnet-4")
+        response = await list_models(
+            after_id="github-copilot/claude-sonnet-4",
+            model_router=mock_router,
+        )
 
         assert len(response.data) == 2
         assert response.data[0].id == "github-copilot/gpt-4o"
@@ -198,8 +198,7 @@ class TestListModelsEndpoint:
         mock = AsyncMock()
         mock.list_models = AsyncMock(return_value=[])
 
-        with patch("router_maestro.server.routes.anthropic.get_router", return_value=mock):
-            response = await list_models()
+        response = await list_models(model_router=mock)
 
         assert len(response.data) == 0
         assert response.first_id is None
@@ -208,8 +207,8 @@ class TestListModelsEndpoint:
 
     def test_http_endpoint(self, client, mock_router):
         """Test the HTTP endpoint via test client."""
-        with patch("router_maestro.server.routes.anthropic.get_router", return_value=mock_router):
-            response = client.get("/api/anthropic/v1/models")
+        client.app.dependency_overrides[get_app_router] = lambda: mock_router
+        response = client.get("/api/anthropic/v1/models")
 
         assert response.status_code == 200
         data = response.json()

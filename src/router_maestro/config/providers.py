@@ -27,7 +27,7 @@ class ModelConfig(BaseModel):
 class CustomProviderOptions(BaseModel):
     """Runtime options supported by an OpenAI-compatible custom provider."""
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="allow")
 
     api_key_env: str | None = Field(
         default=None,

@@ -4,7 +4,7 @@ import asyncio
 import logging
 
 import httpx
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, Response
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Response
 
 from router_maestro.auth import (
     ApiKeyCredential,
@@ -28,6 +28,12 @@ from router_maestro.config.repository import (
 )
 from router_maestro.config.settings import load_providers_config
 from router_maestro.routing.model_ref import catalog_model_public_id
+from router_maestro.routing.router import Router
+from router_maestro.server.dependencies import (
+    get_app_router,
+    get_router_owner,
+    get_runtime_config_repository,
+)
 from router_maestro.server.oauth_sessions import oauth_sessions
 from router_maestro.server.schemas.admin import (
     AuthListResponse,
@@ -46,16 +52,6 @@ from router_maestro.server.schemas.admin import (
 router = APIRouter(prefix="/api/admin", tags=["admin"])
 
 logger = logging.getLogger("router_maestro.server.routes.admin")
-
-
-def get_runtime_config_repository(request: Request) -> RuntimeConfigRepository:
-    """Return the application-owned runtime configuration repository."""
-    return request.app.state.runtime_config_repository
-
-
-def get_router_owner(request: Request):
-    """Return the application-owned Router generation owner."""
-    return request.app.state.router_owner
 
 
 def _runtime_config_response(snapshot: RuntimeConfigSnapshot) -> PrioritiesResponse:
@@ -387,12 +383,10 @@ async def logout(
 
 
 @router.get("/models", response_model=ModelsResponse)
-async def list_models(router_owner=Depends(get_router_owner)) -> ModelsResponse:
+async def list_models(model_router: Router = Depends(get_app_router)) -> ModelsResponse:
     """List all available models from authenticated providers."""
-    lease = await router_owner.acquire()
-
     try:
-        models = await lease.router.list_models()
+        models = await model_router.list_models()
         model_list = [
             ModelInfo(
                 provider=model.provider,
@@ -412,8 +406,6 @@ async def list_models(router_owner=Depends(get_router_owner)) -> ModelsResponse:
     except Exception:
         logger.error("Failed to list models", exc_info=True)
         raise HTTPException(status_code=500, detail="Failed to list models")
-    finally:
-        await lease.release()
 
 
 @router.post("/models/refresh")
