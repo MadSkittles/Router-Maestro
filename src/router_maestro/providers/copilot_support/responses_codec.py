@@ -41,8 +41,6 @@ class CopilotResponsesCodec:
 
     name = "github-copilot"
 
-    unsupported_tool_types = frozenset({"web_search", "web_search_preview", "code_interpreter"})
-
     @staticmethod
     def input_has_vision(value: Any, depth: int = 0) -> bool:
         if depth > 32 or value is None:
