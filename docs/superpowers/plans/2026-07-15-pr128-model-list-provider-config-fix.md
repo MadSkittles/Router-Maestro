@@ -155,7 +155,7 @@ Install the wheel into a fresh CPython 3.11 environment, run CLI help, and
 import the shared server dependency and provider config models from installed
 `site-packages`.
 
-- [ ] **Step 5: Commit, push, and open the PR without merging**
+- [x] **Step 5: Commit, push, and open the PR without merging**
 
 Explicitly stage only reviewed paths, commit, push the fix branch, and create a
 PR against `master` containing the two root causes, compatibility behavior, and
