@@ -25,7 +25,7 @@ from router_maestro.providers import (
 )
 from router_maestro.routing import Router, get_router
 from router_maestro.routing.model_ref import qualify_model_id
-from router_maestro.server.protocols import client_error_response, unrepresented_option_error
+from router_maestro.server.protocols import client_error_response
 from router_maestro.server.protocols.errors import postcommit_error_data, protocol_error_response
 from router_maestro.server.routes._outcomes import record_chat_response_outcome
 from router_maestro.server.schemas import (
@@ -120,8 +120,6 @@ async def chat_completions(request: ChatCompletionRequest):
             )
         request.stream_options = stream_options
 
-    if error := unrepresented_option_error(request):
-        return client_error_response(error, "openai")
     if stream_options is not None and not request.stream:
         return client_error_response(
             RequestOptionError(

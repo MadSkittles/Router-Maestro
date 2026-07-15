@@ -93,6 +93,11 @@ _COPILOT_ACCEPTED_FIELDS = frozenset(
         "stop_sequences",
         "metadata",
         "output_config",
+        # Forwarded verbatim to the native Anthropic transport. GHC accepts and
+        # applies context_management (verified live: 200 with an applied_edits
+        # echo); the paired anthropic-beta header is already forwarded by the
+        # Copilot transport, so the option only needs to survive body stripping.
+        "context_management",
     }
 )
 
@@ -173,15 +178,18 @@ def _sanitize_output_config(body: dict) -> str | None:
 
 
 def _validate_beta_request_options(body: dict) -> None:
-    """Reject unrepresented beta Messages options before transport selection."""
-    unsupported_fields = sorted(set(body) - _COPILOT_ACCEPTED_FIELDS)
-    if unsupported_fields:
-        parameter = unsupported_fields[0]
-        raise RequestOptionError(
-            f"{parameter} is not supported by the beta Anthropic endpoint",
-            parameter=parameter,
-        )
+    """Validate representable beta Messages options before transport selection.
 
+    Options that Router-Maestro does not model as typed fields (for example
+    ``context_management`` sent by Claude Code) are NOT rejected: a transparent
+    proxy forwards or ignores unknown options rather than returning a 400. The
+    native passthrough path strips anything outside ``_COPILOT_ACCEPTED_FIELDS``
+    before forwarding, so unknown top-level keys are ignored, not echoed upstream.
+
+    Only ``output_config`` is validated here, because Router-Maestro actively
+    consumes it to shape the native reasoning-effort payload; a malformed value
+    cannot be represented and is reported instead of silently mishandled.
+    """
     if "output_config" in body:
         output_config = body["output_config"]
         if not isinstance(output_config, dict):

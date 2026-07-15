@@ -25,7 +25,6 @@ from router_maestro.server.protocols import (
     build_nonstream_snapshot,
     client_error_response,
     responses_reducer,
-    unrepresented_option_error,
 )
 from router_maestro.server.protocols.errors import postcommit_error_data, protocol_error_response
 from router_maestro.server.routes._outcomes import record_terminal_outcome
@@ -239,8 +238,6 @@ async def create_response(request: ResponsesRequest):
         request.tools is not None,
         request.reasoning,
     )
-    if error := unrepresented_option_error(request):
-        return client_error_response(error, "openai")
 
     model_router = get_router()
 

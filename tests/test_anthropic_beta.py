@@ -2174,15 +2174,13 @@ class TestBetaMessagesEndpoint:
     @pytest.mark.parametrize(
         ("option_payload", "parameter"),
         [
-            ({"context_management": {"enabled": True}}, "context_management"),
             (
                 {"output_config": {"effort": "low", "format": "text"}},
                 "output_config.format",
             ),
-            ({"service_tier": "standard_only"}, "service_tier"),
         ],
     )
-    def test_beta_rejects_unknown_semantic_options_before_transport_selection(
+    def test_beta_rejects_malformed_output_config_before_transport_selection(
         self,
         client,
         transport,
@@ -2245,6 +2243,43 @@ class TestBetaMessagesEndpoint:
         provider._send_with_auth_retry.assert_not_awaited()
         provider._stream_with_auth_retry.assert_not_called()
 
+    def test_beta_forwards_unmodeled_client_option_to_native_transport(self, client):
+        """Claude Code sends ``context_management`` on the beta endpoint by default.
+
+        Router-Maestro does not model it as a typed field, but it is a legitimate
+        upstream Anthropic option. It must be forwarded to the native transport,
+        not hard-rejected with a 400 before transport selection."""
+        provider = _native_provider()
+        model = ModelInfo(
+            id="claude-options",
+            name="Claude options",
+            provider="github-copilot",
+            operation_capabilities={Operation.NATIVE_ANTHROPIC: True},
+        )
+        model_router = _real_native_router(
+            provider,
+            [model],
+            ["github-copilot/claude-options"],
+        )
+        body = {
+            "model": "github-copilot/claude-options",
+            "max_tokens": 100,
+            "stream": False,
+            "messages": [{"role": "user", "content": "Hi"}],
+            "context_management": {"edits": [{"type": "clear_tool_uses_20250919"}]},
+        }
+
+        with patch(
+            "router_maestro.server.routes.anthropic_beta.get_router",
+            return_value=model_router,
+        ):
+            response = client.post("/api/anthropic/beta/v1/messages", json=body)
+
+        assert response.status_code == 200, response.text
+        assert "Unsupported request option" not in response.text
+        assert "not supported by the beta" not in response.text
+        provider._send_with_auth_retry.assert_awaited_once()
+
     @pytest.mark.parametrize("stream", [False, True], ids=["nonstream", "stream"])
     @pytest.mark.parametrize(
         ("option_payload", "parameter"),
@@ -2257,7 +2292,6 @@ class TestBetaMessagesEndpoint:
                 "output_config.format",
             ),
             ({"temperature": 0.2, "top_p": 0.8}, "top_p"),
-            ({"service_tier": "standard_only"}, "service_tier"),
         ],
     )
     def test_native_rejects_unpreservable_options_before_transport(

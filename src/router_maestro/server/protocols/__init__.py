@@ -7,7 +7,6 @@ from router_maestro.server.protocols.anthropic_reducer import (
 )
 from router_maestro.server.protocols.errors import (
     client_error_response,
-    unrepresented_option_error,
 )
 from router_maestro.server.protocols.responses_reducer import (
     ResponsesReducer,
@@ -21,5 +20,4 @@ __all__ = [
     "build_anthropic_response",
     "build_nonstream_snapshot",
     "client_error_response",
-    "unrepresented_option_error",
 ]
