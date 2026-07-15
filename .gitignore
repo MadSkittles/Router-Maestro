@@ -116,3 +116,6 @@ logs/security/
 
 # MCP configuration (contains secrets)
 .mcp.json
+
+# Superpowers skill working artifacts (agent plans/specs, not project docs)
+docs/superpowers/
