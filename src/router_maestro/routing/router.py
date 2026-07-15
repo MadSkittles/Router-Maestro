@@ -1848,7 +1848,24 @@ class Router:
                     kind=ProviderFailureKind.CLIENT_REQUEST,
                 )
 
-            reasoning_drift = plan.features.reasoning and not transformed_features.reasoning
+            # The primary is the only executable route; when the caller scopes
+            # its per-candidate request (via ``candidate_requests``) it owns that
+            # request's reasoning shape. The Anthropic route, for example, runs
+            # ``_apply_thinking_budget`` per candidate and legitimately disables
+            # thinking when the requested ``max_tokens`` leaves no output
+            # headroom for a thinking budget. That server-initiated downgrade is
+            # safe — a non-reasoning request always runs on a reasoning-capable
+            # route — so the primary proceeds instead of 400'ing. Fallbacks that
+            # lose reasoning are still dropped (see ``prevalidate_plan``), and an
+            # unscoped primary still enforces the client's explicit reasoning.
+            primary_scoped = (
+                candidate.model == plan.primary.model and candidate.model in candidate_requests
+            )
+            reasoning_drift = (
+                plan.features.reasoning
+                and not transformed_features.reasoning
+                and not primary_scoped
+            )
             unscoped_reasoning_enhancement = (
                 transformed_features.reasoning
                 and not plan.features.reasoning
