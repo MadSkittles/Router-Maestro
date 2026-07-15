@@ -31,9 +31,14 @@ class ChatMessage(BaseModel):
 
 
 class OpenAIThinkingConfig(BaseModel):
-    """Strict Anthropic-style thinking extension accepted by Chat Completions."""
+    """Anthropic-style thinking extension accepted by Chat Completions.
 
-    model_config = ConfigDict(extra="forbid")
+    Only ``type`` and ``budget_tokens`` are consumed; unknown siblings a client
+    sends (e.g. Anthropic's ``display``) are tolerated and dropped rather than
+    rejected. The two consumed fields are still value-validated.
+    """
+
+    model_config = ConfigDict(extra="ignore")
 
     type: Literal["enabled", "adaptive", "disabled"]
     budget_tokens: Annotated[int, Field(strict=True, gt=0)] | None = None

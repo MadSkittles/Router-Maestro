@@ -565,11 +565,6 @@ def test_openai_chat_preserves_minimal_reasoning_effort(monkeypatch, stream):
             "thinking.budget_tokens",
             id="disabled-string-budget",
         ),
-        pytest.param(
-            {"type": "enabled", "vendor_option": True},
-            "thinking.vendor_option",
-            id="unknown-field",
-        ),
     ],
 )
 def test_openai_chat_rejects_malformed_thinking_before_router_calls(
@@ -601,6 +596,24 @@ def test_openai_chat_rejects_malformed_thinking_before_router_calls(
     router.chat_completion.assert_not_awaited()
     router.prepare_chat_completion_stream.assert_not_awaited()
     router.chat_completion_stream.assert_not_awaited()
+
+
+def test_openai_thinking_with_unknown_sibling_is_accepted():
+    from router_maestro.server.schemas.openai import OpenAIThinkingConfig
+
+    # Anthropic's `display` sibling (summarized/omitted) is sent by real clients.
+    cfg = OpenAIThinkingConfig.model_validate({"type": "adaptive", "display": "summarized"})
+    assert cfg.type == "adaptive"
+
+
+def test_openai_thinking_invalid_budget_still_rejected():
+    from pydantic import ValidationError
+
+    from router_maestro.server.schemas.openai import OpenAIThinkingConfig
+
+    with pytest.raises(ValidationError):
+        OpenAIThinkingConfig.model_validate({"type": "enabled", "budget_tokens": -1})
+
 
 
 @pytest.mark.parametrize("stream", [False, True], ids=["nonstream", "stream"])
