@@ -92,9 +92,16 @@ class ResponsesToolChoiceFunction(BaseModel):
 
 
 class ResponsesReasoningConfig(BaseModel):
-    """Reasoning controls represented by Router-Maestro in Phase 1."""
+    """Reasoning controls Router-Maestro represents.
 
-    model_config = ConfigDict(extra="forbid")
+    Only ``effort`` is consumed; unknown siblings that clients send (e.g. Codex's
+    ``reasoning.context`` on gpt-5.6, or ``reasoning.summary``) are tolerated and
+    dropped rather than rejected — a transparent proxy does not 400 on options it
+    does not model. ``effort`` itself is still validated so an invalid tier is
+    reported instead of forwarded.
+    """
+
+    model_config = ConfigDict(extra="ignore")
 
     effort: Literal["minimal", "low", "medium", "high", "xhigh", "max"] | None = None
 

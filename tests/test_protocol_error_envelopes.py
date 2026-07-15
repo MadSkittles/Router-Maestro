@@ -1727,26 +1727,32 @@ def test_responses_invalid_reasoning_effort_is_native_400(
 
 @pytest.mark.parametrize("stream", [False, True], ids=["nonstream", "stream"])
 @pytest.mark.parametrize(
-    ("reasoning", "parameter"),
+    "reasoning",
     [
-        pytest.param({"summary": "detailed"}, "reasoning.summary", id="summary-only"),
-        pytest.param(
-            {"effort": "low", "summary": "detailed"},
-            "reasoning.summary",
-            id="effort-and-summary",
-        ),
-        pytest.param({"future": "value"}, "reasoning.future", id="unknown-field"),
+        pytest.param({"summary": "detailed"}, id="summary-only"),
+        pytest.param({"effort": "low", "summary": "detailed"}, id="effort-and-summary"),
+        pytest.param({"future": "value"}, id="unknown-field"),
+        pytest.param({"effort": "low", "context": {"foo": "bar"}}, id="effort-and-context"),
     ],
 )
-def test_responses_unrepresented_reasoning_fields_are_native_400_before_router(
+def test_responses_unrepresented_reasoning_fields_reach_router_not_400(
     client: TestClient,
     stream: bool,
     reasoning: dict,
-    parameter: str,
 ) -> None:
+    """Unknown ``reasoning`` siblings (Codex sends ``reasoning.context`` on gpt-5.6,
+    ``summary``, etc.) must NOT be rejected. Router-Maestro extracts ``effort`` and
+    ignores the rest, so the request reaches routing instead of a native 400."""
+    sentinel = ProviderError(
+        "reached routing sentinel",
+        status_code=503,
+        retryable=False,
+        kind=ProviderFailureKind.UPSTREAM_STATUS,
+    )
     router = MagicMock()
-    router.responses_completion = AsyncMock()
-    router.prepare_responses_completion_stream = AsyncMock()
+    router.responses_completion = AsyncMock(side_effect=sentinel)
+    router.prepare_responses_completion_stream = AsyncMock(side_effect=sentinel)
+    router.responses_completion_stream = AsyncMock(side_effect=sentinel)
     with patch("router_maestro.server.routes.responses.get_router", return_value=router):
         response = client.post(
             "/api/openai/v1/responses",
@@ -1758,12 +1764,9 @@ def test_responses_unrepresented_reasoning_fields_are_native_400_before_router(
             },
         )
 
-    assert response.status_code == 400
-    assert response.headers["content-type"].startswith("application/json")
-    assert response.json()["error"]["param"] == parameter
-    assert "data:" not in response.text
-    router.responses_completion.assert_not_awaited()
-    router.prepare_responses_completion_stream.assert_not_awaited()
+    assert response.status_code != 400, response.text
+    assert "Invalid request option" not in response.text
+    assert "Unsupported request option" not in response.text
 
 
 def test_responses_unsupported_tools_use_native_400(client: TestClient) -> None:
