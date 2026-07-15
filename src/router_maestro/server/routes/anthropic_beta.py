@@ -74,33 +74,6 @@ _ANTHROPIC_SSE_EVENTS = frozenset(
     }
 )
 
-# Top-level Messages fields whose semantics Router-Maestro represents on the
-# beta endpoint. Nested message/content payloads remain forward-compatible and
-# are deliberately outside this shallow request-option gate.
-_COPILOT_ACCEPTED_FIELDS = frozenset(
-    {
-        "model",
-        "messages",
-        "max_tokens",
-        "stream",
-        "system",
-        "thinking",
-        "tools",
-        "tool_choice",
-        "temperature",
-        "top_p",
-        "top_k",
-        "stop_sequences",
-        "metadata",
-        "output_config",
-        # Forwarded verbatim to the native Anthropic transport. GHC accepts and
-        # applies context_management (verified live: 200 with an applied_edits
-        # echo); the paired anthropic-beta header is already forwarded by the
-        # Copilot transport, so the option only needs to survive body stripping.
-        "context_management",
-    }
-)
-
 
 @dataclass(frozen=True, slots=True)
 class _ResolvedModel:
@@ -183,7 +156,8 @@ def _validate_beta_request_options(body: dict) -> None:
     Options that Router-Maestro does not model as typed fields (for example
     ``context_management`` sent by Claude Code) are NOT rejected: a transparent
     proxy forwards or ignores unknown options rather than returning a 400. The
-    native passthrough path strips anything outside ``_COPILOT_ACCEPTED_FIELDS``
+    native passthrough path strips anything outside the Copilot provider's
+    outbound contract (``CopilotOutboundContract.forwardable_fields``)
     before forwarding, so unknown top-level keys are ignored, not echoed upstream.
 
     Only ``output_config`` is validated here, because Router-Maestro actively
@@ -1203,11 +1177,15 @@ async def beta_messages(raw_request: FastAPIRequest):
 
     # Defense in depth for fields introduced by internal transformations. Raw
     # client options have already passed the shallow beta option gate above.
-    unknown = set(body.keys()) - _COPILOT_ACCEPTED_FIELDS
-    if unknown:
-        logger.debug("Stripping unknown fields before passthrough: %s", unknown)
-        for key in unknown:
-            del body[key]
+    forwardable = copilot_provider.outbound_contract.forwardable_fields(
+        Operation.NATIVE_ANTHROPIC
+    )
+    if forwardable is not None:
+        unknown = set(body.keys()) - forwardable
+        if unknown:
+            logger.debug("Stripping unknown fields before passthrough: %s", unknown)
+            for key in unknown:
+                del body[key]
 
     # Legacy test/integration hooks may still return a resolution without a plan.
     # Real native routing always executes the immutable plan below.
