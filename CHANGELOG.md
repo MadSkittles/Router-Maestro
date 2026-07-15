@@ -4,6 +4,31 @@ All notable changes to Router-Maestro are documented here.
 
 ---
 
+## v0.7.0 (2026-07-15)
+
+### Changes
+
+- **Provider-bound option policy (round 1).** Inference request schemas are now
+  uniformly permissive: options a client sends but Router-Maestro does not model
+  are ignored rather than rejected with an HTTP 400/422. A CI guard prevents any
+  inference request schema from reintroducing strict `extra="forbid"` rejection.
+  The GitHub Copilot native-Anthropic passthrough allowlist moves out of the
+  route into a provider-bound `OutboundContract`, so a provider owns the
+  knowledge of what its upstream accepts.
+
+### Fixes
+
+- **Unknown thinking siblings on the chat endpoint.** `thinking.display` (and
+  any future sibling) sent to `/api/openai/v1/chat/completions` is tolerated and
+  dropped rather than rejected; `thinking.type` and `budget_tokens` are still
+  validated.
+- **Anthropic built-in/server tools.** Tools in the documented built-in shape
+  (`web_search_20250305`, `bash_*`, `text_editor_*`, `computer_*`) that carry no
+  `input_schema` are accepted instead of returning HTTP 422.
+- **Replayed and unmodeled Anthropic content blocks.** `redacted_thinking`,
+  `server_tool_use`, and unknown content blocks replayed in message history pass
+  through instead of returning HTTP 422.
+
 ## v0.6.2 (2026-07-15)
 
 ### Fixes
