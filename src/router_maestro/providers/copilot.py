@@ -32,6 +32,7 @@ from router_maestro.providers.base import (
 )
 from router_maestro.providers.copilot_support.auth_session import CopilotAuthSession
 from router_maestro.providers.copilot_support.catalog import CopilotCatalog
+from router_maestro.providers.outbound_contract import OutboundContract
 from router_maestro.providers.copilot_support.catalog import (
     normalize_supported_endpoints as _catalog_normalize_supported_endpoints,
 )
@@ -252,10 +253,55 @@ def _extract_reasoning_from_chunk(part: dict | None) -> tuple[str, str | None]:
     return CopilotChatCodec.extract_reasoning(part)
 
 
+_COPILOT_NATIVE_ANTHROPIC_FORWARD_FIELDS = frozenset(
+    {
+        "model",
+        "messages",
+        "max_tokens",
+        "stream",
+        "system",
+        "thinking",
+        "tools",
+        "tool_choice",
+        "temperature",
+        "top_p",
+        "top_k",
+        "stop_sequences",
+        "metadata",
+        "output_config",
+        # Forwarded verbatim: GHC accepts and applies context_management
+        # (verified live, echoes applied_edits). The paired anthropic-beta header
+        # is forwarded by the Copilot transport, so the option only needs to
+        # survive body stripping.
+        "context_management",
+    }
+)
+
+
+class CopilotOutboundContract(OutboundContract):
+    """Copilot upstream wire contract.
+
+    Round 1: the native Anthropic passthrough forward allowlist. Fields outside
+    this set are stripped before the raw body is sent to GitHub Copilot, which
+    rejects unknown top-level fields (e.g. mcp_servers, container).
+    """
+
+    def forwardable_fields(self, operation: Operation) -> frozenset[str] | None:
+        if operation is Operation.NATIVE_ANTHROPIC:
+            return _COPILOT_NATIVE_ANTHROPIC_FORWARD_FIELDS
+        return None
+
+
 class CopilotProvider(BaseProvider):
     """GitHub Copilot provider."""
 
     name = "github-copilot"
+
+    _copilot_outbound_contract = CopilotOutboundContract()
+
+    @property
+    def outbound_contract(self) -> OutboundContract:
+        return self._copilot_outbound_contract
 
     @property
     def capabilities(self) -> ProviderCapabilities:
