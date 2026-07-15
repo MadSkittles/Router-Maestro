@@ -284,3 +284,50 @@ class TestToolResultWithToolReference:
         assert len(tool_messages) == 1
         assert tool_messages[0].content == ""
         assert tool_messages[0].tool_call_id == "toolu_456"
+
+
+class TestPermissiveRequestParsing:
+    """Inbound permissiveness: clients send options RM doesn't model (F2, F3)."""
+
+    def test_builtin_tool_without_input_schema_is_accepted(self):
+        # Anthropic built-in/server tools carry no input_schema (F2).
+        req = AnthropicMessagesRequest.model_validate(
+            {
+                "model": "claude-sonnet-4.5",
+                "max_tokens": 64,
+                "messages": [{"role": "user", "content": "hi"}],
+                "tools": [{"type": "web_search_20250305", "name": "web_search"}],
+            }
+        )
+        assert req.tools[0].name == "web_search"
+
+    def test_redacted_thinking_block_is_accepted(self):
+        # Extended thinking is default-on for opus-4.8; redacted blocks replay (F3).
+        req = AnthropicMessagesRequest.model_validate(
+            {
+                "model": "claude-opus-4.8",
+                "max_tokens": 64,
+                "messages": [
+                    {"role": "user", "content": "hi"},
+                    {
+                        "role": "assistant",
+                        "content": [{"type": "redacted_thinking", "data": "xyz"}],
+                    },
+                    {"role": "user", "content": "continue"},
+                ],
+            }
+        )
+        assert len(req.messages) == 3
+
+    def test_unknown_user_content_block_is_accepted(self):
+        # A future/unmodeled user content block must not 422 (F3).
+        req = AnthropicMessagesRequest.model_validate(
+            {
+                "model": "claude-sonnet-4.5",
+                "max_tokens": 64,
+                "messages": [
+                    {"role": "user", "content": [{"type": "future_block_2026", "payload": {"k": 1}}]},
+                ],
+            }
+        )
+        assert len(req.messages) == 1
