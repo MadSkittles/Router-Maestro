@@ -4,6 +4,21 @@ All notable changes to Router-Maestro are documented here.
 
 ---
 
+## v0.6.1 (2026-07-15)
+
+### Fixes
+
+- **Transparent passthrough of unmodeled client request options.** The v0.6.0
+  request-option policy rejected any option Router-Maestro does not model as a
+  typed field with an HTTP 400, breaking clients that send such options by
+  default — Claude Code's `context_management` and Codex's `store`. Options are
+  no longer blanket-rejected: verified against the live upstream, GitHub
+  Copilot accepts and applies `context_management` (now forwarded to the native
+  Anthropic transport), while `store` is dropped before the Responses upstream
+  that rejects it. Value-level validation (reasoning effort, temperature/top_p
+  conflicts, `include_usage` type) and provider-capability rejections are
+  retained.
+
 ## v0.6.0 (2026-07-15)
 
 ### Changes
