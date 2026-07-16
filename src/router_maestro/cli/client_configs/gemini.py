@@ -11,6 +11,11 @@ from router_maestro.cli.client_configs.base import (
     GenerateContext,
     console,
 )
+from router_maestro.cli.client_configs.model_id import (
+    ModelFamily,
+    detect_family,
+    to_gemini_official,
+)
 
 
 def get_gemini_cli_paths() -> dict[str, Path]:
@@ -61,6 +66,12 @@ class GeminiConfig(ClientConfig):
             "User-level (~/.gemini/.env)",
             "Project-level (./.gemini/.env)",
         )
+
+    def is_native_family(self, bare_id: str) -> bool:
+        return detect_family(bare_id) is ModelFamily.GOOGLE
+
+    def to_official_id(self, bare_id: str) -> str:
+        return to_gemini_official(bare_id)
 
     def write(self, *, level: str, path: Path, models: list[str], ctx: GenerateContext) -> None:
         model_name = models[0]

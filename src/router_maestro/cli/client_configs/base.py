@@ -208,6 +208,18 @@ class ClientConfig(ABC):
     ) -> None:
         """Print the post-generation success panel."""
 
+    @abstractmethod
+    def is_native_family(self, bare_id: str) -> bool:
+        """Whether ``bare_id`` belongs to this client's native vendor.
+
+        The official-id option is only offered for native models (Codex↔OpenAI,
+        Claude Code↔Anthropic, Gemini CLI↔Google).
+        """
+
+    @abstractmethod
+    def to_official_id(self, bare_id: str) -> str:
+        """Convert a native ``bare_id`` to this vendor's official spelling."""
+
     # ---- overridable hooks (single-model, no injection, no extras) ------
 
     def load_models(self) -> list[dict]:
@@ -223,21 +235,63 @@ class ClientConfig(ABC):
         """Prompt for any client-specific options (default: none)."""
         return {}
 
-    # ---- id-style resolution (base-owned; Part B extends) ---------------
+    # ---- id-style resolution (base-owned) ------------------------------
+
+    def _is_convertible(self, model: dict | None) -> bool:
+        """Whether ``model`` could be written as an official id.
+
+        The auto-routing sentinel and entries carrying an explicit
+        ``wire_key``/``custom_key`` (e.g. Claude's injected 1M variants) are
+        never converted, so they never gate the prompt on.
+        """
+        if model is None or "wire_key" in model or "custom_key" in model:
+            return False
+        return self.is_native_family(_bare_upstream_model_id(model))
 
     def resolve_id_style(self, id_style: IdStyle | None, selected: list[dict | None]) -> IdStyle:
-        """Resolve the effective id style. Part A: always ``QUALIFIED``."""
-        return id_style or IdStyle.QUALIFIED
+        """Resolve the effective id style, prompting only when it matters.
+
+        An explicit ``id_style`` (from ``--id-style``) wins with no prompt.
+        Otherwise the interactive choice is offered only when at least one
+        selected model is convertible; if nothing is convertible the option is
+        meaningless, so we skip the prompt and stay ``QUALIFIED``.
+        """
+        if id_style is not None:
+            return id_style
+        if any(self._is_convertible(model) for model in selected):
+            choice = Prompt.ask(
+                "Model ID style — 'official' uses the vendor's native id the client "
+                "recognizes and may optimize for; 'qualified' is provider/model",
+                choices=[IdStyle.OFFICIAL.value, IdStyle.QUALIFIED.value],
+                default=IdStyle.QUALIFIED.value,
+            )
+            return IdStyle(choice)
+        return IdStyle.QUALIFIED
 
     def resolve_model_string(self, model: dict | None, id_style: IdStyle) -> str:
         """Resolve one selected model dict to the string written into config.
 
-        Part A always produces the provider-qualified wire key (or the
-        auto-routing sentinel). Part B adds official-id conversion here.
+        ``None`` -> the auto-routing sentinel. An explicit ``wire_key``/
+        ``custom_key`` (Claude 1M variants) is returned unchanged regardless of
+        style. Under ``OFFICIAL``, native models are converted to the vendor's
+        spelling; non-native models stay provider-qualified (with a warning),
+        since dropping the prefix would be meaningless for another vendor.
         """
         if model is None:
             return "router-maestro"
-        return _model_key(model)
+        if "wire_key" in model or "custom_key" in model:
+            return _model_key(model)
+        qualified = _model_key(model)
+        if id_style is IdStyle.QUALIFIED:
+            return qualified
+        bare = _bare_upstream_model_id(model)
+        if not self.is_native_family(bare):
+            console.print(
+                f"[yellow]{qualified} is not a native {self.display_name} model; "
+                f"keeping the provider-qualified id.[/yellow]"
+            )
+            return qualified
+        return self.to_official_id(bare)
 
     # ---- shared resolvers ----------------------------------------------
 

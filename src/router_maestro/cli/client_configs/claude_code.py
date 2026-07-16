@@ -22,6 +22,11 @@ from router_maestro.cli.client_configs.base import (
     _upstream_context_window,
     console,
 )
+from router_maestro.cli.client_configs.model_id import (
+    ModelFamily,
+    detect_family,
+    to_anthropic_official,
+)
 from router_maestro.routing.model_ref import qualify_model_id
 
 # Claude Code native model IDs for 1M context variants.
@@ -234,6 +239,12 @@ class ClaudeCodeConfig(ClientConfig):
             "User-level (~/.claude/settings.json)",
             "Project-level (./.claude/settings.json)",
         )
+
+    def is_native_family(self, bare_id: str) -> bool:
+        return detect_family(bare_id) is ModelFamily.ANTHROPIC
+
+    def to_official_id(self, bare_id: str) -> str:
+        return to_anthropic_official(bare_id)
 
     def load_models(self) -> list[dict]:
         # Import from base's module namespace so tests that patch

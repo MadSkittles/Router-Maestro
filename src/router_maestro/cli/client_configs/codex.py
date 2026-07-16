@@ -13,6 +13,11 @@ from router_maestro.cli.client_configs.base import (
     GenerateContext,
     console,
 )
+from router_maestro.cli.client_configs.model_id import (
+    ModelFamily,
+    detect_family,
+    to_openai_official,
+)
 
 
 def get_codex_paths() -> dict[str, Path]:
@@ -60,6 +65,12 @@ class CodexConfig(ClientConfig):
             "User-level (~/.codex/config.toml)",
             "Project-level (./.codex/config.toml)",
         )
+
+    def is_native_family(self, bare_id: str) -> bool:
+        return detect_family(bare_id) is ModelFamily.OPENAI
+
+    def to_official_id(self, bare_id: str) -> str:
+        return to_openai_official(bare_id)
 
     def write(self, *, level: str, path: Path, models: list[str], ctx: GenerateContext) -> None:
         selected_model = models[0]
