@@ -4,6 +4,29 @@ All notable changes to Router-Maestro are documented here.
 
 ---
 
+## v0.7.2 (2026-07-16)
+
+### Features
+
+- **Optional official model id in generated client configs.** `router-maestro
+  config` (claude-code / codex / gemini) can now write a model's official vendor
+  id — `gpt-4.1`, `claude-opus-4-6`, `gemini-2.5-pro` — instead of the internal
+  `provider/model` form, so the client/TUI recognizes it natively. Opt in with
+  the new `--id-style official` flag or the interactive prompt; the default
+  stays `qualified` (`provider/model`), which remains unambiguous when several
+  providers serve the same upstream id. The option is offered only for models of
+  the client's native vendor (Codex↔OpenAI, Claude Code↔Anthropic, Gemini↔Google),
+  and the conversion is derived from each vendor's naming convention rather than
+  a hardcoded per-model table (Anthropic uses dashes, OpenAI/Google keep dots).
+
+### Changes
+
+- **Per-client config-generation abstraction.** The `router-maestro config`
+  command internals are refactored so each supported client owns its entire
+  generation flow behind a `ClientConfig` abstraction. Adding a new client is now
+  a single focused module plus one registry entry. Behavior-preserving: the
+  generated config files are byte-identical to v0.7.1.
+
 ## v0.7.1 (2026-07-15)
 
 ### Changes
