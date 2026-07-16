@@ -12,6 +12,8 @@ import tomlkit
 from rich.console import Console
 
 from router_maestro.cli import config as cli_config
+from router_maestro.cli.client_configs import base as cc_base
+from router_maestro.cli.client_configs import claude_code as cc_claude
 from router_maestro.cli.config import (
     _OPUS_1M_NATIVE_KEY,
     _OPUS_1M_SOURCE_MODEL,
@@ -446,7 +448,7 @@ class TestSelectModel:
 
     def test_display_uses_qualified_server_id_once(self, monkeypatch):
         output = Console(record=True, width=120)
-        monkeypatch.setattr(cli_config, "console", output)
+        monkeypatch.setattr(cc_base, "console", output)
 
         _display_models(
             [
@@ -763,8 +765,8 @@ def _setup_codex_env(
         {"provider": "github-copilot", "id": "gpt-5.5", "name": "GPT-5.5"},
         {"provider": "github-copilot", "id": "claude-opus-4.6", "name": "Claude Opus 4.6"},
     ]
-    monkeypatch.setattr(cli_config, "_fetch_and_display_models", lambda: list(fake_models))
-    monkeypatch.setattr(cli_config, "get_admin_client", lambda: _StubAdminClient())
+    monkeypatch.setattr(cc_base, "_fetch_and_display_models", lambda: list(fake_models))
+    monkeypatch.setattr(cc_base, "get_admin_client", lambda: _StubAdminClient())
 
     answers = iter([level_choice, model_choice])
     monkeypatch.setattr(cli_config.Prompt, "ask", lambda *a, **kw: next(answers))
@@ -819,7 +821,7 @@ class TestCodexConfig:
     def test_qualified_server_model_writes_single_provider_prefix(self, tmp_path, monkeypatch):
         home, _ = _setup_codex_env(monkeypatch, tmp_path, level_choice="1")
         monkeypatch.setattr(
-            cli_config,
+            cc_base,
             "_fetch_and_display_models",
             lambda: _qualified_server_models(),
         )
@@ -914,10 +916,10 @@ def test_claude_config_qualified_models_write_single_prefix_and_offer_beta(
     home.mkdir()
     monkeypatch.setattr(cli_config.Path, "home", classmethod(lambda cls: home))
     monkeypatch.setattr(cli_config.Path, "cwd", classmethod(lambda cls: tmp_path))
-    monkeypatch.setattr(cli_config, "_fetch_models", _qualified_server_models)
-    monkeypatch.setattr(cli_config, "get_admin_client", lambda: _StubAdminClient())
-    monkeypatch.setattr(cli_config, "get_current_context_api_key", lambda: "test-key")
-    monkeypatch.setattr(cli_config, "_prompt_auto_compact_window", lambda _model: None)
+    monkeypatch.setattr(cc_base, "_fetch_models", _qualified_server_models)
+    monkeypatch.setattr(cc_base, "get_admin_client", lambda: _StubAdminClient())
+    monkeypatch.setattr(cc_base, "get_current_context_api_key", lambda: "test-key")
+    monkeypatch.setattr(cc_claude, "_prompt_auto_compact_window", lambda _model: None)
     answers = iter(["1", "2", "1", "2"])
     monkeypatch.setattr(cli_config.Prompt, "ask", lambda *a, **kw: next(answers))
     monkeypatch.setattr(cli_config.Confirm, "ask", lambda *a, **kw: False)
@@ -936,7 +938,7 @@ def test_claude_config_writes_provider_qualified_native_1m_key(tmp_path, monkeyp
     monkeypatch.setattr(cli_config.Path, "home", classmethod(lambda cls: home))
     monkeypatch.setattr(cli_config.Path, "cwd", classmethod(lambda cls: tmp_path))
     monkeypatch.setattr(
-        cli_config,
+        cc_base,
         "_fetch_models",
         lambda: [
             {
@@ -947,10 +949,10 @@ def test_claude_config_writes_provider_qualified_native_1m_key(tmp_path, monkeyp
             }
         ],
     )
-    monkeypatch.setattr(cli_config, "get_admin_client", lambda: _StubAdminClient())
-    monkeypatch.setattr(cli_config, "get_current_context_api_key", lambda: "test-key")
-    monkeypatch.setattr(cli_config, "_prompt_auto_compact_window", lambda _model: None)
-    monkeypatch.setattr(cli_config, "_prompt_endpoint_mode", lambda _model: False)
+    monkeypatch.setattr(cc_base, "get_admin_client", lambda: _StubAdminClient())
+    monkeypatch.setattr(cc_base, "get_current_context_api_key", lambda: "test-key")
+    monkeypatch.setattr(cc_claude, "_prompt_auto_compact_window", lambda _model: None)
+    monkeypatch.setattr(cc_claude, "_prompt_endpoint_mode", lambda _model: False)
     answers = iter(["1", "1", "2"])
     monkeypatch.setattr(cli_config.Prompt, "ask", lambda *a, **kw: next(answers))
     monkeypatch.setattr(cli_config.Confirm, "ask", lambda *a, **kw: False)
@@ -967,12 +969,12 @@ def test_gemini_config_qualified_model_preserves_public_id(tmp_path, monkeypatch
     monkeypatch.setattr(cli_config.Path, "home", classmethod(lambda cls: home))
     monkeypatch.setattr(cli_config.Path, "cwd", classmethod(lambda cls: tmp_path))
     monkeypatch.setattr(
-        cli_config,
+        cc_base,
         "_fetch_and_display_models",
         lambda: [_qualified_server_models()[2]],
     )
-    monkeypatch.setattr(cli_config, "get_admin_client", lambda: _StubAdminClient())
-    monkeypatch.setattr(cli_config, "get_current_context_api_key", lambda: "test-key")
+    monkeypatch.setattr(cc_base, "get_admin_client", lambda: _StubAdminClient())
+    monkeypatch.setattr(cc_base, "get_current_context_api_key", lambda: "test-key")
     answers = iter(["1", "1"])
     monkeypatch.setattr(cli_config.Prompt, "ask", lambda *a, **kw: next(answers))
     monkeypatch.setattr(cli_config.Confirm, "ask", lambda *a, **kw: False)
