@@ -14,6 +14,7 @@ from rich.console import Console
 from router_maestro.cli import config as cli_config
 from router_maestro.cli.client_configs import base as cc_base
 from router_maestro.cli.client_configs import claude_code as cc_claude
+from router_maestro.cli.client_configs.base import IdStyle
 from router_maestro.cli.config import (
     _OPUS_1M_NATIVE_KEY,
     _OPUS_1M_SOURCE_MODEL,
@@ -802,7 +803,7 @@ class TestCodexConfig:
         """User-level scope writes ``model``, ``model_provider``, and the provider table."""
         home, _ = _setup_codex_env(monkeypatch, tmp_path, level_choice="1")
 
-        cli_config.codex_config()
+        cli_config.codex_config(id_style=IdStyle.QUALIFIED)
 
         user_path = home / ".codex" / "config.toml"
         assert user_path.exists()
@@ -826,7 +827,7 @@ class TestCodexConfig:
             lambda: _qualified_server_models(),
         )
 
-        cli_config.codex_config()
+        cli_config.codex_config(id_style=IdStyle.QUALIFIED)
 
         with open(home / ".codex" / "config.toml", "rb") as f:
             data = tomllib.load(f)
@@ -836,7 +837,7 @@ class TestCodexConfig:
         """Project-level scope must NOT write ``model_provider``/``model_providers``."""
         _, cwd = _setup_codex_env(monkeypatch, tmp_path, level_choice="2")
 
-        cli_config.codex_config()
+        cli_config.codex_config(id_style=IdStyle.QUALIFIED)
 
         project_path = cwd / ".codex" / "config.toml"
         assert project_path.exists()
@@ -868,7 +869,7 @@ class TestCodexConfig:
         with open(project_path, "w", encoding="utf-8") as f:
             f.write(tomlkit.dumps(stale))
 
-        cli_config.codex_config()
+        cli_config.codex_config(id_style=IdStyle.QUALIFIED)
 
         with open(project_path, "rb") as f:
             data = tomllib.load(f)
@@ -898,7 +899,7 @@ class TestCodexConfig:
         with open(project_path, "w", encoding="utf-8") as f:
             f.write(tomlkit.dumps(seed))
 
-        cli_config.codex_config()
+        cli_config.codex_config(id_style=IdStyle.QUALIFIED)
 
         with open(project_path, "rb") as f:
             data = tomllib.load(f)
@@ -924,7 +925,7 @@ def test_claude_config_qualified_models_write_single_prefix_and_offer_beta(
     monkeypatch.setattr(cli_config.Prompt, "ask", lambda *a, **kw: next(answers))
     monkeypatch.setattr(cli_config.Confirm, "ask", lambda *a, **kw: False)
 
-    cli_config.claude_code_config()
+    cli_config.claude_code_config(id_style=IdStyle.QUALIFIED)
 
     data = json.loads((home / ".claude" / "settings.json").read_text(encoding="utf-8"))
     assert data["env"]["ANTHROPIC_MODEL"] == "github-copilot/claude-opus-4.6"
@@ -957,7 +958,7 @@ def test_claude_config_writes_provider_qualified_native_1m_key(tmp_path, monkeyp
     monkeypatch.setattr(cli_config.Prompt, "ask", lambda *a, **kw: next(answers))
     monkeypatch.setattr(cli_config.Confirm, "ask", lambda *a, **kw: False)
 
-    cli_config.claude_code_config()
+    cli_config.claude_code_config(id_style=IdStyle.QUALIFIED)
 
     data = json.loads((home / ".claude" / "settings.json").read_text(encoding="utf-8"))
     assert data["env"]["ANTHROPIC_MODEL"] == f"github-copilot/{_OPUS_1M_NATIVE_KEY}"
@@ -979,7 +980,138 @@ def test_gemini_config_qualified_model_preserves_public_id(tmp_path, monkeypatch
     monkeypatch.setattr(cli_config.Prompt, "ask", lambda *a, **kw: next(answers))
     monkeypatch.setattr(cli_config.Confirm, "ask", lambda *a, **kw: False)
 
-    cli_config.gemini_cli_config()
+    cli_config.gemini_cli_config(id_style=IdStyle.QUALIFIED)
 
     env = cli_config._parse_env_file(home / ".gemini" / ".env")
     assert env["GEMINI_MODEL"] == "github-copilot/gemini-2.5-pro"
+
+
+class TestOfficialIdStyleEndToEnd:
+    """End-to-end ``--id-style official`` behavior through the command functions.
+
+    The existing integration tests above pin ``IdStyle.QUALIFIED`` and assert the
+    provider-qualified output. These cover the OFFICIAL path: native models are
+    converted to the vendor's spelling, non-native models stay qualified, and
+    injected 1M keys survive untouched.
+    """
+
+    def test_codex_official_writes_unprefixed_gpt(self, tmp_path, monkeypatch):
+        home, _ = _setup_codex_env(monkeypatch, tmp_path, level_choice="1", model_choice="1")
+
+        cli_config.codex_config(id_style=IdStyle.OFFICIAL)
+
+        with open(home / ".codex" / "config.toml", "rb") as f:
+            data = tomllib.load(f)
+        # gpt-5.5 is OpenAI-native → official id drops the provider prefix, keeps dots.
+        assert data["model"] == "gpt-5.5"
+
+    def test_codex_official_non_native_claude_stays_qualified(self, tmp_path, monkeypatch):
+        # Select the Claude model (index 2) while configuring Codex (OpenAI-native).
+        home, _ = _setup_codex_env(monkeypatch, tmp_path, level_choice="1", model_choice="2")
+
+        cli_config.codex_config(id_style=IdStyle.OFFICIAL)
+
+        with open(home / ".codex" / "config.toml", "rb") as f:
+            data = tomllib.load(f)
+        # Claude is not OpenAI-native → must NOT be converted; provider prefix kept.
+        assert data["model"] == "github-copilot/claude-opus-4.6"
+
+    def test_gemini_official_writes_unprefixed_gemini(self, tmp_path, monkeypatch):
+        home = tmp_path / "home"
+        home.mkdir()
+        monkeypatch.setattr(cli_config.Path, "home", classmethod(lambda cls: home))
+        monkeypatch.setattr(cli_config.Path, "cwd", classmethod(lambda cls: tmp_path))
+        monkeypatch.setattr(
+            cc_base,
+            "_fetch_and_display_models",
+            lambda: [_qualified_server_models()[2]],
+        )
+        monkeypatch.setattr(cc_base, "get_admin_client", lambda: _StubAdminClient())
+        monkeypatch.setattr(cc_base, "get_current_context_api_key", lambda: "test-key")
+        answers = iter(["1", "1"])
+        monkeypatch.setattr(cli_config.Prompt, "ask", lambda *a, **kw: next(answers))
+        monkeypatch.setattr(cli_config.Confirm, "ask", lambda *a, **kw: False)
+
+        cli_config.gemini_cli_config(id_style=IdStyle.OFFICIAL)
+
+        env = cli_config._parse_env_file(home / ".gemini" / ".env")
+        # gemini-2.5-pro is Google-native → official id drops prefix, keeps dots.
+        assert env["GEMINI_MODEL"] == "gemini-2.5-pro"
+
+    def test_claude_official_converts_dots_to_dashes(self, tmp_path, monkeypatch):
+        home = tmp_path / "home"
+        home.mkdir()
+        monkeypatch.setattr(cli_config.Path, "home", classmethod(lambda cls: home))
+        monkeypatch.setattr(cli_config.Path, "cwd", classmethod(lambda cls: tmp_path))
+        monkeypatch.setattr(
+            cc_base,
+            "_fetch_models",
+            lambda: [
+                {"provider": "github-copilot", "id": "claude-opus-4.6", "name": "Claude Opus 4.6"},
+                {"provider": "github-copilot", "id": "gpt-5.5", "name": "GPT-5.5"},
+            ],
+        )
+        monkeypatch.setattr(cc_base, "get_admin_client", lambda: _StubAdminClient())
+        monkeypatch.setattr(cc_base, "get_current_context_api_key", lambda: "test-key")
+        monkeypatch.setattr(cc_claude, "_prompt_auto_compact_window", lambda _model: None)
+        monkeypatch.setattr(cc_claude, "_prompt_endpoint_mode", lambda _model: False)
+        # main=1 (claude), fast=2 (gpt); no id-style prompt (explicit OFFICIAL).
+        answers = iter(["1", "1", "2"])
+        monkeypatch.setattr(cli_config.Prompt, "ask", lambda *a, **kw: next(answers))
+        monkeypatch.setattr(cli_config.Confirm, "ask", lambda *a, **kw: False)
+
+        cli_config.claude_code_config(id_style=IdStyle.OFFICIAL)
+
+        data = json.loads((home / ".claude" / "settings.json").read_text(encoding="utf-8"))
+        # Claude main → Anthropic official (dashes); GPT fast is non-native → stays qualified.
+        assert data["env"]["ANTHROPIC_MODEL"] == "claude-opus-4-6"
+        assert data["env"]["ANTHROPIC_SMALL_FAST_MODEL"] == "github-copilot/gpt-5.5"
+
+    def test_claude_official_preserves_injected_1m_wire_key(self, tmp_path, monkeypatch):
+        """The injected 1M entry carries an explicit wire_key that must survive
+        OFFICIAL mode untouched (converting it would mangle the ``[1m]`` suffix)."""
+        home = tmp_path / "home"
+        home.mkdir()
+        monkeypatch.setattr(cli_config.Path, "home", classmethod(lambda cls: home))
+        monkeypatch.setattr(cli_config.Path, "cwd", classmethod(lambda cls: tmp_path))
+        monkeypatch.setattr(
+            cc_base,
+            "_fetch_models",
+            lambda: [
+                {
+                    "provider": "github-copilot",
+                    "id": "claude-opus-4.6",
+                    "name": "Claude Opus 4.6",
+                    "max_context_window_tokens": 1_000_000,
+                }
+            ],
+        )
+        monkeypatch.setattr(cc_base, "get_admin_client", lambda: _StubAdminClient())
+        monkeypatch.setattr(cc_base, "get_current_context_api_key", lambda: "test-key")
+        monkeypatch.setattr(cc_claude, "_prompt_auto_compact_window", lambda _model: None)
+        monkeypatch.setattr(cc_claude, "_prompt_endpoint_mode", lambda _model: False)
+        # level=1 (user), main=1 (injected 1M variant), fast=2 (base claude-opus-4.6).
+        answers = iter(["1", "1", "2"])
+        monkeypatch.setattr(cli_config.Prompt, "ask", lambda *a, **kw: next(answers))
+        monkeypatch.setattr(cli_config.Confirm, "ask", lambda *a, **kw: False)
+
+        cli_config.claude_code_config(id_style=IdStyle.OFFICIAL)
+
+        data = json.loads((home / ".claude" / "settings.json").read_text(encoding="utf-8"))
+        # Injected main keeps its explicit provider-qualified wire_key…
+        assert data["env"]["ANTHROPIC_MODEL"] == f"github-copilot/{_OPUS_1M_NATIVE_KEY}"
+        # …while the plain native fast model is converted to official dashes.
+        assert data["env"]["ANTHROPIC_SMALL_FAST_MODEL"] == "claude-opus-4-6"
+
+    def test_codex_no_id_style_prompt_when_non_native_selected(self, tmp_path, monkeypatch):
+        """Configuring Codex and picking a Claude model must NOT offer the option
+        (nothing convertible), so the answer iterator only needs level + model."""
+        home, _ = _setup_codex_env(monkeypatch, tmp_path, level_choice="1", model_choice="2")
+
+        # id_style=None → interactive resolution; with only a non-native model the
+        # prompt must be skipped. If it fired, the 2-item iterator would StopIteration.
+        cli_config.codex_config(id_style=None)
+
+        with open(home / ".codex" / "config.toml", "rb") as f:
+            data = tomllib.load(f)
+        assert data["model"] == "github-copilot/claude-opus-4.6"

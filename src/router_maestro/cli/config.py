@@ -6,14 +6,26 @@ picker, and a small back-compat re-export block.
 """
 
 from pathlib import Path
+from typing import Annotated
 
 import typer
 from rich.prompt import Confirm, Prompt
 
-from router_maestro.cli.client_configs import get_client, list_clients
+from router_maestro.cli.client_configs import IdStyle, get_client, list_clients
 from router_maestro.cli.client_configs.base import console
 
 app = typer.Typer(invoke_without_command=True)
+
+_ID_STYLE_OPT = typer.Option(
+    "--id-style",
+    help=(
+        "Model id spelling: 'official' writes the vendor's native id (e.g. gpt-4.1, "
+        "claude-opus-4-6) that the client recognizes and may optimize for — only "
+        "applied to models of this client's native vendor, and it drops the "
+        "provider/ prefix (ambiguous if several providers share the id). "
+        "'qualified' (default) writes provider/model. Omit for an interactive prompt."
+    ),
+)
 
 
 @app.callback(invoke_without_command=True)
@@ -40,21 +52,21 @@ def config_callback(ctx: typer.Context) -> None:
 
 
 @app.command(name="claude-code")
-def claude_code_config() -> None:
+def claude_code_config(id_style: Annotated[IdStyle | None, _ID_STYLE_OPT] = None) -> None:
     """Generate Claude Code CLI settings.json for router-maestro."""
-    get_client("claude-code")().generate()
+    get_client("claude-code")().generate(id_style=id_style)
 
 
 @app.command(name="codex")
-def codex_config() -> None:
+def codex_config(id_style: Annotated[IdStyle | None, _ID_STYLE_OPT] = None) -> None:
     """Generate OpenAI Codex CLI config.toml for router-maestro."""
-    get_client("codex")().generate()
+    get_client("codex")().generate(id_style=id_style)
 
 
 @app.command(name="gemini")
-def gemini_cli_config() -> None:
+def gemini_cli_config(id_style: Annotated[IdStyle | None, _ID_STYLE_OPT] = None) -> None:
     """Generate Gemini CLI .env for router-maestro."""
-    get_client("gemini")().generate()
+    get_client("gemini")().generate(id_style=id_style)
 
 
 # --- back-compat re-exports -------------------------------------------------
