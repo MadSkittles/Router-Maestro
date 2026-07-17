@@ -4,6 +4,37 @@ All notable changes to Router-Maestro are documented here.
 
 ---
 
+## v0.7.3 (2026-07-17)
+
+### Features
+
+- **Native OpenAI Responses beta passthrough.** New `POST /api/openai/beta/v1/responses`
+  forwards Responses-format requests straight to GitHub Copilot's native
+  `/responses` endpoint (a raw `response → response` passthrough), mirroring the
+  existing `/api/anthropic/beta/v1/messages` route. It is capability-gated — the
+  model must resolve to `github-copilot` and advertise the `/responses` endpoint —
+  with no env flag. Fidelity fields the translated route re-derives and drops
+  (`include`, `previous_response_id`, `prompt_cache_key`, `reasoning.context`)
+  survive verbatim to upstream; `store` is stripped because GHC rejects it.
+  Non-eligible models fall back transparently to the translated handler. Codex
+  config gained a beta-endpoint toggle.
+- **Config prompts track the live catalog.** The admin `/models` response now
+  exposes `operation_capabilities`, so the client-config beta-endpoint prompts
+  (Codex → `responses`, Claude Code → `native_anthropic`) recognize newly-added
+  GHC models in real time instead of relying on a hardcoded name list, falling
+  back to the model-name heuristic only when the field is absent.
+
+### Changes
+
+- **Removed the experimental Chat→Responses bridge.** The
+  `ROUTER_MAESTRO_EXPERIMENTAL_RESPONSES_API` flag and all the Chat↔Responses
+  translation + routing-bridge machinery are deleted now that GHC serves
+  `/responses` natively and Router-Maestro has a first-class native Responses
+  path. An Anthropic/Gemini/Chat request for a GPT-5 model now takes the plain
+  translated `/chat/completions` path; responses-only models are reachable only
+  via the native `/responses` routes. The responses-eligibility helper is
+  retained (relocated to the Copilot catalog) as the cold-start fallback.
+
 ## v0.7.2 (2026-07-16)
 
 ### Features
