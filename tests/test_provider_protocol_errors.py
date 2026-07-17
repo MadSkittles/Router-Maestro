@@ -20,10 +20,8 @@ from router_maestro.providers import (
     OpenAICompatibleProvider,
     OpenAIProvider,
     ResponsesRequest,
-    ResponsesResponse,
     ResponsesStreamChunk,
     ResponseStatus,
-    TerminalError,
     TerminalOutcome,
     TransportTermination,
 )
@@ -46,7 +44,6 @@ from router_maestro.routing.route_plan import NoCompatibleRouteError, RouteCandi
 from router_maestro.routing.router import Router
 from router_maestro.server.routes.anthropic import router as anthropic_router
 from router_maestro.utils import get_logger
-from router_maestro.utils.responses_bridge import responses_response_to_chat_response
 
 RAW_MARKER = "private-upstream-marker"
 
@@ -3393,43 +3390,6 @@ async def test_default_responses_failure_is_typed_unsupported_operation() -> Non
     assert exc_info.value.kind is ProviderFailureKind.UNSUPPORTED_OPERATION
     assert exc_info.value.provider == "custom-provider"
     assert exc_info.value.model == "m"
-
-
-@pytest.mark.parametrize("status", [ResponseStatus.FAILED, ResponseStatus.CANCELLED])
-def test_responses_bridge_business_failure_is_typed(status: ResponseStatus) -> None:
-    response = ResponsesResponse(
-        content="",
-        model="gpt-5",
-        terminal_outcome=TerminalOutcome(
-            transport=TransportTermination.EXPLICIT_TERMINAL,
-            response_status=status,
-            error=TerminalError(code="upstream_terminal", message="safe terminal failure"),
-        ),
-    )
-
-    with pytest.raises(ProviderError) as exc_info:
-        responses_response_to_chat_response(response, "gpt-5")
-
-    assert exc_info.value.kind is ProviderFailureKind.UPSTREAM_STATUS
-    assert exc_info.value.provider == "github-copilot"
-    assert exc_info.value.model == "gpt-5"
-
-
-def test_responses_bridge_business_failure_does_not_expose_upstream_message() -> None:
-    response = ResponsesResponse(
-        content="",
-        model="gpt-5",
-        terminal_outcome=TerminalOutcome(
-            transport=TransportTermination.EXPLICIT_TERMINAL,
-            response_status=ResponseStatus.FAILED,
-            error=TerminalError(code="upstream_terminal", message=RAW_MARKER),
-        ),
-    )
-
-    with pytest.raises(ProviderError) as exc_info:
-        responses_response_to_chat_response(response, "gpt-5")
-
-    assert RAW_MARKER not in str(exc_info.value)
 
 
 def test_shared_status_helper_accepts_canonical_provider_and_model_context() -> None:

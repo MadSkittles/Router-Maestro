@@ -610,7 +610,6 @@ class TestAnthropicRouteThinkingBudget:
 
         monkeypatch.setattr(model_router, "plan_chat_completion", capture_plan)
         monkeypatch.setattr(anthropic_route, "get_router", lambda: model_router)
-        monkeypatch.setattr(anthropic_route, "is_experimental_responses_enabled", lambda: False)
         monkeypatch.setattr(
             "router_maestro.config.load_priorities_config",
             lambda: priorities,
@@ -729,7 +728,6 @@ class TestAnthropicRouteThinkingBudget:
         model_router._providers_ttl = TTLCache(CACHE_TTL_SECONDS)
         model_router._providers_ttl.set(True)
         monkeypatch.setattr(anthropic_route, "get_router", lambda: model_router)
-        monkeypatch.setattr(anthropic_route, "is_experimental_responses_enabled", lambda: False)
         monkeypatch.setattr(
             "router_maestro.config.load_priorities_config",
             lambda: priorities,

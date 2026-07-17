@@ -280,11 +280,6 @@ class ChatRequest:
     # cannot silently discard them after translation.
     candidate_count: int | None = None
     response_mime_type: str | None = None
-    # Experimental: when True, eligible providers (currently Copilot+gpt-5.x)
-    # should fulfil this chat request via the /responses endpoint instead of
-    # /chat/completions. Set by entry routes (Anthropic, Gemini) when the
-    # ROUTER_MAESTRO_EXPERIMENTAL_RESPONSES_API flag is on.
-    use_responses_api: bool = False
     provider_extensions: dict[str, Any] = field(default_factory=dict)
     # Deprecated construction alias retained for third-party callers. Core
     # options are always sourced from typed fields and cannot be overridden.
@@ -354,8 +349,7 @@ class ChatResponse:
     thinking_signature: str | None = None
     # Upstream reasoning item id (e.g. ``rs_…``). The encrypted ``thinking_signature``
     # is signed against this id, so the pair must travel together — Copilot's
-    # /responses rejects a blob paired with a mismatched id. Carried here so the
-    # Responses→Chat bridge doesn't drop it (see responses_response_to_chat_response).
+    # /responses rejects a blob paired with a mismatched id.
     thinking_id: str | None = None
     # OpenAI refusal output. Appended to preserve the legacy positional constructor.
     refusal: str | None = None
@@ -515,7 +509,7 @@ class ResponsesResponse:
     thinking_signature: str | None = None
     # Upstream completion status mapped to chat-style finish reason
     # ("stop" | "length" | "content_filter" | "tool_calls"). None means
-    # the bridge should pick a default based on tool_calls presence.
+    # consumers should pick a default based on tool_calls presence.
     finish_reason: str | None = None
     # Canonical Responses terminal semantics. Native Responses adapters must
     # prefer this over the lossy chat-style finish_reason above.
@@ -575,6 +569,24 @@ class ProviderFailureSignal(StrEnum):
     """Closed, non-sensitive classifications for narrowly handled failures."""
 
     COPILOT_BARE_BAD_REQUEST = "copilot_bare_bad_request"
+
+
+_RETRYABLE_UPSTREAM_STATUSES = frozenset({429, 500, 502, 503, 504, 529})
+
+
+def classify_upstream_status(status_code: int) -> tuple[ProviderFailureKind, bool]:
+    """Map an upstream HTTP status to its (failure kind, retryable) classification.
+
+    Single source of truth for the status-code buckets shared by the native
+    passthrough transports and ``_raise_http_status_error``.
+    """
+    if status_code in (401, 403):
+        kind = ProviderFailureKind.AUTHENTICATION
+    elif status_code in (429, 529):
+        kind = ProviderFailureKind.RATE_LIMIT
+    else:
+        kind = ProviderFailureKind.UPSTREAM_STATUS
+    return kind, status_code in _RETRYABLE_UPSTREAM_STATUSES
 
 
 class ProviderError(Exception):
@@ -835,13 +847,7 @@ class BaseProvider(ABC):
             include_body: Whether to record only the response body size in provider logs
         """
         status_code = error.response.status_code
-        retryable = status_code in (429, 500, 502, 503, 504, 529)
-        if status_code in (401, 403):
-            kind = ProviderFailureKind.AUTHENTICATION
-        elif status_code in (429, 529):
-            kind = ProviderFailureKind.RATE_LIMIT
-        else:
-            kind = ProviderFailureKind.UPSTREAM_STATUS
+        kind, retryable = classify_upstream_status(status_code)
         suffix = " stream" if stream else ""
         if include_body:
             try:

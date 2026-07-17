@@ -1,6 +1,5 @@
 """Tests for OpenAI chat route option passthrough."""
 
-from dataclasses import replace
 from unittest.mock import AsyncMock
 
 import pytest
@@ -8,7 +7,6 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from router_maestro.providers import ChatResponse, ChatStreamChunk, RequestOptionError
-from router_maestro.providers.copilot import CopilotProvider
 from router_maestro.server.routes.chat import chat_completions
 from router_maestro.server.routes.chat import router as chat_router
 from router_maestro.server.schemas import ChatCompletionRequest, ChatMessage
@@ -369,104 +367,6 @@ async def test_openai_chat_nonstream_emits_refusal_field(monkeypatch):
 
     assert response.choices[0].message.content is None
     assert response.choices[0].message.refusal == "I cannot help"
-
-
-class _ResponsesBridgePreflightRouter:
-    """Exercise the real Copilot bridge policy without opening upstream I/O."""
-
-    def __init__(self) -> None:
-        self.provider = CopilotProvider()
-        self.upstream = AsyncMock(side_effect=AssertionError("upstream must not run"))
-        self.chat_calls = 0
-        self.prepare_calls = 0
-        self.stream_calls = 0
-
-    def _validate(self, request, *, stream: bool) -> None:
-        opted_in = replace(request, use_responses_api=True, extra={})
-        self.provider.validate_chat_request(opted_in, stream=stream)
-
-    async def chat_completion(self, request):
-        self.chat_calls += 1
-        self._validate(request, stream=False)
-        await self.upstream()
-
-    async def prepare_chat_completion_stream(self, request):
-        self.prepare_calls += 1
-        self._validate(request, stream=True)
-        await self.upstream()
-
-    async def chat_completion_stream(self, request, *, prepared_plan=None):
-        self.stream_calls += 1
-        await self.upstream()
-
-
-@pytest.mark.parametrize("stream", [False, True], ids=["nonstream", "stream"])
-def test_openai_chat_responses_bridge_rejects_explicit_temperature_before_upstream(
-    monkeypatch,
-    stream,
-):
-    app = FastAPI()
-    app.include_router(chat_router)
-    client = TestClient(app, raise_server_exceptions=False)
-    router = _ResponsesBridgePreflightRouter()
-    monkeypatch.setenv("ROUTER_MAESTRO_EXPERIMENTAL_RESPONSES_API", "1")
-    monkeypatch.setattr("router_maestro.server.routes.chat.get_router", lambda: router)
-
-    response = client.post(
-        "/api/openai/v1/chat/completions",
-        json={
-            "model": "gpt-5.4",
-            "messages": [{"role": "user", "content": "hello"}],
-            "stream": stream,
-            "temperature": 0.4,
-        },
-    )
-
-    assert response.status_code == 400
-    assert response.headers["content-type"].startswith("application/json")
-    assert response.json()["error"]["param"] == "temperature"
-    assert "data:" not in response.text
-    router.upstream.assert_not_awaited()
-    assert router.chat_calls == (0 if stream else 1)
-    assert router.prepare_calls == (1 if stream else 0)
-    assert router.stream_calls == 0
-
-
-@pytest.mark.parametrize("stream", [False, True], ids=["nonstream", "stream"])
-@pytest.mark.parametrize("thinking_budget", [1, 1023])
-def test_openai_chat_responses_bridge_rejects_tiny_budget_before_upstream(
-    monkeypatch,
-    stream,
-    thinking_budget,
-):
-    app = FastAPI()
-    app.include_router(chat_router)
-    client = TestClient(app, raise_server_exceptions=False)
-    router = _ResponsesBridgePreflightRouter()
-    monkeypatch.setenv("ROUTER_MAESTRO_EXPERIMENTAL_RESPONSES_API", "1")
-    monkeypatch.setattr("router_maestro.server.routes.chat.get_router", lambda: router)
-
-    response = client.post(
-        "/api/openai/v1/chat/completions",
-        json={
-            "model": "gpt-5.4",
-            "messages": [{"role": "user", "content": "hello"}],
-            "stream": stream,
-            "thinking": {
-                "type": "enabled",
-                "budget_tokens": thinking_budget,
-            },
-        },
-    )
-
-    assert response.status_code == 400
-    assert response.headers["content-type"].startswith("application/json")
-    assert response.json()["error"]["param"] == "thinking_budget"
-    assert "data:" not in response.text
-    router.upstream.assert_not_awaited()
-    assert router.chat_calls == (0 if stream else 1)
-    assert router.prepare_calls == (1 if stream else 0)
-    assert router.stream_calls == 0
 
 
 class _ThinkingRouteRouter:

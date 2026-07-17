@@ -30,7 +30,6 @@ from router_maestro.routing.capabilities import (
 from router_maestro.routing.model_ref import ModelRef
 from router_maestro.routing.route_plan import RouteCandidate, RoutePlan
 from router_maestro.routing.router import Router
-from router_maestro.server.routes.gemini import _maybe_enable_responses_api
 from router_maestro.server.schemas.gemini import (
     GeminiContent,
     GeminiGenerateContentRequest,
@@ -41,7 +40,6 @@ from router_maestro.server.schemas.openai import ChatCompletionRequest, ChatMess
 from router_maestro.server.schemas.responses import ResponsesRequest as WireResponsesRequest
 from router_maestro.server.translation_gemini import translate_gemini_to_openai
 from router_maestro.utils.reasoning import pick_closest_effort
-from router_maestro.utils.responses_bridge import chat_request_to_responses_request
 
 
 class _OpenAIProvider(OpenAIChatProvider):
@@ -469,7 +467,6 @@ def test_non_optional_legacy_core_value_is_not_silently_dropped() -> None:
     ("field", "value"),
     [
         ("stream", True),
-        ("use_responses_api", True),
     ],
 )
 def test_legacy_extra_rejects_non_null_default_core_fields(field, value) -> None:
@@ -480,50 +477,6 @@ def test_legacy_extra_rejects_non_null_default_core_fields(field, value) -> None
 def test_legacy_extra_rejects_invalid_reasoning_effort() -> None:
     with pytest.raises(ValueError, match="reasoning_effort"):
         _request(extra={"reasoning_effort": "ultra"})
-
-
-def test_chat_to_responses_preserves_supported_options() -> None:
-    converted = chat_request_to_responses_request(
-        _request(
-            temperature=0.3,
-            top_p=0.6,
-            metadata={"trace": "abc"},
-            service_tier="flex",
-            reasoning_effort="high",
-        )
-    )
-
-    assert converted.temperature == 0.3
-    assert converted.top_p == 0.6
-    assert converted.metadata == {"trace": "abc"}
-    assert converted.service_tier == "flex"
-    assert converted.reasoning_effort == "high"
-
-
-def test_chat_to_responses_preserves_temperature_omission() -> None:
-    assert chat_request_to_responses_request(_request()).temperature is None
-
-
-@pytest.mark.parametrize(
-    ("options", "parameter"),
-    [
-        ({"frequency_penalty": 0.1}, "frequency_penalty"),
-        ({"presence_penalty": 0.1}, "presence_penalty"),
-        ({"stop": "END"}, "stop"),
-        ({"user": "user-123"}, "user"),
-        ({"top_k": 10}, "top_k"),
-        ({"stop_sequences": ["END"]}, "stop_sequences"),
-        ({"candidate_count": 2}, "candidate_count"),
-        ({"response_mime_type": "application/json"}, "response_mime_type"),
-    ],
-)
-def test_chat_to_responses_rejects_unrepresentable_options(options, parameter) -> None:
-    with pytest.raises(ProviderError) as caught:
-        chat_request_to_responses_request(_request(**options))
-
-    assert caught.value.kind is ProviderFailureKind.CLIENT_REQUEST
-    assert caught.value.status_code == 400
-    assert caught.value.parameter == parameter
 
 
 def test_reasoning_tier_selection_never_substitutes_upward() -> None:
@@ -957,27 +910,6 @@ def test_copilot_chat_explicit_effort_takes_precedence_over_budget() -> None:
     assert payload["reasoning_effort"] == "low"
 
 
-def test_copilot_experimental_preflight_matches_actual_responses_policy(monkeypatch) -> None:
-    monkeypatch.setenv("ROUTER_MAESTRO_EXPERIMENTAL_RESPONSES_API", "1")
-    provider = CopilotProvider()
-    request = _request(
-        model="gpt-5.4",
-        stream=True,
-        use_responses_api=True,
-        stop_sequences=["END"],
-    )
-
-    with pytest.raises(ProviderError) as preflight:
-        provider.validate_chat_request(request, stream=True)
-    with pytest.raises(ProviderError) as actual:
-        from router_maestro.utils.responses_bridge import chat_request_to_responses_request
-
-        provider.validate_responses_request(chat_request_to_responses_request(request))
-
-    assert preflight.value.kind is ProviderFailureKind.CLIENT_REQUEST
-    assert preflight.value.parameter == actual.value.parameter == "stop_sequences"
-
-
 def test_copilot_responses_rejects_reasoning_when_catalog_says_unsupported() -> None:
     provider = CopilotProvider()
     provider._models_ttl_cache.set(
@@ -1336,23 +1268,4 @@ def test_router_model_rebuild_preserves_typed_options_and_extensions() -> None:
     assert rebuilt.stop_sequences == ["END"]
     assert rebuilt.metadata == {"trace": "abc"}
     assert rebuilt.service_tier == "standard_only"
-    assert rebuilt.provider_extensions == {"vendor": True}
-
-
-def test_gemini_responses_opt_in_preserves_typed_options_and_extensions(monkeypatch) -> None:
-    monkeypatch.setenv("ROUTER_MAESTRO_EXPERIMENTAL_RESPONSES_API", "1")
-    request = _request(
-        model="gpt-5.4",
-        top_p=0.7,
-        top_k=32,
-        stop_sequences=["END"],
-        provider_extensions={"vendor": True},
-    )
-
-    rebuilt = _maybe_enable_responses_api(request, request.model)
-
-    assert rebuilt.use_responses_api is True
-    assert rebuilt.top_p == 0.7
-    assert rebuilt.top_k == 32
-    assert rebuilt.stop_sequences == ["END"]
     assert rebuilt.provider_extensions == {"vendor": True}

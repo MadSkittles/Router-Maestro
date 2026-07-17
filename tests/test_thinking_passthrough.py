@@ -1,6 +1,5 @@
 """Tests for thinking configuration passthrough."""
 
-from dataclasses import replace
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -151,14 +150,11 @@ class TestTranslateThinkingConfig:
         )
         translated = translate_anthropic_to_openai(request)
 
-        opted_in = replace(translated, use_responses_api=True, extra={})
-
-        assert opted_in.use_responses_api is True
-        assert opted_in.top_p == 0.8
-        assert opted_in.top_k == 32
-        assert opted_in.stop_sequences == ["END"]
-        assert opted_in.metadata == {"user_id": "user-123"}
-        assert opted_in.service_tier == "standard_only"
+        assert translated.top_p == 0.8
+        assert translated.top_k == 32
+        assert translated.stop_sequences == ["END"]
+        assert translated.metadata == {"user_id": "user-123"}
+        assert translated.service_tier == "standard_only"
 
 
 class TestCopilotPayloadThinking:

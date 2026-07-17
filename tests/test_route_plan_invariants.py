@@ -10,7 +10,6 @@ from router_maestro.routing.capabilities import (
     Feature,
     ModelCapabilities,
     Operation,
-    ProviderCapabilities,
     RequestFeatures,
 )
 from router_maestro.routing.model_ref import ModelRef
@@ -193,67 +192,6 @@ def test_route_candidate_rejects_provider_name_inconsistent_with_model_ref() -> 
             capabilities=capabilities,
             evaluated_operation=Operation.CHAT,
             evaluated_features=RequestFeatures(),
-            support=CapabilitySupport.SUPPORTED,
-        )
-
-
-def test_route_candidate_accepts_provider_declared_operation_bridge_without_name_special_case() -> (
-    None
-):
-    ref = ModelRef("future-provider", "model")
-    capabilities = ModelCapabilities(
-        model=ref,
-        operations={Operation.RESPONSES: CapabilitySupport.SUPPORTED},
-    )
-    provider = SimpleNamespace(
-        name="future-provider",
-        capabilities=ProviderCapabilities(
-            operations=frozenset({Operation.CHAT, Operation.RESPONSES}),
-            operation_bridges={Operation.CHAT: Operation.RESPONSES},
-        ),
-    )
-    candidate = RouteCandidate(
-        model=ref,
-        provider=provider,
-        capabilities=capabilities,
-        requested_operation=Operation.CHAT,
-        evaluated_operation=Operation.RESPONSES,
-        evaluated_features=RequestFeatures(responses_bridge=True),
-        support=CapabilitySupport.SUPPORTED,
-    )
-
-    plan = RoutePlan(
-        operation=Operation.CHAT,
-        features=RequestFeatures(responses_bridge=True),
-        primary=candidate,
-        fallbacks=(),
-        explicit=True,
-    )
-
-    assert plan.primary.evaluated_operation is Operation.RESPONSES
-
-
-def test_route_candidate_rejects_undeclared_operation_bridge() -> None:
-    ref = ModelRef("provider", "model")
-    capabilities = ModelCapabilities(
-        model=ref,
-        operations={Operation.RESPONSES: CapabilitySupport.SUPPORTED},
-    )
-    provider = SimpleNamespace(
-        name="provider",
-        capabilities=ProviderCapabilities(
-            operations=frozenset({Operation.CHAT, Operation.RESPONSES}),
-        ),
-    )
-
-    with pytest.raises(ValueError, match="bridge"):
-        RouteCandidate(
-            model=ref,
-            provider=provider,
-            capabilities=capabilities,
-            requested_operation=Operation.CHAT,
-            evaluated_operation=Operation.RESPONSES,
-            evaluated_features=RequestFeatures(responses_bridge=True),
             support=CapabilitySupport.SUPPORTED,
         )
 

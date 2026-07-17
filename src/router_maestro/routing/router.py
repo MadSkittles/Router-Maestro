@@ -28,7 +28,6 @@ from router_maestro.providers import (
     ResponsesRequest,
     ResponsesResponse,
     ResponsesStreamChunk,
-    ResponseStatus,
 )
 from router_maestro.routing.attempts import (
     AttemptLedger,
@@ -59,11 +58,6 @@ from router_maestro.utils.model_match import (
     fuzzy_match_model,
 )
 from router_maestro.utils.model_sort import sort_models
-from router_maestro.utils.responses_bridge import (
-    chat_request_to_responses_request,
-    responses_chunk_to_chat_chunk,
-    responses_response_to_chat_response,
-)
 
 logger = get_logger("routing")
 
@@ -903,22 +897,13 @@ class Router:
             return None
         model = entry[1]
         capabilities = self._model_capabilities(model, provider)
-        support_operation = operation
-        bridge_operation = provider.capabilities.bridge_for(operation)
-        if (
-            features.responses_bridge
-            and bridge_operation is not None
-            and capabilities.operation(bridge_operation) is CapabilitySupport.SUPPORTED
-        ):
-            support_operation = bridge_operation
         return RouteCandidate(
             model=capabilities.model,
             provider=provider,
             capabilities=capabilities,
-            evaluated_operation=support_operation,
+            evaluated_operation=operation,
             evaluated_features=features,
-            support=capabilities.support_for(support_operation, features),
-            requested_operation=operation,
+            support=capabilities.support_for(operation, features),
         )
 
     def _configured_candidates(
@@ -1255,15 +1240,9 @@ class Router:
         self,
         request: ChatRequest,
         candidate: RouteCandidate,
-    ) -> ChatRequest | ResponsesRequest:
-        """Build the candidate request selected by frozen operation provenance."""
-        chat_request = self._create_request_with_model(request, candidate.model.upstream_id)
-        if candidate.evaluated_operation in {
-            Operation.RESPONSES,
-            Operation.RESPONSES_STREAM,
-        }:
-            return chat_request_to_responses_request(chat_request)
-        return replace(chat_request, use_responses_api=False, extra={})
+    ) -> ChatRequest:
+        """Build the candidate chat request with the resolved upstream model."""
+        return self._create_request_with_model(request, candidate.model.upstream_id)
 
     def _validate_chat_candidate(
         self,
@@ -1273,9 +1252,6 @@ class Router:
         stream: bool,
     ) -> None:
         candidate_request = self._chat_request_for_candidate(request, candidate)
-        if isinstance(candidate_request, ResponsesRequest):
-            candidate.provider.validate_responses_request(candidate_request)
-            return
         candidate.provider.validate_chat_request(candidate_request, stream=stream)
 
     async def _execute_chat_plan_nonstream(
@@ -1294,13 +1270,6 @@ class Router:
             )
             candidate_request = self._chat_request_for_candidate(source_request, candidate)
             await candidate.provider.ensure_token()
-            if isinstance(candidate_request, ResponsesRequest):
-                response = await candidate.provider.responses_completion(candidate_request)
-                return responses_response_to_chat_response(
-                    response,
-                    candidate.model.upstream_id,
-                    provider=candidate.model.provider,
-                )
             return await candidate.provider.chat_completion(candidate_request)
 
         return await self._execute_attempts(plan, candidates, attempt)
@@ -1312,39 +1281,7 @@ class Router:
         fallback: bool,
         request_for_candidate: Callable[[ModelRef], ChatRequest] | None = None,
     ) -> tuple[AsyncIterator[ChatStreamChunk], str]:
-        """Open a Chat stream using each candidate's frozen transport operation."""
-
-        def open_stream(
-            provider: BaseProvider,
-            candidate_request: ChatRequest | ResponsesRequest,
-        ) -> AsyncIterator[ChatStreamChunk]:
-            if isinstance(candidate_request, ChatRequest):
-                return provider.chat_completion_stream(candidate_request)
-
-            async def bridge() -> AsyncIterator[ChatStreamChunk]:
-                stream = provider.responses_completion_stream(candidate_request)
-                emitted_tool_call = False
-                try:
-                    async for response_chunk in stream:
-                        if response_chunk.tool_call is not None:
-                            emitted_tool_call = True
-                        chat_chunk = responses_chunk_to_chat_chunk(response_chunk)
-                        terminal_outcome = response_chunk.terminal_outcome
-                        can_upgrade_tool_finish = terminal_outcome is None or (
-                            terminal_outcome.response_status is ResponseStatus.COMPLETED
-                        )
-                        if (
-                            emitted_tool_call
-                            and can_upgrade_tool_finish
-                            and chat_chunk.finish_reason == "stop"
-                        ):
-                            chat_chunk.finish_reason = "tool_calls"
-                        yield chat_chunk
-                finally:
-                    await close_async_iterator(stream)
-
-            return bridge()
-
+        """Open a Chat stream for each candidate."""
         candidates = self._plan_execution_candidates(plan, fallback)
 
         async def attempt(candidate: RouteCandidate) -> AsyncIterator[ChatStreamChunk]:
@@ -1353,7 +1290,7 @@ class Router:
             )
             candidate_request = self._chat_request_for_candidate(source_request, candidate)
             await candidate.provider.ensure_token()
-            stream = open_stream(candidate.provider, candidate_request)
+            stream = candidate.provider.chat_completion_stream(candidate_request)
             wrapped = self._wrap_stream_errors(
                 stream,
                 candidate.model.provider,
@@ -1838,7 +1775,6 @@ class Router:
                 transformed_features.tools != plan.features.tools
                 or transformed_features.vision != plan.features.vision
                 or transformed_features.parallel_tools != plan.features.parallel_tools
-                or transformed_features.responses_bridge != plan.features.responses_bridge
             )
             if client_feature_drift:
                 raise ProviderError(
