@@ -37,8 +37,8 @@ class NormalizedProtocolError:
 
 def protocol_surface_for_path(path: str) -> ProtocolSurface | None:
     """Classify a public inference namespace without requiring a matched route."""
-    responses_prefix = "/api/openai/v1/responses"
-    if path == responses_prefix or path.startswith(f"{responses_prefix}/"):
+    responses_prefixes = ("/api/openai/v1/responses", "/api/openai/beta/v1/responses")
+    if any(path == prefix or path.startswith(f"{prefix}/") for prefix in responses_prefixes):
         return "openai_responses"
     if path == "/api/openai" or path.startswith("/api/openai/"):
         return "openai_chat"

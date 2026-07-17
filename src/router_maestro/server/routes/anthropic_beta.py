@@ -25,6 +25,7 @@ from router_maestro.providers import (
     TerminalError,
     TerminalOutcome,
     TransportTermination,
+    classify_upstream_status,
     client_cancelled_outcome,
     exception_outcome,
     unexpected_eof_outcome,
@@ -46,7 +47,7 @@ from router_maestro.server.routes.anthropic import (
 from router_maestro.server.routes.anthropic import (
     messages as standard_messages,
 )
-from router_maestro.server.streaming import sse_streaming_response
+from router_maestro.server.streaming import parse_sse_frame, sse_streaming_response
 from router_maestro.utils import get_logger
 from router_maestro.utils.async_iterators import close_async_iterator
 from router_maestro.utils.context_window import resolve_thinking_budget
@@ -94,16 +95,11 @@ class _NativeUpstreamStatusError(ProviderError):
 
     def __init__(self, response, *, provider: str, model: str) -> None:
         status_code = response.status_code
-        if status_code in (401, 403):
-            kind = ProviderFailureKind.AUTHENTICATION
-        elif status_code in (429, 529):
-            kind = ProviderFailureKind.RATE_LIMIT
-        else:
-            kind = ProviderFailureKind.UPSTREAM_STATUS
+        kind, retryable = classify_upstream_status(status_code)
         super().__init__(
             f"Native Anthropic upstream returned {status_code}",
             status_code=status_code,
-            retryable=status_code in (429, 500, 502, 503, 504, 529),
+            retryable=retryable,
             kind=kind,
             upstream_status_code=status_code,
             provider=provider,
@@ -733,7 +729,7 @@ async def _encode_native_stream_errors(
     response_status = ResponseStatus.COMPLETED
     try:
         async for frame in stream:
-            event_type, data = _parse_native_frame(frame)
+            event_type, data = parse_sse_frame(frame)
             if pipeline is not None:
                 abort_reason = _feed_native_frame_guards(
                     pipeline,
@@ -819,23 +815,6 @@ async def _encode_native_stream_errors(
         yield _sse_error_event("Internal server error")
     finally:
         await close_async_iterator(stream)
-
-
-def _parse_native_frame(frame: str) -> tuple[str | None, dict | None]:
-    """Return the event discriminator and JSON object from one encoded frame."""
-    event_type: str | None = None
-    data: dict | None = None
-    for line in frame.splitlines():
-        if line.startswith("event: "):
-            event_type = line.removeprefix("event: ")
-        elif line.startswith("data: "):
-            try:
-                parsed = json.loads(line.removeprefix("data: "))
-            except json.JSONDecodeError:
-                continue
-            if isinstance(parsed, dict):
-                data = parsed
-    return event_type, data
 
 
 def _feed_native_frame_guards(

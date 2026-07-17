@@ -155,6 +155,23 @@ def _bare_upstream_model_id(model: dict) -> str:
     return model_id[len(prefix) :] if provider and model_id.startswith(prefix) else model_id
 
 
+def _model_operation_support(model: dict, operation: str) -> bool | None:
+    """Return the live-catalog verdict for one Operation, or ``None`` if unknown.
+
+    The server's admin ``/models`` response carries ``operation_capabilities``
+    (keyed by ``Operation`` value, e.g. ``"responses"`` / ``"native_anthropic"``)
+    derived from the provider's live catalog. When present it is authoritative,
+    so beta-endpoint prompts track whatever the upstream currently serves. An
+    older server that predates this field omits it entirely; ``None`` then lets
+    callers fall back to their model-name heuristic.
+    """
+    caps = model.get("operation_capabilities")
+    if not isinstance(caps, dict) or operation not in caps:
+        return None
+    value = caps.get(operation)
+    return value if isinstance(value, bool) else None
+
+
 def _upstream_context_window(model: dict) -> int | None:
     """Compute the displayed upstream context window for a Copilot model.
 

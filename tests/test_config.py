@@ -14,6 +14,7 @@ from rich.console import Console
 from router_maestro.cli import config as cli_config
 from router_maestro.cli.client_configs import base as cc_base
 from router_maestro.cli.client_configs import claude_code as cc_claude
+from router_maestro.cli.client_configs import codex as cc_codex
 from router_maestro.cli.client_configs.base import IdStyle
 from router_maestro.cli.config import (
     _OPUS_1M_NATIVE_KEY,
@@ -674,6 +675,111 @@ def test_claude_endpoint_prompt_recognizes_bare_upstream_id(monkeypatch, model_i
     )
 
 
+class TestEndpointPromptLiveCatalogGating:
+    """The beta-endpoint prompts must gate on the server's live
+    ``operation_capabilities`` when present (so newly-added GHC models are
+    recognized in real time), and fall back to the model-name heuristic only
+    when the field is absent (older server)."""
+
+    @staticmethod
+    def _select_beta(monkeypatch) -> None:
+        monkeypatch.setattr(cli_config.Prompt, "ask", lambda *a, **kw: "2")
+
+    def test_claude_prompt_uses_live_native_anthropic_capability(self, monkeypatch):
+        self._select_beta(monkeypatch)
+        # A brand-new Copilot model whose NAME is not "claude-*" but whose live
+        # catalog advertises native_anthropic → prompt is offered.
+        assert (
+            _prompt_endpoint_mode(
+                {
+                    "provider": "github-copilot",
+                    "id": "anthropic-next",
+                    "name": "New Claude",
+                    "operation_capabilities": {"native_anthropic": True},
+                }
+            )
+            is True
+        )
+
+    def test_claude_prompt_blocks_when_live_capability_false(self, monkeypatch):
+        self._select_beta(monkeypatch)
+        # A claude-named model whose live catalog says native_anthropic is
+        # unsupported → prompt suppressed despite the name.
+        assert (
+            _prompt_endpoint_mode(
+                {
+                    "provider": "github-copilot",
+                    "id": "claude-opus-4.6",
+                    "name": "Claude Opus 4.6",
+                    "operation_capabilities": {"native_anthropic": False},
+                }
+            )
+            is False
+        )
+
+    def test_codex_prompt_uses_live_responses_capability(self, monkeypatch):
+        self._select_beta(monkeypatch)
+        # A brand-new model not in RESPONSES_ELIGIBLE_MODELS but advertising
+        # /responses in the live catalog → prompt offered.
+        assert (
+            cc_codex._prompt_endpoint_mode(
+                {
+                    "provider": "github-copilot",
+                    "id": "gpt-6-preview",
+                    "name": "GPT-6 Preview",
+                    "operation_capabilities": {"responses": True},
+                }
+            )
+            is True
+        )
+
+    def test_codex_prompt_blocks_when_live_capability_false(self, monkeypatch):
+        self._select_beta(monkeypatch)
+        assert (
+            cc_codex._prompt_endpoint_mode(
+                {
+                    "provider": "github-copilot",
+                    "id": "gpt-5.5",
+                    "name": "GPT-5.5",
+                    "operation_capabilities": {"responses": False},
+                }
+            )
+            is False
+        )
+
+    def test_codex_prompt_falls_back_to_name_when_field_absent(self, monkeypatch):
+        self._select_beta(monkeypatch)
+        # No operation_capabilities (older server) → name heuristic applies.
+        assert (
+            cc_codex._prompt_endpoint_mode(
+                {"provider": "github-copilot", "id": "gpt-5.5", "name": "GPT-5.5"}
+            )
+            is True
+        )
+        assert (
+            cc_codex._prompt_endpoint_mode(
+                {"provider": "github-copilot", "id": "gpt-4o", "name": "GPT-4o"}
+            )
+            is False
+        )
+
+    def test_model_operation_support_helper(self):
+        assert (
+            cc_base._model_operation_support(
+                {"operation_capabilities": {"responses": True}}, "responses"
+            )
+            is True
+        )
+        assert (
+            cc_base._model_operation_support(
+                {"operation_capabilities": {"responses": False}}, "responses"
+            )
+            is False
+        )
+        # Field absent → unknown (None) so callers apply their own fallback.
+        assert cc_base._model_operation_support({"id": "gpt-5.5"}, "responses") is None
+
+
 class TestPromptAutoCompactWindow:
     """Tests for ``_prompt_auto_compact_window`` — the Claude Code auto-compact
     env var selection. Native 1M model keys must offer 1M as the default; every
@@ -747,13 +853,17 @@ def _setup_codex_env(
     *,
     level_choice: str,
     model_choice: str = "1",
+    endpoint_choice: str = "1",
     backup_yes: bool = False,
 ):
     """Patch the world for an in-process call to ``cli_config.codex_config()``.
 
     ``level_choice`` is "1" (user) or "2" (project). ``model_choice`` is the
-    1-indexed table choice (or "0" for auto-routing). ``backup_yes`` controls
-    the response to the backup prompt that fires when the target file exists.
+    1-indexed table choice (or "0" for auto-routing). ``endpoint_choice`` is the
+    endpoint-mode answer ("1" standard, "2" beta passthrough), only consumed when
+    the selected model is a Responses-eligible GitHub Copilot model. ``backup_yes``
+    controls the response to the backup prompt that fires when the target file
+    exists.
     """
     home = tmp_path / "home"
     cwd = tmp_path / "project"
@@ -769,7 +879,7 @@ def _setup_codex_env(
     monkeypatch.setattr(cc_base, "_fetch_and_display_models", lambda: list(fake_models))
     monkeypatch.setattr(cc_base, "get_admin_client", lambda: _StubAdminClient())
 
-    answers = iter([level_choice, model_choice])
+    answers = iter([level_choice, model_choice, endpoint_choice])
     monkeypatch.setattr(cli_config.Prompt, "ask", lambda *a, **kw: next(answers))
     monkeypatch.setattr(cli_config.Confirm, "ask", lambda *a, **kw: backup_yes)
 
@@ -818,6 +928,17 @@ class TestCodexConfig:
             "env_key": "ROUTER_MAESTRO_API_KEY",
             "wire_api": "responses",
         }
+
+    def test_beta_endpoint_choice_writes_beta_base_url(self, tmp_path, monkeypatch):
+        """Choosing beta for a Responses-eligible Copilot model writes the beta URL."""
+        home, _ = _setup_codex_env(monkeypatch, tmp_path, level_choice="1", endpoint_choice="2")
+
+        cli_config.codex_config(id_style=IdStyle.QUALIFIED)
+
+        with open(home / ".codex" / "config.toml", "rb") as f:
+            data = tomllib.load(f)
+        provider = data["model_providers"]["router-maestro"]
+        assert provider["base_url"] == "http://localhost:8080/api/openai/beta/v1"
 
     def test_qualified_server_model_writes_single_provider_prefix(self, tmp_path, monkeypatch):
         home, _ = _setup_codex_env(monkeypatch, tmp_path, level_choice="1")

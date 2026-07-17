@@ -6,6 +6,9 @@ from router_maestro.server.routes.anthropic_beta import router as anthropic_beta
 from router_maestro.server.routes.chat import router as chat_router
 from router_maestro.server.routes.gemini import router as gemini_router
 from router_maestro.server.routes.models import router as models_router
+from router_maestro.server.routes.openai_responses_beta import (
+    router as openai_responses_beta_router,
+)
 from router_maestro.server.routes.responses import router as responses_router
 
 __all__ = [
@@ -15,5 +18,6 @@ __all__ = [
     "chat_router",
     "gemini_router",
     "models_router",
+    "openai_responses_beta_router",
     "responses_router",
 ]

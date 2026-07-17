@@ -399,6 +399,7 @@ async def list_models(model_router: Router = Depends(get_app_router)) -> ModelsR
                 max_prompt_tokens=model.max_prompt_tokens,
                 max_output_tokens=model.max_output_tokens,
                 max_context_window_tokens=model.max_context_window_tokens,
+                operation_capabilities=dict(model.operation_capabilities),
             )
             for model in models
         ]

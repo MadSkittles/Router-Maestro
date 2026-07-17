@@ -596,6 +596,30 @@ async def test_admin_models_returns_unique_provider_qualified_public_ids(monkeyp
 
 
 @pytest.mark.asyncio
+async def test_admin_models_exposes_operation_capabilities(monkeypatch):
+    """Admin /models must surface operation_capabilities so config CLIs can gate
+    beta-endpoint prompts on the live catalog."""
+
+    class _ModelRouter:
+        async def list_models(self):
+            return [
+                ProviderModelInfo(
+                    id="gpt-5.5",
+                    name="GPT-5.5",
+                    provider="github-copilot",
+                    operation_capabilities={"responses": True, "native_anthropic": False},
+                ),
+            ]
+
+    response = await admin.list_models(_ModelRouter())
+
+    assert response.models[0].operation_capabilities == {
+        "responses": True,
+        "native_anthropic": False,
+    }
+
+
+@pytest.mark.asyncio
 async def test_admin_model_refresh_rebuilds_generation_and_releases_lease_after_failure():
     events = []
 

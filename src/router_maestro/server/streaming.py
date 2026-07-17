@@ -1,6 +1,7 @@
 """Shared SSE streaming utilities with keepalive and error handling."""
 
 import asyncio
+import json
 from collections.abc import AsyncGenerator
 
 from fastapi.responses import StreamingResponse
@@ -8,6 +9,29 @@ from fastapi.responses import StreamingResponse
 from router_maestro.utils import get_logger
 
 logger = get_logger("server.streaming")
+
+
+def parse_sse_frame(frame: str) -> tuple[str | None, dict | None]:
+    """Return the event discriminator and JSON object from one encoded SSE frame.
+
+    Generic ``event:``/``data:`` line parsing shared by the native passthrough
+    routes. A ``data:`` payload that is not a JSON object (or fails to decode) is
+    ignored, leaving ``data`` as ``None``.
+    """
+    event_type: str | None = None
+    data: dict | None = None
+    for line in frame.splitlines():
+        if line.startswith("event: "):
+            event_type = line.removeprefix("event: ")
+        elif line.startswith("data: "):
+            try:
+                parsed = json.loads(line.removeprefix("data: "))
+            except json.JSONDecodeError:
+                continue
+            if isinstance(parsed, dict):
+                data = parsed
+    return event_type, data
+
 
 SSE_KEEPALIVE_INTERVAL = 5.0  # seconds
 

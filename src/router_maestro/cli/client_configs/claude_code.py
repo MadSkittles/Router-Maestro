@@ -18,6 +18,7 @@ from router_maestro.cli.client_configs.base import (
     GenerateContext,
     _bare_upstream_model_id,
     _model_key,
+    _model_operation_support,
     _select_model_dict,
     _upstream_context_window,
     console,
@@ -27,6 +28,7 @@ from router_maestro.cli.client_configs.model_id import (
     detect_family,
     to_anthropic_official,
 )
+from router_maestro.routing.capabilities import Operation
 from router_maestro.routing.model_ref import qualify_model_id
 
 # Claude Code native model IDs for 1M context variants.
@@ -133,14 +135,22 @@ def _maybe_inject_opus_1m(models: list[dict]) -> list[dict]:
 def _prompt_endpoint_mode(model: dict | None) -> bool:
     """Prompt whether to use the beta native passthrough endpoint.
 
-    Only offered when the selected model is a Claude model on GitHub Copilot.
-    Returns True to use the beta endpoint, False for standard.
+    Offered when the selected GitHub Copilot model natively serves the Anthropic
+    Messages API. Eligibility tracks the server's live catalog
+    (``operation_capabilities['native_anthropic']``) so a newly-added Copilot
+    Claude model is recognized in real time; the ``claude-`` name heuristic is
+    only the fallback for servers that predate that field. Returns True to use
+    the beta endpoint, False for standard.
     """
     if model is None:
         return False
     provider = model.get("provider", "")
-    model_id = _bare_upstream_model_id(model)
-    if provider != "github-copilot" or not model_id.lower().startswith("claude-"):
+    if provider != "github-copilot":
+        return False
+    supported = _model_operation_support(model, Operation.NATIVE_ANTHROPIC.value)
+    if supported is None:
+        supported = _bare_upstream_model_id(model).lower().startswith("claude-")
+    if not supported:
         return False
 
     console.print("\n[bold]Endpoint mode[/bold]")
