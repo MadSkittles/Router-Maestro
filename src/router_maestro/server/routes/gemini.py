@@ -42,9 +42,6 @@ from router_maestro.server.translation_gemini import (
 )
 from router_maestro.utils import get_logger
 from router_maestro.utils.async_iterators import close_async_iterator
-from router_maestro.utils.responses_bridge import (
-    is_experimental_responses_enabled,
-)
 
 logger = get_logger("server.routes.gemini")
 
@@ -74,22 +71,6 @@ def _estimate_input_tokens(request: GeminiGenerateContentRequest) -> int:
         return 0
 
 
-def _maybe_enable_responses_api(request: ChatRequest, model: str) -> ChatRequest:
-    """Opt this ChatRequest into Copilot /responses when the env flag is on.
-
-    The Copilot provider is the authoritative gate
-    (``should_use_responses_for_chat``): it checks the resolved provider name
-    and model eligibility and falls through to ``/chat/completions`` when
-    either fails. Setting the flag here is a no-op for non-Copilot or
-    non-GPT-5 backends — we don't pre-filter on the raw path model so
-    aliases/fuzzy matches resolve through the router instead of the entry
-    route.
-    """
-    if not is_experimental_responses_enabled():
-        return request
-    return replace(request, use_responses_api=True, extra={})
-
-
 # ============================================================================
 # POST /api/gemini/v1beta/models/{model}:generateContent
 # ============================================================================
@@ -110,7 +91,6 @@ async def generate_content(
 
     model_router = get_router()
     chat_request = translate_gemini_to_openai(request, model)
-    chat_request = _maybe_enable_responses_api(chat_request, model)
 
     try:
         response, provider_name = await model_router.chat_completion(chat_request)
@@ -162,9 +142,8 @@ async def stream_generate_content(
     #     chat_request.max_tokens,
     # )
     # Enable streaming, preserving every other ChatRequest field so reasoning
-    # metadata and the experimental flag survive into the provider call.
+    # metadata survives into the provider call.
     chat_request = replace(chat_request, stream=True, extra={})
-    chat_request = _maybe_enable_responses_api(chat_request, model)
 
     estimated_tokens = _estimate_input_tokens(request)
     stream = None

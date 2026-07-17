@@ -53,9 +53,6 @@ from router_maestro.server.translation import translate_anthropic_to_openai
 from router_maestro.utils import count_anthropic_request_tokens, get_logger
 from router_maestro.utils.async_iterators import close_async_iterator
 from router_maestro.utils.context_window import resolve_thinking_budget
-from router_maestro.utils.responses_bridge import (
-    is_experimental_responses_enabled,
-)
 from router_maestro.utils.token_config import (
     count_tokens_via_anthropic_api,
     get_config_for_provider,
@@ -374,13 +371,6 @@ async def messages(request: AnthropicMessagesRequest, raw_request: FastAPIReques
 
     # Translate Anthropic request to OpenAI format
     chat_request = translate_anthropic_to_openai(request)
-
-    # Experimental: opt this request into Copilot's /responses endpoint when
-    # the flag is on. The Copilot provider gates on the resolved provider +
-    # model and falls back to /chat/completions for ineligible models, so we
-    # don't pre-filter on the entry-route model string here.
-    if is_experimental_responses_enabled():
-        chat_request = replace(chat_request, use_responses_api=True, extra={})
 
     try:
         route_plan = await model_router.plan_chat_completion(

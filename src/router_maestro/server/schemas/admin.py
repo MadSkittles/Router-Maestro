@@ -72,6 +72,14 @@ class ModelInfo(BaseModel):
     max_context_window_tokens: int | None = Field(
         default=None, description="Maximum total context window (input + output)"
     )
+    operation_capabilities: dict[str, bool] = Field(
+        default_factory=dict,
+        description=(
+            "Per-model transport support keyed by Operation value "
+            "(e.g. 'responses', 'native_anthropic'). Derived from the live "
+            "provider catalog; lets clients gate native-passthrough options."
+        ),
+    )
 
 
 class ModelsResponse(BaseModel):

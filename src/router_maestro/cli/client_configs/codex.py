@@ -7,10 +7,13 @@ from pathlib import Path
 
 import tomlkit
 from rich.panel import Panel
+from rich.prompt import Prompt
 
 from router_maestro.cli.client_configs.base import (
     ClientConfig,
     GenerateContext,
+    _bare_upstream_model_id,
+    _model_operation_support,
     console,
 )
 from router_maestro.cli.client_configs.model_id import (
@@ -18,6 +21,8 @@ from router_maestro.cli.client_configs.model_id import (
     detect_family,
     to_openai_official,
 )
+from router_maestro.providers.copilot_support.catalog import is_model_responses_eligible
+from router_maestro.routing.capabilities import Operation
 
 
 def get_codex_paths() -> dict[str, Path]:
@@ -26,6 +31,36 @@ def get_codex_paths() -> dict[str, Path]:
         "user": Path.home() / ".codex" / "config.toml",
         "project": Path.cwd() / ".codex" / "config.toml",
     }
+
+
+def _prompt_endpoint_mode(model: dict | None) -> bool:
+    """Prompt whether to use the beta native Responses passthrough endpoint.
+
+    Offered when the selected GitHub Copilot model natively serves the Responses
+    API. Eligibility tracks the server's live catalog
+    (``operation_capabilities['responses']``) so a newly-added GHC model is
+    recognized in real time; the hardcoded ``is_model_responses_eligible`` name
+    heuristic is only the fallback for servers that predate that field. Returns
+    True to use the beta endpoint, False for the standard translated endpoint.
+    """
+    if model is None:
+        return False
+    provider = model.get("provider", "")
+    if provider != "github-copilot":
+        return False
+    supported = _model_operation_support(model, Operation.RESPONSES.value)
+    if supported is None:
+        supported = is_model_responses_eligible(_bare_upstream_model_id(model))
+    if not supported:
+        return False
+
+    console.print("\n[bold]Endpoint mode[/bold]")
+    console.print("  1. Standard (translation-based, battle-tested)")
+    console.print(
+        "  2. Beta (native Copilot Responses passthrough — full reasoning/cache fidelity)"
+    )
+    choice = Prompt.ask("Select", choices=["1", "2"], default="2")
+    return choice == "2"
 
 
 def _build_router_maestro_provider_table(openai_url: str) -> tomlkit.items.Table:
@@ -72,9 +107,17 @@ class CodexConfig(ClientConfig):
     def to_official_id(self, bare_id: str) -> str:
         return to_openai_official(bare_id)
 
+    def prompt_extras(self, selected_dicts: list[dict | None]) -> dict:
+        main_model_dict = selected_dicts[0] if selected_dicts else None
+        return {"use_beta_endpoint": _prompt_endpoint_mode(main_model_dict)}
+
+    def _openai_url(self, ctx: GenerateContext) -> str:
+        path = "/api/openai/beta/v1" if ctx.extras.get("use_beta_endpoint") else "/api/openai/v1"
+        return f"{self._base_url()}{path}"
+
     def write(self, *, level: str, path: Path, models: list[str], ctx: GenerateContext) -> None:
         selected_model = models[0]
-        openai_url = f"{self._base_url()}/api/openai/v1"
+        openai_url = self._openai_url(ctx)
 
         # Load existing config to preserve other sections
         existing_config: tomlkit.TOMLDocument = tomlkit.document()
@@ -115,7 +158,7 @@ class CodexConfig(ClientConfig):
         self, *, level: str, path: Path, models: list[str], ctx: GenerateContext
     ) -> None:
         selected_model = models[0]
-        openai_url = f"{self._base_url()}/api/openai/v1"
+        openai_url = self._openai_url(ctx)
 
         if level == "user":
             body = (

@@ -215,6 +215,40 @@ _COPILOT_NATIVE_ANTHROPIC_FORWARD_FIELDS = frozenset(
 )
 
 
+# Top-level fields the native OpenAI Responses passthrough forwards to GHC's
+# ``/responses`` endpoint. Fields outside this set are stripped before the raw
+# body is sent, because GHC rejects unknown top-level fields. The set covers
+# what OpenAI's Responses API defines and what Codex actually sends, so
+# fidelity-relevant options the translated route drops (``include``,
+# ``previous_response_id``, ``prompt_cache_key``, ``text``, encrypted-reasoning
+# round-trip) survive the passthrough.
+#
+# ``store`` is intentionally excluded: GHC 400s on ``store: true``
+# (unsupported_value), so it must be stripped rather than forwarded.
+_COPILOT_RESPONSES_FORWARD_FIELDS = frozenset(
+    {
+        "model",
+        "input",
+        "stream",
+        "instructions",
+        "max_output_tokens",
+        "tools",
+        "tool_choice",
+        "parallel_tool_calls",
+        "temperature",
+        "top_p",
+        "reasoning",
+        "include",
+        "metadata",
+        "service_tier",
+        "previous_response_id",
+        "prompt_cache_key",
+        "text",
+        "truncation",
+    }
+)
+
+
 class CopilotOutboundContract(OutboundContract):
     """Copilot upstream wire contract.
 
@@ -226,6 +260,8 @@ class CopilotOutboundContract(OutboundContract):
     def forwardable_fields(self, operation: Operation) -> frozenset[str] | None:
         if operation is Operation.NATIVE_ANTHROPIC:
             return _COPILOT_NATIVE_ANTHROPIC_FORWARD_FIELDS
+        if operation in (Operation.RESPONSES, Operation.RESPONSES_STREAM):
+            return _COPILOT_RESPONSES_FORWARD_FIELDS
         return None
 
     def resolve_reasoning(
@@ -434,13 +470,7 @@ class CopilotProvider(BaseProvider):
 
     @property
     def capabilities(self) -> ProviderCapabilities:
-        return ProviderCapabilities(
-            operations=frozenset(Operation),
-            operation_bridges={
-                Operation.CHAT: Operation.RESPONSES,
-                Operation.CHAT_STREAM: Operation.RESPONSES_STREAM,
-            },
-        )
+        return ProviderCapabilities(operations=frozenset(Operation))
 
     # Recycle the HTTP/2 client after this many seconds to avoid GOAWAY races
     _CLIENT_MAX_AGE = 300  # 5 minutes
@@ -723,10 +753,6 @@ class CopilotProvider(BaseProvider):
         """
         return self._catalog.effort_values(model)
 
-    def _catalog_operation_support(self, model: str, operation: Operation) -> bool | None:
-        """Return catalog operation support without triggering a model fetch."""
-        return self._catalog.operation_support(model, operation)
-
     def _get_client(self) -> httpx.AsyncClient:
         """Get or create a reusable HTTP client.
 
@@ -827,31 +853,6 @@ class CopilotProvider(BaseProvider):
 
     async def chat_completion(self, request: ChatRequest) -> ChatResponse:
         """Generate a chat completion via Copilot."""
-        # Experimental: route GPT-5.x ChatRequests through /responses when the
-        # entry route opted in. Anthropic/Gemini set use_responses_api=True
-        # under the ROUTER_MAESTRO_EXPERIMENTAL_RESPONSES_API flag.
-        from router_maestro.utils.responses_bridge import (
-            chat_request_to_responses_request,
-            responses_response_to_chat_response,
-            should_use_responses_for_chat,
-        )
-
-        if should_use_responses_for_chat(
-            request,
-            self.name,
-            responses_supported=self._catalog_operation_support(
-                request.model,
-                Operation.RESPONSES,
-            ),
-        ):
-            logger.info(
-                "Routing chat request via /responses (experimental): model=%s",
-                request.model,
-            )
-            responses_req = chat_request_to_responses_request(request)
-            responses_resp = await self.responses_completion(responses_req)
-            return responses_response_to_chat_response(responses_resp, request.model)
-
         await self.ensure_token()
 
         messages, has_images = self._build_messages_payload(request)
@@ -945,43 +946,6 @@ class CopilotProvider(BaseProvider):
 
     async def chat_completion_stream(self, request: ChatRequest) -> AsyncIterator[ChatStreamChunk]:
         """Generate a streaming chat completion via Copilot."""
-        from router_maestro.utils.responses_bridge import (
-            chat_request_to_responses_request,
-            responses_chunk_to_chat_chunk,
-            should_use_responses_for_chat,
-        )
-
-        if should_use_responses_for_chat(
-            request,
-            self.name,
-            responses_supported=self._catalog_operation_support(
-                request.model,
-                Operation.RESPONSES_STREAM,
-            ),
-        ):
-            logger.info(
-                "Streaming chat request via /responses (experimental): model=%s",
-                request.model,
-            )
-            responses_req = chat_request_to_responses_request(request)
-            emitted_tool_call = False
-            async for resp_chunk in self.responses_completion_stream(responses_req):
-                chat_chunk = responses_chunk_to_chat_chunk(resp_chunk)
-                if resp_chunk.tool_call is not None:
-                    emitted_tool_call = True
-                terminal_outcome = resp_chunk.terminal_outcome
-                can_upgrade_tool_finish = terminal_outcome is None or (
-                    terminal_outcome.response_status is ResponseStatus.COMPLETED
-                )
-                if (
-                    emitted_tool_call
-                    and can_upgrade_tool_finish
-                    and chat_chunk.finish_reason == "stop"
-                ):
-                    chat_chunk.finish_reason = "tool_calls"
-                yield chat_chunk
-            return
-
         await self.ensure_token()
 
         messages, has_images = self._build_messages_payload(request)
@@ -1370,18 +1334,5 @@ class CopilotProvider(BaseProvider):
         )
 
     def validate_chat_request(self, request: ChatRequest, *, stream: bool) -> None:
-        """Exercise the same Chat or Responses policy as actual execution."""
-        from router_maestro.utils.responses_bridge import (
-            chat_request_to_responses_request,
-            should_use_responses_for_chat,
-        )
-
-        operation = Operation.RESPONSES_STREAM if stream else Operation.RESPONSES
-        if should_use_responses_for_chat(
-            request,
-            self.name,
-            responses_supported=self._catalog_operation_support(request.model, operation),
-        ):
-            self.validate_responses_request(chat_request_to_responses_request(request))
-            return
+        """Exercise the same Chat payload policy as actual execution."""
         self._build_chat_payload(request, stream=stream)

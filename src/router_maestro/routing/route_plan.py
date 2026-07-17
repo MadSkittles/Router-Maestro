@@ -31,22 +31,12 @@ class RouteCandidate:
     evaluated_operation: Operation
     evaluated_features: RequestFeatures
     support: CapabilitySupport
-    requested_operation: Operation | None = None
 
     def __post_init__(self) -> None:
-        requested_operation = self.requested_operation or self.evaluated_operation
-        object.__setattr__(self, "requested_operation", requested_operation)
         if self.model != self.capabilities.model:
             raise ValueError("route candidate model must match its capability model")
         if getattr(self.provider, "name", None) != self.model.provider:
             raise ValueError("route candidate provider must match its model provider")
-        if self.evaluated_operation is not requested_operation:
-            declared_bridge = self.provider.capabilities.bridge_for(requested_operation)
-            if (
-                not self.evaluated_features.responses_bridge
-                or declared_bridge is not self.evaluated_operation
-            ):
-                raise ValueError("route candidate operation bridge must match provider provenance")
         evaluated_support = self.capabilities.support_for(
             self.evaluated_operation,
             self.evaluated_features,
@@ -107,7 +97,7 @@ class RoutePlan:
             raise ValueError("fallbacks must be an ordered subsequence of fallback_pool")
 
     def _operation_matches(self, candidate: RouteCandidate) -> bool:
-        return candidate.requested_operation is self.operation
+        return candidate.evaluated_operation is self.operation
 
     @property
     def candidates(self) -> tuple[RouteCandidate, ...]:

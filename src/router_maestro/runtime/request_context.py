@@ -240,6 +240,7 @@ def is_inference_path(path: str) -> bool:
     if path in {
         "/api/openai/v1/chat/completions",
         "/api/openai/v1/responses",
+        "/api/openai/beta/v1/responses",
         "/v1/messages",
         "/v1/messages/count_tokens",
         "/api/anthropic/v1/messages",

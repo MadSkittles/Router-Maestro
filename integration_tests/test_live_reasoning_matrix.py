@@ -72,34 +72,6 @@ def test_anthropic_unsupported_claude_thinking_returns_native_400(
     assert "event:" not in response.text
 
 
-def test_anthropic_gpt5_responses_bridge_thinking_budget_matrix(
-    client: httpx.Client,
-    anthropic_gpt5_bridge_models: list[str],
-):
-    """Anthropic wire format should bridge GPT-5 models through GHC Responses."""
-    failures: list[str] = []
-
-    for model in anthropic_gpt5_bridge_models:
-        for budget in ANTHROPIC_THINKING_BUDGETS:
-            for stream in STREAM_MODES:
-                cell = _cell_id(model, budget=budget, stream=stream)
-                try:
-                    payload = anthropic_reasoning_payload(model, budget=budget, stream=stream)
-                    if stream:
-                        data = _post_anthropic_payload_stream(client, payload)
-                    else:
-                        data = _post_anthropic_payload_non_stream(client, payload)
-                    _assert_anthropic_reasoning_result(
-                        data,
-                        requested_max_tokens=payload["max_tokens"],
-                        requested_thinking_budget=budget,
-                    )
-                except AssertionError as exc:
-                    failures.append(f"{cell}: {exc}")
-
-    assert not failures, "\n".join(failures)
-
-
 def test_anthropic_enabled_budget_and_output_config_effort(
     client: httpx.Client,
     anthropic_effort_profile: tuple[str, str],

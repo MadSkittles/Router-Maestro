@@ -27,9 +27,9 @@ import pytest
 from router_maestro.auth import AuthManager, AuthStorage, OAuthCredential, run_async
 from router_maestro.config.server import get_current_context_api_key
 from router_maestro.providers import CopilotProvider, ModelInfo
+from router_maestro.providers.copilot_support.catalog import RESPONSES_ELIGIBLE_MODELS
 from router_maestro.routing.model_ref import ModelRef
 from router_maestro.utils.reasoning import EFFORT_ORDER
-from router_maestro.utils.responses_bridge import RESPONSES_ELIGIBLE_MODELS
 
 STARTUP_TIMEOUT_SECONDS = 45.0
 REQUEST_TIMEOUT_SECONDS = 120.0
@@ -427,8 +427,6 @@ def live_server() -> Iterator[LiveServer]:
     env = os.environ.copy()
     env["ROUTER_MAESTRO_API_KEY"] = api_key
     env.setdefault("ROUTER_MAESTRO_LOG_LEVEL", "INFO")
-    if env.get("RM_INTEGRATION_RESPONSES_CHAT") is None:
-        env["ROUTER_MAESTRO_EXPERIMENTAL_RESPONSES_API"] = "1"
 
     process = subprocess.Popen(
         [
@@ -707,19 +705,6 @@ def anthropic_effort_profile(
     pytest.fail(
         "All catalog candidates rejected enabled thinking with effort "
         f"after {len(bounded_candidates)} bounded attempts: " + ", ".join(rejected)
-    )
-
-
-@pytest.fixture(scope="session")
-def anthropic_gpt5_bridge_models(copilot_catalog: dict[str, ModelInfo]) -> list[str]:
-    """Catalog-declared Responses models for Anthropic bridge coverage."""
-    return _required_reasoning_subset(
-        list(copilot_catalog),
-        predicate=lambda model: (
-            bare_model(model).lower().startswith("gpt-5")
-            and select_live_http_endpoint(model, copilot_catalog) is LiveHttpEndpoint.RESPONSES
-        ),
-        description="Responses-eligible GPT-5 Copilot models",
     )
 
 

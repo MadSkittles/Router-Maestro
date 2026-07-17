@@ -49,13 +49,10 @@ class RequestFeatures:
     vision: bool = False
     reasoning: bool = False
     parallel_tools: bool = False
-    responses_bridge: bool = False
     reasoning_parameter: str | None = field(default=None, compare=False, repr=False)
 
     @classmethod
     def for_chat(cls, request: ChatRequest) -> RequestFeatures:
-        from router_maestro.utils.responses_bridge import is_experimental_responses_enabled
-
         return cls(
             tools=bool(request.tools),
             vision=_contains_image(request.messages),
@@ -64,7 +61,6 @@ class RequestFeatures:
                 or request.thinking_budget
                 or request.thinking_type in {"enabled", "adaptive"}
             ),
-            responses_bridge=request.use_responses_api and is_experimental_responses_enabled(),
             reasoning_parameter=(
                 "reasoning_effort"
                 if request.reasoning_effort is not None
@@ -112,6 +108,27 @@ class RequestFeatures:
             ),
         )
 
+    @classmethod
+    def for_responses_native(cls, body: Mapping[str, object]) -> RequestFeatures:
+        """Derive native Responses requirements from one raw wire request.
+
+        Mirrors ``for_anthropic_native`` for the raw-passthrough Responses route:
+        reasoning is expressed through ``reasoning.effort`` (the OpenAI Responses
+        shape), tools through ``tools``, and vision through image blocks in
+        ``input``.
+        """
+        from router_maestro.utils.reasoning import VALID_EFFORTS
+
+        reasoning = body.get("reasoning")
+        effort = reasoning.get("effort") if isinstance(reasoning, dict) else None
+        has_effort = isinstance(effort, str) and effort in VALID_EFFORTS
+        return cls(
+            tools=bool(body.get("tools")),
+            vision=_contains_image(body.get("input")),
+            reasoning=has_effort,
+            reasoning_parameter="reasoning.effort" if has_effort else None,
+        )
+
     def required(self) -> tuple[Feature, ...]:
         return tuple(
             feature
@@ -128,24 +145,12 @@ class RequestFeatures:
 @dataclass(frozen=True, slots=True)
 class ProviderCapabilities:
     operations: frozenset[Operation] = frozenset({Operation.CHAT, Operation.CHAT_STREAM})
-    operation_bridges: Mapping[Operation, Operation] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "operations", frozenset(self.operations))
-        bridges = dict(self.operation_bridges)
-        if any(
-            source not in self.operations or target not in self.operations
-            for source, target in bridges.items()
-        ):
-            raise ValueError("operation bridges must reference provider-supported operations")
-        object.__setattr__(self, "operation_bridges", MappingProxyType(bridges))
 
     def supports(self, operation: Operation) -> bool:
         return operation in self.operations
-
-    def bridge_for(self, operation: Operation) -> Operation | None:
-        """Return the provider-declared alternate transport for one operation."""
-        return self.operation_bridges.get(operation)
 
 
 @dataclass(frozen=True, slots=True)

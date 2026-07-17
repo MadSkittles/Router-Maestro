@@ -2,7 +2,6 @@
 
 import ast
 import importlib
-import inspect
 import json
 import os
 import subprocess
@@ -1158,42 +1157,6 @@ def test_anthropic_thinking_models_only_include_reasoning_capable_claude(monkeyp
     assert selected == [claude]
 
 
-def test_anthropic_gpt5_bridge_models_only_include_http_responses_gpt5(monkeypatch):
-    conftest = importlib.import_module("integration_tests.conftest")
-    monkeypatch.setenv("RM_INTEGRATION_MAX_REASONING_MODELS", "0")
-    gpt = "github-copilot/gpt-5.4"
-    catalog = {
-        gpt: ModelInfo(
-            id="gpt-5.4",
-            name="GPT 5.4",
-            provider="github-copilot",
-            supported_endpoints=("/responses",),
-        ),
-        "github-copilot/claude-future": ModelInfo(
-            id="claude-future",
-            name="Claude Future",
-            provider="github-copilot",
-            supported_endpoints=("/responses",),
-        ),
-        "github-copilot/future-reasoner": ModelInfo(
-            id="future-reasoner",
-            name="Future Reasoner",
-            provider="github-copilot",
-            supported_endpoints=("/responses",),
-        ),
-        "github-copilot/gpt-5-ws": ModelInfo(
-            id="gpt-5-ws",
-            name="GPT 5 WS",
-            provider="github-copilot",
-            supported_endpoints=("ws:/responses",),
-        ),
-    }
-
-    selected = conftest.anthropic_gpt5_bridge_models.__wrapped__(catalog)
-
-    assert selected == [gpt]
-
-
 def test_live_reasoning_selection_uses_catalog_metadata_not_model_name():
     conftest = importlib.import_module("integration_tests.conftest")
     capable = ModelInfo(
@@ -2154,7 +2117,6 @@ def test_integration_tests_include_reasoning_and_gemini_family_matrices():
     gemini = (integration_dir / "test_live_gemini_matrix.py").read_text(encoding="utf-8")
 
     assert "test_anthropic_claude_thinking_budget_matrix" in reasoning
-    assert "test_anthropic_gpt5_responses_bridge_thinking_budget_matrix" in reasoning
     assert "test_openai_chat_reasoning_effort_matrix" in reasoning
     assert "test_anthropic_enabled_budget_and_output_config_effort" in reasoning
     assert "test_gemini_family_generate_content_matrix" in gemini
@@ -2185,26 +2147,6 @@ def test_responses_top_p_fixture_only_selects_verified_representative():
     )
 
     assert selected == representative
-
-
-def test_bridge_stop_sequences_contract_covers_both_modes_and_native_json_400():
-    bridge = importlib.import_module("integration_tests.test_live_anthropic_responses_bridge")
-    test = bridge.test_bridge_stop_sequences_returns_native_400
-    stream_marks = [
-        mark
-        for mark in getattr(test, "pytestmark", ())
-        if mark.name == "parametrize" and mark.args[0] == "stream"
-    ]
-
-    assert stream_marks
-    assert tuple(stream_marks[0].args[1]) == (False, True)
-
-    source = inspect.getsource(test)
-    assert "response.status_code == 400" in source
-    assert 'response.headers["content-type"].startswith("application/json")' in source
-    assert 'response.json()["type"] == "error"' in source
-    assert 'response.json()["error"]["type"] == "invalid_request_error"' in source
-    assert '"event:" not in response.text' in source
 
 
 def test_integration_harness_documents_existing_config_usage():

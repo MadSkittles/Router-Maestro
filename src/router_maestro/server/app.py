@@ -41,6 +41,7 @@ from router_maestro.server.routes import (
     chat_router,
     gemini_router,
     models_router,
+    openai_responses_beta_router,
     responses_router,
 )
 from router_maestro.utils import get_logger, setup_logging
@@ -202,6 +203,7 @@ def create_app() -> FastAPI:
     app.include_router(chat_router, dependencies=[Depends(verify_api_key)])
     app.include_router(models_router, dependencies=[Depends(verify_api_key)])
     app.include_router(responses_router, dependencies=[Depends(verify_api_key)])
+    app.include_router(openai_responses_beta_router, dependencies=[Depends(verify_api_key)])
     app.include_router(anthropic_router, dependencies=[Depends(verify_api_key)])
     app.include_router(anthropic_beta_router, dependencies=[Depends(verify_api_key)])
     app.include_router(gemini_router, dependencies=[Depends(verify_api_key)])

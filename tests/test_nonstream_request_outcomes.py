@@ -26,7 +26,6 @@ from router_maestro.server.routes.anthropic import router as anthropic_router
 from router_maestro.server.routes.chat import router as chat_router
 from router_maestro.server.routes.gemini import router as gemini_router
 from router_maestro.server.routes.responses import router as responses_router
-from router_maestro.utils.responses_bridge import responses_response_to_chat_response
 
 
 class _Snapshot:
@@ -84,11 +83,9 @@ class _Backend:
         *,
         chat_response: ChatResponse | None = None,
         responses_response: InternalResponsesResponse | None = None,
-        bridge_response: InternalResponsesResponse | None = None,
     ) -> None:
         self.chat_response = chat_response
         self.responses_response = responses_response
-        self.bridge_response = bridge_response
         self.contexts: list[RequestContext] = []
         self.candidate = SimpleNamespace(
             model=ModelRef("test-provider", "test-model"),
@@ -104,13 +101,6 @@ class _Backend:
 
     async def chat_completion(self, _request, **_kwargs):
         self.contexts.append(current_request_context())
-        if self.bridge_response is not None:
-            bridged = responses_response_to_chat_response(
-                self.bridge_response,
-                "test-model",
-                provider="test-provider",
-            )
-            return bridged, "test-provider"
         assert self.chat_response is not None
         return self.chat_response, "test-provider"
 
@@ -283,68 +273,3 @@ def test_native_responses_nonstream_http_200_records_business_terminal_status(
     assert response.status_code == 200
     assert response.json()["status"] == status.value
     _assert_context(backend, lease, expected)
-
-
-@pytest.mark.parametrize("status", [ResponseStatus.FAILED, ResponseStatus.CANCELLED])
-@pytest.mark.parametrize(
-    ("route", "path", "payload", "error_key"),
-    [
-        (
-            chat_router,
-            "/api/openai/v1/chat/completions",
-            {"model": "test-model", "messages": [{"role": "user", "content": "hello"}]},
-            "error",
-        ),
-        (
-            anthropic_router,
-            "/v1/messages",
-            {
-                "model": "test-model",
-                "max_tokens": 8,
-                "messages": [{"role": "user", "content": "hello"}],
-            },
-            "error",
-        ),
-        (
-            gemini_router,
-            "/api/gemini/v1beta/models/test-model:generateContent",
-            {"contents": [{"role": "user", "parts": [{"text": "hello"}]}]},
-            "error",
-        ),
-    ],
-    ids=["chat", "anthropic", "gemini"],
-)
-def test_responses_bridge_failure_keeps_protocol_error_semantics(
-    status: ResponseStatus,
-    route: APIRouter,
-    path: str,
-    payload: dict,
-    error_key: str,
-) -> None:
-    upstream = InternalResponsesResponse(
-        content="partial",
-        model="test-model",
-        terminal_outcome=TerminalOutcome(
-            transport=TransportTermination.EXPLICIT_TERMINAL,
-            response_status=status,
-            error=(
-                TerminalError(code="upstream_failed", message="safe failure")
-                if status is ResponseStatus.FAILED
-                else None
-            ),
-        ),
-    )
-    backend = _Backend(bridge_response=upstream)
-    client, lease = _client(route, backend)
-
-    response = client.post(path, json=payload)
-
-    assert response.status_code == 502
-    assert error_key in response.json()
-    assert len(backend.contexts) == 1
-    context = backend.contexts[0]
-    assert context.finalized is True
-    assert context.status_code == 502
-    assert context.outcome is not None
-    assert context.outcome.response_status is ResponseStatus.FAILED
-    assert lease.release_count == 1

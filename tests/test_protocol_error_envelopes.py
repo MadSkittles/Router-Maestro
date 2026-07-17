@@ -18,15 +18,11 @@ from router_maestro.providers import (
 )
 from router_maestro.providers.copilot import CopilotProvider
 from router_maestro.routing.capabilities import (
-    CapabilitySupport,
     Feature,
-    ModelCapabilities,
     Operation,
     ProviderCapabilities,
-    RequestFeatures,
 )
 from router_maestro.routing.model_ref import ModelRef
-from router_maestro.routing.route_plan import RouteCandidate, RoutePlan
 from router_maestro.routing.router import CACHE_TTL_SECONDS, Router
 from router_maestro.server.app import create_app
 from router_maestro.server.middleware import REQUEST_ID_HEADER, verify_api_key
@@ -1857,89 +1853,3 @@ def test_stream_option_rejection_happens_before_sse_commit(
     assert response.headers["content-type"].startswith("application/json")
     assert "data:" not in response.text
     mocked_router.chat_completion_stream.assert_not_awaited()
-
-
-def _experimental_copilot_router(monkeypatch) -> tuple[Router, CopilotProvider]:
-    monkeypatch.setenv("ROUTER_MAESTRO_EXPERIMENTAL_RESPONSES_API", "1")
-    provider = CopilotProvider()
-    router = Router.__new__(Router)
-    ref = ModelRef("github-copilot", "gpt-5.4")
-    operation = Operation.CHAT_STREAM
-    features = RequestFeatures(responses_bridge=True)
-    capabilities = ModelCapabilities(
-        model=ref,
-        operations={Operation.RESPONSES_STREAM: CapabilitySupport.SUPPORTED},
-    )
-    plan = RoutePlan(
-        operation=operation,
-        features=features,
-        primary=RouteCandidate(
-            model=ref,
-            provider=provider,
-            capabilities=capabilities,
-            evaluated_operation=Operation.RESPONSES_STREAM,
-            evaluated_features=features,
-            support=CapabilitySupport.SUPPORTED,
-            requested_operation=operation,
-        ),
-        fallbacks=(),
-        explicit=True,
-    )
-    router._plan_completion_route = AsyncMock(return_value=plan)
-
-    async def prepare(request):
-        provider.validate_chat_request(request, stream=True)
-        return plan
-
-    router.prepare_chat_completion_stream = AsyncMock(side_effect=prepare)
-    router.chat_completion_stream = AsyncMock(side_effect=AssertionError("stream must not start"))
-    router.get_model_info = AsyncMock(return_value=None)
-    router._resolve_provider = AsyncMock(return_value=("github-copilot", "gpt-5.4", provider))
-    return router, provider
-
-
-def test_anthropic_experimental_responses_rejects_before_sse(client, monkeypatch) -> None:
-    router, provider = _experimental_copilot_router(monkeypatch)
-    provider.responses_completion_stream = AsyncMock(
-        side_effect=AssertionError("provider stream must not start")
-    )
-    with patch("router_maestro.server.routes.anthropic.get_router", return_value=router):
-        response = client.post(
-            "/v1/messages",
-            json={
-                "model": "gpt-5.4",
-                "stream": True,
-                "max_tokens": 32,
-                "messages": [{"role": "user", "content": "hi"}],
-                "stop_sequences": ["END"],
-            },
-        )
-
-    assert response.status_code == 400
-    assert response.headers["content-type"].startswith("application/json")
-    assert response.json()["error"]["type"] == "invalid_request_error"
-    assert "event:" not in response.text
-    router.chat_completion_stream.assert_not_awaited()
-    provider.responses_completion_stream.assert_not_awaited()
-
-
-def test_gemini_experimental_responses_rejects_before_sse(client, monkeypatch) -> None:
-    router, provider = _experimental_copilot_router(monkeypatch)
-    provider.responses_completion_stream = AsyncMock(
-        side_effect=AssertionError("provider stream must not start")
-    )
-    with patch("router_maestro.server.routes.gemini.get_router", return_value=router):
-        response = client.post(
-            "/api/gemini/v1beta/models/gpt-5.4:streamGenerateContent",
-            json={
-                "contents": [{"role": "user", "parts": [{"text": "hi"}]}],
-                "generationConfig": {"stopSequences": ["END"]},
-            },
-        )
-
-    assert response.status_code == 400
-    assert response.headers["content-type"].startswith("application/json")
-    assert response.json()["error"]["status"] == "INVALID_ARGUMENT"
-    assert "data:" not in response.text
-    router.chat_completion_stream.assert_not_awaited()
-    provider.responses_completion_stream.assert_not_awaited()

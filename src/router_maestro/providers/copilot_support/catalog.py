@@ -21,7 +21,6 @@ from router_maestro.routing.capabilities import Feature, Operation
 from router_maestro.utils import get_logger
 from router_maestro.utils.cache import TTLCache
 from router_maestro.utils.reasoning import VALID_EFFORTS
-from router_maestro.utils.responses_bridge import is_model_responses_eligible
 
 logger = get_logger("providers.copilot.catalog")
 
@@ -31,6 +30,36 @@ _COPILOT_REASONING_EFFORT_SENTINELS = frozenset({"none"})
 _COPILOT_CATALOG_REASONING_EFFORT_VALUES = frozenset(VALID_EFFORTS).union(
     _COPILOT_REASONING_EFFORT_SENTINELS
 )
+
+# Cold-start fallback for Responses eligibility. The live catalog's
+# ``supported_endpoints`` (``/responses``) is authoritative and used whenever it
+# is available (see ``operation_capabilities`` below); this hardcoded set only
+# applies before the catalog has been fetched. Confirmed by direct probing of
+# api.githubcopilot.com/responses — anything else returns 400
+# unsupported_api_for_model. Match by suffix after stripping optional
+# ``provider/`` prefix.
+RESPONSES_ELIGIBLE_MODELS: frozenset[str] = frozenset(
+    {
+        "gpt-5.3-codex",
+        "gpt-5.4",
+        "gpt-5.4-mini",
+        "gpt-5.5",
+        "gpt-5.6-luna",
+        "gpt-5.6-sol",
+        "gpt-5.6-terra",
+        "gpt-5-mini",
+        "mai-code-1-flash-picker",
+    }
+)
+
+
+def _bare_model(model: str) -> str:
+    return model.split("/", 1)[1] if "/" in model else model
+
+
+def is_model_responses_eligible(model: str) -> bool:
+    """Whether the upstream serves this model via /responses (cold-start fallback)."""
+    return _bare_model(model) in RESPONSES_ELIGIBLE_MODELS
 
 
 def normalize_supported_endpoints(model: Mapping[str, Any]) -> tuple[str, ...] | None:
@@ -142,16 +171,6 @@ class CopilotCatalog:
         for info in cached:
             if info.id == bare or info.id == model:
                 return deepcopy(info.reasoning_effort_values)
-        return None
-
-    def operation_support(self, model: str, operation: Operation) -> bool | None:
-        cached = self.models_ttl_cache.get()
-        if not cached:
-            return None
-        bare = model.split("/", 1)[1] if "/" in model else model
-        for info in cached:
-            if info.id == bare or info.id == model:
-                return info.operation_capabilities.get(operation.value)
         return None
 
     @staticmethod
