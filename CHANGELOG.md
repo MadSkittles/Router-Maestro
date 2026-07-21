@@ -4,6 +4,27 @@ All notable changes to Router-Maestro are documented here.
 
 ---
 
+## v0.7.4 (2026-07-21)
+
+### Fixes
+
+- **Responses tool compatibility.** Preserve the inner `tools` arrays in Codex
+  namespace/MCP wrappers through schema parsing, so populated registries no longer
+  look empty and fail validation. Copilot-unsupported Responses tools
+  (`web_search`, `web_search_preview`, `code_interpreter`) are now silently
+  dropped instead of rejecting the entire request, allowing clients that inject
+  them by default to continue.
+- **Native Anthropic beta stream keepalives.** Prime planned Copilot streams
+  inside the SSE keepalive wrapper and emit an eager ping plus recurring pings
+  during long first-frame waits. Claude Code no longer hits its 300-second idle
+  timeout on large-context `[1m]` requests; failures after the stream commits
+  surface as sanitized SSE error events.
+- **Scoped thinking-budget downgrades.** Allow the caller-scoped primary candidate
+  to proceed when per-candidate budget adaptation disables thinking because
+  `max_tokens` leaves no budget headroom. This prevents a spurious HTTP 400 on
+  reasoning-capable models while retaining reasoning-drift guards for fallbacks
+  and unscoped requests.
+
 ## v0.7.3 (2026-07-17)
 
 ### Features
