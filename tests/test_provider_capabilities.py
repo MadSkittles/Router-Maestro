@@ -1373,6 +1373,34 @@ def test_request_feature_detection_covers_chat_and_responses_shapes():
     )
 
 
+def test_request_feature_detection_tolerates_non_string_schema_type():
+    # A prior turn echoes tool JSON Schemas whose ``type`` is a list, e.g.
+    # ``{"type": ["string", "null"]}``. Vision detection walks the whole input
+    # and must not choke testing an unhashable list against the image-block set.
+    responses_request = ResponsesRequest(
+        model="m",
+        input=[
+            {
+                "type": "function_call",
+                "parameters": {
+                    "properties": {
+                        "org": {"type": ["string", "null"]},
+                        "count": {"type": ["array", "null"]},
+                    }
+                },
+            }
+        ],
+        tools=[{"type": "function", "name": "tool"}],
+    )
+
+    assert RequestFeatures.for_responses(responses_request) == RequestFeatures(
+        tools=True,
+        vision=False,
+        reasoning=False,
+        parallel_tools=False,
+    )
+
+
 def test_plan_route_is_not_used_for_token_counting_operation():
     assert {operation.value for operation in Operation} == {
         "chat",
