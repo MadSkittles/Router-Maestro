@@ -196,7 +196,10 @@ def _contains_image(value: object) -> bool:
         return any(_contains_image(item) for item in value)
     if isinstance(value, dict):
         block_type = value.get("type")
-        if block_type in {"image", "image_url", "input_image"}:
+        # A tool's JSON Schema can carry a non-string ``type`` (e.g.
+        # ``"type": ["string", "null"]``). Only string block types can name an
+        # image block; testing membership with an unhashable list would raise.
+        if isinstance(block_type, str) and block_type in {"image", "image_url", "input_image"}:
             return True
         return any(_contains_image(item) for item in value.values())
     content = getattr(value, "content", None)
