@@ -694,7 +694,7 @@ class TestStripHistoryThinkingBlocks:
 
 
 class TestApplyThinkingBudgetNative:
-    @patch("router_maestro.server.routes.anthropic_beta.resolve_thinking_budget")
+    @patch("router_maestro.providers.copilot.resolve_thinking_budget")
     def test_effort_removes_conflicting_budget(self, mock_resolve_tb):
         body = {
             "thinking": {"type": "adaptive", "budget_tokens": 16000},
@@ -707,9 +707,9 @@ class TestApplyThinkingBudgetNative:
         assert result["output_config"] == {"effort": "xhigh"}
         mock_resolve_tb.assert_not_called()
 
-    @patch("router_maestro.server.routes.anthropic_beta.get_router")
+    @patch("router_maestro.routing.get_router")
     @patch("router_maestro.config.load_priorities_config")
-    @patch("router_maestro.server.routes.anthropic_beta.resolve_thinking_budget")
+    @patch("router_maestro.providers.copilot.resolve_thinking_budget")
     def test_effort_preserves_required_enabled_budget(
         self, mock_resolve_tb, mock_config, mock_router
     ):
@@ -729,9 +729,9 @@ class TestApplyThinkingBudgetNative:
         assert result["output_config"] == {"effort": "xhigh"}
         mock_resolve_tb.assert_called_once()
 
-    @patch("router_maestro.server.routes.anthropic_beta.get_router")
+    @patch("router_maestro.routing.get_router")
     @patch("router_maestro.config.load_priorities_config")
-    @patch("router_maestro.server.routes.anthropic_beta.resolve_thinking_budget")
+    @patch("router_maestro.providers.copilot.resolve_thinking_budget")
     def test_effort_maps_to_catalog_supported_tier(self, mock_resolve_tb, mock_config, mock_router):
         mock_config.return_value = MagicMock(
             thinking=MagicMock(default_budget=16000, auto_enable=False, model_budgets={})
@@ -763,9 +763,9 @@ class TestApplyThinkingBudgetNative:
         # Decision C: xhigh must substitute down to high, never up to max.
         assert result["output_config"] == {"effort": "high"}
 
-    @patch("router_maestro.server.routes.anthropic_beta.get_router")
+    @patch("router_maestro.routing.get_router")
     @patch("router_maestro.config.load_priorities_config")
-    @patch("router_maestro.server.routes.anthropic_beta.resolve_thinking_budget")
+    @patch("router_maestro.providers.copilot.resolve_thinking_budget")
     def test_enabled_budget_normalization_preserves_display(
         self, mock_resolve_tb, mock_config, mock_router
     ):
@@ -793,9 +793,9 @@ class TestApplyThinkingBudgetNative:
             "display": "summarized",
         }
 
-    @patch("router_maestro.server.routes.anthropic_beta.get_router")
+    @patch("router_maestro.routing.get_router")
     @patch("router_maestro.config.load_priorities_config")
-    @patch("router_maestro.server.routes.anthropic_beta.resolve_thinking_budget")
+    @patch("router_maestro.providers.copilot.resolve_thinking_budget")
     def test_effort_fills_missing_enabled_budget(self, mock_resolve_tb, mock_config, mock_router):
         mock_config.return_value = MagicMock(
             thinking=MagicMock(default_budget=16000, auto_enable=False, model_budgets={})
@@ -815,9 +815,9 @@ class TestApplyThinkingBudgetNative:
         assert result["output_config"] == {"effort": "xhigh"}
         mock_resolve_tb.assert_called_once()
 
-    @patch("router_maestro.server.routes.anthropic_beta.get_router")
+    @patch("router_maestro.routing.get_router")
     @patch("router_maestro.config.load_priorities_config")
-    @patch("router_maestro.server.routes.anthropic_beta.resolve_thinking_budget")
+    @patch("router_maestro.providers.copilot.resolve_thinking_budget")
     def test_effort_normalizes_enabled_budget(self, mock_resolve_tb, mock_config, mock_router):
         mock_config.return_value = MagicMock(
             thinking=MagicMock(default_budget=16000, auto_enable=False, model_budgets={})
@@ -839,9 +839,9 @@ class TestApplyThinkingBudgetNative:
         mock_resolve_tb.assert_called_once()
         assert mock_resolve_tb.call_args.kwargs["max_output_tokens"] == 4096
 
-    @patch("router_maestro.server.routes.anthropic_beta.get_router")
+    @patch("router_maestro.routing.get_router")
     @patch("router_maestro.config.load_priorities_config")
-    @patch("router_maestro.server.routes.anthropic_beta.resolve_thinking_budget")
+    @patch("router_maestro.providers.copilot.resolve_thinking_budget")
     def test_effort_removes_disabled_thinking(self, mock_resolve_tb, mock_config, mock_router):
         mock_config.return_value = MagicMock(
             thinking=MagicMock(default_budget=16000, auto_enable=False, model_budgets={})
@@ -861,7 +861,7 @@ class TestApplyThinkingBudgetNative:
         assert result["output_config"] == {"effort": "xhigh"}
         mock_resolve_tb.assert_called_once()
 
-    @patch("router_maestro.server.routes.anthropic_beta.resolve_thinking_budget")
+    @patch("router_maestro.providers.copilot.resolve_thinking_budget")
     def test_adaptive_without_effort_omits_budget(self, mock_resolve_tb):
         result = _apply_thinking_budget_native(
             {"thinking": {"type": "adaptive", "budget_tokens": 16000}},
@@ -871,9 +871,9 @@ class TestApplyThinkingBudgetNative:
         assert result["thinking"] == {"type": "adaptive"}
         mock_resolve_tb.assert_not_called()
 
-    @patch("router_maestro.server.routes.anthropic_beta.get_router")
+    @patch("router_maestro.routing.get_router")
     @patch("router_maestro.config.load_priorities_config")
-    @patch("router_maestro.server.routes.anthropic_beta.resolve_thinking_budget")
+    @patch("router_maestro.providers.copilot.resolve_thinking_budget")
     def test_enabled_without_budget_headroom_is_removed(
         self, mock_resolve_tb, mock_config, mock_router
     ):
@@ -895,9 +895,9 @@ class TestApplyThinkingBudgetNative:
         assert "thinking" not in result
         mock_resolve_tb.assert_called_once()
 
-    @patch("router_maestro.server.routes.anthropic_beta.get_router")
+    @patch("router_maestro.routing.get_router")
     @patch("router_maestro.config.load_priorities_config")
-    @patch("router_maestro.server.routes.anthropic_beta.resolve_thinking_budget")
+    @patch("router_maestro.providers.copilot.resolve_thinking_budget")
     def test_no_change_when_client_sets_budget(self, mock_resolve_tb, mock_config, mock_router):
         mock_config.return_value = MagicMock(
             thinking=MagicMock(default_budget=16000, auto_enable=False, model_budgets={})
@@ -909,9 +909,9 @@ class TestApplyThinkingBudgetNative:
         result = _apply_thinking_budget_native(body, "claude-sonnet-4.5")
         assert result["thinking"]["budget_tokens"] == 5000
 
-    @patch("router_maestro.server.routes.anthropic_beta.get_router")
+    @patch("router_maestro.routing.get_router")
     @patch("router_maestro.config.load_priorities_config")
-    @patch("router_maestro.server.routes.anthropic_beta.resolve_thinking_budget")
+    @patch("router_maestro.providers.copilot.resolve_thinking_budget")
     def test_removes_thinking_when_server_disables(self, mock_resolve_tb, mock_config, mock_router):
         """Server config forces thinking off when client requested it."""
         mock_config.return_value = MagicMock(

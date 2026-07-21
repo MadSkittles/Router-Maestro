@@ -44,7 +44,9 @@ from router_maestro.providers.copilot_support.transport import CopilotTransport
 from router_maestro.providers.outbound_contract import OutboundContract, ReasoningResolution
 from router_maestro.routing.capabilities import Operation, ProviderCapabilities
 from router_maestro.utils import get_logger
+from router_maestro.utils.context_window import resolve_thinking_budget
 from router_maestro.utils.reasoning import (
+    VALID_EFFORTS,
     budget_to_effort,
     downgrade_for_upstream,
     pick_closest_effort,
@@ -452,6 +454,189 @@ class CopilotOutboundContract(OutboundContract):
     def allows_temperature(self, operation: Operation) -> bool:
         """Copilot Responses rejects explicit temperature; Chat forwards it."""
         return operation not in (Operation.RESPONSES, Operation.RESPONSES_STREAM)
+
+    # ------------------------------------------------------------------
+    # Native Anthropic passthrough normalization (folded in from the beta
+    # Anthropic route). These own the outbound wire knowledge; the route keeps
+    # thin seams that delegate here. Kept as staticmethods because they carry no
+    # instance state and are Copilot-native-Anthropic specific.
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def sanitize_output_config(body: dict) -> str | None:
+        """Keep only a valid effort supported by Copilot's native endpoint."""
+        output_config = body.get("output_config")
+        if not isinstance(output_config, dict):
+            body.pop("output_config", None)
+            return None
+
+        effort = output_config.get("effort")
+        if effort not in VALID_EFFORTS:
+            body.pop("output_config", None)
+            return None
+
+        body["output_config"] = {"effort": effort}
+        return effort
+
+    @staticmethod
+    def resolve_native_effort(
+        effort: str,
+        allowed: tuple[str, ...] | list[str] | None,
+        *,
+        provider: str | None = None,
+        model: str | None = None,
+    ) -> str:
+        """Resolve a native effort exactly or downward, preserving unknown catalogs.
+
+        The native passthrough resolves ``output_config.effort`` with its own
+        catalog-or-passthrough rule (distinct error surface and no family fallback),
+        so it is intentionally NOT routed through ``resolve_reasoning`` (the
+        chat/responses orchestration). Both share the ``pick_closest_effort``
+        primitive as the single source of the downgrade math.
+        """
+        if allowed is None:
+            return effort
+        mapped_effort = pick_closest_effort(effort, list(allowed))
+        if mapped_effort is None:
+            raise RequestOptionError(
+                "output_config.effort has no supported tier at or below the requested tier",
+                parameter="output_config.effort",
+                provider=provider,
+                model=model,
+            )
+        return mapped_effort
+
+    @staticmethod
+    def reject_unpreservable_native_options(body: dict) -> None:
+        """Reject native Anthropic options the transport cannot preserve together."""
+        if "temperature" in body and "top_p" in body:
+            raise RequestOptionError(
+                "top_p cannot be combined with temperature on the native Anthropic transport",
+                parameter="top_p",
+            )
+
+    @staticmethod
+    def apply_native_anthropic_thinking(
+        body: dict,
+        actual_model: str,
+        reasoning_effort_values: tuple[str, ...] | list[str] | None = None,
+    ) -> dict:
+        """Apply effort precedence or the server budget fallback to a raw body.
+
+        Explicit ``output_config.effort`` removes an adaptive thinking budget.
+        Manual enabled thinking retains a normalized budget, using the server
+        fallback when the client omits it. Without effort, budget resolution is
+        unchanged.
+        """
+        effort = CopilotOutboundContract.sanitize_output_config(body)
+        client_thinking = body.get("thinking")
+
+        model_router = None
+        model_info = None
+
+        if effort is not None:
+            effort = CopilotOutboundContract.resolve_native_effort(
+                effort,
+                reasoning_effort_values,
+                provider="github-copilot",
+                model=actual_model,
+            )
+            body["output_config"] = {"effort": effort}
+
+        if isinstance(client_thinking, dict) and client_thinking.get("type") == "adaptive":
+            thinking = dict(client_thinking)
+            thinking.pop("budget_tokens", None)
+            body["thinking"] = thinking
+            return body
+
+        if effort is not None:
+            if not (
+                isinstance(client_thinking, dict)
+                and client_thinking.get("type") in ("enabled", "disabled")
+            ):
+                return body
+
+        from router_maestro.runtime import get_current_request_context
+
+        context = get_current_request_context()
+        if context is not None:
+            priorities = context.config
+        else:
+            from router_maestro.config import load_priorities_config
+
+            priorities = load_priorities_config()
+        thinking_config = priorities.thinking
+
+        client_budget = None
+        client_type = None
+        if isinstance(client_thinking, dict):
+            client_budget = client_thinking.get("budget_tokens")
+            client_type = client_thinking.get("type")
+
+        if model_router is None:
+            from router_maestro.routing import get_router
+
+            model_router = get_router()
+        if model_info is None and hasattr(model_router, "_models_cache"):
+            cache_entry = model_router._models_cache.get(actual_model)
+            if cache_entry:
+                _, model_info = cache_entry
+
+        supports_thinking = model_info.supports_thinking if model_info else True
+        max_output = (model_info.max_output_tokens or 16384) if model_info else 16384
+        request_max_output = body.get("max_tokens")
+        if isinstance(request_max_output, int):
+            max_output = min(max_output, request_max_output)
+
+        budget, thinking_type = resolve_thinking_budget(
+            client_budget=client_budget,
+            client_thinking_type=client_type,
+            model_id=actual_model,
+            max_output_tokens=max_output,
+            thinking_config=thinking_config,
+            supports_thinking=supports_thinking,
+        )
+
+        if thinking_type == "adaptive":
+            adaptive = dict(client_thinking) if isinstance(client_thinking, dict) else {}
+            adaptive["type"] = "adaptive"
+            adaptive.pop("budget_tokens", None)
+            body["thinking"] = adaptive
+            if budget != client_budget or thinking_type != client_type:
+                logger.debug(
+                    "Thinking budget adjusted: %s/%s -> %s/%s for model=%s",
+                    client_type,
+                    client_budget,
+                    thinking_type,
+                    budget,
+                    actual_model,
+                )
+        elif thinking_type == "enabled" and budget is not None:
+            enabled = dict(client_thinking) if isinstance(client_thinking, dict) else {}
+            enabled["type"] = "enabled"
+            enabled["budget_tokens"] = budget
+            body["thinking"] = enabled
+            if budget != client_budget or thinking_type != client_type:
+                logger.debug(
+                    "Thinking budget adjusted: %s/%s -> %s/%s for model=%s",
+                    client_type,
+                    client_budget,
+                    thinking_type,
+                    budget,
+                    actual_model,
+                )
+        else:
+            body.pop("thinking", None)
+            if client_type is not None:
+                logger.debug(
+                    "Thinking removed: client had %s/%s, resolved to %s for model=%s",
+                    client_type,
+                    client_budget,
+                    thinking_type,
+                    actual_model,
+                )
+
+        return body
 
 
 class CopilotProvider(BaseProvider):

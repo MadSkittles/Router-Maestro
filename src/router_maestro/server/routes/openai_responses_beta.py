@@ -22,6 +22,7 @@ from pydantic import ValidationError
 from router_maestro.providers import (
     ProviderError,
     ProviderFailureKind,
+    RequestOptionError,
     ResponseStatus,
     TerminalOutcome,
     TransportTermination,
@@ -37,6 +38,7 @@ from router_maestro.routing.capabilities import CapabilitySupport, Operation, Re
 from router_maestro.routing.route_plan import NoCompatibleRouteError, RouteCandidate, RoutePlan
 from router_maestro.routing.router import Router
 from router_maestro.server.protocols.errors import (
+    client_error_response,
     postcommit_error_data,
     protocol_error_response,
 )
@@ -126,16 +128,10 @@ async def _resolve_responses_model(
     )
 
 
-def _strip_forbidden_fields(body: dict, copilot_provider: CopilotProvider, operation: Operation):
-    """Remove top-level fields GHC's /responses rejects before forwarding."""
-    forwardable = copilot_provider.outbound_contract.forwardable_fields(operation)
-    if forwardable is None:
-        return
-    unknown = set(body.keys()) - forwardable
-    if unknown:
-        logger.debug("Stripping unknown fields before passthrough: %s", sorted(unknown))
-        for key in unknown:
-            del body[key]
+def _candidate_effort_values(candidate: RouteCandidate) -> list[str] | None:
+    """The per-candidate reasoning-effort catalog list for reasoning downgrade."""
+    values = candidate.capabilities.reasoning_effort_values
+    return list(values) if values is not None else None
 
 
 def _strip_response(data: dict) -> dict:
@@ -215,6 +211,12 @@ async def _send_native_nonstream(candidate: RouteCandidate, body: dict):
             model=candidate.model.upstream_id,
         )
     payload = dict(body)
+    provider.outbound_contract.reconcile_passthrough_body(
+        payload,
+        operation=Operation.RESPONSES,
+        model=candidate.model.upstream_id,
+        catalog_effort_values=_candidate_effort_values(candidate),
+    )
     payload["model"] = candidate.model.upstream_id
     payload["stream"] = False
     await provider.ensure_token()
@@ -264,6 +266,12 @@ async def _stream_native_candidate(
             model=candidate.model.upstream_id,
         )
     payload = dict(body)
+    provider.outbound_contract.reconcile_passthrough_body(
+        payload,
+        operation=Operation.RESPONSES_STREAM,
+        model=candidate.model.upstream_id,
+        catalog_effort_values=_candidate_effort_values(candidate),
+    )
     payload["model"] = candidate.model.upstream_id
     payload["stream"] = True
     await provider.ensure_token()
@@ -544,7 +552,9 @@ async def beta_responses(raw_request: FastAPIRequest):
         )
         return await _fallback_to_standard(body)
 
-    _strip_forbidden_fields(body, copilot_provider, operation)
+    # Field strip + tool/temperature/reasoning reconciliation happen per-candidate
+    # inside the send helpers (each on its own payload copy), so fallback candidates
+    # with different catalogs resolve independently.
     body["model"] = resolution.actual_model
     plan = resolution.plan
 
@@ -577,6 +587,8 @@ async def beta_responses(raw_request: FastAPIRequest):
                 log_prefix="Beta Responses",
             )
         except ProviderError as error:
+            if isinstance(error, RequestOptionError):
+                return client_error_response(error, "openai")
             logger.error(
                 "beta_responses_stream_open_failed kind=%s retryable=%s",
                 error.kind.value,
@@ -593,6 +605,8 @@ async def beta_responses(raw_request: FastAPIRequest):
             lambda candidate: _send_native_nonstream(candidate, body),
         )
     except ProviderError as error:
+        if isinstance(error, RequestOptionError):
+            return client_error_response(error, "openai")
         logger.error(
             "beta_responses_request_failed kind=%s retryable=%s",
             error.kind.value,
