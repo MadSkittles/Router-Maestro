@@ -75,13 +75,24 @@ class ResponsesFunctionParameters(BaseModel):
 
 
 class ResponsesFunctionTool(BaseModel):
-    """A function tool definition."""
+    """A function tool definition.
+
+    ``extra="allow"`` and the explicit ``tools`` field are critical for
+    ``type="namespace"`` wrappers: Codex groups MCP servers as
+    ``{type: "namespace", name, description, tools: [...]}``. Without them the
+    union coerces the wrapper into this model and silently drops the inner
+    ``tools`` registry, so ``filter_tools`` then sees an empty namespace and
+    rejects the request with "namespace tools ... non-empty".
+    """
+
+    model_config = ConfigDict(extra="allow")
 
     type: str = "function"
-    name: str
+    name: str | None = None
     description: str | None = None
     parameters: dict[str, Any] | None = None
     strict: bool | None = None
+    tools: list[dict[str, Any]] | None = None
 
 
 class ResponsesToolChoiceFunction(BaseModel):

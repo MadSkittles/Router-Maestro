@@ -443,13 +443,10 @@ class CopilotOutboundContract(OutboundContract):
                     )
             elif tool_type not in self._RESPONSES_UNSUPPORTED_TOOL_TYPES:
                 validated.append(tool)
-            else:
-                raise RequestOptionError(
-                    f"GitHub Copilot does not support Responses tool type '{tool_type}'",
-                    provider="github-copilot",
-                    model=model,
-                    parameter="tools",
-                )
+            # else: silently drop tools Copilot Responses cannot express
+            # (web_search, web_search_preview, code_interpreter). Clients like
+            # Codex inject these unconditionally; 400-ing the whole request over
+            # a tool the backend can't run is worse than dropping it.
         return validated or None
 
     def allows_temperature(self, operation: Operation) -> bool:
