@@ -592,7 +592,7 @@ def test_copilot_tool_prevalidation_replaces_incompatible_fallback_without_spend
     request = ResponsesRequest(
         model="router-maestro",
         input="hi",
-        tools=[{"type": "web_search"}],
+        tools=[{"type": "namespace", "name": "mcp__empty__", "tools": []}],
     )
 
     validated = Router.prevalidate_plan(

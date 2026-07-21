@@ -1780,7 +1780,7 @@ def test_responses_unsupported_tools_use_native_400(client: TestClient) -> None:
             json={
                 "model": "m",
                 "input": "hi",
-                "tools": [{"type": "web_search"}],
+                "tools": [{"type": "namespace", "name": "mcp__empty__", "tools": []}],
             },
         )
 
