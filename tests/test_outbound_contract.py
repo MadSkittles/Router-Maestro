@@ -185,3 +185,106 @@ def test_permissive_defaults_for_tools_and_temperature():
     tools = [{"type": "anything"}]
     assert c.filter_tools(tools, operation=Operation.CHAT, model="m") == tools
     assert c.allows_temperature(Operation.RESPONSES) is True
+
+
+# --- reconcile_passthrough_body orchestrator (Responses shape) ---
+
+
+def test_reconcile_responses_strips_filters_and_downgrades():
+    c = _copilot_contract()
+    body = {
+        "model": "github-copilot/gpt-5.5",
+        "input": "hi",
+        "store": True,  # stripped (not in allowlist)
+        "tools": [{"type": "function", "name": "echo"}, {"type": "web_search"}],
+        "reasoning": {"effort": "xhigh", "summary": "auto"},
+        "include": ["reasoning.encrypted_content"],
+    }
+    c.reconcile_passthrough_body(
+        body,
+        operation=Operation.RESPONSES,
+        model="github-copilot/gpt-5.5",
+        catalog_effort_values=["low", "medium", "high"],
+    )
+    assert "store" not in body
+    assert body["tools"] == [{"type": "function", "name": "echo"}]
+    assert body["reasoning"] == {"effort": "high", "summary": "auto"}
+    assert body["include"] == ["reasoning.encrypted_content"]  # preserved, not injected
+
+
+def test_reconcile_responses_rejects_temperature():
+    import pytest
+
+    from router_maestro.providers import RequestOptionError
+
+    c = _copilot_contract()
+    with pytest.raises(RequestOptionError) as excinfo:
+        c.reconcile_passthrough_body(
+            {"model": "m", "input": "hi", "temperature": 0.5},
+            operation=Operation.RESPONSES,
+            model="github-copilot/gpt-5.5",
+            catalog_effort_values=None,
+        )
+    assert excinfo.value.parameter == "temperature"
+
+
+def test_reconcile_permissive_is_noop():
+    from router_maestro.providers.outbound_contract import PermissiveOutboundContract
+
+    c = PermissiveOutboundContract()
+    body = {"model": "m", "input": "hi", "temperature": 0.5, "reasoning": {"effort": "high"}}
+    before = dict(body)
+    c.reconcile_passthrough_body(
+        body, operation=Operation.RESPONSES, model="m", catalog_effort_values=None
+    )
+    assert body == before
+
+
+# --- native Anthropic normalizers (folded in from the beta route) ---
+
+
+def test_sanitize_output_config_keeps_only_valid_effort():
+    from router_maestro.providers.copilot import CopilotOutboundContract
+
+    body = {"output_config": {"effort": "xhigh", "format": "json"}}
+    assert CopilotOutboundContract.sanitize_output_config(body) == "xhigh"
+    assert body["output_config"] == {"effort": "xhigh"}
+
+    dropped = {"output_config": {"effort": "invalid"}}
+    assert CopilotOutboundContract.sanitize_output_config(dropped) is None
+    assert "output_config" not in dropped
+
+
+def test_resolve_native_effort_downgrades_or_rejects():
+    import pytest
+
+    from router_maestro.providers import RequestOptionError
+    from router_maestro.providers.copilot import CopilotOutboundContract
+
+    # Unknown catalog (None) is preserved verbatim.
+    assert CopilotOutboundContract.resolve_native_effort("xhigh", None) == "xhigh"
+    # Downgrades to the nearest tier at or below.
+    assert (
+        CopilotOutboundContract.resolve_native_effort("xhigh", ("low", "medium", "high")) == "high"
+    )
+    # No tier at or below the request -> reject (no family fallback).
+    with pytest.raises(RequestOptionError) as excinfo:
+        CopilotOutboundContract.resolve_native_effort("low", ("high",))
+    assert excinfo.value.parameter == "output_config.effort"
+
+
+def test_reject_unpreservable_native_options_flags_temp_plus_top_p():
+    import pytest
+
+    from router_maestro.providers import RequestOptionError
+    from router_maestro.providers.copilot import CopilotOutboundContract
+
+    # Either alone is fine.
+    CopilotOutboundContract.reject_unpreservable_native_options({"temperature": 0.5})
+    CopilotOutboundContract.reject_unpreservable_native_options({"top_p": 0.9})
+    # Both together cannot be preserved on the native transport.
+    with pytest.raises(RequestOptionError) as excinfo:
+        CopilotOutboundContract.reject_unpreservable_native_options(
+            {"temperature": 0.5, "top_p": 0.9}
+        )
+    assert excinfo.value.parameter == "top_p"

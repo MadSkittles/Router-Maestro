@@ -20,12 +20,12 @@ from router_maestro.routing.capabilities import (
 from router_maestro.routing.model_ref import ModelRef
 from router_maestro.routing.route_plan import RouteCandidate, RoutePlan
 from router_maestro.server.routes.openai_responses_beta import (
+    _candidate_effort_values,
     _frame_terminal_outcome,
     _guard_chunk,
     _iter_sse_frames,
     _operation_for,
     _ResponsesResolution,
-    _strip_forbidden_fields,
     router,
 )
 
@@ -90,21 +90,86 @@ def test_operation_for_stream_flag() -> None:
     assert _operation_for(False) is Operation.RESPONSES
 
 
-def test_strip_forbidden_fields_removes_unlisted_keys() -> None:
+def test_candidate_effort_values_reads_capabilities() -> None:
     provider = MagicMock(spec=CopilotProvider)
-    provider.outbound_contract = CopilotOutboundContract()
+    provider.name = "github-copilot"
+    plan = _responses_plan_with_efforts(provider, efforts=("low", "high"))
+    assert _candidate_effort_values(plan.primary) == ["low", "high"]
+    # None catalog (cold) yields None, not an empty list.
+    bare = _responses_plan_with_efforts(provider, efforts=None)
+    assert _candidate_effort_values(bare.primary) is None
+
+
+def test_reconcile_passthrough_body_strips_and_reconciles() -> None:
+    contract = CopilotOutboundContract()
     body = {
         "model": "gpt-5.2",
         "input": "hi",
-        "store": True,  # rejected by GHC
-        "mcp_servers": [],  # not in the allowlist
+        "store": True,  # rejected by GHC -> stripped
+        "mcp_servers": [],  # not in the allowlist -> stripped
         "reasoning": {"effort": "high"},
     }
-    _strip_forbidden_fields(body, provider, Operation.RESPONSES)
+    contract.reconcile_passthrough_body(
+        body,
+        operation=Operation.RESPONSES,
+        model="gpt-5.2",
+        catalog_effort_values=["low", "medium", "high"],
+    )
     assert "store" not in body
     assert "mcp_servers" not in body
     assert body["model"] == "gpt-5.2"
     assert body["reasoning"] == {"effort": "high"}
+
+
+def test_reconcile_passthrough_body_drops_unsupported_tool() -> None:
+    contract = CopilotOutboundContract()
+    body = {
+        "model": "gpt-5.5",
+        "input": "hi",
+        "tools": [{"type": "function", "name": "echo"}, {"type": "web_search"}],
+    }
+    contract.reconcile_passthrough_body(
+        body,
+        operation=Operation.RESPONSES,
+        model="gpt-5.5",
+        catalog_effort_values=None,
+    )
+    assert body["tools"] == [{"type": "function", "name": "echo"}]
+
+
+def test_reconcile_passthrough_body_rejects_temperature() -> None:
+    from router_maestro.providers import RequestOptionError
+
+    contract = CopilotOutboundContract()
+    body = {"model": "gpt-5.5", "input": "hi", "temperature": 0.5}
+    with pytest.raises(RequestOptionError) as excinfo:
+        contract.reconcile_passthrough_body(
+            body,
+            operation=Operation.RESPONSES,
+            model="gpt-5.5",
+            catalog_effort_values=None,
+        )
+    assert excinfo.value.parameter == "temperature"
+
+
+def test_reconcile_passthrough_body_downgrades_reasoning_effort() -> None:
+    contract = CopilotOutboundContract()
+    body = {
+        "model": "gpt-5.5",
+        "input": "hi",
+        "reasoning": {"effort": "xhigh", "summary": "auto"},
+        "include": ["reasoning.encrypted_content"],
+    }
+    contract.reconcile_passthrough_body(
+        body,
+        operation=Operation.RESPONSES,
+        model="gpt-5.5",
+        catalog_effort_values=["low", "medium", "high"],
+    )
+    # Effort downgraded to the nearest supported tier; sibling keys + client
+    # include preserved (no summary/include injection on passthrough).
+    assert body["reasoning"] == {"effort": "high", "summary": "auto"}
+    assert body["include"] == ["reasoning.encrypted_content"]
 
 
 # ---------------------------------------------------------------------------
@@ -354,6 +419,113 @@ def test_nonstream_passthrough_forwards_raw_and_rewrites_model(client) -> None:
     assert "store" not in sent_payload
     assert sent_payload["previous_response_id"] == "resp_prev"
     assert sent_payload["input"] == "hi"
+
+
+def _responses_plan_with_efforts(provider, *, model="gpt-5.5", efforts=None) -> RoutePlan:
+    ref = ModelRef("github-copilot", model)
+    operation = Operation.RESPONSES
+    features = RequestFeatures()
+    capabilities = ModelCapabilities(
+        model=ref,
+        operations={operation: CapabilitySupport.SUPPORTED},
+        reasoning_effort_values=tuple(efforts) if efforts is not None else None,
+    )
+    return RoutePlan(
+        operation=operation,
+        features=features,
+        primary=RouteCandidate(
+            model=ref,
+            provider=provider,
+            capabilities=capabilities,
+            evaluated_operation=operation,
+            evaluated_features=features,
+            support=CapabilitySupport.SUPPORTED,
+        ),
+        fallbacks=(),
+        explicit=True,
+    )
+
+
+def _native_resolution(provider, plan, *, model="gpt-5.5") -> _ResponsesResolution:
+    return _ResponsesResolution(
+        provider_name="github-copilot",
+        actual_model=model,
+        copilot_provider=provider,
+        support=CapabilitySupport.SUPPORTED,
+        plan=plan,
+    )
+
+
+def test_nonstream_passthrough_drops_unsupported_tool(client) -> None:
+    provider = _native_provider()
+    plan = _responses_plan_with_efforts(provider)
+    resolution = _native_resolution(provider, plan)
+    with patch(
+        "router_maestro.server.routes.openai_responses_beta._resolve_responses_model",
+        new_callable=AsyncMock,
+        return_value=resolution,
+    ):
+        downstream = client.post(
+            "/api/openai/beta/v1/responses",
+            json={
+                "model": "github-copilot/gpt-5.5",
+                "input": "hi",
+                "tools": [
+                    {"type": "function", "name": "echo"},
+                    {"type": "web_search"},
+                ],
+            },
+        )
+    assert downstream.status_code == 200
+    sent_payload = provider._send_with_auth_retry.await_args.kwargs["json"]
+    assert sent_payload["tools"] == [{"type": "function", "name": "echo"}]
+
+
+def test_nonstream_passthrough_rejects_temperature(client) -> None:
+    provider = _native_provider()
+    plan = _responses_plan_with_efforts(provider)
+    resolution = _native_resolution(provider, plan)
+    with patch(
+        "router_maestro.server.routes.openai_responses_beta._resolve_responses_model",
+        new_callable=AsyncMock,
+        return_value=resolution,
+    ):
+        downstream = client.post(
+            "/api/openai/beta/v1/responses",
+            json={
+                "model": "github-copilot/gpt-5.5",
+                "input": "hi",
+                "temperature": 0.5,
+            },
+        )
+    assert downstream.status_code == 400
+    assert downstream.json()["error"]["type"] == "invalid_request_error"
+    # Upstream was never called — rejected locally before transport.
+    provider._send_with_auth_retry.assert_not_awaited()
+
+
+def test_nonstream_passthrough_downgrades_reasoning_effort(client) -> None:
+    provider = _native_provider()
+    plan = _responses_plan_with_efforts(provider, efforts=("low", "medium", "high"))
+    resolution = _native_resolution(provider, plan)
+    with patch(
+        "router_maestro.server.routes.openai_responses_beta._resolve_responses_model",
+        new_callable=AsyncMock,
+        return_value=resolution,
+    ):
+        downstream = client.post(
+            "/api/openai/beta/v1/responses",
+            json={
+                "model": "github-copilot/gpt-5.5",
+                "input": "hi",
+                "reasoning": {"effort": "xhigh", "summary": "auto"},
+            },
+        )
+    assert downstream.status_code == 200
+    sent_payload = provider._send_with_auth_retry.await_args.kwargs["json"]
+    assert sent_payload["reasoning"]["effort"] == "high"
+    # Sibling reasoning keys preserved (no injection on passthrough).
+    assert sent_payload["reasoning"]["summary"] == "auto"
 
 
 def test_nonstream_falls_back_to_standard_for_unsupported(client) -> None:
