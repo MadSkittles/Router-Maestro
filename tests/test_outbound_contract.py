@@ -130,26 +130,32 @@ def test_copilot_resolve_reasoning_responses_unsupported_model_rejects():
 # --- Round 2: tool filtering + temperature verdict ---
 
 
-def test_copilot_filter_tools_keeps_function_rejects_web_search():
-    import pytest
-
-    from router_maestro.providers import RequestOptionError
-
+def test_copilot_filter_tools_keeps_function_drops_web_search():
     c = _copilot_contract()
     # A function tool and an unknown/other type are kept; a known-unsupported
-    # type raises (behavior preserved from filter_unsupported_tools).
+    # type (web_search) is silently dropped rather than rejected, so clients
+    # like Codex that inject it unconditionally still get their other tools.
     kept = c.filter_tools(
         [{"type": "function", "name": "echo"}, {"type": "custom_future"}],
         operation=Operation.RESPONSES,
         model="github-copilot/gpt-5.5",
     )
     assert kept == [{"type": "function", "name": "echo"}, {"type": "custom_future"}]
-    with pytest.raises(RequestOptionError):
-        c.filter_tools(
-            [{"type": "web_search"}],
-            operation=Operation.RESPONSES,
-            model="github-copilot/gpt-5.5",
-        )
+
+    mixed = c.filter_tools(
+        [{"type": "function", "name": "echo"}, {"type": "web_search"}],
+        operation=Operation.RESPONSES,
+        model="github-copilot/gpt-5.5",
+    )
+    assert mixed == [{"type": "function", "name": "echo"}]
+
+    # web_search alone leaves nothing → None
+    only_unsupported = c.filter_tools(
+        [{"type": "web_search"}],
+        operation=Operation.RESPONSES,
+        model="github-copilot/gpt-5.5",
+    )
+    assert only_unsupported is None
 
 
 def test_copilot_filter_tools_rejects_empty_namespace():

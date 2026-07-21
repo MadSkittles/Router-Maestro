@@ -74,33 +74,30 @@ class TestFilterUnsupportedTools:
         "tool_type",
         ["web_search", "web_search_preview", "code_interpreter"],
     )
-    def test_rejects_unsupported_tool_types(self, tool_type):
-        with pytest.raises(RequestOptionError) as caught:
-            self.provider._build_responses_payload(
-                ResponsesRequest(
-                    model="gpt-5.4",
-                    input="hi",
-                    tools=[{"type": tool_type}],
-                )
+    def test_drops_unsupported_tool_types(self, tool_type):
+        # Copilot Responses cannot express these; they are silently dropped
+        # rather than 400-ing the whole request (Codex injects web_search
+        # unconditionally). With no other tools the payload carries none.
+        payload = self.provider._build_responses_payload(
+            ResponsesRequest(
+                model="gpt-5.4",
+                input="hi",
+                tools=[{"type": tool_type}],
             )
+        )
+        assert "tools" not in payload
 
-        assert caught.value.kind is ProviderFailureKind.CLIENT_REQUEST
-        assert caught.value.parameter == "tools"
-        assert caught.value.model == "gpt-5.4"
-
-    def test_mixed_supported_and_unsupported_tools_rejects_entire_request(self):
+    def test_mixed_supported_and_unsupported_tools_drops_only_unsupported(self):
         tools = [
             {"type": "function", "name": "lookup", "parameters": {}},
             {"type": "web_search"},
         ]
 
-        with pytest.raises(RequestOptionError) as caught:
-            self.provider._build_responses_payload(
-                ResponsesRequest(model="gpt-5.4", input="hi", tools=tools)
-            )
+        payload = self.provider._build_responses_payload(
+            ResponsesRequest(model="gpt-5.4", input="hi", tools=tools)
+        )
 
-        assert caught.value.parameter == "tools"
-        assert caught.value.model == "gpt-5.4"
+        assert payload["tools"] == [{"type": "function", "name": "lookup", "parameters": {}}]
 
     def test_keeps_unknown_non_function_types(self):
         # denylist semantics: anything not in UNSUPPORTED_TOOL_TYPES passes through
