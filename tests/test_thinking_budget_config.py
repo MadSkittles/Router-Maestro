@@ -1145,6 +1145,55 @@ class TestAnthropicRouteThinkingBudget:
         assert fallback.requests == []
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("stream", [False, True])
+    async def test_scoped_primary_that_loses_thinking_headroom_still_proceeds(
+        self,
+        stream,
+    ):
+        """A scoped primary whose thinking is disabled for lack of output
+        headroom must proceed rather than 400.
+
+        When the requested ``max_tokens`` is too small to fit any thinking
+        budget, ``_apply_thinking_budget`` disables thinking for that candidate.
+        The primary is the only executable route, and a non-reasoning request
+        always runs on a reasoning-capable route, so preparation must succeed.
+        A scoped fallback that loses the same headroom is still dropped.
+        """
+        router, _primary, _fallback, _priorities = _auto_thinking_fallback_router(
+            primary_fail=False,
+            fallback_supports_thinking=True,
+            auto_enable=False,
+        )
+        request = ChatRequest(
+            model="shared",
+            messages=[Message(role="user", content="hi")],
+            max_tokens=200,
+            stream=stream,
+            thinking_budget=8192,
+            thinking_type="enabled",
+        )
+        plan = await router.plan_chat_completion(request, stream=stream)
+        candidate_requests = {
+            candidate.model: await _apply_thinking_budget(
+                router,
+                request,
+                request.model,
+                candidate=candidate,
+            )
+            for candidate in (plan.primary, *plan.prevalidation_fallbacks)
+        }
+
+        prepared = router.prepare_planned_chat_completion(
+            plan,
+            candidate_requests[plan.primary.model],
+            candidate_requests=candidate_requests,
+        )
+
+        assert prepared.plan.fallbacks == ()
+        assert candidate_requests[plan.primary.model].thinking_type is None
+        assert candidate_requests[plan.primary.model].thinking_budget is None
+
+    @pytest.mark.asyncio
     async def test_auto_enabled_primary_keeps_non_reasoning_stream_fallback(self, monkeypatch):
         router, primary, fallback, priorities = _auto_thinking_fallback_router()
         monkeypatch.setattr(anthropic_route, "get_router", lambda: router)
