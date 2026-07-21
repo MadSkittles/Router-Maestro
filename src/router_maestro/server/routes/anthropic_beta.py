@@ -719,6 +719,78 @@ async def _stream_native_candidate(
         await close_async_iterator(stream)
 
 
+async def _beta_planned_native_stream(
+    plan: RoutePlan,
+    body: dict,
+    *,
+    pipeline=None,
+) -> AsyncGenerator[str, None]:
+    """Prime and stream a native beta plan under the SSE keepalive wrapper.
+
+    ``execute_plan_stream`` primes the upstream by awaiting Copilot's first
+    frame, which for a large context can take minutes. Running that await here
+    — after the eager ping and inside the generator driven by
+    ``resilient_sse_generator`` — keeps keepalive pings flowing during the
+    priming window, so the client's streaming idle watchdog never starves.
+
+    A stream-open failure therefore surfaces as an SSE ``error`` event rather
+    than an HTTP status, mirroring the standard Anthropic streaming path (the
+    response headers have already committed by the time priming runs).
+    """
+    yield ANTHROPIC_PING_FRAME
+    try:
+        selected_stream, _used_provider = await Router.execute_plan_stream(
+            plan,
+            lambda candidate: _stream_native_candidate(candidate, body),
+            log_prefix="Beta native",
+        )
+    except ProviderError as error:
+        logger.error(
+            "beta_native_stream_open_failed kind=%s retryable=%s",
+            error.kind.value,
+            str(error.retryable).lower(),
+        )
+        if pipeline is not None:
+            pipeline.finish(
+                wire_status=200,
+                outcome=exception_outcome(error.safe_message, code="provider_error"),
+                body_summary=error.safe_message,
+            )
+        yield _sse_error_event(error)
+        return
+    except asyncio.CancelledError:
+        # Client disconnected while priming the upstream — the very window this
+        # eager-ping restructure protects. Finalize the ledger as cancelled so
+        # the outcome matches an in-stream disconnect (``_encode_native_stream_errors``
+        # handles the same case once frames are flowing).
+        if pipeline is not None:
+            pipeline.finish(wire_status=200, outcome=client_cancelled_outcome())
+        raise
+    except Exception:
+        # An unexpected priming failure (routing/normalization bug, provider
+        # hook) would otherwise reach ``resilient_sse_generator``, which logs
+        # and swallows it — leaving the client with a lone ping + EOF and the
+        # ledger unfinished. Mirror the standard path's generic handler.
+        logger.error("Unexpected error opening beta native stream", exc_info=True)
+        if pipeline is not None:
+            pipeline.finish(
+                wire_status=200,
+                outcome=exception_outcome("Internal server error", code="server_error"),
+                body_summary="Internal server error",
+            )
+        yield _sse_error_event(RuntimeError("Internal server error"))
+        return
+    # Own the delegated iterator so its cleanup (upstream close, cancellation
+    # outcome) runs deterministically when this generator is closed, rather
+    # than being deferred to async-generator finalization.
+    encoded = _encode_native_stream_errors(selected_stream, pipeline=pipeline)
+    try:
+        async for frame in encoded:
+            yield frame
+    finally:
+        await close_async_iterator(encoded)
+
+
 async def _encode_native_stream_errors(
     stream: AsyncIterator[str],
     *,
@@ -1194,21 +1266,12 @@ async def beta_messages(raw_request: FastAPIRequest):
             tool_names=tool_names,
         )
         if native_resolution.plan is not None:
-            try:
-                selected_stream, _used_provider = await Router.execute_plan_stream(
-                    native_resolution.plan,
-                    lambda candidate: _stream_native_candidate(candidate, body),
-                    log_prefix="Beta native",
-                )
-            except ProviderError as e:
-                logger.error(
-                    "beta_native_stream_open_failed kind=%s retryable=%s",
-                    e.kind.value,
-                    str(e.retryable).lower(),
-                )
-                return protocol_error_response(e, "anthropic")
             return sse_streaming_response(
-                _encode_native_stream_errors(selected_stream, pipeline=pipeline),
+                _beta_planned_native_stream(
+                    native_resolution.plan,
+                    body,
+                    pipeline=pipeline,
+                ),
                 keepalive_frame=ANTHROPIC_PING_FRAME,
             )
         return sse_streaming_response(

@@ -66,6 +66,29 @@ _VALID_MESSAGE_START = {
 _MISSING = object()
 
 
+async def _empty_async_gen():
+    """An async generator that yields nothing — stands in for a stream body."""
+    return
+    yield  # pragma: no cover
+
+
+def _parse_sse_events(text: str) -> list[tuple[str, dict | None]]:
+    """Parse an SSE response body into ``(event, data)`` tuples."""
+    events: list[tuple[str, dict | None]] = []
+    event_type: str | None = None
+    for line in text.splitlines():
+        if line.startswith("event: "):
+            event_type = line.removeprefix("event: ")
+        elif line.startswith("data: ") and event_type is not None:
+            try:
+                data = json.loads(line.removeprefix("data: "))
+            except json.JSONDecodeError:
+                data = None
+            events.append((event_type, data))
+            event_type = None
+    return events
+
+
 def _message_start_with_model(value=_MISSING):
     event = deepcopy(_VALID_MESSAGE_START)
     if value is _MISSING:
@@ -1209,16 +1232,24 @@ class TestBetaMessagesEndpoint:
             for line in downstream.text.splitlines()
             if line.startswith("event: ")
         ]
+        # The planned path emits an eager keepalive ping before priming the
+        # upstream; the legacy passthrough path primes inside the wrapper and
+        # has no eager ping.
+        ping_prefix = ["ping"] if path == "planned" else []
         assert context.pipeline is not None
         assert context.pipeline.outcome is not None
         assert (context.pipeline.leak_guard is not None) is leak_enabled
         if initially_enabled:
-            assert event_types == ["message_start", "error"]
+            assert event_types == ping_prefix + ["message_start", "error"]
             assert context.pipeline.outcome.transport is TransportTermination.EXCEPTION
             assert context.pipeline.outcome.response_status is ResponseStatus.FAILED
             assert context.pipeline.outcome.error.code == "overloaded"
         else:
-            assert event_types == ["message_start", "content_block_delta", "message_stop"]
+            assert event_types == ping_prefix + [
+                "message_start",
+                "content_block_delta",
+                "message_stop",
+            ]
             assert context.pipeline.outcome.transport is TransportTermination.EXPLICIT_TERMINAL
             assert context.pipeline.outcome.response_status is ResponseStatus.COMPLETED
 
@@ -2075,6 +2106,7 @@ class TestBetaMessagesEndpoint:
         snapshot = _GuardSnapshot(config)
         lease = _GuardLease(config)
         captured_contexts = []
+        stream_started = asyncio.Event()
 
         class Repository:
             def read(self):
@@ -2095,6 +2127,7 @@ class TestBetaMessagesEndpoint:
             from router_maestro.runtime import current_request_context
 
             captured_contexts.append(current_request_context())
+            stream_started.set()
             yield f"event: message_start\ndata: {json.dumps(_VALID_MESSAGE_START)}\n\n"
             await asyncio.Event().wait()
 
@@ -2154,6 +2187,10 @@ class TestBetaMessagesEndpoint:
                         "body": request_body,
                         "more_body": False,
                     }
+                # Only disconnect once the upstream stream has actually begun,
+                # so this exercises a mid-stream cancel rather than a cancel
+                # during the eager-ping priming window.
+                await stream_started.wait()
                 return {"type": "http.disconnect"}
 
             async def send(_message):
@@ -2615,10 +2652,9 @@ class TestBetaMessagesEndpoint:
             if stream
             else nullcontext(),
             patch(
-                "router_maestro.server.routes.anthropic_beta.Router.execute_plan_stream",
-                new_callable=AsyncMock,
-                return_value=(object(), "github-copilot"),
-            ) as execute_stream,
+                "router_maestro.server.routes.anthropic_beta._beta_planned_native_stream",
+                return_value=_empty_async_gen(),
+            ) as planned_stream,
         ):
             response = client.post(
                 "/api/anthropic/beta/v1/messages",
@@ -2627,7 +2663,9 @@ class TestBetaMessagesEndpoint:
 
         assert response.status_code == 200
         if stream:
-            selected_plan = execute_stream.await_args.args[0]
+            # Priming is lazy inside the streaming generator now, so assert on
+            # the plan handed to it rather than a synchronously-awaited open.
+            selected_plan = planned_stream.call_args.args[0]
             assert selected_plan.primary.model.upstream_id == "claude-compatible"
             provider._send_with_auth_retry.assert_not_awaited()
         else:
@@ -2644,7 +2682,7 @@ class TestBetaMessagesEndpoint:
             (529, ProviderFailureKind.RATE_LIMIT, "overloaded_error"),
         ],
     )
-    def test_planned_native_stream_open_failure_uses_typed_anthropic_json(
+    def test_planned_native_stream_open_failure_emits_typed_anthropic_sse_error(
         self,
         client,
         status_code,
@@ -2690,15 +2728,146 @@ class TestBetaMessagesEndpoint:
                 },
             )
 
-        assert response.status_code == status_code
-        assert response.headers["content-type"].startswith("application/json")
-        assert response.json() == {
-            "type": "error",
-            "error": {
-                "type": expected_type,
-                "message": "Safe planned stream failure",
-            },
-        }
+        # Headers commit for keepalive before priming runs, so an open failure
+        # surfaces as a 200 + SSE error event (matching the standard path)
+        # rather than a typed HTTP status.
+        assert response.status_code == 200
+        assert response.headers["content-type"].startswith("text/event-stream")
+        frames = _parse_sse_events(response.text)
+        assert ("ping", {"type": "ping"}) in frames
+        error_frames = [data for event, data in frames if event == "error"]
+        assert error_frames == [
+            {
+                "type": "error",
+                "error": {
+                    "type": expected_type,
+                    "message": "Safe planned stream failure",
+                },
+            }
+        ]
+
+    @pytest.mark.asyncio
+    async def test_planned_native_stream_pings_during_upstream_priming(self):
+        """Keepalive pings must keep flowing while priming is blocked.
+
+        The client's streaming idle watchdog fires after 300s of silence.
+        ``execute_plan_stream`` primes the upstream by awaiting Copilot's first
+        frame, which for a large context can take minutes. That await must run
+        *inside* the SSE keepalive wrapper. This drives the real wrapper over a
+        generator whose priming blocks on an event with a short keepalive
+        interval, and asserts a recurring keepalive ping is delivered *before*
+        priming completes — i.e. the priming window is covered, not just the
+        eager ping.
+        """
+        from router_maestro.server.routes.anthropic_beta import (
+            _beta_planned_native_stream,
+        )
+        from router_maestro.server.streaming import resilient_sse_generator
+
+        release_priming = asyncio.Event()
+
+        async def _selected_stream():
+            yield f"event: message_start\ndata: {json.dumps(_VALID_MESSAGE_START)}\n\n"
+            yield 'event: message_stop\ndata: {"type":"message_stop"}\n\n'
+
+        async def _blocked_execute_plan_stream(*_args, **_kwargs):
+            await release_priming.wait()
+            return _selected_stream(), "github-copilot"
+
+        plan = self._native_plan(
+            _native_provider(),
+            CapabilitySupport.SUPPORTED,
+            model="priming-window",
+        )
+        inner = _beta_planned_native_stream(plan, {"model": "router-maestro"}, pipeline=None)
+        # Wrap exactly as the route does, so keepalive frames are real pings.
+        wrapped = resilient_sse_generator(inner, keepalive_frame=ANTHROPIC_PING_FRAME)
+
+        events: list[str] = []
+        with (
+            patch(
+                "router_maestro.server.routes.anthropic_beta.Router.execute_plan_stream",
+                side_effect=_blocked_execute_plan_stream,
+            ),
+            patch("router_maestro.server.streaming.SSE_KEEPALIVE_INTERVAL", 0.02),
+        ):
+            # First pull yields the eager ping (inner suspends before priming).
+            events.append(await asyncio.wait_for(wrapped.__anext__(), timeout=1.0))
+            # Second pull resumes inner into the blocked priming await; since it
+            # cannot complete within the keepalive interval, the wrapper emits a
+            # recurring keepalive ping. This is the assertion that matters: the
+            # priming window is covered, not just the eager ping.
+            events.append(await asyncio.wait_for(wrapped.__anext__(), timeout=1.0))
+            # Release priming and drain the content frames.
+            release_priming.set()
+            for _ in range(10):
+                try:
+                    events.append(await asyncio.wait_for(wrapped.__anext__(), timeout=1.0))
+                except StopAsyncIteration:
+                    break
+
+        ping_frames = [f for f in events if '"type": "ping"' in f]
+        assert len(ping_frames) >= 2  # eager ping + at least one recurring keepalive
+        assert any("message_start" in f for f in events)
+        # Both pings precede the first content frame.
+        first_content = next(i for i, f in enumerate(events) if "message_start" in f)
+        assert sum('"type": "ping"' in f for f in events[:first_content]) >= 2
+
+    def test_planned_native_stream_unexpected_priming_error_emits_sse_error(self, client):
+        """An unexpected priming exception becomes a sanitized SSE error.
+
+        Only ``ProviderError``/``CancelledError`` are semantically handled; any
+        other exception (routing/normalization bug, provider hook) must not
+        leak to ``resilient_sse_generator``, which would swallow it and leave
+        the client with a lone ping + EOF. It is converted to one sanitized
+        Anthropic error event and a failed pipeline outcome, matching the
+        standard path.
+        """
+        from router_maestro.routing.router import Router
+
+        provider = _native_provider()
+        plan = self._native_plan(
+            provider,
+            CapabilitySupport.SUPPORTED,
+            model="priming-boom",
+        )
+        model_router = Router.__new__(Router)
+        model_router._models_cache = {}
+        model_router.plan_route = AsyncMock(return_value=plan)
+
+        secret = "internal-priming-detail-should-not-leak"
+
+        with (
+            patch(
+                "router_maestro.server.routes.anthropic_beta.get_router",
+                return_value=model_router,
+            ),
+            patch(
+                "router_maestro.server.routes.anthropic_beta.Router.execute_plan_stream",
+                new_callable=AsyncMock,
+                side_effect=RuntimeError(secret),
+            ),
+        ):
+            response = client.post(
+                "/api/anthropic/beta/v1/messages",
+                json={
+                    "model": "router-maestro",
+                    "max_tokens": 100,
+                    "stream": True,
+                    "messages": [{"role": "user", "content": "Hi"}],
+                },
+            )
+
+        assert response.status_code == 200
+        assert response.headers["content-type"].startswith("text/event-stream")
+        frames = _parse_sse_events(response.text)
+        assert ("ping", {"type": "ping"}) in frames
+        error_frames = [data for event, data in frames if event == "error"]
+        assert len(error_frames) == 1
+        assert error_frames[0]["type"] == "error"
+        assert error_frames[0]["error"]["message"] == "Internal server error"
+        # The private exception detail must never reach the client.
+        assert secret not in response.text
 
     @pytest.mark.parametrize("stream", [False, True], ids=["nonstream", "stream"])
     @pytest.mark.parametrize(
@@ -4528,18 +4697,17 @@ class TestBetaMessagesEndpoint:
         secondary._stream_with_auth_retry.assert_called_once()
 
     @pytest.mark.parametrize(
-        ("failure", "expected_status"),
+        "failure",
         [
-            pytest.param("http-503", 503, id="retryable-status-exhaustion"),
-            pytest.param("malformed", 502, id="malformed-protocol-exhaustion"),
+            pytest.param("http-503", id="retryable-status-exhaustion"),
+            pytest.param("malformed", id="malformed-protocol-exhaustion"),
         ],
     )
-    def test_native_stream_precommit_exhaustion_returns_json_error(
+    def test_native_stream_precommit_exhaustion_emits_sse_error(
         self,
         client,
         caplog: pytest.LogCaptureFixture,
         failure: str,
-        expected_status: int,
     ):
         from router_maestro.routing.router import Router
 
@@ -4608,13 +4776,19 @@ class TestBetaMessagesEndpoint:
                 },
             )
 
-        assert downstream.status_code == expected_status
-        assert downstream.headers["content-type"].startswith("application/json")
-        assert downstream.json()["type"] == "error"
-        assert downstream.json()["error"]["type"] == "api_error"
+        # Priming runs inside the committed SSE stream now, so exhausting every
+        # candidate surfaces as a 200 + SSE error event rather than an HTTP
+        # status. The private upstream body must never leak to client or logs.
+        assert downstream.status_code == 200
+        assert downstream.headers["content-type"].startswith("text/event-stream")
+        frames = _parse_sse_events(downstream.text)
+        assert ("ping", {"type": "ping"}) in frames
+        error_frames = [data for event, data in frames if event == "error"]
+        assert len(error_frames) == 1
+        assert error_frames[0]["type"] == "error"
+        assert error_frames[0]["error"]["type"] == "api_error"
         assert marker not in downstream.text
         assert marker not in caplog.text
-        assert "data:" not in downstream.text
         for provider in providers:
             provider._stream_with_auth_retry.assert_called_once()
 
