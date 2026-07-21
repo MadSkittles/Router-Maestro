@@ -4,6 +4,17 @@ All notable changes to Router-Maestro are documented here.
 
 ---
 
+## v0.7.5 (2026-07-21)
+
+### Fixes
+
+- **Vision detection tolerates non-string JSON Schema tool types.** Guard the
+  image-block membership test in `_contains_image` with an `isinstance(str)`
+  check so a tool's JSON Schema `type` field expressed as a list (e.g.
+  `["string", "null"]`) no longer raises `TypeError: unhashable type: 'list'`
+  while walking the request for image content. Capability/vision detection now
+  returns cleanly instead of crashing on such payloads.
+
 ## v0.7.4 (2026-07-21)
 
 ### Fixes
