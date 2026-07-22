@@ -898,16 +898,18 @@ class TestApplyThinkingBudgetNative:
     @patch("router_maestro.routing.get_router")
     @patch("router_maestro.config.load_priorities_config")
     @patch("router_maestro.providers.copilot.resolve_thinking_budget")
-    def test_no_change_when_client_sets_budget(self, mock_resolve_tb, mock_config, mock_router):
+    def test_non_reasoning_model_strips_client_budget(
+        self, mock_resolve_tb, mock_config, mock_router
+    ):
         mock_config.return_value = MagicMock(
             thinking=MagicMock(default_budget=16000, auto_enable=False, model_budgets={})
         )
         mock_router.return_value = MagicMock(_models_cache={})
-        mock_resolve_tb.return_value = (5000, "enabled")
 
         body = {"thinking": {"type": "enabled", "budget_tokens": 5000}}
         result = _apply_thinking_budget_native(body, "claude-sonnet-4.5")
-        assert result["thinking"]["budget_tokens"] == 5000
+        assert "thinking" not in result
+        mock_resolve_tb.assert_not_called()
 
     @patch("router_maestro.routing.get_router")
     @patch("router_maestro.config.load_priorities_config")
@@ -924,6 +926,44 @@ class TestApplyThinkingBudgetNative:
         body = {"thinking": {"type": "enabled", "budget_tokens": 5000}}
         result = _apply_thinking_budget_native(body, "claude-sonnet-4.5")
         assert "thinking" not in result
+
+    @patch("router_maestro.routing.get_router")
+    @patch("router_maestro.providers.copilot.resolve_thinking_budget")
+    def test_haiku_strips_thinking_static_cold_cache(self, mock_resolve_tb, mock_router):
+        """Cold cache: static _known_reasoning_support(False) still strips."""
+        mock_router.return_value = MagicMock(_models_cache={})
+        body = {
+            "thinking": {"type": "enabled", "budget_tokens": 16000},
+            "output_config": {"effort": "high"},
+            "max_tokens": 4096,
+        }
+
+        result = _apply_thinking_budget_native(body, "claude-haiku-4.5")
+
+        assert "thinking" not in result
+        assert "output_config" not in result
+        mock_resolve_tb.assert_not_called()
+
+    @patch("router_maestro.routing.get_router")
+    @patch("router_maestro.providers.copilot.resolve_thinking_budget")
+    def test_non_reasoning_model_strips_thinking_warm_cache(self, mock_resolve_tb, mock_router):
+        """Warm cache: supports_thinking False strips even for unknown families."""
+        model_info = ModelInfo(
+            id="some-non-reasoning-model",
+            name="Some Model",
+            provider="github-copilot",
+            max_output_tokens=4096,
+            supports_thinking=False,
+        )
+        mock_router.return_value = MagicMock(
+            _models_cache={"some-non-reasoning-model": ("github-copilot", model_info)}
+        )
+        body = {"thinking": {"type": "enabled", "budget_tokens": 16000}}
+
+        result = _apply_thinking_budget_native(body, "some-non-reasoning-model")
+
+        assert "thinking" not in result
+        mock_resolve_tb.assert_not_called()
 
 
 class TestSanitizeOutputConfig:
@@ -2371,11 +2411,9 @@ class TestBetaMessagesEndpoint:
         provider._send_with_auth_retry.assert_not_awaited()
         provider._stream_with_auth_retry.assert_not_called()
 
-    @pytest.mark.parametrize("stream", [False, True], ids=["nonstream", "stream"])
-    def test_native_rejects_reasoning_tier_when_only_higher_tiers_exist(
+    def test_native_clamps_up_reasoning_tier_when_only_higher_tiers_exist(
         self,
         client,
-        stream,
     ):
         provider = _native_provider()
         model = ModelInfo(
@@ -2400,143 +2438,24 @@ class TestBetaMessagesEndpoint:
                 json={
                     "model": "github-copilot/claude-higher-only",
                     "max_tokens": 100,
-                    "stream": stream,
+                    "stream": False,
                     "messages": [{"role": "user", "content": "Hi"}],
                     "output_config": {"effort": "low"},
                 },
             )
 
-        assert response.status_code == 400
-        assert "output_config.effort" in response.json()["error"]["message"]
-        provider.ensure_token.assert_not_awaited()
-        provider._send_with_auth_retry.assert_not_awaited()
-        provider._stream_with_auth_retry.assert_not_called()
-
-    @pytest.mark.parametrize("stream", [False, True], ids=["nonstream", "stream"])
-    def test_native_effort_prevalidation_does_not_spend_retry_slot_on_incompatible_fallback(
-        self,
-        client,
-        stream,
-    ):
-        from router_maestro.routing.router import Router
-
-        def candidate(provider, model: str, efforts: tuple[str, ...]) -> RouteCandidate:
-            ref = ModelRef("github-copilot", model)
-            operation = Operation.NATIVE_ANTHROPIC
-            features = RequestFeatures(reasoning=True)
-            capabilities = ModelCapabilities(
-                model=ref,
-                operations={
-                    operation: CapabilitySupport.SUPPORTED,
-                },
-                features={Feature.REASONING: CapabilitySupport.SUPPORTED},
-                reasoning_effort_values=efforts,
-            )
-            return RouteCandidate(
-                model=ref,
-                provider=provider,
-                capabilities=capabilities,
-                evaluated_operation=operation,
-                evaluated_features=features,
-                support=CapabilitySupport.SUPPORTED,
-            )
-
-        primary = _native_provider()
-        rejected = _native_provider()
-        compatible = _native_provider()
-        primary_candidate = candidate(primary, "claude-primary", ("low", "medium"))
-        rejected_candidate = candidate(rejected, "claude-higher-only", ("medium", "high"))
-        compatible_candidate = candidate(compatible, "claude-compatible", ("low", "medium"))
-        plan = RoutePlan(
-            operation=Operation.NATIVE_ANTHROPIC,
-            features=RequestFeatures(reasoning=True),
-            primary=primary_candidate,
-            fallbacks=(rejected_candidate,),
-            explicit=False,
-            fallback_pool=(rejected_candidate, compatible_candidate),
-            max_fallback_attempts=1,
-        )
-        model_router = Router.__new__(Router)
-        model_router._models_cache = {}
-        model_router.plan_route = AsyncMock(return_value=plan)
-
-        if stream:
-
-            class _StreamResponse:
-                def __init__(self, status_code: int, lines: list[str]) -> None:
-                    self.status_code = status_code
-                    self._lines = lines
-
-                async def aread(self) -> bytes:
-                    return b'{"error":{"message":"retryable"}}'
-
-                async def aiter_lines(self):
-                    for line in self._lines:
-                        yield line
-
-            def context(response):
-                @asynccontextmanager
-                async def manager():
-                    yield response
-
-                return manager()
-
-            primary._stream_with_auth_retry = MagicMock(
-                return_value=context(_StreamResponse(503, []))
-            )
-            rejected._stream_with_auth_retry = MagicMock(
-                side_effect=AssertionError("incompatible fallback must not open")
-            )
-            compatible._stream_with_auth_retry = MagicMock(
-                return_value=context(
-                    _StreamResponse(
-                        200,
-                        [
-                            "event: message_start",
-                            f"data: {json.dumps(_VALID_MESSAGE_START)}",
-                            "",
-                        ],
-                    )
-                )
-            )
-        else:
-            primary._send_with_auth_retry.side_effect = ProviderError(
-                "primary retryable",
-                status_code=503,
-                retryable=True,
-                kind=ProviderFailureKind.UPSTREAM_STATUS,
-            )
-
-        with patch(
-            "router_maestro.server.routes.anthropic_beta.get_router",
-            return_value=model_router,
-        ):
-            response = client.post(
-                "/api/anthropic/beta/v1/messages",
-                json={
-                    "model": "router-maestro",
-                    "max_tokens": 100,
-                    "stream": stream,
-                    "messages": [{"role": "user", "content": "Hi"}],
-                    "output_config": {"effort": "low"},
-                },
-            )
-
+        # Category B: ``low`` is below the ``medium`` floor -> clamp up and
+        # proceed to the provider instead of returning a 400.
         assert response.status_code == 200
-        rejected.ensure_token.assert_not_awaited()
-        rejected._send_with_auth_retry.assert_not_awaited()
-        if stream:
-            rejected._stream_with_auth_retry.assert_not_called()
-            compatible._stream_with_auth_retry.assert_called_once()
-        else:
-            compatible._send_with_auth_retry.assert_awaited_once()
+        provider.ensure_token.assert_awaited()
+        provider._send_with_auth_retry.assert_awaited_once()
 
-    @pytest.mark.parametrize("stream", [False, True], ids=["nonstream", "stream"])
-    def test_native_primary_effort_error_does_not_switch_to_compatible_fallback(
+    def test_native_primary_effort_below_floor_clamps_up_on_primary(
         self,
         client,
-        stream,
     ):
+        """A sub-floor effort on the primary clamps up and runs on the primary;
+        routing does not fall through to a lower-floor fallback."""
         from router_maestro.routing.router import Router
 
         primary = _native_provider()
@@ -2583,20 +2502,18 @@ class TestBetaMessagesEndpoint:
                 json={
                     "model": "router-maestro",
                     "max_tokens": 100,
-                    "stream": stream,
+                    "stream": False,
                     "messages": [{"role": "user", "content": "Hi"}],
                     "output_config": {"effort": "low"},
                 },
             )
 
-        assert response.status_code == 400
-        assert "output_config.effort" in response.json()["error"]["message"]
-        primary.ensure_token.assert_not_awaited()
+        # ``low`` clamps up to the primary's ``medium`` floor and succeeds on the
+        # primary — the compatible fallback is never consulted.
+        assert response.status_code == 200
+        primary._send_with_auth_retry.assert_awaited_once()
         fallback.ensure_token.assert_not_awaited()
-        primary._send_with_auth_retry.assert_not_awaited()
         fallback._send_with_auth_retry.assert_not_awaited()
-        primary._stream_with_auth_retry.assert_not_called()
-        fallback._stream_with_auth_retry.assert_not_called()
 
     @pytest.mark.parametrize("stream", [False, True], ids=["nonstream", "stream"])
     @pytest.mark.parametrize(
@@ -5677,7 +5594,7 @@ class TestBetaMessagesEndpoint:
     ):
         provider = _native_provider()
         mock_resolve.return_value = _NativeModelResolution(
-            _ResolvedModel("github-copilot", "claude-sonnet-4.5", provider),
+            _ResolvedModel("github-copilot", "claude-opus-4.6", provider),
             CapabilitySupport.SUPPORTED,
         )
         mock_router.return_value = MagicMock(_models_cache={})
@@ -5685,7 +5602,7 @@ class TestBetaMessagesEndpoint:
         response = non_raising_client.post(
             "/api/anthropic/beta/v1/messages",
             json={
-                "model": "claude-sonnet-4.5",
+                "model": "claude-opus-4.6",
                 "max_tokens": max_tokens,
                 "messages": [{"role": "user", "content": "Hi"}],
                 "thinking": {"type": "enabled", "budget_tokens": 1024},
@@ -5719,7 +5636,7 @@ class TestBetaMessagesEndpoint:
     ):
         provider = _native_provider()
         mock_resolve.return_value = _NativeModelResolution(
-            _ResolvedModel("github-copilot", "claude-sonnet-4.5", provider),
+            _ResolvedModel("github-copilot", "claude-opus-4.6", provider),
             CapabilitySupport.SUPPORTED,
         )
         mock_router.return_value = MagicMock(_models_cache={})
@@ -5730,7 +5647,7 @@ class TestBetaMessagesEndpoint:
         response = non_raising_client.post(
             "/api/anthropic/beta/v1/messages",
             json={
-                "model": "claude-sonnet-4.5",
+                "model": "claude-opus-4.6",
                 "max_tokens": 8192,
                 "messages": [{"role": "user", "content": "Hi"}],
                 "thinking": {"type": "enabled"},

@@ -112,19 +112,37 @@ def test_copilot_resolve_reasoning_responses_cold_downgrades_via_upstream():
     assert r.effort == "max"
 
 
-def test_copilot_resolve_reasoning_responses_unsupported_model_rejects():
-    import pytest
+def test_copilot_resolve_reasoning_responses_unsupported_model_strips():
+    r = _copilot_contract().resolve_reasoning(
+        model="github-copilot/gpt-4o",  # known_reasoning_support False
+        reasoning_effort="high",
+        thinking_budget=None,
+        catalog_effort_values=None,
+        operation=Operation.RESPONSES,
+    )
+    assert r.effort is None
 
-    from router_maestro.providers import RequestOptionError
 
-    with pytest.raises(RequestOptionError):
-        _copilot_contract().resolve_reasoning(
-            model="github-copilot/gpt-4o",  # known_reasoning_support False
-            reasoning_effort="high",
-            thinking_budget=None,
-            catalog_effort_values=None,
-            operation=Operation.RESPONSES,
-        )
+def test_copilot_resolve_reasoning_responses_clamps_up_below_floor():
+    r = _copilot_contract().resolve_reasoning(
+        model="github-copilot/claude-opus-4.7",
+        reasoning_effort="low",
+        thinking_budget=None,
+        catalog_effort_values=["medium", "high"],
+        operation=Operation.RESPONSES,
+    )
+    assert r.effort == "medium"
+
+
+def test_copilot_resolve_reasoning_responses_empty_catalog_strips():
+    r = _copilot_contract().resolve_reasoning(
+        model="github-copilot/claude-haiku-4.5",
+        reasoning_effort="high",
+        thinking_budget=None,
+        catalog_effort_values=[],
+        operation=Operation.RESPONSES,
+    )
+    assert r.effort is None
 
 
 # --- Round 2: tool filtering + temperature verdict ---
@@ -255,10 +273,7 @@ def test_sanitize_output_config_keeps_only_valid_effort():
     assert "output_config" not in dropped
 
 
-def test_resolve_native_effort_downgrades_or_rejects():
-    import pytest
-
-    from router_maestro.providers import RequestOptionError
+def test_resolve_native_effort_downgrades_or_clamps_up():
     from router_maestro.providers.copilot import CopilotOutboundContract
 
     # Unknown catalog (None) is preserved verbatim.
@@ -267,10 +282,8 @@ def test_resolve_native_effort_downgrades_or_rejects():
     assert (
         CopilotOutboundContract.resolve_native_effort("xhigh", ("low", "medium", "high")) == "high"
     )
-    # No tier at or below the request -> reject (no family fallback).
-    with pytest.raises(RequestOptionError) as excinfo:
-        CopilotOutboundContract.resolve_native_effort("low", ("high",))
-    assert excinfo.value.parameter == "output_config.effort"
+    # No tier at or below the request -> clamp UP to the lowest available.
+    assert CopilotOutboundContract.resolve_native_effort("low", ("high",)) == "high"
 
 
 def test_reject_unpreservable_native_options_flags_temp_plus_top_p():
