@@ -95,28 +95,18 @@ class TestGitHubOAuth:
         assert token.api_endpoint == "https://api.enterprise.githubcopilot.com"
 
     @pytest.mark.asyncio
-    async def test_get_copilot_token_retries_transient_errors(self):
-        """Transient refresh failures should be retried before surfacing to callers."""
-        ok = httpx.Response(
-            200,
-            json={
-                "token": "copilot-token",
-                "expires_at": 1234567890,
-                "refresh_in": 1000,
-            },
-            request=httpx.Request("GET", "https://api.github.com/copilot_internal/v2/token"),
-        )
+    async def test_get_copilot_token_makes_single_attempt(self):
+        """Token exchange no longer retries internally; the caller owns retry."""
         client = AsyncMock()
-        client.get.side_effect = [
-            httpx.ConnectError("temporary"),
-            ok,
-        ]
+        client.get.side_effect = httpx.ConnectError("temporary")
 
-        with patch("router_maestro.auth.github_oauth._async_sleep", new=AsyncMock()):
-            token = await get_copilot_token(client, "github-token")
+        with (
+            patch("router_maestro.auth.github_oauth._async_sleep", new=AsyncMock()),
+            pytest.raises(httpx.ConnectError),
+        ):
+            await get_copilot_token(client, "github-token")
 
-        assert token.token == "copilot-token"
-        assert client.get.call_count == 2
+        assert client.get.call_count == 1
 
     @pytest.mark.asyncio
     async def test_get_copilot_token_does_not_retry_auth_errors(self):
