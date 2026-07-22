@@ -102,6 +102,21 @@ class TestEffortMapping:
         assert pick_closest_effort("ultra", ["low", "high"]) is None
         assert pick_closest_effort("low", ["future"]) is None
 
+    def test_resolve_effort_within_catalog_clamps_up_when_below_floor(self):
+        from router_maestro.utils.reasoning import resolve_effort_within_catalog
+
+        # At/below desired: behaves like pick_closest_effort.
+        assert resolve_effort_within_catalog("high", ["low", "medium", "high"]) == "high"
+        assert resolve_effort_within_catalog("xhigh", ["low", "medium"]) == "medium"
+        # Below every available tier: clamp UP to the lowest available.
+        assert resolve_effort_within_catalog("low", ["medium", "high"]) == "medium"
+        assert resolve_effort_within_catalog("minimal", ["high"]) == "high"
+        # Unknown desired tier still resolves to the lowest available tier.
+        assert resolve_effort_within_catalog("ultra", ["low", "high"]) == "low"
+        # Empty / no valid tier -> None.
+        assert resolve_effort_within_catalog("low", []) is None
+        assert resolve_effort_within_catalog("low", ["bogus"]) is None
+
     def test_downgrade_for_upstream(self):
         assert downgrade_for_upstream(None) is None
         assert downgrade_for_upstream("low") == "low"

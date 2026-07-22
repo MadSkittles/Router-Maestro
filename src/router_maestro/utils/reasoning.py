@@ -45,6 +45,23 @@ def pick_closest_effort(desired: str, allowed: list[str]) -> str | None:
     return None
 
 
+def resolve_effort_within_catalog(desired: str, allowed: list[str]) -> str | None:
+    """Clamp ``desired`` into a non-empty catalog.
+
+    Returns the highest tier at or below ``desired``; when none is at or below,
+    clamps UP to the lowest available tier so a request never 400s over a tier
+    below the model's floor. Returns ``None`` only when ``allowed`` holds no
+    valid tier (the caller treats that as "no reasoning support").
+    """
+    valid_allowed = [value for value in allowed if value in EFFORT_ORDER]
+    if not valid_allowed:
+        return None
+    at_or_below = pick_closest_effort(desired, valid_allowed)
+    if at_or_below is not None:
+        return at_or_below
+    return min(valid_allowed, key=EFFORT_ORDER.index)
+
+
 def effort_to_budget(effort: str | None) -> int | None:
     if effort is None:
         return None
