@@ -46,6 +46,13 @@ class CopilotAuthSession:
         mint: Callable[[httpx.AsyncClient, str], Awaitable[Any]] = get_copilot_token,
     ) -> None:
         """Ensure a usable Copilot token, serializing concurrent refreshes."""
+        # Fast-path: a valid in-memory token needs no disk read. This must run
+        # before get_credential() so a transient auth.json read failure cannot
+        # turn a perfectly good cached token into a spurious auth error.
+        current_time = int(time.time())
+        if not force and self.cached_token and self.token_expires > current_time + 60:
+            return
+
         cred = self.auth_manager.get_credential(self.provider_name)
         if not cred or not isinstance(cred, OAuthCredential):
             logger.error("Not authenticated with GitHub Copilot")
@@ -58,10 +65,6 @@ class CopilotAuthSession:
 
         if cred.api_endpoint:
             self.api_base = cred.api_endpoint
-
-        current_time = int(time.time())
-        if not force and self.cached_token and self.token_expires > current_time + 60:
-            return
 
         token_before_lock = self.cached_token
         async with self.token_refresh_lock:
