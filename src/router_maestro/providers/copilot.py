@@ -526,6 +526,24 @@ class CopilotOutboundContract(OutboundContract):
         fallback when the client omits it. Without effort, budget resolution is
         unchanged.
         """
+        # Category A: models with no reasoning surface cannot accept thinking or
+        # output_config.effort. Strip both before any resolution so the native
+        # passthrough forwards a valid body. Static heuristic first (survives a
+        # cold catalog), then the warm-cache capability flag.
+        if _known_reasoning_support(actual_model) is False:
+            body.pop("thinking", None)
+            body.pop("output_config", None)
+            return body
+        from router_maestro.routing import get_router
+
+        _cache_router = get_router()
+        if hasattr(_cache_router, "_models_cache"):
+            _entry = _cache_router._models_cache.get(actual_model)
+            if _entry is not None and _entry[1].supports_thinking is False:
+                body.pop("thinking", None)
+                body.pop("output_config", None)
+                return body
+
         effort = CopilotOutboundContract.sanitize_output_config(body)
         client_thinking = body.get("thinking")
 

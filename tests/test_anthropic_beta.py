@@ -898,16 +898,18 @@ class TestApplyThinkingBudgetNative:
     @patch("router_maestro.routing.get_router")
     @patch("router_maestro.config.load_priorities_config")
     @patch("router_maestro.providers.copilot.resolve_thinking_budget")
-    def test_no_change_when_client_sets_budget(self, mock_resolve_tb, mock_config, mock_router):
+    def test_non_reasoning_model_strips_client_budget(
+        self, mock_resolve_tb, mock_config, mock_router
+    ):
         mock_config.return_value = MagicMock(
             thinking=MagicMock(default_budget=16000, auto_enable=False, model_budgets={})
         )
         mock_router.return_value = MagicMock(_models_cache={})
-        mock_resolve_tb.return_value = (5000, "enabled")
 
         body = {"thinking": {"type": "enabled", "budget_tokens": 5000}}
         result = _apply_thinking_budget_native(body, "claude-sonnet-4.5")
-        assert result["thinking"]["budget_tokens"] == 5000
+        assert "thinking" not in result
+        mock_resolve_tb.assert_not_called()
 
     @patch("router_maestro.routing.get_router")
     @patch("router_maestro.config.load_priorities_config")
@@ -924,6 +926,44 @@ class TestApplyThinkingBudgetNative:
         body = {"thinking": {"type": "enabled", "budget_tokens": 5000}}
         result = _apply_thinking_budget_native(body, "claude-sonnet-4.5")
         assert "thinking" not in result
+
+    @patch("router_maestro.routing.get_router")
+    @patch("router_maestro.providers.copilot.resolve_thinking_budget")
+    def test_haiku_strips_thinking_static_cold_cache(self, mock_resolve_tb, mock_router):
+        """Cold cache: static _known_reasoning_support(False) still strips."""
+        mock_router.return_value = MagicMock(_models_cache={})
+        body = {
+            "thinking": {"type": "enabled", "budget_tokens": 16000},
+            "output_config": {"effort": "high"},
+            "max_tokens": 4096,
+        }
+
+        result = _apply_thinking_budget_native(body, "claude-haiku-4.5")
+
+        assert "thinking" not in result
+        assert "output_config" not in result
+        mock_resolve_tb.assert_not_called()
+
+    @patch("router_maestro.routing.get_router")
+    @patch("router_maestro.providers.copilot.resolve_thinking_budget")
+    def test_non_reasoning_model_strips_thinking_warm_cache(self, mock_resolve_tb, mock_router):
+        """Warm cache: supports_thinking False strips even for unknown families."""
+        model_info = ModelInfo(
+            id="some-non-reasoning-model",
+            name="Some Model",
+            provider="github-copilot",
+            max_output_tokens=4096,
+            supports_thinking=False,
+        )
+        mock_router.return_value = MagicMock(
+            _models_cache={"some-non-reasoning-model": ("github-copilot", model_info)}
+        )
+        body = {"thinking": {"type": "enabled", "budget_tokens": 16000}}
+
+        result = _apply_thinking_budget_native(body, "some-non-reasoning-model")
+
+        assert "thinking" not in result
+        mock_resolve_tb.assert_not_called()
 
 
 class TestSanitizeOutputConfig:
