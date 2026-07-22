@@ -16,19 +16,26 @@ from __future__ import annotations
 import httpx
 
 from integration_tests.conftest import (
+    _post_compat_probe_with_marked_400_retry,
     anthropic_thinking_replay_payload,
     anthropic_tool_choice_any_payload,
     assert_anthropic_has_tool_use,
     assert_anthropic_usage,
     assert_gemini_usage,
     assert_http_success,
+    assert_responses_usage,
     assert_text_response,
+    bare_model,
     event_payloads,
     gemini_model_path,
     gemini_payload,
     openai_chat_tool_required_payload,
+    openai_responses_payload,
     parse_sse_events,
 )
+
+CODEX_AUTO_REVIEW_ALIAS = "codex-auto-review"
+CODEX_AUTO_REVIEW_TARGET = "gpt-5.4-mini"
 
 
 def test_anthropic_tool_choice_any_forces_tool(client: httpx.Client, tool_model: str):
@@ -131,3 +138,32 @@ def test_wrong_api_key_is_rejected(
         },
     )
     assert response.status_code == 401, response.text
+
+
+def test_codex_auto_review_alias_routes_to_real_model(client: httpx.Client):
+    """Codex's ``codex-auto-review`` guardian model must route to a real GHC model.
+
+    OpenAI Codex's Auto-review (guardian) mode issues a Responses request with
+    ``model="codex-auto-review"``, a synthetic id that exists only on the
+    ChatGPT/Codex subscription backend — not in GHC's catalog. Before the alias
+    fix this 404'd at routing and Codex's approval failed. The Copilot provider
+    now aliases it to ``gpt-5.4-mini``; this asserts the live request succeeds
+    (200, not 404) and that the response echoes the *resolved* target model, not
+    the synthetic alias — i.e. the alias actually normalized to a real model
+    rather than some unrelated fallback answering.
+    """
+    response = _post_compat_probe_with_marked_400_retry(
+        client,
+        "/api/openai/v1/responses",
+        json_payload=openai_responses_payload(CODEX_AUTO_REVIEW_ALIAS),
+    )
+    assert_http_success(response)
+    data = response.json()
+
+    assert data["object"] == "response"
+    assert data["status"] == "completed", data
+    # The public model id must reflect the resolved target, never the alias.
+    returned_model = bare_model(data["model"])
+    assert returned_model != CODEX_AUTO_REVIEW_ALIAS, data
+    assert returned_model == CODEX_AUTO_REVIEW_TARGET, data
+    assert_responses_usage(data["usage"])
