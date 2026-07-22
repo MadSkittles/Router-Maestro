@@ -60,6 +60,9 @@ class CopilotAuthSession:
             self.api_base = cred.api_endpoint
 
         current_time = int(time.time())
+        if not self.cached_token and cred.access and cred.expires > current_time:
+            self.cached_token = cred.access
+            self.token_expires = cred.expires
         if not force and self.cached_token and self.token_expires > current_time + 60:
             return
 
@@ -107,6 +110,18 @@ class CopilotAuthSession:
                     "Failed to refresh Copilot token: status=%d",
                     error.response.status_code,
                 )
+                retryable = error.response.status_code == 429 or error.response.status_code >= 500
+                if (
+                    retryable
+                    and not force
+                    and self.cached_token
+                    and self.token_expires > int(time.time())
+                ):
+                    logger.warning(
+                        "Using unexpired cached Copilot token after refresh status=%d",
+                        error.response.status_code,
+                    )
+                    return
                 kind = (
                     ProviderFailureKind.RATE_LIMIT
                     if error.response.status_code in (429, 529)
@@ -115,9 +130,7 @@ class CopilotAuthSession:
                 raise ProviderError(
                     "Failed to refresh Copilot token",
                     status_code=error.response.status_code,
-                    retryable=(
-                        error.response.status_code == 429 or error.response.status_code >= 500
-                    ),
+                    retryable=retryable,
                     kind=kind,
                     upstream_status_code=error.response.status_code,
                     provider=self.provider_name,
@@ -125,6 +138,11 @@ class CopilotAuthSession:
                 ) from error
             except (httpx.HTTPError, GitHubOAuthError) as error:
                 logger.error("Failed to refresh Copilot token (%s)", type(error).__name__)
+                if not force and self.cached_token and self.token_expires > int(time.time()):
+                    logger.warning(
+                        "Using unexpired cached Copilot token after refresh transport failure"
+                    )
+                    return
                 raise ProviderError(
                     "Failed to refresh Copilot token",
                     status_code=502,

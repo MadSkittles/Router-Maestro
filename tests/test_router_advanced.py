@@ -202,6 +202,69 @@ class TestRouterCacheManagement:
         assert "test-provider/model-2" in router_with_mock._models_cache
 
     @pytest.mark.asyncio
+    async def test_catalog_refresh_failure_preserves_stale_models(self, router_with_mock):
+        """A transient provider failure must not erase the last successful catalog."""
+        provider = MockProvider(
+            name="test-provider",
+            models=[ModelInfo(id="model-1", name="Model 1", provider="test-provider")],
+        )
+        router_with_mock.providers = {"test-provider": provider}
+        _mark_providers_fresh(router_with_mock)
+        await router_with_mock._ensure_models_cache()
+        router_with_mock._models_cache_ttl.clear()
+
+        calls = 0
+
+        async def fail_list_models() -> list[ModelInfo]:
+            nonlocal calls
+            calls += 1
+            raise ProviderError(
+                "temporary catalog failure",
+                status_code=502,
+                retryable=True,
+                kind=ProviderFailureKind.UPSTREAM_STATUS,
+            )
+
+        provider.list_models = fail_list_models  # type: ignore[method-assign]
+
+        await router_with_mock._ensure_models_cache()
+
+        assert calls == 1
+        assert router_with_mock._models_cache_ttl.is_valid
+        assert router_with_mock._models_cache["test-provider/model-1"][1].id == "model-1"
+
+    @pytest.mark.asyncio
+    async def test_cold_catalog_failure_is_retryable_instead_of_cached_empty(
+        self, router_with_mock
+    ):
+        """Cold-start failures propagate and every later request can retry discovery."""
+        provider = MockProvider(name="test-provider")
+        router_with_mock.providers = {"test-provider": provider}
+        _mark_providers_fresh(router_with_mock)
+        calls = 0
+
+        async def fail_list_models() -> list[ModelInfo]:
+            nonlocal calls
+            calls += 1
+            raise ProviderError(
+                "temporary catalog failure",
+                status_code=502,
+                retryable=True,
+                kind=ProviderFailureKind.UPSTREAM_STATUS,
+            )
+
+        provider.list_models = fail_list_models  # type: ignore[method-assign]
+
+        with pytest.raises(ProviderError, match="temporary catalog failure"):
+            await router_with_mock._ensure_models_cache()
+        with pytest.raises(ProviderError, match="temporary catalog failure"):
+            await router_with_mock._ensure_models_cache()
+
+        assert calls == 2
+        assert router_with_mock._models_cache == {}
+        assert not router_with_mock._models_cache_ttl.is_valid
+
+    @pytest.mark.asyncio
     async def test_qualified_catalog_id_is_normalized_once_and_round_trips(self, router_with_mock):
         qualified = ModelInfo(
             id="p/m",

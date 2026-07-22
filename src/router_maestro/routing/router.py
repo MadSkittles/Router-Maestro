@@ -670,65 +670,83 @@ class Router:
         if self._models_cache_ttl.is_valid:
             return
 
-        if self._models_cache:
-            logger.debug("Cache expired, refreshing")
-            self._models_cache.clear()
-            self._fuzzy_cache.clear()
+        stale_cache = self._models_cache
+        refreshed_cache: dict[str, tuple[str, ModelInfo]] = {}
+        refresh_errors: list[ProviderError] = []
 
-        logger.debug("Initializing models cache")
+        logger.debug("Refreshing models cache")
         for provider_name, provider in self.providers.items():
             if provider.is_authenticated():
                 try:
-                    await provider.ensure_token()
                     models = await provider.list_models()
-                    for model in models:
-                        try:
-                            ref = (
-                                ModelRef.from_qualified_catalog_id(provider_name, model.id)
-                                if model.id_is_qualified
-                                else ModelRef.from_catalog_id(provider_name, model.id)
-                            )
-                        except ValueError:
-                            logger.warning(
-                                "model_catalog_entry_skipped provider=%s reason=provider_mismatch",
-                                provider_name,
-                            )
-                            continue
-                        normalized_model = replace(
-                            model,
-                            id=ref.upstream_id,
-                            provider=provider_name,
-                            id_is_qualified=False,
-                        )
-                        entry = (provider_name, normalized_model)
-                        # Canonical public identities always win over convenience
-                        # aliases when their strings collide. This can happen when
-                        # an upstream ID itself contains '/', for example
-                        # ``meta-llama/llama-3``.
-                        existing = self._models_cache.get(ref.qualified_id)
-                        if existing is None or not self._is_qualified_cache_entry(
-                            ref.qualified_id,
-                            existing,
-                        ):
-                            self._models_cache[ref.qualified_id] = entry
-
-                        # Keep a bare alias only when it does not shadow a
-                        # canonical provider/model identity. Duplicate aliases
-                        # retain the first catalog entry; RoutePlan later chooses
-                        # the provider by configured priority and capability.
-                        alias_entry = self._models_cache.get(ref.upstream_id)
-                        if alias_entry is None:
-                            self._models_cache[ref.upstream_id] = entry
                     logger.debug("Cached %d models from %s", len(models), provider_name)
                 except ProviderError as e:
+                    refresh_errors.append(e)
                     logger.warning(
                         "model_catalog_failed provider=%s kind=%s retryable=%s",
                         provider_name,
                         e.kind.value,
                         str(e.retryable).lower(),
                     )
-                    continue
+                    models = [
+                        entry[1]
+                        for key, entry in stale_cache.items()
+                        if entry[0] == provider_name and self._is_qualified_cache_entry(key, entry)
+                    ]
+                    if models:
+                        logger.warning(
+                            "Using %d stale models for %s after catalog refresh failure",
+                            len(models),
+                            provider_name,
+                        )
 
+                for model in models:
+                    try:
+                        ref = (
+                            ModelRef.from_qualified_catalog_id(provider_name, model.id)
+                            if model.id_is_qualified
+                            else ModelRef.from_catalog_id(provider_name, model.id)
+                        )
+                    except ValueError:
+                        logger.warning(
+                            "model_catalog_entry_skipped provider=%s reason=provider_mismatch",
+                            provider_name,
+                        )
+                        continue
+                    normalized_model = replace(
+                        model,
+                        id=ref.upstream_id,
+                        provider=provider_name,
+                        id_is_qualified=False,
+                    )
+                    entry = (provider_name, normalized_model)
+                    # Canonical public identities always win over convenience
+                    # aliases when their strings collide. This can happen when
+                    # an upstream ID itself contains '/', for example
+                    # ``meta-llama/llama-3``.
+                    existing = refreshed_cache.get(ref.qualified_id)
+                    if existing is None or not self._is_qualified_cache_entry(
+                        ref.qualified_id,
+                        existing,
+                    ):
+                        refreshed_cache[ref.qualified_id] = entry
+
+                    # Keep a bare alias only when it does not shadow a canonical
+                    # provider/model identity. Duplicate aliases retain the first
+                    # catalog entry; RoutePlan later chooses the provider by
+                    # configured priority and capability.
+                    alias_entry = refreshed_cache.get(ref.upstream_id)
+                    if alias_entry is None:
+                        refreshed_cache[ref.upstream_id] = entry
+
+        if refresh_errors and not refreshed_cache:
+            # A cold-start catalog failure is an upstream outage, not proof that
+            # every requested model is unknown. Keep the cache invalid so the
+            # next request retries the provider instead of returning cached 404s.
+            raise refresh_errors[0]
+
+        self._models_cache = refreshed_cache
+        self._fuzzy_cache.clear()
         self._models_cache_ttl.set(True)
         logger.info("Models cache initialized with %d entries", len(self._models_cache))
 

@@ -119,6 +119,29 @@ class TestGitHubOAuth:
         assert client.get.call_count == 2
 
     @pytest.mark.asyncio
+    async def test_get_copilot_token_retries_502(self):
+        """An intermittent GitHub 502 should recover inside one token refresh."""
+        request = httpx.Request("GET", "https://api.github.com/copilot_internal/v2/token")
+        bad_gateway = httpx.Response(502, request=request)
+        ok = httpx.Response(
+            200,
+            json={
+                "token": "copilot-token",
+                "expires_at": 1234567890,
+                "refresh_in": 1000,
+            },
+            request=request,
+        )
+        client = AsyncMock()
+        client.get.side_effect = [bad_gateway, ok]
+
+        with patch("router_maestro.auth.github_oauth._async_sleep", new=AsyncMock()):
+            token = await get_copilot_token(client, "github-token")
+
+        assert token.token == "copilot-token"
+        assert client.get.call_count == 2
+
+    @pytest.mark.asyncio
     async def test_get_copilot_token_does_not_retry_auth_errors(self):
         """Permanent auth failures should surface immediately instead of being retried."""
         response = httpx.Response(

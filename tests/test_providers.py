@@ -690,6 +690,70 @@ class TestCopilotTokenRefresh:
     """Tests for automatic Copilot token refresh + 401/403 retry."""
 
     @pytest.mark.asyncio
+    async def test_ensure_token_reuses_unexpired_persisted_token(self):
+        """A restarted server should not re-mint a still-valid persisted token."""
+        provider = _copilot_with_cred(access="persisted-token", expires=2**31)
+
+        with patch("router_maestro.providers.copilot.get_copilot_token", new=AsyncMock()) as mint:
+            await provider.ensure_token()
+
+        mint.assert_not_awaited()
+        assert provider._cached_token == "persisted-token"
+        assert provider._token_expires == 2**31
+
+    @pytest.mark.asyncio
+    async def test_transient_refresh_failure_uses_token_until_actual_expiration(self):
+        """A refresh-window 502 should not discard a token that remains usable."""
+        import time
+
+        provider = _copilot_with_cred(
+            access="nearly-expired-token",
+            expires=int(time.time()) + 30,
+        )
+        response = httpx.Response(
+            502,
+            request=httpx.Request("GET", "https://api.github.com/copilot_internal/v2/token"),
+        )
+        error = httpx.HTTPStatusError(
+            "bad gateway",
+            request=response.request,
+            response=response,
+        )
+
+        with patch(
+            "router_maestro.providers.copilot.get_copilot_token",
+            new=AsyncMock(side_effect=error),
+        ):
+            await provider.ensure_token()
+
+        assert provider._cached_token == "nearly-expired-token"
+
+    @pytest.mark.asyncio
+    async def test_forced_refresh_does_not_reuse_rejected_token(self):
+        """The 401/403 recovery path must not fall back to a rejected old token."""
+        provider = _copilot_with_cred(access="rejected-token", expires=2**31)
+        response = httpx.Response(
+            502,
+            request=httpx.Request("GET", "https://api.github.com/copilot_internal/v2/token"),
+        )
+        error = httpx.HTTPStatusError(
+            "bad gateway",
+            request=response.request,
+            response=response,
+        )
+
+        with (
+            patch(
+                "router_maestro.providers.copilot.get_copilot_token",
+                new=AsyncMock(side_effect=error),
+            ),
+            pytest.raises(ProviderError) as exc_info,
+        ):
+            await provider.ensure_token(force=True)
+
+        assert exc_info.value.status_code == 502
+
+    @pytest.mark.asyncio
     async def test_ensure_token_dead_token_raises_reauth_error(self):
         """No refresh token + a 403 mint surfaces a clear re-auth error.
 
