@@ -67,14 +67,14 @@ class ModelRef:
         validate_upstream_model_id(self.upstream_id)
 
     @classmethod
-    def from_catalog_id(cls, provider: str, catalog_id: str) -> "ModelRef":
+    def from_catalog_id(cls, provider: str, catalog_id: str) -> ModelRef:
         """Construct from a raw upstream catalog ID."""
         validate_provider_id(provider)
         validate_upstream_model_id(catalog_id)
         return cls(provider=provider, upstream_id=catalog_id)
 
     @classmethod
-    def from_qualified_catalog_id(cls, provider: str, catalog_id: str) -> "ModelRef":
+    def from_qualified_catalog_id(cls, provider: str, catalog_id: str) -> ModelRef:
         """Construct from a catalog source explicitly known to return public IDs."""
         validate_provider_id(provider)
         validate_upstream_model_id(catalog_id)

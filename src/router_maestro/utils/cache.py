@@ -1,12 +1,9 @@
 """Generic time-based cache with configurable TTL."""
 
 import time
-from typing import Generic, TypeVar
-
-T = TypeVar("T")
 
 
-class TTLCache(Generic[T]):
+class TTLCache[T]:
     """Generic time-based cache with configurable TTL.
 
     Args:

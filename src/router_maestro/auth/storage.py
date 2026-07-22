@@ -49,7 +49,7 @@ class AuthStorage(BaseModel):
     credentials: dict[str, Credential] = Field(default_factory=dict)
 
     @classmethod
-    def load(cls, path: Path = AUTH_FILE) -> "AuthStorage":
+    def load(cls, path: Path = AUTH_FILE) -> AuthStorage:
         """Load credentials from file."""
         if not path.exists():
             return cls()

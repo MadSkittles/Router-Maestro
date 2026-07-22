@@ -551,7 +551,7 @@ async def _send_native_nonstream(candidate: RouteCandidate, body: dict):
 async def _stream_native_candidate(
     candidate: RouteCandidate,
     body: dict,
-) -> AsyncGenerator[str, None]:
+) -> AsyncGenerator[str]:
     """Open one candidate's native stream and surface pre-commit typed failures."""
     provider = candidate.provider
     if not isinstance(provider, CopilotProvider):
@@ -597,7 +597,7 @@ async def _beta_planned_native_stream(
     body: dict,
     *,
     pipeline=None,
-) -> AsyncGenerator[str, None]:
+) -> AsyncGenerator[str]:
     """Prime and stream a native beta plan under the SSE keepalive wrapper.
 
     ``execute_plan_stream`` primes the upstream by awaiting Copilot's first
@@ -668,7 +668,7 @@ async def _encode_native_stream_errors(
     stream: AsyncIterator[str],
     *,
     pipeline=None,
-) -> AsyncGenerator[str, None]:
+) -> AsyncGenerator[str]:
     """Apply raw stream guards and preserve native semantic terminal state."""
     terminal_outcome: TerminalOutcome | None = None
     response_status = ResponseStatus.COMPLETED
@@ -1321,7 +1321,7 @@ async def _stream_passthrough(
     payload: dict,
     *,
     raise_provider_errors: bool = False,
-) -> AsyncGenerator[str, None]:
+) -> AsyncGenerator[str]:
     """Stream SSE events from Copilot's native Anthropic endpoint.
 
     Filters out copilot-internal events and strips internal metadata from
@@ -1408,7 +1408,7 @@ async def _stream_passthrough(
         yield _sse_error_event("Internal server error")
 
 
-async def _iter_sse_frames(response, *, leak_guard=None) -> AsyncGenerator[str, None]:
+async def _iter_sse_frames(response, *, leak_guard=None) -> AsyncGenerator[str]:
     """Iterate SSE frames from a response, filtering copilot-internal events."""
     current_event: str | None = None
     data_buffer: str = ""
