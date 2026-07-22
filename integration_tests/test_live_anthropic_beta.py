@@ -264,10 +264,11 @@ def test_beta_tool_choice_any(client: httpx.Client, tool_model: str):
 # ---------------------------------------------------------------------------
 
 
-def test_beta_thinking_non_streaming(client: httpx.Client, chat_model: str):
+def test_beta_thinking_non_streaming(client: httpx.Client, anthropic_thinking_models: list[str]):
     """Beta endpoint supports extended thinking natively."""
+    model = anthropic_thinking_models[0]
     payload = {
-        "model": chat_model,
+        "model": model,
         "messages": [{"role": "user", "content": "What is 7*8?"}],
         "max_tokens": 8000,
         "thinking": {"type": "enabled", "budget_tokens": 4000},
@@ -284,10 +285,11 @@ def test_beta_thinking_non_streaming(client: httpx.Client, chat_model: str):
     assert_anthropic_usage(data["usage"])
 
 
-def test_beta_thinking_streaming(client: httpx.Client, chat_model: str):
+def test_beta_thinking_streaming(client: httpx.Client, anthropic_thinking_models: list[str]):
     """Beta streaming surfaces thinking_delta and signature_delta events."""
+    model = anthropic_thinking_models[0]
     payload = {
-        "model": chat_model,
+        "model": model,
         "messages": [{"role": "user", "content": "What is 3+5?"}],
         "max_tokens": 8000,
         "stream": True,

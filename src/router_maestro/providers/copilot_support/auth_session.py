@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import random
 import time
 from collections.abc import Awaitable, Callable
 from typing import Any, NoReturn
@@ -10,7 +11,11 @@ from typing import Any, NoReturn
 import httpx
 
 from router_maestro.auth import AuthManager, AuthType, CredentialRepository
-from router_maestro.auth.github_oauth import GitHubOAuthError, get_copilot_token
+from router_maestro.auth.github_oauth import (
+    GitHubOAuthError,
+    _async_sleep,
+    get_copilot_token,
+)
 from router_maestro.auth.storage import OAuthCredential
 from router_maestro.providers.base import ProviderError, ProviderFailureKind
 from router_maestro.utils import get_logger
@@ -19,6 +24,19 @@ logger = get_logger("providers.copilot.auth")
 
 COPILOT_BASE_URL = "https://api.githubcopilot.com"
 AUTH_RETRY_STATUSES = frozenset({401, 403})
+
+# Token-mint retry policy. Retry only genuinely transient failures — NOT
+# AUTHENTICATION: this codebase raises 401/403 with retryable=True to drive
+# the router's cross-provider fallback, which is unrelated to re-minting.
+_RETRYABLE_MINT_KINDS = frozenset(
+    {
+        ProviderFailureKind.RATE_LIMIT,
+        ProviderFailureKind.UPSTREAM_STATUS,
+        ProviderFailureKind.TRANSPORT,
+    }
+)
+_MINT_MAX_RETRIES = 3
+_MINT_BACKOFF_BASE = 0.3
 
 
 class CopilotAuthSession:
@@ -38,6 +56,94 @@ class CopilotAuthSession:
         cred = self.auth_manager.get_credential(self.provider_name)
         return cred is not None and cred.type == AuthType.OAUTH
 
+    async def _mint_token(
+        self,
+        cred: OAuthCredential,
+        mint: Callable[[httpx.AsyncClient, str], Awaitable[Any]],
+    ) -> Any:
+        """Mint a Copilot token, mapping HTTP errors to ProviderError.
+
+        Raises the mapped ProviderError on failure; the retry policy lives in
+        the caller (_mint_with_retry).
+        """
+        logger.debug("Refreshing Copilot token")
+        try:
+            async with httpx.AsyncClient(
+                timeout=httpx.Timeout(connect=10.0, read=30.0, write=10.0, pool=10.0)
+            ) as client:
+                return await mint(client, cred.refresh)
+        except httpx.HTTPStatusError as error:
+            if error.response.status_code in AUTH_RETRY_STATUSES:
+                logger.error(
+                    "GitHub Copilot authentication failed (%s)",
+                    error.response.status_code,
+                )
+                raise ProviderError(
+                    "GitHub Copilot authentication expired. If Copilot is your only "
+                    "provider, re-authenticate: `router-maestro auth login github-copilot`.",
+                    status_code=401,
+                    retryable=True,
+                    kind=ProviderFailureKind.AUTHENTICATION,
+                    upstream_status_code=error.response.status_code,
+                    provider=self.provider_name,
+                    cause=error,
+                ) from error
+            logger.error(
+                "Failed to refresh Copilot token: status=%d",
+                error.response.status_code,
+            )
+            kind = (
+                ProviderFailureKind.RATE_LIMIT
+                if error.response.status_code in (429, 529)
+                else ProviderFailureKind.UPSTREAM_STATUS
+            )
+            raise ProviderError(
+                "Failed to refresh Copilot token",
+                status_code=error.response.status_code,
+                retryable=(error.response.status_code == 429 or error.response.status_code >= 500),
+                kind=kind,
+                upstream_status_code=error.response.status_code,
+                provider=self.provider_name,
+                cause=error,
+            ) from error
+        except (httpx.HTTPError, GitHubOAuthError) as error:
+            logger.error("Failed to refresh Copilot token (%s)", type(error).__name__)
+            raise ProviderError(
+                "Failed to refresh Copilot token",
+                status_code=502,
+                retryable=True,
+                kind=ProviderFailureKind.TRANSPORT,
+                provider=self.provider_name,
+                cause=error,
+            ) from error
+
+    async def _mint_with_retry(
+        self,
+        cred: OAuthCredential,
+        mint: Callable[[httpx.AsyncClient, str], Awaitable[Any]],
+    ) -> Any:
+        """Mint a token, retrying transient failures with bounded backoff.
+
+        Only RATE_LIMIT / UPSTREAM_STATUS / TRANSPORT failures are retried;
+        AUTHENTICATION (a genuinely expired credential) surfaces immediately.
+        """
+        attempt = 0
+        while True:
+            try:
+                return await self._mint_token(cred, mint)
+            except ProviderError as error:
+                if error.kind not in _RETRYABLE_MINT_KINDS or attempt >= _MINT_MAX_RETRIES:
+                    raise
+                delay = _MINT_BACKOFF_BASE * (2**attempt) + random.uniform(0, 0.1)
+                logger.warning(
+                    "copilot_token_mint_retry attempt=%d kind=%s delay=%.2f",
+                    attempt + 1,
+                    error.kind.value,
+                    delay,
+                )
+                await _async_sleep(delay)
+                attempt += 1
+
     async def ensure_token(
         self,
         force: bool = False,
@@ -46,6 +152,13 @@ class CopilotAuthSession:
         mint: Callable[[httpx.AsyncClient, str], Awaitable[Any]] = get_copilot_token,
     ) -> None:
         """Ensure a usable Copilot token, serializing concurrent refreshes."""
+        # Fast-path: a valid in-memory token needs no disk read. This must run
+        # before get_credential() so a transient auth.json read failure cannot
+        # turn a perfectly good cached token into a spurious auth error.
+        current_time = int(time.time())
+        if not force and self.cached_token and self.token_expires > current_time + 60:
+            return
+
         cred = self.auth_manager.get_credential(self.provider_name)
         if not cred or not isinstance(cred, OAuthCredential):
             logger.error("Not authenticated with GitHub Copilot")
@@ -58,10 +171,6 @@ class CopilotAuthSession:
 
         if cred.api_endpoint:
             self.api_base = cred.api_endpoint
-
-        current_time = int(time.time())
-        if not force and self.cached_token and self.token_expires > current_time + 60:
-            return
 
         token_before_lock = self.cached_token
         async with self.token_refresh_lock:
@@ -81,58 +190,7 @@ class CopilotAuthSession:
                     provider=self.provider_name,
                 )
 
-            logger.debug("Refreshing Copilot token")
-            try:
-                async with httpx.AsyncClient(
-                    timeout=httpx.Timeout(connect=10.0, read=30.0, write=10.0, pool=10.0)
-                ) as client:
-                    copilot_token = await mint(client, cred.refresh)
-            except httpx.HTTPStatusError as error:
-                if error.response.status_code in AUTH_RETRY_STATUSES:
-                    logger.error(
-                        "GitHub Copilot authentication failed (%s)",
-                        error.response.status_code,
-                    )
-                    raise ProviderError(
-                        "GitHub Copilot authentication expired. If Copilot is your only "
-                        "provider, re-authenticate: `router-maestro auth login github-copilot`.",
-                        status_code=401,
-                        retryable=True,
-                        kind=ProviderFailureKind.AUTHENTICATION,
-                        upstream_status_code=error.response.status_code,
-                        provider=self.provider_name,
-                        cause=error,
-                    ) from error
-                logger.error(
-                    "Failed to refresh Copilot token: status=%d",
-                    error.response.status_code,
-                )
-                kind = (
-                    ProviderFailureKind.RATE_LIMIT
-                    if error.response.status_code in (429, 529)
-                    else ProviderFailureKind.UPSTREAM_STATUS
-                )
-                raise ProviderError(
-                    "Failed to refresh Copilot token",
-                    status_code=error.response.status_code,
-                    retryable=(
-                        error.response.status_code == 429 or error.response.status_code >= 500
-                    ),
-                    kind=kind,
-                    upstream_status_code=error.response.status_code,
-                    provider=self.provider_name,
-                    cause=error,
-                ) from error
-            except (httpx.HTTPError, GitHubOAuthError) as error:
-                logger.error("Failed to refresh Copilot token (%s)", type(error).__name__)
-                raise ProviderError(
-                    "Failed to refresh Copilot token",
-                    status_code=502,
-                    retryable=True,
-                    kind=ProviderFailureKind.TRANSPORT,
-                    provider=self.provider_name,
-                    cause=error,
-                ) from error
+            copilot_token = await self._mint_with_retry(cred, mint)
 
             self.cached_token = copilot_token.token
             self.token_expires = copilot_token.expires_at

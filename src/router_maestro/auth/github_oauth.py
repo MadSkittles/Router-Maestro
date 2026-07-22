@@ -50,13 +50,6 @@ class GitHubOAuthError(Exception):
     pass
 
 
-def _is_retryable_token_error(error: httpx.HTTPError) -> bool:
-    """Whether a Copilot token refresh error is likely transient."""
-    if isinstance(error, httpx.HTTPStatusError):
-        return error.response.status_code == 429 or error.response.status_code >= 500
-    return True
-
-
 async def request_device_code(client: httpx.AsyncClient) -> DeviceCodeResponse:
     """Request a device code from GitHub.
 
@@ -168,23 +161,11 @@ async def get_copilot_token(
         "X-Vscode-User-Agent-Library-Version": "electron-fetch",
     }
 
-    response: httpx.Response | None = None
-    max_attempts = 3
-    for attempt in range(max_attempts):
-        try:
-            response = await client.get(
-                COPILOT_TOKEN_URL,
-                headers=headers,
-            )
-            response.raise_for_status()
-            break
-        except httpx.HTTPError as e:
-            if attempt == max_attempts - 1 or not _is_retryable_token_error(e):
-                raise
-            await _async_sleep(0.2 * (attempt + 1))
-
-    if response is None:
-        raise GitHubOAuthError("Failed to exchange GitHub token for Copilot token")
+    response = await client.get(
+        COPILOT_TOKEN_URL,
+        headers=headers,
+    )
+    response.raise_for_status()
 
     data = response.json()
     endpoints = data.get("endpoints")
