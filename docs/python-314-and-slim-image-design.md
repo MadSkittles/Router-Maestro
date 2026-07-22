@@ -91,3 +91,10 @@ ALL IMPORTS OK
 - 本设计文档
 
 `conftest.py` 的临时改动**不进 PR**。
+
+## 验证结果(实测)
+
+- **单元测试:** 3475 passed(Python 3.14.6);`ruff check` + `ruff format --check` 全 clean(采纳 py314 target 后修掉 F811 重名 bug + PEP 695/UP 现代化)。
+- **镜像体积:** 126MB(baseline-311)→ **88.5MB**(314-slim),**-37.5MB / -30%**,优于 ~92MB 预估。venv 已无 pip/setuptools/pkg_resources,curl 已移除,容器内 `from router_maestro.server import app` + tiktoken/pydantic-core/rapidfuzz 均 import OK。
+- **全量 integration test 打到 docker 容器:** 76 passed, 2 failed, 3 skipped。两个 failure 均已证明**与本分支无关**:① `test_stream_open_errors[anthropic-beta]` 在 master(02abffa)上同样失败——既有问题;② `test_anthropic_claude_thinking_budget_matrix` 为 live Copilot 后端偶发(重试 1 passed)。3 个 skip 为环境条件性跳过,非回归。
+
