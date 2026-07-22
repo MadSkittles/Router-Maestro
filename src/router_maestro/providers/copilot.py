@@ -49,7 +49,6 @@ from router_maestro.utils.reasoning import (
     VALID_EFFORTS,
     budget_to_effort,
     downgrade_for_upstream,
-    pick_closest_effort,
     resolve_effort_within_catalog,
 )
 
@@ -482,7 +481,7 @@ class CopilotOutboundContract(OutboundContract):
         provider: str | None = None,
         model: str | None = None,
     ) -> str:
-        """Resolve a native effort exactly or downward, preserving unknown catalogs.
+        """Resolve a native effort within the catalog, clamping up below the floor.
 
         The native passthrough resolves ``output_config.effort`` with its own
         catalog-or-passthrough rule (distinct error surface and no family fallback),
@@ -492,10 +491,13 @@ class CopilotOutboundContract(OutboundContract):
         """
         if allowed is None:
             return effort
-        mapped_effort = pick_closest_effort(effort, list(allowed))
+        mapped_effort = resolve_effort_within_catalog(effort, list(allowed))
         if mapped_effort is None:
+            # allowed held no valid tier: treat as no reasoning surface. The
+            # caller (apply_native_anthropic_thinking) strips output_config in
+            # that case, so this path is defensive only.
             raise RequestOptionError(
-                "output_config.effort has no supported tier at or below the requested tier",
+                "output_config.effort has no supported tier",
                 parameter="output_config.effort",
                 provider=provider,
                 model=model,

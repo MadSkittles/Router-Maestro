@@ -273,10 +273,7 @@ def test_sanitize_output_config_keeps_only_valid_effort():
     assert "output_config" not in dropped
 
 
-def test_resolve_native_effort_downgrades_or_rejects():
-    import pytest
-
-    from router_maestro.providers import RequestOptionError
+def test_resolve_native_effort_downgrades_or_clamps_up():
     from router_maestro.providers.copilot import CopilotOutboundContract
 
     # Unknown catalog (None) is preserved verbatim.
@@ -285,10 +282,8 @@ def test_resolve_native_effort_downgrades_or_rejects():
     assert (
         CopilotOutboundContract.resolve_native_effort("xhigh", ("low", "medium", "high")) == "high"
     )
-    # No tier at or below the request -> reject (no family fallback).
-    with pytest.raises(RequestOptionError) as excinfo:
-        CopilotOutboundContract.resolve_native_effort("low", ("high",))
-    assert excinfo.value.parameter == "output_config.effort"
+    # No tier at or below the request -> clamp UP to the lowest available.
+    assert CopilotOutboundContract.resolve_native_effort("low", ("high",)) == "high"
 
 
 def test_reject_unpreservable_native_options_flags_temp_plus_top_p():
