@@ -58,6 +58,13 @@ COPILOT_CHAT_PATH = "/chat/completions"
 COPILOT_RESPONSES_PATH = "/responses"
 COPILOT_COUNT_TOKENS_PATH = "/v1/messages/count_tokens"
 
+# Internal model aliases bound to the Copilot provider. Maps a synthetic client
+# model id (with no GHC catalog entry) to a real upstream Copilot model. Codex's
+# Auto-review (guardian) mode issues Responses requests with model
+# ``codex-auto-review``, which only exists on the ChatGPT/Codex subscription
+# backend; route it to GHC's low-latency ``gpt-5.4-mini`` subagent model.
+COPILOT_MODEL_ALIASES: dict[str, str] = {"codex-auto-review": "gpt-5.4-mini"}
+
 _COPILOT_UNSUPPORTED_OPERATION_CODE = "unsupported_api_for_model"
 _MAX_COPILOT_ERROR_BODY_BYTES = 64 * 1024
 _EXACT_COPILOT_BARE_BAD_REQUEST = b"Bad Request\n"
@@ -731,6 +738,10 @@ class CopilotProvider(BaseProvider):
     def is_authenticated(self) -> bool:
         """Check if authenticated with GitHub Copilot."""
         return self._auth_session.is_authenticated()
+
+    def model_aliases(self) -> Mapping[str, str]:
+        """Synthetic model ids routed to real GHC models (see COPILOT_MODEL_ALIASES)."""
+        return COPILOT_MODEL_ALIASES
 
     async def ensure_token(self, force: bool = False) -> None:
         """Ensure we have a valid Copilot token, refreshing if needed.
