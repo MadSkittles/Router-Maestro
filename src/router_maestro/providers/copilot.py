@@ -384,16 +384,13 @@ class CopilotOutboundContract(OutboundContract):
             if reasoning_effort is None:
                 return ReasoningResolution(effort=None)
             # Category B: clamp up when below the catalog floor.
-            upstream_effort = resolve_effort_within_catalog(
-                reasoning_effort, catalog_effort_values
-            )
+            upstream_effort = resolve_effort_within_catalog(reasoning_effort, catalog_effort_values)
             return ReasoningResolution(effort=upstream_effort)
 
         if reasoning_effort is not None and known_reasoning_support is False:
             # Category A (cold path): statically known to lack reasoning -> strip.
             logger.debug(
-                "Copilot Responses model %s has no known reasoning support; "
-                "stripping reasoning",
+                "Copilot Responses model %s has no known reasoning support; stripping reasoning",
                 model,
             )
             return ReasoningResolution(effort=None)
