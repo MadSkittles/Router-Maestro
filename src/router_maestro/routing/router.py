@@ -670,12 +670,10 @@ class Router:
         if self._models_cache_ttl.is_valid:
             return
 
-        if self._models_cache:
-            logger.debug("Cache expired, refreshing")
-            self._models_cache.clear()
-            self._fuzzy_cache.clear()
-
         logger.debug("Initializing models cache")
+        previous_cache = self._models_cache
+        new_cache: dict[str, tuple[str, ModelInfo]] = {}
+        any_provider_failed = False
         for provider_name, provider in self.providers.items():
             if provider.is_authenticated():
                 try:
@@ -705,31 +703,52 @@ class Router:
                         # aliases when their strings collide. This can happen when
                         # an upstream ID itself contains '/', for example
                         # ``meta-llama/llama-3``.
-                        existing = self._models_cache.get(ref.qualified_id)
+                        existing = new_cache.get(ref.qualified_id)
                         if existing is None or not self._is_qualified_cache_entry(
                             ref.qualified_id,
                             existing,
                         ):
-                            self._models_cache[ref.qualified_id] = entry
+                            new_cache[ref.qualified_id] = entry
 
                         # Keep a bare alias only when it does not shadow a
                         # canonical provider/model identity. Duplicate aliases
                         # retain the first catalog entry; RoutePlan later chooses
                         # the provider by configured priority and capability.
-                        alias_entry = self._models_cache.get(ref.upstream_id)
+                        alias_entry = new_cache.get(ref.upstream_id)
                         if alias_entry is None:
-                            self._models_cache[ref.upstream_id] = entry
+                            new_cache[ref.upstream_id] = entry
                     logger.debug("Cached %d models from %s", len(models), provider_name)
                 except ProviderError as e:
+                    any_provider_failed = True
                     logger.warning(
                         "model_catalog_failed provider=%s kind=%s retryable=%s",
                         provider_name,
                         e.kind.value,
                         str(e.retryable).lower(),
                     )
+                    # A transient failure (e.g. a token-refresh race that briefly
+                    # reports the provider as unauthenticated, or an upstream 502
+                    # while minting a token) must not drop a provider's models from
+                    # the catalog, so retain its previously cached entries and let
+                    # in-flight requests keep resolving. Trade-off: a *persistent*
+                    # provider failure keeps serving the last-known catalog until a
+                    # refresh finally succeeds; that is surfaced by the repeated
+                    # model_catalog_failed warning above (the TTL is not refreshed
+                    # on failure, so each request retries) rather than by silently
+                    # emptying the cache.
+                    for key, cached_entry in previous_cache.items():
+                        if cached_entry[0] == provider_name and key not in new_cache:
+                            new_cache[key] = cached_entry
                     continue
 
-        self._models_cache_ttl.set(True)
+        self._models_cache = new_cache
+        self._fuzzy_cache.clear()
+        # Only mark the cache fresh when every authenticated provider refreshed
+        # successfully. If any provider failed, leave the TTL expired so the next
+        # request retries promptly instead of serving a degraded catalog for a
+        # full TTL window.
+        if not any_provider_failed:
+            self._models_cache_ttl.set(True)
         logger.info("Models cache initialized with %d entries", len(self._models_cache))
 
         self._apply_model_overrides()
