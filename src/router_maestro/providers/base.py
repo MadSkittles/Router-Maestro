@@ -1,7 +1,7 @@
 """Base provider interface."""
 
 from abc import ABC, abstractmethod
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass, field, fields, replace
 from enum import StrEnum
 from logging import Logger
@@ -713,6 +713,17 @@ class BaseProvider(ABC):
             True if authenticated
         """
         pass
+
+    def model_aliases(self) -> Mapping[str, str]:
+        """Internal upstream aliases this provider recognizes.
+
+        Maps an incoming client model id -> a real upstream model id owned by
+        this provider. Used to satisfy synthetic model names (e.g. Codex's
+        ``codex-auto-review`` guardian model) that have no catalog entry. The
+        router normalizes a matching id to ``provider/<target>`` before route
+        resolution; aliases are never added to the model catalog.
+        """
+        return {}
 
     async def ensure_token(self) -> None:
         """Ensure the provider has a valid token.

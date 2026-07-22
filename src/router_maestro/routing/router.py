@@ -511,6 +511,9 @@ class Router:
         self._priorities_cache: TTLCache[PrioritiesConfig] = TTLCache(CACHE_TTL_SECONDS)
         # Fuzzy match result cache: raw_query -> resolved_cache_key (or None)
         self._fuzzy_cache: dict[str, str | None] = {}
+        # Provider-declared internal alias map: casefolded alias -> qualified id.
+        # Built lazily from provider.model_aliases(); static, no auth/catalog dep.
+        self._model_aliases: dict[str, str] | None = None
         # Providers config cache
         self._providers_ttl: TTLCache[bool] = TTLCache(CACHE_TTL_SECONDS)
         snapshot_config = getattr(config_snapshot, "config", config_snapshot)
@@ -601,6 +604,7 @@ class Router:
             self._models_cache.clear()
             self._fuzzy_cache.clear()
             self._models_cache_ttl.clear()
+            self._model_aliases = None
 
     def needs_provider_config_reload(self) -> bool:
         """Return whether this immutable managed generation needs replacement."""
@@ -825,6 +829,41 @@ class Router:
             return deepcopy(entry[1])
         return None
 
+    def _ensure_alias_map(self) -> dict[str, str]:
+        """Build (once) the provider-declared internal alias map.
+
+        Maps a casefolded synthetic alias to a fully-qualified ``provider/model``
+        id. Derived purely from ``provider.model_aliases()`` declarations, so it
+        needs neither authentication nor a fresh catalog. Invalidated (set to
+        ``None``) whenever providers reload.
+        """
+        cached = getattr(self, "_model_aliases", None)
+        if cached is not None:
+            return cached
+        aliases: dict[str, str] = {}
+        for provider_name, provider in getattr(self, "providers", {}).items():
+            for alias, target in provider.model_aliases().items():
+                try:
+                    qualified = ModelRef(provider_name, target).qualified_id
+                except (TypeError, ValueError):
+                    logger.warning(
+                        "model_alias_skipped provider=%s alias=%s reason=invalid_target",
+                        provider_name,
+                        alias,
+                    )
+                    continue
+                aliases.setdefault(alias.casefold(), qualified)
+        self._model_aliases = aliases
+        return aliases
+
+    def _normalize_model_alias(self, model_id: str) -> str:
+        """Resolve a provider-declared internal alias to its qualified target id.
+
+        Idempotent: a real (unaliased) id maps to itself, so this is safe to call
+        at every routing entry point regardless of prior normalization.
+        """
+        return self._ensure_alias_map().get(model_id.casefold(), model_id)
+
     async def _resolve_provider(self, model_id: str) -> tuple[str, str, BaseProvider]:
         """Resolve model_id to provider.
 
@@ -837,6 +876,9 @@ class Router:
         Raises:
             ProviderError: If model not found or no models available
         """
+        # Normalize provider-declared internal aliases (e.g. codex-auto-review)
+        # to their real qualified target before any resolution runs.
+        model_id = self._normalize_model_alias(model_id)
         # Check for auto-routing
         if model_id == AUTO_ROUTE_MODEL:
             result = await self._get_auto_route_model()
@@ -1103,6 +1145,9 @@ class Router:
                 cause=error,
             ) from error
         await self._ensure_models_cache()
+        # Normalize provider-declared internal aliases (e.g. codex-auto-review)
+        # to their real qualified target so resolution flows the explicit path.
+        model_id = self._normalize_model_alias(model_id)
         features = features or RequestFeatures()
         explicit = self._is_explicit_model_id(model_id)
         if explicit:
