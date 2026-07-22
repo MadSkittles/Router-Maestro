@@ -19,7 +19,7 @@ from router_maestro.server.routes import anthropic, chat, gemini, responses
 
 
 class _PipelineSpy:
-    instances: list["_PipelineSpy"] = []
+    instances: list[_PipelineSpy] = []
 
     def __init__(self, request_id: str, model: str, tool_names: set[str] | None = None):
         self.request_id = request_id
@@ -34,7 +34,7 @@ class _PipelineSpy:
         request_id: str,
         model: str,
         tool_names: set[str] | None = None,
-    ) -> "_PipelineSpy":
+    ) -> _PipelineSpy:
         return cls(request_id=request_id, model=model, tool_names=tool_names)
 
     def feed_stream(self, chunk) -> str | None:

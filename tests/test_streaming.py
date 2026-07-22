@@ -13,7 +13,7 @@ from router_maestro.server.streaming import (
 )
 
 
-async def _async_gen_from_list(items: list[str]) -> AsyncGenerator[str, None]:
+async def _async_gen_from_list(items: list[str]) -> AsyncGenerator[str]:
     """Helper: yield items from a list as an async generator."""
     for item in items:
         yield item
@@ -21,14 +21,14 @@ async def _async_gen_from_list(items: list[str]) -> AsyncGenerator[str, None]:
 
 async def _failing_gen(
     error: Exception, items_before: list[str] | None = None
-) -> AsyncGenerator[str, None]:
+) -> AsyncGenerator[str]:
     """Helper: yield some items then raise an error."""
     for item in items_before or []:
         yield item
     raise error
 
 
-async def _collect(gen: AsyncGenerator[str, None]) -> list[str]:
+async def _collect(gen: AsyncGenerator[str]) -> list[str]:
     """Collect all items from an async generator."""
     return [item async for item in gen]
 
@@ -52,7 +52,7 @@ async def test_resilient_generator_yields_keepalive_on_timeout():
         # Patching the module-level constant works because asyncio.wait
         # reads SSE_KEEPALIVE_INTERVAL at call time.
 
-        async def slow_single_item() -> AsyncGenerator[str, None]:
+        async def slow_single_item() -> AsyncGenerator[str]:
             await asyncio.sleep(0.15)  # 3x the keepalive interval
             yield "data: final\n\n"
 
@@ -70,7 +70,7 @@ async def test_resilient_generator_yields_keepalive_on_timeout():
 async def test_resilient_generator_handles_cancelled_error():
     """CancelledError should be logged and re-raised."""
 
-    async def cancelled_gen() -> AsyncGenerator[str, None]:
+    async def cancelled_gen() -> AsyncGenerator[str]:
         yield "data: first\n\n"
         raise asyncio.CancelledError()
 

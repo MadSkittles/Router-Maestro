@@ -21,13 +21,13 @@ from router_maestro.server.streaming import (
 )
 
 
-async def _slow_then_done(delay: float, item: str) -> AsyncGenerator[str, None]:
+async def _slow_then_done(delay: float, item: str) -> AsyncGenerator[str]:
     """Sleep ``delay`` seconds, then emit ``item`` and finish."""
     await asyncio.sleep(delay)
     yield item
 
 
-async def _collect(gen: AsyncGenerator[str, None]) -> list[str]:
+async def _collect(gen: AsyncGenerator[str]) -> list[str]:
     return [item async for item in gen]
 
 

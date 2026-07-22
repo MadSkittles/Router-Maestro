@@ -6,7 +6,7 @@ import os
 import tempfile
 from contextlib import suppress
 from pathlib import Path
-from typing import Any, TypeVar
+from typing import Any
 
 from pydantic import BaseModel, ValidationError
 
@@ -19,8 +19,6 @@ from router_maestro.config.providers import (
     ProvidersConfig,
 )
 from router_maestro.routing.model_ref import validate_provider_id
-
-T = TypeVar("T", bound=BaseModel)
 
 logger = logging.getLogger("router_maestro.config.settings")
 
@@ -74,7 +72,7 @@ def write_json_owner_only(path: Path, data: Any) -> None:
         raise
 
 
-def load_config(path: Path, model: type[T], default_factory: callable) -> T:
+def load_config[T: BaseModel](path: Path, model: type[T], default_factory: callable) -> T:
     """Load configuration from JSON file.
 
     Args:

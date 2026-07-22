@@ -5,7 +5,7 @@ import inspect
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from copy import deepcopy
 from dataclasses import dataclass, replace
-from typing import Generic, TypeVar, cast
+from typing import TypeVar, cast
 
 from router_maestro.config import (
     FallbackStrategy,
@@ -68,16 +68,15 @@ AUTO_ROUTE_MODEL = "router-maestro"
 CACHE_TTL_SECONDS = 300
 
 # Global singleton instance
-_router_instance: "Router | None" = None
+_router_instance: Router | None = None
 
 RequestT = TypeVar("RequestT")
 ResponseT = TypeVar("ResponseT")
 ChunkT = TypeVar("ChunkT")
-RouterT = TypeVar("RouterT")
 
 
 @dataclass(slots=True)
-class _RouterGeneration(Generic[RouterT]):
+class _RouterGeneration[RouterT]:
     generation_id: int
     router: RouterT
     config_snapshot: object | None = None
@@ -115,7 +114,9 @@ async def _close_router_resources(router: object) -> None:
             await result
 
 
-async def _await_task_ignoring_cancellation(task: asyncio.Task[RouterT]) -> tuple[RouterT, bool]:
+async def _await_task_ignoring_cancellation[RouterT](
+    task: asyncio.Task[RouterT],
+) -> tuple[RouterT, bool]:
     """Wait through repeated caller cancellation and report whether it occurred."""
     cancelled = False
     while not task.done():
@@ -131,12 +132,12 @@ async def _close_uninstalled_router(router: object) -> None:
     await _await_task_ignoring_cancellation(close_task)
 
 
-class RouterLease(Generic[RouterT]):
+class RouterLease[RouterT]:
     """Idempotent reference to one immutable Router generation."""
 
     def __init__(
         self,
-        owner: "RouterOwner[RouterT]",
+        owner: RouterOwner[RouterT],
         generation: _RouterGeneration[RouterT],
     ) -> None:
         self._owner = owner
@@ -171,14 +172,14 @@ class RouterLease(Generic[RouterT]):
             if cancelled:
                 raise asyncio.CancelledError
 
-    async def __aenter__(self) -> "RouterLease[RouterT]":
+    async def __aenter__(self) -> RouterLease[RouterT]:
         return self
 
     async def __aexit__(self, *_exc_info: object) -> None:
         await self.release()
 
 
-class RouterOwner(Generic[RouterT]):
+class RouterOwner[RouterT]:
     """Own atomically swappable Router generations and their resources."""
 
     def __init__(
@@ -428,7 +429,7 @@ class _PrimedStream(AsyncIterator[ChunkT]):
         self._closed = False
         self.selected_model = selected_model
 
-    def __aiter__(self) -> "_PrimedStream[ChunkT]":
+    def __aiter__(self) -> _PrimedStream[ChunkT]:
         return self
 
     async def __anext__(self) -> ChunkT:
@@ -454,7 +455,7 @@ class _PrimedStream(AsyncIterator[ChunkT]):
         await close_async_iterator(self._stream)
 
 
-def get_router() -> "Router":
+def get_router() -> Router:
     """Get the singleton Router instance.
 
     Returns:
