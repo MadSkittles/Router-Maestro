@@ -2,7 +2,6 @@
 
 import pytest
 
-from router_maestro.providers.base import ProviderError, ProviderFailureKind
 from router_maestro.providers.copilot import apply_copilot_chat_reasoning
 
 
@@ -222,9 +221,7 @@ def test_catalog_empty_list_strips_explicit_reasoning():
 
 def test_catalog_empty_list_strips_budget_only_request() -> None:
     p = _base_payload()
-    apply_copilot_chat_reasoning(
-        p, "claude-haiku-4.5", 16000, None, catalog_effort_values=[]
-    )
+    apply_copilot_chat_reasoning(p, "claude-haiku-4.5", 16000, None, catalog_effort_values=[])
     assert "reasoning_effort" not in p
 
 

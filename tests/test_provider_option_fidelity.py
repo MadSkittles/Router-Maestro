@@ -660,7 +660,7 @@ def test_copilot_chat_rejects_unapproved_provider_extensions() -> None:
     assert caught.value.parameter == "provider_extensions.vendor"
 
 
-def test_copilot_chat_rejects_reasoning_when_only_higher_tiers_are_available() -> None:
+def test_copilot_chat_clamps_up_reasoning_when_only_higher_tiers_are_available() -> None:
     provider = CopilotProvider()
     provider._models_ttl_cache.set(
         [
@@ -673,14 +673,13 @@ def test_copilot_chat_rejects_reasoning_when_only_higher_tiers_are_available() -
         ]
     )
 
-    with pytest.raises(ProviderError) as caught:
-        provider._build_chat_payload(
-            _request(model="gpt-5.4", reasoning_effort="low"),
-            stream=False,
-        )
+    payload = provider._build_chat_payload(
+        _request(model="gpt-5.4", reasoning_effort="low"),
+        stream=False,
+    )
 
-    assert caught.value.kind is ProviderFailureKind.CLIENT_REQUEST
-    assert caught.value.parameter == "reasoning_effort"
+    # Category B: requested tier is below every advertised tier -> clamp up.
+    assert payload["reasoning_effort"] == "medium"
 
 
 @pytest.mark.parametrize(
@@ -718,7 +717,7 @@ def test_copilot_chat_warm_catalog_maps_minimal_exactly_or_downward(
 
 
 @pytest.mark.parametrize("requested", ["minimal", "low"])
-def test_copilot_chat_warm_catalog_none_only_rejects_public_effort(requested) -> None:
+def test_copilot_chat_warm_catalog_none_only_strips_public_effort(requested) -> None:
     provider = CopilotProvider()
     provider._models_ttl_cache.set(
         [
@@ -731,13 +730,13 @@ def test_copilot_chat_warm_catalog_none_only_rejects_public_effort(requested) ->
         ]
     )
 
-    with pytest.raises(RequestOptionError) as caught:
-        provider._build_chat_payload(
-            _request(model="gpt-5.4", reasoning_effort=requested),
-            stream=False,
-        )
+    payload = provider._build_chat_payload(
+        _request(model="gpt-5.4", reasoning_effort=requested),
+        stream=False,
+    )
 
-    assert caught.value.parameter == "reasoning_effort"
+    # ``none`` is not a real tier -> catalog advertises no reasoning -> strip.
+    assert "reasoning_effort" not in payload
 
 
 def test_copilot_chat_warm_catalog_does_not_raise_minimal_to_low() -> None:
@@ -753,16 +752,16 @@ def test_copilot_chat_warm_catalog_does_not_raise_minimal_to_low() -> None:
         ]
     )
 
-    with pytest.raises(RequestOptionError) as caught:
-        provider._build_chat_payload(
-            _request(model="gpt-5.4", reasoning_effort="minimal"),
-            stream=False,
-        )
+    payload = provider._build_chat_payload(
+        _request(model="gpt-5.4", reasoning_effort="minimal"),
+        stream=False,
+    )
 
-    assert caught.value.parameter == "reasoning_effort"
+    # Category B: ``minimal`` is below the ``low`` floor -> clamp up to ``low``.
+    assert payload["reasoning_effort"] == "low"
 
 
-def test_copilot_chat_rejects_budget_when_catalog_says_reasoning_unsupported() -> None:
+def test_copilot_chat_strips_budget_when_catalog_says_reasoning_unsupported() -> None:
     provider = CopilotProvider()
     provider._models_ttl_cache.set(
         [
@@ -775,18 +774,18 @@ def test_copilot_chat_rejects_budget_when_catalog_says_reasoning_unsupported() -
         ]
     )
 
-    with pytest.raises(ProviderError) as caught:
-        provider._build_chat_payload(
-            _request(model="gpt-4o", thinking_budget=4096),
-            stream=False,
-        )
+    payload = provider._build_chat_payload(
+        _request(model="gpt-4o", thinking_budget=4096),
+        stream=False,
+    )
 
-    assert caught.value.kind is ProviderFailureKind.CLIENT_REQUEST
-    assert caught.value.parameter == "thinking_budget"
+    # Category A: catalog advertises no reasoning surface -> strip budget-derived
+    # effort, no 400.
+    assert "reasoning_effort" not in payload
 
 
 @pytest.mark.parametrize("stream", [False, True])
-def test_copilot_chat_preflight_rejects_tiny_budget_without_upward_substitution(stream) -> None:
+def test_copilot_chat_preflight_clamps_up_tiny_budget(stream) -> None:
     provider = CopilotProvider()
     provider._models_ttl_cache.set(
         [
@@ -799,14 +798,17 @@ def test_copilot_chat_preflight_rejects_tiny_budget_without_upward_substitution(
         ]
     )
 
-    with pytest.raises(ProviderError) as caught:
-        provider.validate_chat_request(
-            _request(model="gpt-5.4", thinking_budget=1),
-            stream=stream,
-        )
-
-    assert caught.value.kind is ProviderFailureKind.CLIENT_REQUEST
-    assert caught.value.parameter == "thinking_budget"
+    # Category B: a budget below every tier clamps up to the floor, no preflight
+    # 400. Preflight exercises the same builder as execution.
+    provider.validate_chat_request(
+        _request(model="gpt-5.4", thinking_budget=1),
+        stream=stream,
+    )
+    payload = provider._build_chat_payload(
+        _request(model="gpt-5.4", thinking_budget=1),
+        stream=stream,
+    )
+    assert payload["reasoning_effort"] == "low"
 
 
 def test_copilot_chat_budget_maps_exact_or_downward_only() -> None:
@@ -830,7 +832,7 @@ def test_copilot_chat_budget_maps_exact_or_downward_only() -> None:
     assert payload["reasoning_effort"] == "low"
 
 
-def test_copilot_chat_warm_budget_without_downward_tier_reports_budget_parameter() -> None:
+def test_copilot_chat_warm_budget_without_downward_tier_clamps_up() -> None:
     provider = CopilotProvider()
     provider._models_ttl_cache.set(
         [
@@ -843,16 +845,19 @@ def test_copilot_chat_warm_budget_without_downward_tier_reports_budget_parameter
         ]
     )
 
-    with pytest.raises(ProviderError) as caught:
-        provider.validate_chat_request(
-            _request(model="gpt-5.4", thinking_budget=1024),
-            stream=True,
-        )
+    # Category B: budget maps below the ``medium`` floor -> clamp up, no 400.
+    provider.validate_chat_request(
+        _request(model="gpt-5.4", thinking_budget=1024),
+        stream=True,
+    )
+    payload = provider._build_chat_payload(
+        _request(model="gpt-5.4", thinking_budget=1024),
+        stream=True,
+    )
+    assert payload["reasoning_effort"] == "medium"
 
-    assert caught.value.parameter == "thinking_budget"
 
-
-def test_copilot_chat_warm_explicit_effort_reports_effort_parameter() -> None:
+def test_copilot_chat_warm_explicit_effort_below_floor_clamps_up() -> None:
     provider = CopilotProvider()
     provider._models_ttl_cache.set(
         [
@@ -865,28 +870,33 @@ def test_copilot_chat_warm_explicit_effort_reports_effort_parameter() -> None:
         ]
     )
 
-    with pytest.raises(ProviderError) as caught:
-        provider.validate_chat_request(
-            _request(model="gpt-5.4", thinking_budget=16384, reasoning_effort="low"),
-            stream=True,
-        )
-
-    assert caught.value.parameter == "reasoning_effort"
+    # Explicit effort wins over budget, then clamps up to the ``medium`` floor.
+    provider.validate_chat_request(
+        _request(model="gpt-5.4", thinking_budget=16384, reasoning_effort="low"),
+        stream=True,
+    )
+    payload = provider._build_chat_payload(
+        _request(model="gpt-5.4", thinking_budget=16384, reasoning_effort="low"),
+        stream=True,
+    )
+    assert payload["reasoning_effort"] == "medium"
 
 
 @pytest.mark.parametrize("stream", [False, True])
-def test_copilot_chat_cold_gpt5_tiny_budget_rejects_preflight(stream) -> None:
+def test_copilot_chat_cold_gpt5_tiny_budget_clamps_up_preflight(stream) -> None:
     provider = CopilotProvider()
 
-    with pytest.raises(ProviderError) as caught:
-        provider.validate_chat_request(
-            _request(model="gpt-5.4", thinking_budget=1),
-            stream=stream,
-        )
-
-    assert caught.value.kind is ProviderFailureKind.CLIENT_REQUEST
-    assert caught.value.retryable is False
-    assert caught.value.parameter == "thinking_budget"
+    # Cold catalog, supported gpt-5 family, budget below the lowest mapped tier
+    # -> clamp up to the lowest native tier instead of a preflight 400.
+    provider.validate_chat_request(
+        _request(model="gpt-5.4", thinking_budget=1),
+        stream=stream,
+    )
+    payload = provider._build_chat_payload(
+        _request(model="gpt-5.4", thinking_budget=1),
+        stream=stream,
+    )
+    assert payload["reasoning_effort"] == "low"
 
 
 def test_copilot_chat_explicit_effort_takes_precedence_over_budget() -> None:
@@ -910,7 +920,7 @@ def test_copilot_chat_explicit_effort_takes_precedence_over_budget() -> None:
     assert payload["reasoning_effort"] == "low"
 
 
-def test_copilot_responses_rejects_reasoning_when_catalog_says_unsupported() -> None:
+def test_copilot_responses_strips_reasoning_when_catalog_says_unsupported() -> None:
     provider = CopilotProvider()
     provider._models_ttl_cache.set(
         [
@@ -923,17 +933,16 @@ def test_copilot_responses_rejects_reasoning_when_catalog_says_unsupported() -> 
         ]
     )
 
-    with pytest.raises(ProviderError) as caught:
-        provider._build_responses_payload(
-            ResponsesRequest(model="gpt-4o", input="hi", reasoning_effort="high")
-        )
+    payload = provider._build_responses_payload(
+        ResponsesRequest(model="gpt-4o", input="hi", reasoning_effort="high")
+    )
 
-    assert caught.value.kind is ProviderFailureKind.CLIENT_REQUEST
-    assert caught.value.parameter == "reasoning_effort"
+    # Category A: catalog advertises no reasoning surface -> strip.
+    assert "reasoning" not in payload
 
 
 @pytest.mark.parametrize("stream", [False, True])
-def test_copilot_responses_cold_catalog_rejects_known_unsupported_family(stream) -> None:
+def test_copilot_responses_cold_catalog_strips_known_unsupported_family(stream) -> None:
     provider = CopilotProvider()
     request = ResponsesRequest(
         model="gpt-4o",
@@ -942,11 +951,10 @@ def test_copilot_responses_cold_catalog_rejects_known_unsupported_family(stream)
         reasoning_effort="high",
     )
 
-    with pytest.raises(ProviderError) as caught:
-        provider.validate_responses_request(request)
-
-    assert caught.value.kind is ProviderFailureKind.CLIENT_REQUEST
-    assert caught.value.parameter == "reasoning_effort"
+    # Cold catalog + statically-known-unsupported family -> strip, no 400.
+    provider.validate_responses_request(request)
+    payload = provider._build_responses_payload(request)
+    assert "reasoning" not in payload
 
 
 def test_copilot_responses_unknown_family_keeps_explicit_reasoning_observable() -> None:
@@ -984,17 +992,16 @@ def test_copilot_responses_cold_catalog_preserves_supported_reasoning_family() -
 
 
 @pytest.mark.parametrize("model", ["claude-sonnet-4", "gpt-4o", "gemini-2.5-pro"])
-def test_copilot_chat_rejects_explicit_reasoning_for_known_unsupported_models(model) -> None:
+def test_copilot_chat_strips_explicit_reasoning_for_known_unsupported_models(model) -> None:
     provider = CopilotProvider()
 
-    with pytest.raises(ProviderError) as caught:
-        provider._build_chat_payload(
-            _request(model=model, reasoning_effort="medium"),
-            stream=False,
-        )
+    payload = provider._build_chat_payload(
+        _request(model=model, reasoning_effort="medium"),
+        stream=False,
+    )
 
-    assert caught.value.kind is ProviderFailureKind.CLIENT_REQUEST
-    assert caught.value.parameter == "reasoning_effort"
+    # Category A: statically known to lack a reasoning surface -> strip.
+    assert "reasoning_effort" not in payload
 
 
 @pytest.mark.parametrize(
@@ -1011,7 +1018,7 @@ def test_copilot_chat_rejects_explicit_reasoning_for_known_unsupported_models(mo
 @pytest.mark.parametrize("cache_state", ["cold", "missing-metadata"])
 @pytest.mark.parametrize("stream", [False, True], ids=["nonstream", "stream"])
 @pytest.mark.parametrize("adapter", ["chat", "responses"])
-def test_copilot_missing_catalog_reasoning_metadata_rejects_known_old_claude4(
+def test_copilot_missing_catalog_reasoning_metadata_strips_known_old_claude4(
     model,
     cache_state,
     stream,
@@ -1030,24 +1037,28 @@ def test_copilot_missing_catalog_reasoning_metadata_rejects_known_old_claude4(
             ]
         )
 
-    with pytest.raises(RequestOptionError) as caught:
-        if adapter == "chat":
-            provider.validate_chat_request(
-                _request(model=model, stream=stream, reasoning_effort="low"),
-                stream=stream,
-            )
-        else:
-            provider.validate_responses_request(
-                ResponsesRequest(
-                    model=model,
-                    input="hi",
-                    stream=stream,
-                    reasoning_effort="low",
-                )
-            )
-
-    assert caught.value.kind is ProviderFailureKind.CLIENT_REQUEST
-    assert caught.value.parameter == "reasoning_effort"
+    # Category A: old Claude 4 families have no reasoning surface. With a cold or
+    # metadata-less catalog the static heuristic strips reasoning, no 400.
+    if adapter == "chat":
+        provider.validate_chat_request(
+            _request(model=model, stream=stream, reasoning_effort="low"),
+            stream=stream,
+        )
+        payload = provider._build_chat_payload(
+            _request(model=model, stream=stream, reasoning_effort="low"),
+            stream=stream,
+        )
+        assert "reasoning_effort" not in payload
+    else:
+        request = ResponsesRequest(
+            model=model,
+            input="hi",
+            stream=stream,
+            reasoning_effort="low",
+        )
+        provider.validate_responses_request(request)
+        payload = provider._build_responses_payload(request)
+        assert "reasoning" not in payload
 
 
 @pytest.mark.parametrize(
@@ -1134,7 +1145,7 @@ def test_copilot_live_catalog_can_enable_reasoning_on_static_old_claude(adapter)
         assert payload["reasoning"] == {"effort": "low", "summary": "auto"}
 
 
-def test_copilot_responses_rejects_when_only_higher_tier_is_available() -> None:
+def test_copilot_responses_clamps_up_when_only_higher_tier_is_available() -> None:
     provider = CopilotProvider()
     provider._models_ttl_cache.set(
         [
@@ -1147,13 +1158,12 @@ def test_copilot_responses_rejects_when_only_higher_tier_is_available() -> None:
         ]
     )
 
-    with pytest.raises(ProviderError) as caught:
-        provider._build_responses_payload(
-            ResponsesRequest(model="gpt-5.4", input="hi", reasoning_effort="low")
-        )
+    payload = provider._build_responses_payload(
+        ResponsesRequest(model="gpt-5.4", input="hi", reasoning_effort="low")
+    )
 
-    assert caught.value.kind is ProviderFailureKind.CLIENT_REQUEST
-    assert caught.value.parameter == "reasoning_effort"
+    # Category B: requested tier is below every advertised tier -> clamp up.
+    assert payload["reasoning"] == {"effort": "medium", "summary": "auto"}
 
 
 @pytest.mark.parametrize(
@@ -1190,7 +1200,7 @@ def test_copilot_responses_warm_catalog_maps_minimal_exactly_or_downward(
 
 
 @pytest.mark.parametrize("requested", ["minimal", "low"])
-def test_copilot_responses_warm_catalog_none_only_rejects_public_effort(requested) -> None:
+def test_copilot_responses_warm_catalog_none_only_strips_public_effort(requested) -> None:
     provider = CopilotProvider()
     provider._models_ttl_cache.set(
         [
@@ -1203,12 +1213,12 @@ def test_copilot_responses_warm_catalog_none_only_rejects_public_effort(requeste
         ]
     )
 
-    with pytest.raises(RequestOptionError) as caught:
-        provider._build_responses_payload(
-            ResponsesRequest(model="gpt-5.4", input="hi", reasoning_effort=requested)
-        )
+    payload = provider._build_responses_payload(
+        ResponsesRequest(model="gpt-5.4", input="hi", reasoning_effort=requested)
+    )
 
-    assert caught.value.parameter == "reasoning_effort"
+    # ``none`` is not a real tier -> catalog advertises no reasoning -> strip.
+    assert "reasoning" not in payload
 
 
 def test_copilot_responses_warm_catalog_does_not_raise_minimal_to_low() -> None:
@@ -1224,12 +1234,12 @@ def test_copilot_responses_warm_catalog_does_not_raise_minimal_to_low() -> None:
         ]
     )
 
-    with pytest.raises(RequestOptionError) as caught:
-        provider._build_responses_payload(
-            ResponsesRequest(model="gpt-5.4", input="hi", reasoning_effort="minimal")
-        )
+    payload = provider._build_responses_payload(
+        ResponsesRequest(model="gpt-5.4", input="hi", reasoning_effort="minimal")
+    )
 
-    assert caught.value.parameter == "reasoning_effort"
+    # Category B: ``minimal`` is below the ``low`` floor -> clamp up to ``low``.
+    assert payload["reasoning"] == {"effort": "low", "summary": "auto"}
 
 
 @pytest.mark.parametrize("model", ["gpt-5.4", "future-reasoner"])

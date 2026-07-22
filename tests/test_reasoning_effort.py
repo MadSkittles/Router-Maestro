@@ -9,8 +9,6 @@ import pytest
 from router_maestro.providers.base import (
     ChatRequest,
     Message,
-    ProviderError,
-    ProviderFailureKind,
     ResponsesRequest,
 )
 from router_maestro.providers.copilot import CopilotProvider
@@ -212,15 +210,13 @@ class TestCopilotResponsesPayloadEffort:
         payload = provider._build_responses_payload(req)
         assert payload["reasoning"] == {"effort": "medium", "summary": "auto"}
 
-    def test_responses_payload_rejects_when_catalog_says_no_reasoning(self):
-        # Explicit reasoning must not be silently dropped.
+    def test_responses_payload_strips_when_catalog_says_no_reasoning(self):
+        # Catalog explicitly advertises no reasoning surface -> strip, no 400.
         provider = CopilotProvider()
         self._seed_catalog(provider, "gpt-4o", [])
         req = ResponsesRequest(model="gpt-4o", input="hi", reasoning_effort="high")
-        with pytest.raises(ProviderError) as caught:
-            provider._build_responses_payload(req)
-        assert caught.value.kind is ProviderFailureKind.CLIENT_REQUEST
-        assert caught.value.parameter == "reasoning_effort"
+        payload = provider._build_responses_payload(req)
+        assert "reasoning" not in payload
 
     def test_responses_payload_preserves_known_supported_tier_when_catalog_cold(self):
         # Static capability knowledge keeps cold and warm behavior consistent.
