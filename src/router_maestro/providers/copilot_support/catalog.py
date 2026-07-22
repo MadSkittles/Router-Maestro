@@ -244,7 +244,7 @@ class CopilotCatalog:
                     max_context_window_tokens=normalize_catalog_limit(
                         limits, "max_context_window_tokens"
                     ),
-                    supports_thinking=thinking_support is True,
+                    supports_thinking=(thinking_support is True or bool(reasoning_values)),
                     supports_vision=vision_support is True,
                     reasoning_effort_values=reasoning_values,
                     supported_endpoints=supported_endpoints,
