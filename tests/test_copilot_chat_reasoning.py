@@ -329,3 +329,26 @@ def test_catalog_tiny_thinking_budget_clamps_up_to_lowest_tier():
         catalog_effort_values=["low", "medium", "high", "xhigh", "max"],
     )
     assert p.get("reasoning_effort") == "low"
+
+
+def test_haiku_chat_payload_has_no_reasoning_real_layer():
+    """Repro: Claude Code Haiku subagent sends thinking; payload must be valid
+    and carry no reasoning field, instead of raising a 400."""
+    from router_maestro.providers.base import ChatRequest, Message
+    from router_maestro.providers.copilot import CopilotProvider
+
+    provider = CopilotProvider()
+    request = ChatRequest(
+        model="github-copilot/claude-haiku-4.5",
+        messages=[Message(role="user", content="hi")],
+        max_tokens=1024,
+        reasoning_effort="high",
+        thinking_budget=16000,
+        thinking_type="enabled",
+    )
+
+    payload = provider._build_chat_payload(request, stream=False)
+
+    assert "reasoning_effort" not in payload
+    assert "thinking_budget" not in payload
+    assert payload["model"] == "github-copilot/claude-haiku-4.5"
