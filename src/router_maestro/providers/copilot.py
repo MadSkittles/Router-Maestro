@@ -367,33 +367,30 @@ class CopilotOutboundContract(OutboundContract):
         known_reasoning_support = _known_reasoning_support(model)
         if catalog_effort_values is not None:
             if not catalog_effort_values:
+                # Category A: no reasoning surface -> strip.
                 if reasoning_effort is not None:
-                    raise RequestOptionError(
-                        "GitHub Copilot does not support reasoning for this model",
-                        provider="github-copilot",
-                        model=model,
-                        parameter="reasoning_effort",
+                    logger.debug(
+                        "Copilot Responses model %s advertises no reasoning "
+                        "tiers; stripping reasoning",
+                        model,
                     )
                 return ReasoningResolution(effort=None)
             if reasoning_effort is None:
                 return ReasoningResolution(effort=None)
-            upstream_effort = pick_closest_effort(reasoning_effort, catalog_effort_values)
-            if upstream_effort is None:
-                raise RequestOptionError(
-                    "GitHub Copilot has no reasoning tier at or below the requested tier",
-                    provider="github-copilot",
-                    model=model,
-                    parameter="reasoning_effort",
-                )
+            # Category B: clamp up when below the catalog floor.
+            upstream_effort = resolve_effort_within_catalog(
+                reasoning_effort, catalog_effort_values
+            )
             return ReasoningResolution(effort=upstream_effort)
 
         if reasoning_effort is not None and known_reasoning_support is False:
-            raise RequestOptionError(
-                "GitHub Copilot does not support reasoning for this model",
-                provider="github-copilot",
-                model=model,
-                parameter="reasoning_effort",
+            # Category A (cold path): statically known to lack reasoning -> strip.
+            logger.debug(
+                "Copilot Responses model %s has no known reasoning support; "
+                "stripping reasoning",
+                model,
             )
+            return ReasoningResolution(effort=None)
         upstream_effort = (
             reasoning_effort
             if known_reasoning_support is True
