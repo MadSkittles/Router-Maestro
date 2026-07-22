@@ -50,6 +50,7 @@ from router_maestro.utils.reasoning import (
     budget_to_effort,
     downgrade_for_upstream,
     pick_closest_effort,
+    resolve_effort_within_catalog,
 )
 
 logger = get_logger("providers.copilot")
@@ -307,42 +308,38 @@ class CopilotOutboundContract(OutboundContract):
         rewrite = bare_lower.startswith("gpt-5.4")
         known_reasoning_support = _known_reasoning_support(model)
 
-        def unsupported_reasoning() -> NoReturn:
-            parameter = "reasoning_effort" if reasoning_effort is not None else "thinking_budget"
-            raise RequestOptionError(
-                "GitHub Copilot does not support the requested reasoning option for this model",
-                provider="github-copilot",
-                model=model,
-                parameter=parameter,
-            )
-
         # Catalog-driven path: trust whatever Copilot advertises.
         if catalog_effort_values is not None:
             if not catalog_effort_values:
+                # Category A: model advertises no reasoning surface -> strip.
                 if reasoning_effort is not None or thinking_budget is not None:
-                    unsupported_reasoning()
+                    logger.debug(
+                        "Copilot model %s advertises no reasoning tiers; "
+                        "stripping requested reasoning",
+                        model,
+                    )
                 return ReasoningResolution(effort=None, rewrite_max_tokens_to_completion=rewrite)
             desired = reasoning_effort or budget_to_effort(thinking_budget)
-            if desired is None and thinking_budget is not None:
-                unsupported_reasoning()
             if desired is None:
+                if thinking_budget is not None:
+                    # Category B: budget too small to derive a tier -> clamp up.
+                    picked = resolve_effort_within_catalog("minimal", catalog_effort_values)
+                    return ReasoningResolution(
+                        effort=picked, rewrite_max_tokens_to_completion=rewrite
+                    )
                 return ReasoningResolution(effort=None, rewrite_max_tokens_to_completion=rewrite)
-            picked = pick_closest_effort(desired, catalog_effort_values)
-            if picked is None:
-                raise RequestOptionError(
-                    "GitHub Copilot has no reasoning tier at or below the requested tier",
-                    provider="github-copilot",
-                    model=model,
-                    parameter=(
-                        "reasoning_effort" if reasoning_effort is not None else "thinking_budget"
-                    ),
-                )
+            picked = resolve_effort_within_catalog(desired, catalog_effort_values)
             return ReasoningResolution(effort=picked, rewrite_max_tokens_to_completion=rewrite)
 
         # Hardcoded fallback when the catalog hasn't been fetched yet.
         if known_reasoning_support is False:
+            # Category A: statically known to lack reasoning -> strip.
             if reasoning_effort is not None or thinking_budget is not None:
-                unsupported_reasoning()
+                logger.debug(
+                    "Copilot model %s has no known reasoning support; "
+                    "stripping requested reasoning",
+                    model,
+                )
             return ReasoningResolution(effort=None, rewrite_max_tokens_to_completion=rewrite)
 
         effort = reasoning_effort or budget_to_effort(thinking_budget)
@@ -353,7 +350,9 @@ class CopilotOutboundContract(OutboundContract):
         elif known_reasoning_support is None and effort == "xhigh":
             effort = "high"
         if effort is None and thinking_budget is not None:
-            unsupported_reasoning()
+            # Category B (cold path): supported family, budget below the lowest
+            # mapped tier -> clamp up to the lowest upstream-native tier.
+            effort = "low"
         if effort in ("minimal", "low", "medium", "high", "xhigh"):
             return ReasoningResolution(effort=effort, rewrite_max_tokens_to_completion=rewrite)
         return ReasoningResolution(effort=None, rewrite_max_tokens_to_completion=rewrite)
