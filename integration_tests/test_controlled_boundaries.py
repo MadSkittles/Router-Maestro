@@ -151,6 +151,24 @@ def _assert_native_open_failure(surface: str, response: httpx.Response) -> None:
         ]
         return
 
+    if surface == "anthropic-beta":
+        # The native beta stream primes upstream inside the SSE generator (to keep
+        # keepalive pings flowing during a possibly minutes-long first-frame wait),
+        # so response headers commit as 200 before the open failure is known. A
+        # stream-open failure therefore surfaces as an SSE ``error`` event, mirroring
+        # the standard Anthropic path. See anthropic_beta._beta_planned_native_stream.
+        assert response.status_code == 200
+        assert response.headers["content-type"].startswith("text/event-stream")
+        errors = [
+            payload
+            for name, payload in parse_sse_events(response)
+            if name == "error" and isinstance(payload, dict)
+        ]
+        assert len(errors) == 1
+        assert errors[0]["type"] == "error"
+        assert errors[0]["error"]["type"] == "rate_limit_error"
+        return
+
     assert response.status_code == 429
     assert response.headers["content-type"].startswith("application/json")
     assert "data:" not in response.text
@@ -159,9 +177,6 @@ def _assert_native_open_failure(surface: str, response: httpx.Response) -> None:
     if surface in {"openai-chat", "openai-responses"}:
         assert body["error"]["type"] == "rate_limit_error"
         assert body["error"]["code"] == "rate_limit_exceeded"
-    elif surface == "anthropic-beta":
-        assert body["type"] == "error"
-        assert body["error"]["type"] == "rate_limit_error"
     else:
         assert body["error"]["code"] == 429
         assert body["error"]["status"] == "RESOURCE_EXHAUSTED"

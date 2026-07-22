@@ -867,7 +867,7 @@ class CopilotProvider(BaseProvider):
         json: dict,
         headers_kwargs: dict,
         model: str | None = None,
-    ) -> "AsyncIterator[httpx.Response]":
+    ) -> AsyncIterator[httpx.Response]:
         """Open a Copilot stream, force-refreshing and retrying once on 401/403.
 
         Mirrors ``_send_with_auth_retry`` for streaming. The 401/403 is detected

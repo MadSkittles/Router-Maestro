@@ -253,7 +253,7 @@ async def _send_native_nonstream(candidate: RouteCandidate, body: dict):
 async def _stream_native_candidate(
     candidate: RouteCandidate,
     body: dict,
-) -> AsyncGenerator[str, None]:
+) -> AsyncGenerator[str]:
     """Open one candidate's native Responses stream and pump raw SSE frames."""
     provider = candidate.provider
     if not isinstance(provider, CopilotProvider):
@@ -287,7 +287,7 @@ async def _stream_passthrough(
     provider: CopilotProvider,
     payload: dict,
     candidate: RouteCandidate,
-) -> AsyncGenerator[str, None]:
+) -> AsyncGenerator[str]:
     """Stream raw SSE frames from Copilot's native /responses endpoint."""
     async with provider._stream_with_auth_retry(
         COPILOT_RESPONSES_PATH,
@@ -309,7 +309,7 @@ async def _stream_passthrough(
             yield frame
 
 
-async def _iter_sse_frames(response) -> AsyncGenerator[str, None]:
+async def _iter_sse_frames(response) -> AsyncGenerator[str]:
     """Iterate SSE frames, filtering Copilot-internal events."""
     current_event: str | None = None
     data_buffer: str = ""
@@ -405,7 +405,7 @@ async def _encode_native_stream_errors(
     stream: AsyncIterator[str],
     *,
     pipeline=None,
-) -> AsyncGenerator[str, None]:
+) -> AsyncGenerator[str]:
     """Apply the shared guard chain and preserve native terminal semantics."""
     terminal_outcome: TerminalOutcome | None = None
     try:

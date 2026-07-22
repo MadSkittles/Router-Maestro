@@ -3516,7 +3516,7 @@ class _ClosableEmptyStream(AsyncIterator[ChatStreamChunk]):
     def __init__(self) -> None:
         self.close_calls = 0
 
-    def __aiter__(self) -> "_ClosableEmptyStream":
+    def __aiter__(self) -> _ClosableEmptyStream:
         return self
 
     async def __anext__(self) -> ChatStreamChunk:

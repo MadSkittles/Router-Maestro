@@ -188,7 +188,7 @@ class AuditTrace:
         status: int,
         headers: dict[str, str] | None = None,
         body_summary: str | None = None,
-        outcome: "TerminalOutcome | None" = None,
+        outcome: TerminalOutcome | None = None,
     ) -> None:
         record: dict[str, Any] = {
             "timestamp": time.time(),

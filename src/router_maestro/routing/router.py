@@ -5,7 +5,7 @@ import inspect
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from copy import deepcopy
 from dataclasses import dataclass, replace
-from typing import Generic, TypeVar, cast
+from typing import TypeVar, cast
 
 from router_maestro.config import (
     FallbackStrategy,
@@ -68,16 +68,15 @@ AUTO_ROUTE_MODEL = "router-maestro"
 CACHE_TTL_SECONDS = 300
 
 # Global singleton instance
-_router_instance: "Router | None" = None
+_router_instance: Router | None = None
 
 RequestT = TypeVar("RequestT")
 ResponseT = TypeVar("ResponseT")
 ChunkT = TypeVar("ChunkT")
-RouterT = TypeVar("RouterT")
 
 
 @dataclass(slots=True)
-class _RouterGeneration(Generic[RouterT]):
+class _RouterGeneration[RouterT]:
     generation_id: int
     router: RouterT
     config_snapshot: object | None = None
@@ -115,7 +114,9 @@ async def _close_router_resources(router: object) -> None:
             await result
 
 
-async def _await_task_ignoring_cancellation(task: asyncio.Task[RouterT]) -> tuple[RouterT, bool]:
+async def _await_task_ignoring_cancellation[RouterT](
+    task: asyncio.Task[RouterT],
+) -> tuple[RouterT, bool]:
     """Wait through repeated caller cancellation and report whether it occurred."""
     cancelled = False
     while not task.done():
@@ -131,12 +132,12 @@ async def _close_uninstalled_router(router: object) -> None:
     await _await_task_ignoring_cancellation(close_task)
 
 
-class RouterLease(Generic[RouterT]):
+class RouterLease[RouterT]:
     """Idempotent reference to one immutable Router generation."""
 
     def __init__(
         self,
-        owner: "RouterOwner[RouterT]",
+        owner: RouterOwner[RouterT],
         generation: _RouterGeneration[RouterT],
     ) -> None:
         self._owner = owner
@@ -171,14 +172,14 @@ class RouterLease(Generic[RouterT]):
             if cancelled:
                 raise asyncio.CancelledError
 
-    async def __aenter__(self) -> "RouterLease[RouterT]":
+    async def __aenter__(self) -> RouterLease[RouterT]:
         return self
 
     async def __aexit__(self, *_exc_info: object) -> None:
         await self.release()
 
 
-class RouterOwner(Generic[RouterT]):
+class RouterOwner[RouterT]:
     """Own atomically swappable Router generations and their resources."""
 
     def __init__(
@@ -428,7 +429,7 @@ class _PrimedStream(AsyncIterator[ChunkT]):
         self._closed = False
         self.selected_model = selected_model
 
-    def __aiter__(self) -> "_PrimedStream[ChunkT]":
+    def __aiter__(self) -> _PrimedStream[ChunkT]:
         return self
 
     async def __anext__(self) -> ChunkT:
@@ -454,7 +455,7 @@ class _PrimedStream(AsyncIterator[ChunkT]):
         await close_async_iterator(self._stream)
 
 
-def get_router() -> "Router":
+def get_router() -> Router:
     """Get the singleton Router instance.
 
     Returns:
@@ -670,12 +671,10 @@ class Router:
         if self._models_cache_ttl.is_valid:
             return
 
-        if self._models_cache:
-            logger.debug("Cache expired, refreshing")
-            self._models_cache.clear()
-            self._fuzzy_cache.clear()
-
         logger.debug("Initializing models cache")
+        previous_cache = self._models_cache
+        new_cache: dict[str, tuple[str, ModelInfo]] = {}
+        any_provider_failed = False
         for provider_name, provider in self.providers.items():
             if provider.is_authenticated():
                 try:
@@ -705,31 +704,52 @@ class Router:
                         # aliases when their strings collide. This can happen when
                         # an upstream ID itself contains '/', for example
                         # ``meta-llama/llama-3``.
-                        existing = self._models_cache.get(ref.qualified_id)
+                        existing = new_cache.get(ref.qualified_id)
                         if existing is None or not self._is_qualified_cache_entry(
                             ref.qualified_id,
                             existing,
                         ):
-                            self._models_cache[ref.qualified_id] = entry
+                            new_cache[ref.qualified_id] = entry
 
                         # Keep a bare alias only when it does not shadow a
                         # canonical provider/model identity. Duplicate aliases
                         # retain the first catalog entry; RoutePlan later chooses
                         # the provider by configured priority and capability.
-                        alias_entry = self._models_cache.get(ref.upstream_id)
+                        alias_entry = new_cache.get(ref.upstream_id)
                         if alias_entry is None:
-                            self._models_cache[ref.upstream_id] = entry
+                            new_cache[ref.upstream_id] = entry
                     logger.debug("Cached %d models from %s", len(models), provider_name)
                 except ProviderError as e:
+                    any_provider_failed = True
                     logger.warning(
                         "model_catalog_failed provider=%s kind=%s retryable=%s",
                         provider_name,
                         e.kind.value,
                         str(e.retryable).lower(),
                     )
+                    # A transient failure (e.g. a token-refresh race that briefly
+                    # reports the provider as unauthenticated, or an upstream 502
+                    # while minting a token) must not drop a provider's models from
+                    # the catalog, so retain its previously cached entries and let
+                    # in-flight requests keep resolving. Trade-off: a *persistent*
+                    # provider failure keeps serving the last-known catalog until a
+                    # refresh finally succeeds; that is surfaced by the repeated
+                    # model_catalog_failed warning above (the TTL is not refreshed
+                    # on failure, so each request retries) rather than by silently
+                    # emptying the cache.
+                    for key, cached_entry in previous_cache.items():
+                        if cached_entry[0] == provider_name and key not in new_cache:
+                            new_cache[key] = cached_entry
                     continue
 
-        self._models_cache_ttl.set(True)
+        self._models_cache = new_cache
+        self._fuzzy_cache.clear()
+        # Only mark the cache fresh when every authenticated provider refreshed
+        # successfully. If any provider failed, leave the TTL expired so the next
+        # request retries promptly instead of serving a degraded catalog for a
+        # full TTL window.
+        if not any_provider_failed:
+            self._models_cache_ttl.set(True)
         logger.info("Models cache initialized with %d entries", len(self._models_cache))
 
         self._apply_model_overrides()

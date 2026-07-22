@@ -110,7 +110,7 @@ class PrioritiesConfig(BaseModel):
     audit: AuditConfig = Field(default_factory=AuditConfig)
 
     @classmethod
-    def get_default(cls) -> "PrioritiesConfig":
+    def get_default(cls) -> PrioritiesConfig:
         """Get default empty priorities configuration."""
         return cls(priorities=[])
 

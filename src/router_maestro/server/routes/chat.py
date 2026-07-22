@@ -277,7 +277,7 @@ async def stream_response(
     prepared_plan=None,
     opened_stream=None,
     opened_provider_name: str | None = None,
-) -> AsyncGenerator[str, None]:
+) -> AsyncGenerator[str]:
     """Stream chat completion response with an optional explicit usage policy.
 
     ``None`` preserves Router-Maestro's legacy wire behavior. Explicit booleans

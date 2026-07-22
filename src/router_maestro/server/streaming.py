@@ -45,9 +45,9 @@ SSE_HEADERS = {
 
 
 async def resilient_sse_generator(
-    inner: AsyncGenerator[str, None],
+    inner: AsyncGenerator[str],
     keepalive_frame: str = SSE_KEEPALIVE_COMMENT,
-) -> AsyncGenerator[str, None]:
+) -> AsyncGenerator[str]:
     """Wrap an SSE generator with keepalive frames and error handling.
 
     Emits ``keepalive_frame`` every ``SSE_KEEPALIVE_INTERVAL`` seconds when
@@ -109,7 +109,7 @@ async def resilient_sse_generator(
 
 
 def sse_streaming_response(
-    generator: AsyncGenerator[str, None],
+    generator: AsyncGenerator[str],
     keepalive_frame: str = SSE_KEEPALIVE_COMMENT,
 ) -> StreamingResponse:
     """Create a ``StreamingResponse`` with SSE headers and keepalive wrapper.

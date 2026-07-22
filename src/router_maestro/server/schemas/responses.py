@@ -200,7 +200,7 @@ class ResponsesMessageOutput(BaseModel):
     content: list[ResponsesOutputText | ResponsesRefusalOutput]
 
 
-class ResponsesFunctionCallOutput(BaseModel):
+class ResponsesFunctionCallOutputItem(BaseModel):
     """A function call output in the response."""
 
     type: str = "function_call"
@@ -244,7 +244,7 @@ class ResponsesResponse(BaseModel):
     output: list[
         ResponsesReasoningOutput
         | ResponsesMessageOutput
-        | ResponsesFunctionCallOutput
+        | ResponsesFunctionCallOutputItem
         | dict[str, Any]
     ]
     usage: ResponsesUsage | None = None

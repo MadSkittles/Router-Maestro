@@ -177,7 +177,7 @@ def _create_test_response() -> AnthropicMessagesResponse:
     )
 
 
-async def _stream_test_response() -> AsyncGenerator[str, None]:
+async def _stream_test_response() -> AsyncGenerator[str]:
     """Stream a mock test response."""
     response_id = f"msg_{uuid.uuid4().hex[:24]}"
 
@@ -548,7 +548,7 @@ async def stream_response(
     *,
     token_estimation_request: AnthropicMessagesRequest | None = None,
     prepared_plan=None,
-) -> AsyncGenerator[str, None]:
+) -> AsyncGenerator[str]:
     """Stream Anthropic Messages API response."""
     response_id = f"msg_{uuid.uuid4().hex[:24]}"
     reducer: AnthropicReducer | None = None
