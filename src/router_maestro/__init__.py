@@ -1,3 +1,3 @@
 """Router-Maestro: Multi-model routing and load balancing system."""
 
-__version__ = "0.7.5"
+__version__ = "0.7.6"
