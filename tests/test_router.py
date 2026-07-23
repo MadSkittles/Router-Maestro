@@ -2,7 +2,14 @@
 
 import pytest
 
-from router_maestro.providers import ChatRequest, ChatResponse, Message, ModelInfo, ProviderError
+from router_maestro.providers import (
+    ChatRequest,
+    ChatResponse,
+    Message,
+    ModelInfo,
+    ProviderError,
+    ProviderFailureKind,
+)
 from router_maestro.providers.base import BaseProvider
 from router_maestro.routing.router import CACHE_TTL_SECONDS, Router
 from router_maestro.utils.cache import TTLCache
@@ -194,4 +201,34 @@ class TestRouterCatalogRefreshResilience:
         # Stale entries survive so bare-name resolution keeps working, and the
         # TTL stays expired so the next request retries instead of waiting.
         assert "gpt-5.6-sol" in router._models_cache
+        assert not router._models_cache_ttl.is_valid
+
+    @pytest.mark.asyncio
+    async def test_cold_start_failure_propagates_and_remains_retryable(self):
+        """An empty catalog after an upstream failure must not become a model 404."""
+
+        class FailingProvider(MockProvider):
+            def __init__(self):
+                super().__init__(name="github-copilot")
+                self.calls = 0
+
+            async def ensure_token(self) -> None:
+                self.calls += 1
+                raise ProviderError(
+                    "Failed to refresh Copilot token",
+                    status_code=502,
+                    retryable=True,
+                    kind=ProviderFailureKind.UPSTREAM_STATUS,
+                )
+
+        provider = FailingProvider()
+        router = self._make_router(provider)
+
+        with pytest.raises(ProviderError, match="Failed to refresh Copilot token"):
+            await router._ensure_models_cache()
+        with pytest.raises(ProviderError, match="Failed to refresh Copilot token"):
+            await router._ensure_models_cache()
+
+        assert provider.calls == 2
+        assert router._models_cache == {}
         assert not router._models_cache_ttl.is_valid

@@ -679,6 +679,7 @@ class Router:
         previous_cache = self._models_cache
         new_cache: dict[str, tuple[str, ModelInfo]] = {}
         any_provider_failed = False
+        first_refresh_error: ProviderError | None = None
         for provider_name, provider in self.providers.items():
             if provider.is_authenticated():
                 try:
@@ -725,6 +726,8 @@ class Router:
                     logger.debug("Cached %d models from %s", len(models), provider_name)
                 except ProviderError as e:
                     any_provider_failed = True
+                    if first_refresh_error is None:
+                        first_refresh_error = e
                     logger.warning(
                         "model_catalog_failed provider=%s kind=%s retryable=%s",
                         provider_name,
@@ -745,6 +748,12 @@ class Router:
                         if cached_entry[0] == provider_name and key not in new_cache:
                             new_cache[key] = cached_entry
                     continue
+
+        if first_refresh_error is not None and not new_cache:
+            # A cold-start catalog failure is an upstream outage, not evidence
+            # that every requested model is unknown. Leave the cache invalid so
+            # this request reports the provider failure and later requests retry.
+            raise first_refresh_error
 
         self._models_cache = new_cache
         self._fuzzy_cache.clear()

@@ -172,6 +172,13 @@ class CopilotAuthSession:
         if cred.api_endpoint:
             self.api_base = cred.api_endpoint
 
+        current_time = int(time.time())
+        if not self.cached_token and cred.access and cred.expires > current_time:
+            self.cached_token = cred.access
+            self.token_expires = cred.expires
+        if not force and self.cached_token and self.token_expires > current_time + 60:
+            return
+
         token_before_lock = self.cached_token
         async with self.token_refresh_lock:
             current_time = int(time.time())
@@ -190,7 +197,21 @@ class CopilotAuthSession:
                     provider=self.provider_name,
                 )
 
-            copilot_token = await self._mint_with_retry(cred, mint)
+            try:
+                copilot_token = await self._mint_with_retry(cred, mint)
+            except ProviderError as error:
+                if (
+                    error.retryable
+                    and error.kind in _RETRYABLE_MINT_KINDS
+                    and not force
+                    and self.cached_token
+                    and self.token_expires > int(time.time())
+                ):
+                    logger.warning(
+                        "Using unexpired cached Copilot token after refresh retries failed"
+                    )
+                    return
+                raise
 
             self.cached_token = copilot_token.token
             self.token_expires = copilot_token.expires_at

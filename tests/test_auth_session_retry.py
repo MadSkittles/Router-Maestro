@@ -109,9 +109,23 @@ def _fast_backoff(monkeypatch):
 
 def _session_needs_refresh() -> tuple[CopilotAuthSession, MagicMock]:
     session, manager = _session_with_stub_manager()
-    manager.get_credential.return_value = _oauth()
+    manager.get_credential.return_value = _oauth().model_copy(update={"expires": 0})
     manager.get_credential.side_effect = None
     return session, manager
+
+
+@pytest.mark.asyncio
+async def test_unexpired_persisted_token_survives_server_restart():
+    """A new session should reuse a valid token persisted in auth.json."""
+    session, manager = _session_with_stub_manager()
+    manager.get_credential.return_value = _oauth("persisted-token")
+    mint = _FlakyMint([])
+
+    await session.ensure_token(persist=_noop_persist, mint=mint)
+
+    assert mint.calls == 0
+    assert session.cached_token == "persisted-token"
+    assert session.token_expires == 2**31
 
 
 @pytest.mark.asyncio
@@ -147,6 +161,38 @@ async def test_retry_exhaustion_reraises_transient_error(_fast_backoff):
 
     with pytest.raises(ProviderError) as exc:
         await session.ensure_token(persist=_noop_persist, mint=mint)
+
+    assert exc.value.retryable is True
+    assert mint.calls == 4
+
+
+@pytest.mark.asyncio
+async def test_retry_exhaustion_uses_token_until_actual_expiration(_fast_backoff):
+    """Proactive refresh failure should not discard a still-usable token."""
+    session, manager = _session_with_stub_manager()
+    credential = _oauth("nearly-expired-token").model_copy(
+        update={"expires": int(time.time()) + 30}
+    )
+    manager.get_credential.return_value = credential
+    mint = _FlakyMint([_transient()] * 5)
+
+    await session.ensure_token(persist=_noop_persist, mint=mint)
+
+    assert mint.calls == 4
+    assert session.cached_token == "nearly-expired-token"
+
+
+@pytest.mark.asyncio
+async def test_forced_refresh_never_reuses_rejected_token(_fast_backoff):
+    """A token rejected with 401/403 must not be restored after retry exhaustion."""
+    session, manager = _session_with_stub_manager()
+    session.cached_token = "rejected-token"
+    session.token_expires = 2**31
+    manager.get_credential.return_value = _oauth("rejected-token")
+    mint = _FlakyMint([_transient()] * 5)
+
+    with pytest.raises(ProviderError) as exc:
+        await session.ensure_token(force=True, persist=_noop_persist, mint=mint)
 
     assert exc.value.retryable is True
     assert mint.calls == 4

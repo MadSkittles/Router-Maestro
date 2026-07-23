@@ -4,6 +4,15 @@ All notable changes to Router-Maestro are documented here.
 
 ---
 
+## Unreleased
+
+### Fixes
+
+- **Copilot refresh outages no longer turn valid models into persistent 404s.** Reuse a
+  persisted Copilot access token while it remains valid, allow a still-unexpired token to
+  survive exhausted proactive-refresh retries, and propagate cold-start catalog failures
+  instead of misclassifying the requested model as missing.
+
 ## v0.7.6 (2026-07-23)
 
 ### Fixes
