@@ -76,6 +76,13 @@ def _estimate_input_tokens(request: GeminiGenerateContentRequest) -> int:
 # ============================================================================
 
 
+def _include_thoughts(request: GeminiGenerateContentRequest) -> bool:
+    """Whether the client asked for reasoning to be returned as thought parts."""
+    gc = request.generation_config
+    tc = gc.thinking_config if gc else None
+    return bool(tc and tc.include_thoughts)
+
+
 @router.post("/api/gemini/v1beta/models/{model_method:path}:generateContent")
 async def generate_content(
     model_method: str,
@@ -103,6 +110,7 @@ async def generate_content(
                 else qualify_model_id(provider_name, response.model)
             ),
             input_tokens=estimated_tokens,
+            include_thoughts=_include_thoughts(request),
         ).model_dump(by_alias=True, exclude_none=True)
         record_chat_response_outcome(response)
         return downstream_response
@@ -141,8 +149,9 @@ async def stream_generate_content(
     #     len(chat_request.tools) if chat_request.tools else 0,
     #     chat_request.max_tokens,
     # )
-    # Enable streaming, preserving every other ChatRequest field so reasoning
-    # metadata survives into the provider call.
+    # Enable streaming, preserving every other ChatRequest field (including the
+    # translated reasoning budget/type) so reasoning survives into the provider
+    # call.
     chat_request = replace(chat_request, stream=True, extra={})
 
     estimated_tokens = _estimate_input_tokens(request)
@@ -166,6 +175,7 @@ async def stream_generate_content(
                 estimated_tokens,
                 opened_stream=stream,
                 opened_provider_name=provider_name,
+                include_thoughts=_include_thoughts(request),
             ),
         )
     except Exception:
@@ -268,6 +278,7 @@ async def _stream_response(
     prepared_plan=None,
     opened_stream=None,
     opened_provider_name: str | None = None,
+    include_thoughts: bool = False,
 ) -> AsyncGenerator[str]:
     """Stream Gemini-format SSE response from the upstream provider."""
     pipeline = None
@@ -348,6 +359,7 @@ async def _stream_response(
                     {
                         "delta": {
                             "content": (chunk.content or chunk.refusal or None),
+                            "thinking": chunk.thinking,
                             "tool_calls": chunk.tool_calls,
                         },
                         "finish_reason": (
@@ -360,7 +372,9 @@ async def _stream_response(
                 "usage": chunk.usage,
             }
 
-            gemini_event = translate_openai_chunk_to_gemini(openai_chunk, state, response_model)
+            gemini_event = translate_openai_chunk_to_gemini(
+                openai_chunk, state, response_model, include_thoughts=include_thoughts
+            )
             if gemini_event is not None:
                 yield (
                     "data: "

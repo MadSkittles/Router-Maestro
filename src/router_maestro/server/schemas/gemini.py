@@ -49,6 +49,7 @@ class GeminiPart(BaseModel):
     function_call: GeminiFunctionCall | None = Field(default=None, alias="functionCall")
     function_response: GeminiFunctionResponse | None = Field(default=None, alias="functionResponse")
     inline_data: GeminiInlineData | None = Field(default=None, alias="inlineData")
+    thought: bool | None = None
 
 
 class GeminiContent(BaseModel):
@@ -98,6 +99,15 @@ class GeminiToolConfig(BaseModel):
     )
 
 
+class GeminiThinkingConfig(BaseModel):
+    """Gemini thinkingConfig (reasoning control)."""
+
+    model_config = ConfigDict(populate_by_name=True, extra="allow")
+
+    thinking_budget: int | None = Field(default=None, alias="thinkingBudget")
+    include_thoughts: bool | None = Field(default=None, alias="includeThoughts")
+
+
 class GeminiGenerationConfig(BaseModel):
     """Generation configuration."""
 
@@ -112,6 +122,7 @@ class GeminiGenerationConfig(BaseModel):
     response_mime_type: str | None = Field(default=None, alias="responseMimeType")
     frequency_penalty: float | None = Field(default=None, alias="frequencyPenalty")
     presence_penalty: float | None = Field(default=None, alias="presencePenalty")
+    thinking_config: GeminiThinkingConfig | None = Field(default=None, alias="thinkingConfig")
 
 
 class GeminiGenerateContentRequest(BaseModel):

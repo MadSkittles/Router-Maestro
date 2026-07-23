@@ -42,8 +42,8 @@ from router_maestro.server.protocols.errors import (
     postcommit_error_data,
     protocol_error_response,
 )
-from router_maestro.server.routes.responses import create_response
-from router_maestro.server.schemas import ResponsesRequest
+from router_maestro.server.routes.responses import _reasoning_validation_error, create_response
+from router_maestro.server.schemas import ResponsesReasoningConfig, ResponsesRequest
 from router_maestro.server.streaming import parse_sse_frame, sse_streaming_response
 from router_maestro.utils import get_logger
 from router_maestro.utils.async_iterators import close_async_iterator
@@ -522,6 +522,17 @@ async def beta_responses(raw_request: FastAPIRequest):
     model = body.get("model")
     if not model:
         return _invalid_request("'model' field is required")
+
+    # Validate reasoning.effort through the same strict gate the standard route
+    # uses, before any planning or native dispatch, so an out-of-spec effort
+    # returns an identical native 400 instead of being clamp-and-forwarded (or,
+    # in the cold-catalog window, forwarded verbatim upstream).
+    reasoning = body.get("reasoning")
+    if isinstance(reasoning, dict) and "effort" in reasoning:
+        try:
+            ResponsesReasoningConfig.model_validate(reasoning)
+        except ValidationError as error:
+            return client_error_response(_reasoning_validation_error(error), "openai")
 
     stream = bool(body.get("stream", False))
     operation = _operation_for(stream)

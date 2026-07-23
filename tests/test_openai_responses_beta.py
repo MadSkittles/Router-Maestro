@@ -421,6 +421,31 @@ def test_nonstream_passthrough_forwards_raw_and_rewrites_model(client) -> None:
     assert sent_payload["input"] == "hi"
 
 
+@pytest.mark.parametrize("bad_effort", ["bogus", "none"])
+def test_beta_responses_rejects_invalid_reasoning_effort(non_raising_client, bad_effort) -> None:
+    """Beta native must reject an out-of-spec effort with a native 400 (matching
+    the standard route) before any planning or upstream dispatch, instead of
+    clamp-and-forwarding it."""
+    send_mock = AsyncMock()
+    with patch(
+        "router_maestro.server.routes.openai_responses_beta._resolve_responses_model",
+        new_callable=AsyncMock,
+    ) as resolve_mock:
+        resolve_mock.side_effect = AssertionError("must 400 before resolving/dispatch")
+        downstream = non_raising_client.post(
+            "/api/openai/beta/v1/responses",
+            json={
+                "model": "github-copilot/gpt-5.5",
+                "input": "hi",
+                "reasoning": {"effort": bad_effort},
+            },
+        )
+    assert downstream.status_code == 400
+    body = downstream.json()
+    assert body["error"]["param"] == "reasoning_effort"
+    send_mock.assert_not_awaited()
+
+
 def _responses_plan_with_efforts(provider, *, model="gpt-5.5", efforts=None) -> RoutePlan:
     ref = ModelRef("github-copilot", model)
     operation = Operation.RESPONSES
