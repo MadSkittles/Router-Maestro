@@ -272,6 +272,53 @@ class TestTranslateGeminiToOpenAI:
         assert result.response_mime_type == "application/json"
         assert result.extra == {}
 
+    def test_thinking_config_enabled_maps_budget_and_type(self):
+        request = GeminiGenerateContentRequest.model_validate(
+            {
+                "contents": [{"role": "user", "parts": [{"text": "hi"}]}],
+                "generationConfig": {
+                    "thinkingConfig": {"thinkingBudget": 4000, "includeThoughts": True}
+                },
+            }
+        )
+        result = translate_gemini_to_openai(request, "github-copilot/gemini-3.5-flash")
+        assert result.thinking_type == "enabled"
+        assert result.thinking_budget == 4000
+
+    def test_thinking_config_zero_disables_minus_one_adaptive(self):
+        def mk(budget):
+            request = GeminiGenerateContentRequest.model_validate(
+                {
+                    "contents": [{"role": "user", "parts": [{"text": "hi"}]}],
+                    "generationConfig": {"thinkingConfig": {"thinkingBudget": budget}},
+                }
+            )
+            return translate_gemini_to_openai(request, "github-copilot/gemini-3.5-flash")
+
+        assert mk(0).thinking_type == "disabled"
+        assert mk(0).thinking_budget is None
+        assert mk(-1).thinking_type == "adaptive"
+        assert mk(-1).thinking_budget is None
+
+    def test_thinking_config_include_thoughts_only_enables(self):
+        request = GeminiGenerateContentRequest.model_validate(
+            {
+                "contents": [{"role": "user", "parts": [{"text": "hi"}]}],
+                "generationConfig": {"thinkingConfig": {"includeThoughts": True}},
+            }
+        )
+        result = translate_gemini_to_openai(request, "github-copilot/gemini-3.5-flash")
+        assert result.thinking_type == "enabled"
+
+    def test_no_thinking_config_leaves_reasoning_unset(self):
+        request = GeminiGenerateContentRequest(
+            contents=[GeminiContent(role="user", parts=[GeminiPart(text="Hi")])],
+            generation_config=GeminiGenerationConfig(temperature=0.5),
+        )
+        result = translate_gemini_to_openai(request, "model")
+        assert result.thinking_type is None
+        assert result.thinking_budget is None
+
     def test_empty_stop_sequences_preserve_explicit_presence(self):
         request = GeminiGenerateContentRequest.model_validate(
             {"generationConfig": {"stopSequences": []}}
@@ -430,6 +477,45 @@ class TestTranslateOpenAIToGemini:
         assert result.usage_metadata.prompt_token_count == 10
         assert result.usage_metadata.candidates_token_count == 5
         assert result.model_version == "gemini-2.5-pro"
+
+    def test_thought_part_emitted_when_include_thoughts(self):
+        response = ChatResponse(
+            content="42",
+            model="gemini-3.5-flash",
+            finish_reason="stop",
+            thinking="let me think",
+        )
+        result = translate_openai_to_gemini(response, "gemini-3.5-flash", include_thoughts=True)
+        parts = result.candidates[0].content.parts
+        assert any(p.thought is True and p.text == "let me think" for p in parts)
+        assert any(p.thought is not True and p.text == "42" for p in parts)
+
+    def test_thought_part_omitted_when_not_requested(self):
+        response = ChatResponse(
+            content="42",
+            model="gemini-3.5-flash",
+            finish_reason="stop",
+            thinking="hidden",
+        )
+        result = translate_openai_to_gemini(response, "gemini-3.5-flash", include_thoughts=False)
+        parts = result.candidates[0].content.parts
+        assert all(p.thought is not True for p in parts)
+        assert all(p.text != "hidden" for p in parts)
+
+    def test_stream_thought_delta_emitted_when_requested(self):
+        state = GeminiStreamState()
+        chunk = {"choices": [{"delta": {"thinking": "pondering"}, "finish_reason": None}]}
+        event = translate_openai_chunk_to_gemini(chunk, state, "model", include_thoughts=True)
+        assert event is not None
+        part = event.candidates[0].content.parts[0]
+        assert part.thought is True
+        assert part.text == "pondering"
+
+    def test_stream_thought_delta_dropped_when_not_requested(self):
+        state = GeminiStreamState()
+        chunk = {"choices": [{"delta": {"thinking": "pondering"}, "finish_reason": None}]}
+        event = translate_openai_chunk_to_gemini(chunk, state, "model", include_thoughts=False)
+        assert event is None
 
     def test_length_finish_reason(self):
         response = ChatResponse(

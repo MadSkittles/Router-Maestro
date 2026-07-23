@@ -141,6 +141,8 @@ def translate_gemini_to_openai(request: GeminiGenerateContentRequest, model: str
     response_mime_type: str | None = None
     frequency_penalty: float | None = None
     presence_penalty: float | None = None
+    thinking_budget: int | None = None
+    thinking_type: str | None = None
     if request.generation_config:
         if request.generation_config.temperature is not None:
             temperature = request.generation_config.temperature
@@ -159,6 +161,20 @@ def translate_gemini_to_openai(request: GeminiGenerateContentRequest, model: str
             frequency_penalty = request.generation_config.frequency_penalty
         if request.generation_config.presence_penalty is not None:
             presence_penalty = request.generation_config.presence_penalty
+        thinking_config = request.generation_config.thinking_config
+        if thinking_config is not None:
+            if thinking_config.thinking_budget is not None:
+                # Gemini thinkingBudget: 0 disables, -1 requests dynamic
+                # (adaptive), any positive value is an explicit token budget.
+                if thinking_config.thinking_budget == 0:
+                    thinking_type = "disabled"
+                elif thinking_config.thinking_budget == -1:
+                    thinking_type = "adaptive"
+                else:
+                    thinking_type = "enabled"
+                    thinking_budget = thinking_config.thinking_budget
+            elif thinking_config.include_thoughts:
+                thinking_type = "enabled"
 
     return ChatRequest(
         model=model,
@@ -175,6 +191,8 @@ def translate_gemini_to_openai(request: GeminiGenerateContentRequest, model: str
         response_mime_type=response_mime_type,
         frequency_penalty=frequency_penalty,
         presence_penalty=presence_penalty,
+        thinking_budget=thinking_budget,
+        thinking_type=thinking_type,
     )
 
 
@@ -354,9 +372,15 @@ def translate_openai_to_gemini(
     response: Any,
     model: str,
     input_tokens: int = 0,
+    *,
+    include_thoughts: bool = False,
 ) -> GeminiGenerateContentResponse:
     """Translate an OpenAI ChatResponse to Gemini generateContent response."""
     parts: list[GeminiPart] = []
+
+    # Reasoning trace, only when the client asked for it via includeThoughts.
+    if include_thoughts and getattr(response, "thinking", None):
+        parts.append(GeminiPart(text=response.thinking, thought=True))
 
     # Text content
     if response.content:
@@ -425,6 +449,8 @@ def translate_openai_chunk_to_gemini(
     chunk: dict[str, Any],
     state: GeminiStreamState,
     model: str,
+    *,
+    include_thoughts: bool = False,
 ) -> GeminiGenerateContentResponse | None:
     """Translate a single OpenAI streaming chunk to a Gemini SSE response.
 
@@ -446,6 +472,22 @@ def translate_openai_chunk_to_gemini(
     choice = chunk["choices"][0]
     delta = choice.get("delta", {})
     finish_reason = choice.get("finish_reason")
+
+    # Reasoning delta, only when the client asked for it. Emitted as a thought
+    # part so the client can distinguish it from answer text. Kept ahead of the
+    # content branch so a thinking-only chunk still produces an event.
+    if include_thoughts and delta.get("thinking") and not finish_reason:
+        return GeminiGenerateContentResponse(
+            candidates=[
+                GeminiCandidate(
+                    content=GeminiContent(
+                        parts=[GeminiPart(text=delta["thinking"], thought=True)],
+                        role="model",
+                    ),
+                    index=0,
+                )
+            ],
+        )
 
     # Text delta. Only emit a standalone text event when there is no
     # finish_reason in the same chunk; otherwise the text is folded into the
