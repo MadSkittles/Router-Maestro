@@ -85,6 +85,6 @@ class ProvidersConfig(BaseModel):
         return providers
 
     @classmethod
-    def get_default(cls) -> "ProvidersConfig":
+    def get_default(cls) -> ProvidersConfig:
         """Get default empty configuration."""
         return cls(providers={})

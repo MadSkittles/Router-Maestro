@@ -9,9 +9,30 @@ All notable changes to Router-Maestro are documented here.
 ### Fixes
 
 - **Copilot refresh outages no longer turn valid models into persistent 404s.** Reuse a
-  persisted Copilot access token while it remains valid, retain the last successful model
-  catalog when a transient refresh fails, and leave cold-start failures uncached so later
-  requests retry discovery instead of caching an empty catalog for five minutes.
+  persisted Copilot access token while it remains valid, allow a still-unexpired token to
+  survive exhausted proactive-refresh retries, and propagate cold-start catalog failures
+  instead of misclassifying the requested model as missing.
+
+## v0.7.6 (2026-07-23)
+
+### Fixes
+
+- **Resilient Copilot token refresh.** `ensure_token` now checks the valid
+  in-memory token before reading `auth.json`, so a transient credential-read
+  hiccup no longer turns a good cached token into a spurious `Not authenticated`
+  error. The token mint gained a bounded, kind-based retry (3 retries, `0.3·2ⁿ`
+  backoff + jitter) for genuinely transient failures (`RATE_LIMIT` /
+  `UPSTREAM_STATUS` / `TRANSPORT`); `AUTHENTICATION` (401/403) is never retried.
+  Retry now lives in a single layer — the inner retry in `get_copilot_token`
+  was removed to avoid multiplicative attempts.
+- **Catalog thinking capability for reasoning models.** GitHub Copilot's catalog
+  reports `supports.thinking=false` for reasoning-capable models (e.g.
+  `claude-sonnet-4.6`, `claude-opus-4.6/4.7/4.8`, `claude-sonnet-5`, `gpt-5.x`,
+  `gemini-3.x`) that nonetheless expose `reasoning_effort` tiers. The native
+  Anthropic beta passthrough trusted that flag and stripped a valid `thinking`
+  request, so these models returned reasoning as plain text with no thinking
+  block. `supports_thinking` now follows the same `thinking OR reasoning_effort`
+  rule the `REASONING` feature already uses.
 
 ## v0.7.5 (2026-07-21)
 

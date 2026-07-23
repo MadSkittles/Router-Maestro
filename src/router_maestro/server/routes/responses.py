@@ -334,7 +334,7 @@ async def stream_response(
     prepared_plan=None,
     opened_stream=None,
     opened_provider_name: str | None = None,
-) -> AsyncGenerator[str, None]:
+) -> AsyncGenerator[str]:
     """Orchestrate a provider stream through the pure Responses reducer."""
     response_id = generate_id("resp")
     created_at = int(time.time())

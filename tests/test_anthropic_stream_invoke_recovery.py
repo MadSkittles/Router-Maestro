@@ -31,7 +31,7 @@ def _bash_tool() -> dict:
 
 
 async def _fake_stream(*chunks: ChatStreamChunk):
-    async def gen() -> AsyncGenerator[ChatStreamChunk, None]:
+    async def gen() -> AsyncGenerator[ChatStreamChunk]:
         for c in chunks:
             yield c
 

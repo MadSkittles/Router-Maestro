@@ -19,7 +19,7 @@ class ContextsConfig(BaseModel):
     )
 
     @classmethod
-    def get_default(cls) -> "ContextsConfig":
+    def get_default(cls) -> ContextsConfig:
         """Get default configuration with local context."""
         return cls(
             current="local",

@@ -49,7 +49,7 @@ from router_maestro.utils.reasoning import (
     VALID_EFFORTS,
     budget_to_effort,
     downgrade_for_upstream,
-    pick_closest_effort,
+    resolve_effort_within_catalog,
 )
 
 logger = get_logger("providers.copilot")
@@ -57,6 +57,13 @@ logger = get_logger("providers.copilot")
 COPILOT_CHAT_PATH = "/chat/completions"
 COPILOT_RESPONSES_PATH = "/responses"
 COPILOT_COUNT_TOKENS_PATH = "/v1/messages/count_tokens"
+
+# Internal model aliases bound to the Copilot provider. Maps a synthetic client
+# model id (with no GHC catalog entry) to a real upstream Copilot model. Codex's
+# Auto-review (guardian) mode issues Responses requests with model
+# ``codex-auto-review``, which only exists on the ChatGPT/Codex subscription
+# backend; route it to GHC's low-latency ``gpt-5.4-mini`` subagent model.
+COPILOT_MODEL_ALIASES: dict[str, str] = {"codex-auto-review": "gpt-5.4-mini"}
 
 _COPILOT_UNSUPPORTED_OPERATION_CODE = "unsupported_api_for_model"
 _MAX_COPILOT_ERROR_BODY_BYTES = 64 * 1024
@@ -307,42 +314,38 @@ class CopilotOutboundContract(OutboundContract):
         rewrite = bare_lower.startswith("gpt-5.4")
         known_reasoning_support = _known_reasoning_support(model)
 
-        def unsupported_reasoning() -> NoReturn:
-            parameter = "reasoning_effort" if reasoning_effort is not None else "thinking_budget"
-            raise RequestOptionError(
-                "GitHub Copilot does not support the requested reasoning option for this model",
-                provider="github-copilot",
-                model=model,
-                parameter=parameter,
-            )
-
         # Catalog-driven path: trust whatever Copilot advertises.
         if catalog_effort_values is not None:
             if not catalog_effort_values:
+                # Category A: model advertises no reasoning surface -> strip.
                 if reasoning_effort is not None or thinking_budget is not None:
-                    unsupported_reasoning()
+                    logger.debug(
+                        "Copilot model %s advertises no reasoning tiers; "
+                        "stripping requested reasoning",
+                        model,
+                    )
                 return ReasoningResolution(effort=None, rewrite_max_tokens_to_completion=rewrite)
             desired = reasoning_effort or budget_to_effort(thinking_budget)
-            if desired is None and thinking_budget is not None:
-                unsupported_reasoning()
             if desired is None:
+                if thinking_budget is not None:
+                    # Category B: budget too small to derive a tier -> clamp up.
+                    picked = resolve_effort_within_catalog("minimal", catalog_effort_values)
+                    return ReasoningResolution(
+                        effort=picked, rewrite_max_tokens_to_completion=rewrite
+                    )
                 return ReasoningResolution(effort=None, rewrite_max_tokens_to_completion=rewrite)
-            picked = pick_closest_effort(desired, catalog_effort_values)
-            if picked is None:
-                raise RequestOptionError(
-                    "GitHub Copilot has no reasoning tier at or below the requested tier",
-                    provider="github-copilot",
-                    model=model,
-                    parameter=(
-                        "reasoning_effort" if reasoning_effort is not None else "thinking_budget"
-                    ),
-                )
+            picked = resolve_effort_within_catalog(desired, catalog_effort_values)
             return ReasoningResolution(effort=picked, rewrite_max_tokens_to_completion=rewrite)
 
         # Hardcoded fallback when the catalog hasn't been fetched yet.
         if known_reasoning_support is False:
+            # Category A: statically known to lack reasoning -> strip.
             if reasoning_effort is not None or thinking_budget is not None:
-                unsupported_reasoning()
+                logger.debug(
+                    "Copilot model %s has no known reasoning support; "
+                    "stripping requested reasoning",
+                    model,
+                )
             return ReasoningResolution(effort=None, rewrite_max_tokens_to_completion=rewrite)
 
         effort = reasoning_effort or budget_to_effort(thinking_budget)
@@ -353,7 +356,9 @@ class CopilotOutboundContract(OutboundContract):
         elif known_reasoning_support is None and effort == "xhigh":
             effort = "high"
         if effort is None and thinking_budget is not None:
-            unsupported_reasoning()
+            # Category B (cold path): supported family, budget below the lowest
+            # mapped tier -> clamp up to the lowest upstream-native tier.
+            effort = "low"
         if effort in ("minimal", "low", "medium", "high", "xhigh"):
             return ReasoningResolution(effort=effort, rewrite_max_tokens_to_completion=rewrite)
         return ReasoningResolution(effort=None, rewrite_max_tokens_to_completion=rewrite)
@@ -368,33 +373,27 @@ class CopilotOutboundContract(OutboundContract):
         known_reasoning_support = _known_reasoning_support(model)
         if catalog_effort_values is not None:
             if not catalog_effort_values:
+                # Category A: no reasoning surface -> strip.
                 if reasoning_effort is not None:
-                    raise RequestOptionError(
-                        "GitHub Copilot does not support reasoning for this model",
-                        provider="github-copilot",
-                        model=model,
-                        parameter="reasoning_effort",
+                    logger.debug(
+                        "Copilot Responses model %s advertises no reasoning "
+                        "tiers; stripping reasoning",
+                        model,
                     )
                 return ReasoningResolution(effort=None)
             if reasoning_effort is None:
                 return ReasoningResolution(effort=None)
-            upstream_effort = pick_closest_effort(reasoning_effort, catalog_effort_values)
-            if upstream_effort is None:
-                raise RequestOptionError(
-                    "GitHub Copilot has no reasoning tier at or below the requested tier",
-                    provider="github-copilot",
-                    model=model,
-                    parameter="reasoning_effort",
-                )
+            # Category B: clamp up when below the catalog floor.
+            upstream_effort = resolve_effort_within_catalog(reasoning_effort, catalog_effort_values)
             return ReasoningResolution(effort=upstream_effort)
 
         if reasoning_effort is not None and known_reasoning_support is False:
-            raise RequestOptionError(
-                "GitHub Copilot does not support reasoning for this model",
-                provider="github-copilot",
-                model=model,
-                parameter="reasoning_effort",
+            # Category A (cold path): statically known to lack reasoning -> strip.
+            logger.debug(
+                "Copilot Responses model %s has no known reasoning support; stripping reasoning",
+                model,
             )
+            return ReasoningResolution(effort=None)
         upstream_effort = (
             reasoning_effort
             if known_reasoning_support is True
@@ -486,7 +485,7 @@ class CopilotOutboundContract(OutboundContract):
         provider: str | None = None,
         model: str | None = None,
     ) -> str:
-        """Resolve a native effort exactly or downward, preserving unknown catalogs.
+        """Resolve a native effort within the catalog, clamping up below the floor.
 
         The native passthrough resolves ``output_config.effort`` with its own
         catalog-or-passthrough rule (distinct error surface and no family fallback),
@@ -496,10 +495,13 @@ class CopilotOutboundContract(OutboundContract):
         """
         if allowed is None:
             return effort
-        mapped_effort = pick_closest_effort(effort, list(allowed))
+        mapped_effort = resolve_effort_within_catalog(effort, list(allowed))
         if mapped_effort is None:
+            # allowed held no valid tier: treat as no reasoning surface. The
+            # caller (apply_native_anthropic_thinking) strips output_config in
+            # that case, so this path is defensive only.
             raise RequestOptionError(
-                "output_config.effort has no supported tier at or below the requested tier",
+                "output_config.effort has no supported tier",
                 parameter="output_config.effort",
                 provider=provider,
                 model=model,
@@ -528,6 +530,24 @@ class CopilotOutboundContract(OutboundContract):
         fallback when the client omits it. Without effort, budget resolution is
         unchanged.
         """
+        # Category A: models with no reasoning surface cannot accept thinking or
+        # output_config.effort. Strip both before any resolution so the native
+        # passthrough forwards a valid body. Static heuristic first (survives a
+        # cold catalog), then the warm-cache capability flag.
+        if _known_reasoning_support(actual_model) is False:
+            body.pop("thinking", None)
+            body.pop("output_config", None)
+            return body
+        from router_maestro.routing import get_router
+
+        _cache_router = get_router()
+        if hasattr(_cache_router, "_models_cache"):
+            _entry = _cache_router._models_cache.get(actual_model)
+            if _entry is not None and _entry[1].supports_thinking is False:
+                body.pop("thinking", None)
+                body.pop("output_config", None)
+                return body
+
         effort = CopilotOutboundContract.sanitize_output_config(body)
         client_thinking = body.get("thinking")
 
@@ -732,6 +752,10 @@ class CopilotProvider(BaseProvider):
         """Check if authenticated with GitHub Copilot."""
         return self._auth_session.is_authenticated()
 
+    def model_aliases(self) -> Mapping[str, str]:
+        """Synthetic model ids routed to real GHC models (see COPILOT_MODEL_ALIASES)."""
+        return COPILOT_MODEL_ALIASES
+
     async def ensure_token(self, force: bool = False) -> None:
         """Ensure we have a valid Copilot token, refreshing if needed.
 
@@ -869,7 +893,7 @@ class CopilotProvider(BaseProvider):
         json: dict,
         headers_kwargs: dict,
         model: str | None = None,
-    ) -> "AsyncIterator[httpx.Response]":
+    ) -> AsyncIterator[httpx.Response]:
         """Open a Copilot stream, force-refreshing and retrying once on 401/403.
 
         Mirrors ``_send_with_auth_retry`` for streaming. The 401/403 is detected

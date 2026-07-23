@@ -515,6 +515,53 @@ async def test_copilot_catalog_preserves_explicit_capabilities_and_unknown_keys(
 
 
 @pytest.mark.asyncio
+async def test_copilot_catalog_reasoning_effort_implies_supports_thinking():
+    """A model advertising reasoning_effort tiers supports thinking even when the
+    Copilot catalog omits/denies ``supports.thinking``.
+
+    GitHub Copilot's catalog reports ``supports.thinking`` as false (or omits it)
+    for reasoning-capable Claude/GPT/Gemini models that nonetheless expose
+    ``reasoning_effort`` tiers. ``supports_thinking`` must follow the same
+    ``thinking OR reasoning_effort`` rule the REASONING feature already uses, so
+    the native passthrough does not strip a valid thinking request.
+    """
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "data": [
+                    {
+                        "id": "claude-sonnet-4.6",
+                        "name": "Claude Sonnet 4.6",
+                        "capabilities": {
+                            "type": "chat",
+                            "supports": {
+                                "thinking": False,
+                                "reasoning_effort": ["low", "medium", "high", "max"],
+                            },
+                        },
+                    },
+                ]
+            },
+            request=httpx.Request("GET", "https://api.githubcopilot.com/models"),
+        )
+
+    provider = CopilotProvider()
+    provider._cached_token = "token"
+    provider.ensure_token = AsyncMock()  # type: ignore[method-assign]
+    with patch(
+        "httpx.AsyncClient",
+        return_value=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+    ):
+        (model,) = await provider.list_models(force_refresh=True)
+
+    assert model.reasoning_effort_values == ["low", "medium", "high", "max"]
+    assert model.supports_thinking is True
+    assert model.feature_capabilities[Feature.REASONING] is True
+
+
+@pytest.mark.asyncio
 async def test_copilot_catalog_results_are_deep_defensive_copies():
     def handler(_request: httpx.Request) -> httpx.Response:
         return httpx.Response(

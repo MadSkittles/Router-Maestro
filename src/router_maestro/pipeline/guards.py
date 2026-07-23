@@ -122,7 +122,7 @@ class GuardChain:
 async def guarded_stream(
     inner: AsyncIterator[ChatStreamChunk],
     guards: Iterable[StreamGuard] | GuardChain,
-) -> AsyncGenerator[tuple[ChatStreamChunk, str | None], None]:
+) -> AsyncGenerator[tuple[ChatStreamChunk, str | None]]:
     """Yield legacy ``(chunk, abort_reason)`` tuples through ``GuardChain``.
 
     This compatibility wrapper remains available for external callers. New

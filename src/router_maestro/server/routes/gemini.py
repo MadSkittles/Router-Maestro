@@ -220,7 +220,7 @@ def _create_test_response(model: str) -> GeminiGenerateContentResponse:
 
 async def _stream_test_response(
     model: str,
-) -> AsyncGenerator[str, None]:
+) -> AsyncGenerator[str]:
     """Stream a mock test response in Gemini SSE format."""
     # Content chunk
     content_chunk = GeminiGenerateContentResponse(
@@ -268,7 +268,7 @@ async def _stream_response(
     prepared_plan=None,
     opened_stream=None,
     opened_provider_name: str | None = None,
-) -> AsyncGenerator[str, None]:
+) -> AsyncGenerator[str]:
     """Stream Gemini-format SSE response from the upstream provider."""
     pipeline = None
     stream = opened_stream

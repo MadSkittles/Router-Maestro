@@ -1,7 +1,7 @@
 """Base provider interface."""
 
 from abc import ABC, abstractmethod
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass, field, fields, replace
 from enum import StrEnum
 from logging import Logger
@@ -325,7 +325,7 @@ class ChatRequest:
         *,
         thinking_budget: int | None,
         thinking_type: str | None,
-    ) -> "ChatRequest":
+    ) -> ChatRequest:
         """Return new ChatRequest with updated thinking parameters (immutable)."""
         return replace(
             self,
@@ -355,7 +355,7 @@ class ChatResponse:
     refusal: str | None = None
     # Router-selected identity. Providers leave this unset; Router attaches the
     # exact candidate so protocol boundaries never infer raw/public provenance.
-    selected_model: "ModelRef | None" = None
+    selected_model: ModelRef | None = None
     # Canonical provider semantics. Appended to preserve positional construction.
     terminal_outcome: TerminalOutcome | None = None
 
@@ -413,7 +413,7 @@ class ModelInfo:
         max_prompt_tokens: int | None = None,
         max_output_tokens: int | None = None,
         max_context_window_tokens: int | None = None,
-    ) -> "ModelInfo":
+    ) -> ModelInfo:
         """Return new ModelInfo with specified limits overridden (immutable)."""
         return ModelInfo(
             id=self.id,
@@ -517,7 +517,7 @@ class ResponsesResponse:
     # OpenAI Responses refusal output, distinct from ordinary output_text.
     refusal: str | None = None
     # Router-selected identity; see ChatResponse.selected_model.
-    selected_model: "ModelRef | None" = None
+    selected_model: ModelRef | None = None
 
 
 @dataclass
@@ -629,11 +629,11 @@ class ProviderError(Exception):
         return self.status_code
 
     @property
-    def attempts(self) -> tuple["AttemptRecord", ...]:
+    def attempts(self) -> tuple[AttemptRecord, ...]:
         """Read-only snapshot of routing attempts that led to this failure."""
         return self._attempts
 
-    def with_attempts(self, attempts: tuple["AttemptRecord", ...]) -> Self:
+    def with_attempts(self, attempts: tuple[AttemptRecord, ...]) -> Self:
         """Copy a ``__dict__``-backed error and attach a request-local snapshot."""
         error = BaseException.__new__(type(self), *self.args)
         error.__dict__ = self.__dict__.copy()
@@ -713,6 +713,17 @@ class BaseProvider(ABC):
             True if authenticated
         """
         pass
+
+    def model_aliases(self) -> Mapping[str, str]:
+        """Internal upstream aliases this provider recognizes.
+
+        Maps an incoming client model id -> a real upstream model id owned by
+        this provider. Used to satisfy synthetic model names (e.g. Codex's
+        ``codex-auto-review`` guardian model) that have no catalog entry. The
+        router normalizes a matching id to ``provider/<target>`` before route
+        resolution; aliases are never added to the model catalog.
+        """
+        return {}
 
     async def ensure_token(self) -> None:
         """Ensure the provider has a valid token.
