@@ -4,7 +4,17 @@ All notable changes to Router-Maestro are documented here.
 
 ---
 
-## Unreleased
+## v0.7.7 (2026-07-23)
+
+### Features
+
+- **Bidirectional Gemini reasoning passthrough.** Parse
+  `generationConfig.thinkingConfig` (`thinkingBudget`: `>0` enabled / `0`
+  disabled / `-1` adaptive; `includeThoughts`) into the internal `ChatRequest`
+  so reasoning flows through `resolve_reasoning` and routing treats the request
+  as reasoning-capable. On the response side, emit Gemini thought parts
+  (`{text, thought: true}`) for both non-stream and stream when
+  `includeThoughts` is set. Non-reasoning Gemini models still strip cleanly.
 
 ### Fixes
 
@@ -12,6 +22,13 @@ All notable changes to Router-Maestro are documented here.
   persisted Copilot access token while it remains valid, allow a still-unexpired token to
   survive exhausted proactive-refresh retries, and propagate cold-start catalog failures
   instead of misclassifying the requested model as missing.
+- **Consistent `reasoning.effort` validation on the Responses beta native path.**
+  The beta native `/responses` path lacked the standard path's strict effort
+  `Literal` gate, so an invalid effort was silently clamp-and-forwarded (`200`
+  where the standard path `400`s) and, in the cold-catalog + known-reasoning
+  window, forwarded verbatim upstream. Validate `reasoning.effort` via
+  `ResponsesReasoningConfig` before native dispatch so both entry points return
+  an identical native `400` with `parameter=reasoning_effort`.
 
 ## v0.7.6 (2026-07-23)
 
