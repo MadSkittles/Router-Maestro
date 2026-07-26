@@ -115,9 +115,9 @@ def _parse_tool_call(tool_call: dict[str, Any]) -> ToolCall:
         raise AnthropicStreamProtocolError("tool call missing name")
     arguments = function.get("arguments", "{}")
     if isinstance(arguments, str):
-        arguments_json = arguments
+        arguments_json = arguments if arguments.strip() else "{}"
         try:
-            parsed = json.loads(arguments) if arguments else {}
+            parsed = json.loads(arguments_json)
         except (json.JSONDecodeError, TypeError) as exc:
             raise AnthropicStreamProtocolError(
                 "tool call arguments must be a valid JSON object"
@@ -135,6 +135,12 @@ def _parse_tool_call(tool_call: dict[str, Any]) -> ToolCall:
         input=parsed,
         arguments_json=arguments_json,
     )
+
+
+def _joined_arguments(call: AnthropicToolCallAccumulator) -> str:
+    """Join buffered argument fragments, treating a zero-argument call as ``{}``."""
+    joined = "".join(call.argument_fragments)
+    return joined if joined.strip() else "{}"
 
 
 def _response_parts(response: ChatResponse) -> list[ContentPart]:
@@ -504,7 +510,7 @@ class AnthropicReducer:
                 raise AnthropicStreamProtocolError("tool call missing id")
             if not call.name:
                 raise AnthropicStreamProtocolError("tool call missing name")
-            arguments = "".join(call.argument_fragments)
+            arguments = _joined_arguments(call)
             try:
                 parsed = json.loads(arguments)
             except (json.JSONDecodeError, TypeError) as exc:
@@ -528,7 +534,7 @@ class AnthropicReducer:
                     "id": call.tool_id,
                     "function": {
                         "name": call.name,
-                        "arguments": "".join(call.argument_fragments),
+                        "arguments": _joined_arguments(call),
                     },
                 }
             )
