@@ -862,3 +862,92 @@ def test_responses_reasoning_effort_downgraded_to_catalog_tier(tmp_path: Path):
     assert response.status_code == 200, response.text
     request = select_recorded_request(upstream.requests, method="POST", path="/responses")
     assert request.payload["reasoning"]["effort"] == "high"
+
+
+@pytest.mark.parametrize(
+    "upstream_arguments",
+    [None, "", "   "],
+    ids=["no-arguments-field", "empty-string", "whitespace-only"],
+)
+def test_anthropic_stream_zero_argument_tool_call_emits_empty_object_on_the_wire(
+    tmp_path: Path,
+    upstream_arguments: str | None,
+):
+    """A zero-parameter tool must reach the client as ``partial_json: "{}"``.
+
+    Upstream sends only ``id``/``name`` for a tool whose schema has no
+    properties. Previously the reducer joined an empty fragment buffer to ``""``
+    and ``json.loads("")`` aborted the whole stream with a 502
+    ``upstream_protocol_error``; forwarding the empty buffer verbatim would
+    instead leave the client with an unparseable ``tool_use`` block. This
+    asserts the literal wire bytes, not a re-parsed value.
+    """
+    function: dict[str, Any] = {"name": "get_current_time"}
+    if upstream_arguments is not None:
+        function["arguments"] = upstream_arguments
+
+    def responder(request: RecordedUpstreamRequest):
+        if request.path == "/models":
+            return _models(_catalog_model("tool-model", endpoints=["/chat/completions"]))
+        return _sse_reply(
+            {
+                "choices": [
+                    {
+                        "delta": {
+                            "tool_calls": [
+                                {"index": 0, "id": "toolu_zero", "function": function},
+                            ]
+                        },
+                        "finish_reason": None,
+                    }
+                ]
+            },
+            {"choices": [{"delta": {}, "finish_reason": "tool_calls"}]},
+        )
+
+    with _controlled_copilot(
+        tmp_path,
+        responder,
+        priorities=["github-copilot/tool-model"],
+    ) as (client, upstream):
+        response = client.post(
+            "/api/anthropic/v1/messages",
+            json={
+                "model": "router-maestro",
+                "max_tokens": 64,
+                "stream": True,
+                "messages": [{"role": "user", "content": "what time is it"}],
+                "tools": [
+                    {
+                        "name": "get_current_time",
+                        "description": "Return the current time.",
+                        "input_schema": {"type": "object", "properties": {}},
+                    }
+                ],
+                "tool_choice": {"type": "tool", "name": "get_current_time"},
+            },
+        )
+
+        assert response.status_code == 200, response.text
+        events = parse_sse_events(response)
+
+    payloads = [payload for _name, payload in events if isinstance(payload, dict)]
+    assert not [payload for payload in payloads if payload.get("type") == "error"], payloads
+
+    starts = [
+        payload
+        for payload in payloads
+        if payload.get("type") == "content_block_start"
+        and payload["content_block"]["type"] == "tool_use"
+    ]
+    assert [block["content_block"]["name"] for block in starts] == ["get_current_time"]
+
+    deltas = [
+        payload
+        for payload in payloads
+        if payload.get("type") == "content_block_delta"
+        and payload["delta"]["type"] == "input_json_delta"
+    ]
+    assert [delta["delta"]["partial_json"] for delta in deltas] == ["{}"]
+    assert [payload["type"] for payload in payloads].count("message_stop") == 1
+    assert len([r for r in upstream.requests if r.path == "/chat/completions"]) == 1
