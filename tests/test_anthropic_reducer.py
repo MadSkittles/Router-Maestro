@@ -215,6 +215,50 @@ def test_tools_are_transactional_and_flush_in_explicit_index_order() -> None:
     assert [block["id"] for block in _reconstruct_blocks(events)] == ["tool-b", "tool-a"]
 
 
+@pytest.mark.parametrize(
+    "arguments",
+    [None, "", "   "],
+    ids=["no-arguments-field", "empty-string", "whitespace-only"],
+)
+def test_stream_zero_argument_tool_call_becomes_empty_object(arguments: str | None) -> None:
+    reducer = AnthropicReducer(response_id="msg_test", model="provider/model")
+    reducer.start()
+    reducer.reduce(
+        ChatStreamChunk(
+            content="",
+            tool_calls=[_tool_call(index=0, tool_id="tool-a", name="alpha", arguments=arguments)],
+        )
+    )
+
+    events = reducer.reduce(ChatStreamChunk(content="", finish_reason="tool_calls"))
+
+    assert _reconstruct_blocks(events) == [
+        {"type": "tool_use", "id": "tool-a", "name": "alpha", "input": {}}
+    ]
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    ["", "   "],
+    ids=["empty-string", "whitespace-only"],
+)
+def test_nonstream_zero_argument_tool_call_becomes_empty_object(arguments: str) -> None:
+    downstream = build_anthropic_response(
+        ChatResponse(
+            content=None,
+            model="upstream-model",
+            finish_reason="tool_calls",
+            tool_calls=[{"id": "tool-a", "function": {"name": "alpha", "arguments": arguments}}],
+        ),
+        response_id="msg_test",
+        model="provider/upstream-model",
+    )
+
+    assert [block.model_dump(exclude_none=True) for block in downstream.content] == [
+        {"type": "tool_use", "id": "tool-a", "name": "alpha", "input": {}}
+    ]
+
+
 def test_malformed_tool_terminal_is_transactional() -> None:
     reducer = AnthropicReducer(response_id="msg_test", model="provider/model")
     reducer.start()
