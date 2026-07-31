@@ -4,6 +4,32 @@ All notable changes to Router-Maestro are documented here.
 
 ---
 
+## v0.7.8 (2026-07-31)
+
+### Fixes
+
+- **Zero-argument tool calls no longer abort the Anthropic stream.** A tool with
+  an empty argument schema made upstream emit only `id` + `name` and never a
+  `function.arguments` fragment, so the terminal validation in the Anthropic
+  stream reducer ran `json.loads("")` and killed the whole stream with a `502`
+  `upstream_protocol_error`. An empty or whitespace-only argument buffer is now
+  normalized to `"{}"` at both consumption points — before terminal validation
+  and when building the `input_json_delta` payload — so the client receives a
+  well-formed `tool_use` block with `input: {}`. The non-streaming path already
+  tolerated this, so the two paths previously disagreed on identical upstream
+  data; `_parse_tool_call` now normalizes the same way.
+
+### Tests
+
+- **Wire-format regression guard at the Anthropic boundary.** The v0.7.8 fix
+  shipped with unit tests that re-parsed `partial_json` before asserting, so
+  they verified "the value parses to `{}`" rather than "the SSE stream carried
+  the string `"{}"`". Added a parametrized boundary test that drives
+  `/api/anthropic/v1/messages` against the scripted upstream and asserts the
+  literal `partial_json` bytes, no `error` event, and exactly one
+  `message_stop` — over all three shapes upstream sends (no `arguments` field,
+  `""`, `"   "`).
+
 ## v0.7.7 (2026-07-23)
 
 ### Features
