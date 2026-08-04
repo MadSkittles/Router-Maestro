@@ -946,6 +946,30 @@ class TestApplyThinkingBudgetNative:
 
     @patch("router_maestro.routing.get_router")
     @patch("router_maestro.providers.copilot.resolve_thinking_budget")
+    def test_non_reasoning_model_keeps_output_config_format(self, mock_resolve_tb, mock_router):
+        """A model without reasoning can still produce structured output.
+
+        Verified live: ``claude-haiku-4.5`` returns 200 and honors
+        ``output_config.format`` while rejecting ``output_config.effort``
+        ("does not support reasoning effort"). Stripping the whole object would
+        silently discard the schema, so only the effort is removed.
+        """
+        mock_router.return_value = MagicMock(_models_cache={})
+        schema = {"type": "json_schema", "schema": {"type": "object"}}
+        body = {
+            "thinking": {"type": "enabled", "budget_tokens": 16000},
+            "output_config": {"effort": "high", "format": schema},
+            "max_tokens": 4096,
+        }
+
+        result = _apply_thinking_budget_native(body, "claude-haiku-4.5")
+
+        assert "thinking" not in result
+        assert result["output_config"] == {"format": schema}
+        mock_resolve_tb.assert_not_called()
+
+    @patch("router_maestro.routing.get_router")
+    @patch("router_maestro.providers.copilot.resolve_thinking_budget")
     def test_non_reasoning_model_strips_thinking_warm_cache(self, mock_resolve_tb, mock_router):
         """Warm cache: supports_thinking False strips even for unknown families."""
         model_info = ModelInfo(

@@ -462,6 +462,26 @@ class CopilotOutboundContract(OutboundContract):
     # ------------------------------------------------------------------
 
     @staticmethod
+    def _strip_output_config_effort(body: dict) -> None:
+        """Remove only the reasoning effort from a non-reasoning model's body.
+
+        Such models reject ``output_config.effort`` ("does not support reasoning
+        effort") but still honor siblings like ``format`` — verified live on
+        ``claude-haiku-4.5``, which returns 200 with a schema-conforming reply.
+        Dropping the whole object would silently disable structured output.
+        """
+        output_config = body.get("output_config")
+        if not isinstance(output_config, dict):
+            body.pop("output_config", None)
+            return
+
+        remaining = {key: value for key, value in output_config.items() if key != "effort"}
+        if remaining:
+            body["output_config"] = remaining
+        else:
+            body.pop("output_config", None)
+
+    @staticmethod
     def sanitize_output_config(body: dict) -> str | None:
         """Normalize the effort Router-Maestro consumes, forwarding siblings intact.
 
@@ -555,7 +575,7 @@ class CopilotOutboundContract(OutboundContract):
         # cold catalog), then the warm-cache capability flag.
         if _known_reasoning_support(actual_model) is False:
             body.pop("thinking", None)
-            body.pop("output_config", None)
+            CopilotOutboundContract._strip_output_config_effort(body)
             return body
         from router_maestro.routing import get_router
 
@@ -564,7 +584,7 @@ class CopilotOutboundContract(OutboundContract):
             _entry = _cache_router._models_cache.get(actual_model)
             if _entry is not None and _entry[1].supports_thinking is False:
                 body.pop("thinking", None)
-                body.pop("output_config", None)
+                CopilotOutboundContract._strip_output_config_effort(body)
                 return body
 
         effort = CopilotOutboundContract.sanitize_output_config(body)
