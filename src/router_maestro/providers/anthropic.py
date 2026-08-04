@@ -189,6 +189,11 @@ class AnthropicProvider(BaseProvider):
 
         if request.reasoning_effort is not None:
             payload["output_config"] = {"effort": request.reasoning_effort}
+        if request.output_format is not None:
+            # ``format`` and ``effort`` are independent siblings on the Anthropic
+            # wire; carrying both keeps a structured-output schema from being
+            # dropped when an effort tier is also requested.
+            payload.setdefault("output_config", {})["format"] = request.output_format
 
         if request.tools:
             payload["tools"] = self._convert_tools(request.tools)

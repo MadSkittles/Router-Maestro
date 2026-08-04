@@ -341,6 +341,69 @@ def test_anthropic_chat_rejects_options_it_cannot_represent(options, parameter) 
     assert caught.value.parameter == parameter
 
 
+_OUTPUT_FORMAT = {
+    "type": "json_schema",
+    "schema": {"type": "object", "properties": {"ok": {"type": "boolean"}}},
+}
+
+
+def test_anthropic_chat_encodes_output_format_as_output_config() -> None:
+    """Anthropic's wire has a native home for a structured-output schema."""
+    provider = AnthropicProvider()
+
+    payload = provider._build_payload(
+        _request(output_format=_OUTPUT_FORMAT, reasoning_effort="low")
+    )
+
+    assert payload["output_config"] == {"effort": "low", "format": _OUTPUT_FORMAT}
+
+
+def test_anthropic_chat_encodes_output_format_without_effort() -> None:
+    """A schema alone must still reach the wire; effort is an independent option."""
+    provider = AnthropicProvider()
+
+    payload = provider._build_payload(_request(output_format=_OUTPUT_FORMAT))
+
+    assert payload["output_config"] == {"format": _OUTPUT_FORMAT}
+
+
+def test_openai_chat_encodes_output_format_as_response_format() -> None:
+    """The OpenAI-shaped chat wire carries a schema as ``response_format``.
+
+    Verified live against GHC ``/chat/completions``: forwarding the schema is
+    accepted (200) for Claude and Gemini models alike, and honored on a
+    best-effort basis. Rejecting instead would break callers whose requests
+    succeed today, so the adapter translates rather than refuses — the native
+    Anthropic transport remains the path that enforces the schema.
+    """
+    provider = _OpenAIProvider()
+
+    payload = provider._build_payload(_request(output_format=_OUTPUT_FORMAT), stream=False)
+
+    assert payload["response_format"] == {
+        "type": "json_schema",
+        "json_schema": {"name": "response", "schema": _OUTPUT_FORMAT["schema"]},
+    }
+
+
+@pytest.mark.parametrize("stream", [False, True], ids=["nonstream", "stream"])
+def test_copilot_chat_encodes_output_format_as_response_format(stream) -> None:
+    """Copilot's chat codec translates the schema instead of dropping it.
+
+    Dropping it silently returned prose to a caller that asked for JSON; this is
+    the translated fallback path, so it forwards the schema best-effort rather
+    than failing a request that GHC accepts.
+    """
+    provider = CopilotProvider()
+
+    payload = provider._build_chat_payload(_request(output_format=_OUTPUT_FORMAT), stream=stream)
+
+    assert payload["response_format"] == {
+        "type": "json_schema",
+        "json_schema": {"name": "response", "schema": _OUTPUT_FORMAT["schema"]},
+    }
+
+
 @pytest.mark.parametrize(
     "extensions",
     [

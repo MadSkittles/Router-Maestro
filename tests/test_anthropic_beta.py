@@ -946,6 +946,30 @@ class TestApplyThinkingBudgetNative:
 
     @patch("router_maestro.routing.get_router")
     @patch("router_maestro.providers.copilot.resolve_thinking_budget")
+    def test_non_reasoning_model_keeps_output_config_format(self, mock_resolve_tb, mock_router):
+        """A model without reasoning can still produce structured output.
+
+        Verified live: ``claude-haiku-4.5`` returns 200 and honors
+        ``output_config.format`` while rejecting ``output_config.effort``
+        ("does not support reasoning effort"). Stripping the whole object would
+        silently discard the schema, so only the effort is removed.
+        """
+        mock_router.return_value = MagicMock(_models_cache={})
+        schema = {"type": "json_schema", "schema": {"type": "object"}}
+        body = {
+            "thinking": {"type": "enabled", "budget_tokens": 16000},
+            "output_config": {"effort": "high", "format": schema},
+            "max_tokens": 4096,
+        }
+
+        result = _apply_thinking_budget_native(body, "claude-haiku-4.5")
+
+        assert "thinking" not in result
+        assert result["output_config"] == {"format": schema}
+        mock_resolve_tb.assert_not_called()
+
+    @patch("router_maestro.routing.get_router")
+    @patch("router_maestro.providers.copilot.resolve_thinking_budget")
     def test_non_reasoning_model_strips_thinking_warm_cache(self, mock_resolve_tb, mock_router):
         """Warm cache: supports_thinking False strips even for unknown families."""
         model_info = ModelInfo(
@@ -967,18 +991,42 @@ class TestApplyThinkingBudgetNative:
 
 
 class TestSanitizeOutputConfig:
-    def test_preserves_only_valid_effort(self):
-        body = {"output_config": {"effort": "xhigh", "format": "json"}}
+    """The sanitizer owns only ``effort``; siblings belong to GHC.
+
+    Verified live against GHC ``POST /v1/messages``: ``output_config.format``
+    with a json_schema returns 200 and the output conforms to the schema
+    (injecting the schema moves input_tokens 15 -> 179), streaming included,
+    and it coexists with ``effort``. GHC itself rejects genuinely unknown
+    siblings (``Extra inputs are not permitted``), so Router-Maestro must not
+    pre-empt that judgment.
+    """
+
+    def test_normalizes_effort_without_dropping_siblings(self):
+        schema = {"type": "json_schema", "schema": {"type": "object"}}
+        body = {"output_config": {"effort": "xhigh", "format": schema}}
 
         _sanitize_output_config(body)
 
-        assert body["output_config"] == {"effort": "xhigh"}
+        assert body["output_config"] == {"effort": "xhigh", "format": schema}
 
-    @pytest.mark.parametrize(
-        "value",
-        [None, {}, {"format": "json"}, {"effort": "invalid"}, "xhigh"],
-    )
-    def test_removes_output_config_without_valid_effort(self, value):
+    def test_preserves_siblings_when_effort_is_absent(self):
+        schema = {"type": "json_schema", "schema": {"type": "object"}}
+        body = {"output_config": {"format": schema}}
+
+        _sanitize_output_config(body)
+
+        assert body["output_config"] == {"format": schema}
+
+    def test_drops_unusable_effort_but_keeps_siblings(self):
+        schema = {"type": "json_schema", "schema": {"type": "object"}}
+        body = {"output_config": {"effort": "invalid", "format": schema}}
+
+        _sanitize_output_config(body)
+
+        assert body["output_config"] == {"format": schema}
+
+    @pytest.mark.parametrize("value", [None, {}, {"effort": "invalid"}, "xhigh"])
+    def test_removes_output_config_with_nothing_left_to_send(self, value):
         body = {"output_config": value}
 
         _sanitize_output_config(body)
@@ -2251,10 +2299,7 @@ class TestBetaMessagesEndpoint:
     @pytest.mark.parametrize(
         ("option_payload", "parameter"),
         [
-            (
-                {"output_config": {"effort": "low", "format": "text"}},
-                "output_config.format",
-            ),
+            ({"output_config": "low"}, "output_config"),
         ],
     )
     def test_beta_rejects_malformed_output_config_before_transport_selection(
@@ -2357,17 +2402,61 @@ class TestBetaMessagesEndpoint:
         assert "not supported by the beta" not in response.text
         provider._send_with_auth_retry.assert_awaited_once()
 
+    @pytest.mark.parametrize(
+        "output_config",
+        [
+            {"format": {"type": "json_schema", "schema": {"type": "object"}}},
+            {"effort": "low", "format": {"type": "json_schema", "schema": {"type": "object"}}},
+        ],
+        ids=["format-only", "format-with-effort"],
+    )
+    def test_beta_forwards_output_config_format_to_native_transport(self, client, output_config):
+        """Claude Code's prompt-hook evaluator sends ``output_config.format``.
+
+        GHC supports structured outputs on the native transport (verified live:
+        200 with schema-conforming output, streaming and non-streaming, with or
+        without a sibling ``effort``). Router-Maestro must forward the schema
+        rather than reject it — and must forward it intact, since dropping it
+        would silently disable the feature instead of erroring."""
+        provider = _native_provider()
+        model = ModelInfo(
+            id="claude-options",
+            name="Claude options",
+            provider="github-copilot",
+            operation_capabilities={Operation.NATIVE_ANTHROPIC: True},
+            supports_thinking=True,
+            reasoning_effort_values=["low", "medium", "high"],
+        )
+        model_router = _real_native_router(
+            provider,
+            [model],
+            ["github-copilot/claude-options"],
+        )
+        body = {
+            "model": "github-copilot/claude-options",
+            "max_tokens": 100,
+            "stream": False,
+            "messages": [{"role": "user", "content": "Hi"}],
+            "output_config": output_config,
+        }
+
+        with patch(
+            "router_maestro.server.routes.anthropic_beta.get_router",
+            return_value=model_router,
+        ):
+            response = client.post("/api/anthropic/beta/v1/messages", json=body)
+
+        assert response.status_code == 200, response.text
+        assert "is not supported by the native Anthropic transport" not in response.text
+        forwarded = provider._send_with_auth_retry.await_args.kwargs["json"]
+        assert forwarded["output_config"]["format"] == output_config["format"]
+
     @pytest.mark.parametrize("stream", [False, True], ids=["nonstream", "stream"])
     @pytest.mark.parametrize(
         ("option_payload", "parameter"),
         [
             ({"output_config": "low"}, "output_config"),
-            ({"output_config": {}}, "output_config.effort"),
             ({"output_config": {"effort": "invalid"}}, "output_config.effort"),
-            (
-                {"output_config": {"effort": "low", "format": "json"}},
-                "output_config.format",
-            ),
             ({"temperature": 0.2, "top_p": 0.8}, "top_p"),
         ],
     )
@@ -5841,6 +5930,65 @@ class TestBetaMessagesEndpoint:
 
         assert resp.status_code == 400
         assert resp.json()["error"]["message"] == "bad model"
+
+    @pytest.mark.parametrize(
+        ("upstream_body", "expected_message"),
+        [
+            # GHC's most common native shape: a bare top-level ``message``.
+            (
+                {"message": "output_config.task_budget: Extra inputs are not permitted"},
+                "output_config.task_budget: Extra inputs are not permitted",
+            ),
+            # A nested error object that still lacks the Anthropic ``type`` fields.
+            (
+                {"error": {"message": 'output_config.effort "ultra" is not supported'}},
+                'output_config.effort "ultra" is not supported',
+            ),
+        ],
+        ids=["bare-message", "error-without-type"],
+    )
+    @patch("router_maestro.server.routes.anthropic_beta._resolve_native_model")
+    def test_upstream_error_normalized_to_anthropic_envelope(
+        self, mock_resolve, client, upstream_body, expected_message
+    ):
+        """A non-Anthropic upstream error body is re-encoded, not echoed verbatim.
+
+        GHC returns at least three different error shapes on the native endpoint
+        (bare ``{"message": ...}``, ``{"error": {"message": ...}}`` without a
+        type, and occasionally a proper Anthropic envelope). Forwarding the first
+        two unchanged breaks clients that parse ``error.type``, so the route
+        normalizes them while preserving the upstream message and status.
+        """
+        mock_provider = MagicMock(spec=CopilotProvider)
+        mock_provider.ensure_token = AsyncMock()
+
+        mock_response = MagicMock()
+        mock_response.status_code = 400
+        mock_response.json.return_value = upstream_body
+        mock_provider._send_with_auth_retry = AsyncMock(return_value=mock_response)
+        mock_resolve.return_value = _NativeModelResolution(
+            _ResolvedModel("github-copilot", "claude-sonnet-4.5", mock_provider),
+            CapabilitySupport.SUPPORTED,
+        )
+
+        with patch(
+            "router_maestro.server.routes.anthropic_beta._apply_thinking_budget_native",
+            side_effect=lambda body, _, _efforts=None: body,
+        ):
+            resp = client.post(
+                "/api/anthropic/beta/v1/messages",
+                json={
+                    "model": "claude-sonnet-4.5",
+                    "max_tokens": 100,
+                    "messages": [{"role": "user", "content": "Hi"}],
+                },
+            )
+
+        assert resp.status_code == 400
+        body = resp.json()
+        assert body["type"] == "error"
+        assert body["error"]["type"] == "invalid_request_error"
+        assert body["error"]["message"] == expected_message
 
     @patch("router_maestro.server.routes.anthropic_beta._resolve_native_model")
     def test_signature_error_triggers_retry(self, mock_resolve, client):

@@ -31,6 +31,7 @@ from router_maestro.server.routes import chat as chat_routes
 from router_maestro.server.routes import gemini as gemini_routes
 from router_maestro.server.routes import responses as responses_routes
 from router_maestro.server.routes.anthropic import router as anthropic_router
+from router_maestro.server.routes.anthropic_beta import router as anthropic_beta_router
 from router_maestro.server.routes.chat import router as chat_router
 from router_maestro.server.routes.gemini import router as gemini_router
 from router_maestro.server.routes.responses import router as responses_router
@@ -652,6 +653,7 @@ def client() -> TestClient:
     app = FastAPI()
     app.include_router(chat_router)
     app.include_router(anthropic_router)
+    app.include_router(anthropic_beta_router)
     app.include_router(gemini_router)
     app.include_router(responses_router)
     return TestClient(app)
@@ -1089,6 +1091,10 @@ def _reaches_routing_router() -> MagicMock:
         "responses_completion",
         "prepare_responses_completion_stream",
         "responses_completion_stream",
+        # The beta route plans a native route before touching a provider; the
+        # sentinel has to surface there too, or the option gate is never reached.
+        "plan_route",
+        "_resolve_provider",
     ):
         setattr(model_router, method, AsyncMock(side_effect=sentinel))
     return model_router
@@ -1119,6 +1125,36 @@ def _reaches_routing_router() -> MagicMock:
             {"store": True},
             "router_maestro.server.routes.responses.get_router",
         ),
+        # Nested options follow the same rule as top-level ones. Router-Maestro
+        # validates only what it consumes (``output_config.effort``); siblings
+        # such as ``format`` belong to upstream, which judges them with a more
+        # precise error than a local allowlist could produce. A carve-out here
+        # is what broke Claude Code's prompt-hook evaluator.
+        (
+            "/v1/messages",
+            {
+                "model": "m",
+                "max_tokens": 32,
+                "messages": [{"role": "user", "content": "hi"}],
+            },
+            {"output_config": {"format": {"type": "json_schema", "schema": {"type": "object"}}}},
+            "router_maestro.server.routes.anthropic.get_router",
+        ),
+        (
+            "/api/anthropic/beta/v1/messages",
+            {
+                "model": "m",
+                "max_tokens": 32,
+                "messages": [{"role": "user", "content": "hi"}],
+            },
+            {
+                "output_config": {
+                    "effort": "low",
+                    "format": {"type": "json_schema", "schema": {"type": "object"}},
+                }
+            },
+            "router_maestro.server.routes.anthropic_beta.get_router",
+        ),
     ],
 )
 def test_unmodeled_client_option_passes_through_instead_of_400(
@@ -1140,6 +1176,7 @@ def test_unmodeled_client_option_passes_through_instead_of_400(
     # The request must reach routing, not be short-circuited by an option-gate 400.
     assert "Unsupported request option" not in response.text
     assert "is not supported by the beta" not in response.text
+    assert "is not supported by the native Anthropic transport" not in response.text
     # It got past the gate and hit the sentinel provider failure (502/503), not a 400.
     assert response.status_code != 400, response.text
 

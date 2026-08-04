@@ -258,6 +258,20 @@ _COPILOT_RESPONSES_FORWARD_FIELDS = frozenset(
 )
 
 
+# Keys inside ``output_config`` that GHC's native Anthropic endpoint refuses.
+# Verified live on claude-opus-4.6, claude-sonnet-4.6 and claude-haiku-4.5:
+# ``task_budget`` always returns 400 ``Extra inputs are not permitted``. Claude
+# Code already carries this option behind the ``task-budgets-2026-03-13`` beta,
+# so it can arrive unprompted.
+#
+# This is the ``store`` rule applied one level down: an option the upstream is
+# known to reject is stripped so the request still succeeds. Siblings that are
+# merely unrecognized here are NOT listed — those are forwarded for GHC to
+# judge, which is what keeps a newly-supported field from being pre-emptively
+# broken by a stale local allowlist.
+_OUTPUT_CONFIG_REJECTED_BY_UPSTREAM = frozenset({"task_budget"})
+
+
 class CopilotOutboundContract(OutboundContract):
     """Copilot upstream wire contract.
 
@@ -462,8 +476,44 @@ class CopilotOutboundContract(OutboundContract):
     # ------------------------------------------------------------------
 
     @staticmethod
+    def _strip_output_config_effort(body: dict) -> None:
+        """Remove only the reasoning effort from a non-reasoning model's body.
+
+        Such models reject ``output_config.effort`` ("does not support reasoning
+        effort") but still honor siblings like ``format`` — verified live on
+        ``claude-haiku-4.5``, which returns 200 with a schema-conforming reply.
+        Dropping the whole object would silently disable structured output.
+        """
+        output_config = body.get("output_config")
+        if not isinstance(output_config, dict):
+            body.pop("output_config", None)
+            return
+
+        remaining = {key: value for key, value in output_config.items() if key != "effort"}
+        if remaining:
+            body["output_config"] = remaining
+        else:
+            body.pop("output_config", None)
+
+    @staticmethod
     def sanitize_output_config(body: dict) -> str | None:
-        """Keep only a valid effort supported by Copilot's native endpoint."""
+        """Normalize the effort Router-Maestro consumes, forwarding siblings intact.
+
+        Only ``effort`` is Router-Maestro's to own: it feeds effort resolution and
+        the thinking-budget precedence rules. Every other key belongs to GHC, which
+        accepts ``format`` (structured outputs, verified live: 200 with
+        schema-conforming output on both streaming and non-streaming) and rejects
+        genuinely unknown siblings itself (``Extra inputs are not permitted``).
+        Stripping them here would turn a supported feature into a silent no-op.
+
+        The exception is ``_OUTPUT_CONFIG_REJECTED_BY_UPSTREAM``: siblings GHC is
+        known to refuse are dropped so the request still succeeds, mirroring how
+        ``store`` is handled on the Responses passthrough.
+
+        An unusable ``effort`` is dropped rather than rejected, but the rest of the
+        object still goes upstream; ``output_config`` is removed only when nothing
+        remains to send.
+        """
         output_config = body.get("output_config")
         if not isinstance(output_config, dict):
             body.pop("output_config", None)
@@ -471,10 +521,21 @@ class CopilotOutboundContract(OutboundContract):
 
         effort = output_config.get("effort")
         if effort not in VALID_EFFORTS:
+            effort = None
+
+        forwarded = {
+            key: value
+            for key, value in output_config.items()
+            if key != "effort" and key not in _OUTPUT_CONFIG_REJECTED_BY_UPSTREAM
+        }
+        if effort is not None:
+            forwarded["effort"] = effort
+
+        if not forwarded:
             body.pop("output_config", None)
             return None
 
-        body["output_config"] = {"effort": effort}
+        body["output_config"] = forwarded
         return effort
 
     @staticmethod
@@ -536,7 +597,7 @@ class CopilotOutboundContract(OutboundContract):
         # cold catalog), then the warm-cache capability flag.
         if _known_reasoning_support(actual_model) is False:
             body.pop("thinking", None)
-            body.pop("output_config", None)
+            CopilotOutboundContract._strip_output_config_effort(body)
             return body
         from router_maestro.routing import get_router
 
@@ -545,7 +606,7 @@ class CopilotOutboundContract(OutboundContract):
             _entry = _cache_router._models_cache.get(actual_model)
             if _entry is not None and _entry[1].supports_thinking is False:
                 body.pop("thinking", None)
-                body.pop("output_config", None)
+                CopilotOutboundContract._strip_output_config_effort(body)
                 return body
 
         effort = CopilotOutboundContract.sanitize_output_config(body)
@@ -561,7 +622,9 @@ class CopilotOutboundContract(OutboundContract):
                 provider="github-copilot",
                 model=actual_model,
             )
-            body["output_config"] = {"effort": effort}
+            # Update effort in place: siblings the sanitizer preserved (e.g.
+            # ``format``) belong to GHC and must survive effort resolution.
+            body["output_config"] = {**body["output_config"], "effort": effort}
 
         if isinstance(client_thinking, dict) and client_thinking.get("type") == "adaptive":
             thinking = dict(client_thinking)

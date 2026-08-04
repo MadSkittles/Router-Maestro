@@ -280,6 +280,10 @@ class ChatRequest:
     # cannot silently discard them after translation.
     candidate_count: int | None = None
     response_mime_type: str | None = None
+    # Anthropic ``output_config.format`` (structured outputs). Typed for the same
+    # reason as the Gemini options above: an adapter that cannot encode a schema
+    # must reject it rather than silently return unstructured text.
+    output_format: dict[str, Any] | None = None
     provider_extensions: dict[str, Any] = field(default_factory=dict)
     # Deprecated construction alias retained for third-party callers. Core
     # options are always sourced from typed fields and cannot be overridden.
