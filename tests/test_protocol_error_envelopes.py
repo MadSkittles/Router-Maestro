@@ -47,6 +47,13 @@ _PROTOCOL_SURFACES = (
     "gemini",
 )
 
+# Raised by the passthrough tests' stub routers as soon as a route reaches
+# provider work. Only this sentinel produces the string, so asserting it proves
+# the request travelled the whole way. A negative assertion such as
+# "status != 400" is also satisfied by an unrouted 404 — which is exactly how a
+# beta-route case in this file once passed vacuously.
+_SENTINEL_MESSAGE = "reached routing sentinel"
+
 
 def _native_error(response, surface: str) -> dict:
     body = response.json() if hasattr(response, "json") else json.loads(response.body)
@@ -727,7 +734,7 @@ def test_unrepresented_openai_semantic_option_reaches_router_not_400(
     ``include``) are NOT rejected at the route. A transparent proxy forwards or
     ignores them, so the request reaches routing instead of a native 400."""
     sentinel = ProviderError(
-        "reached routing sentinel",
+        _SENTINEL_MESSAGE,
         status_code=503,
         retryable=False,
         kind=ProviderFailureKind.UPSTREAM_STATUS,
@@ -749,7 +756,7 @@ def test_unrepresented_openai_semantic_option_reaches_router_not_400(
     with patch(patch_target, return_value=model_router):
         response = client.post(path, json=payload)
 
-    assert response.status_code != 400, response.text
+    assert _SENTINEL_MESSAGE in response.text, response.text
     assert "Unsupported request option" not in response.text
 
 
@@ -831,7 +838,7 @@ def test_unrepresented_gemini_option_reaches_router_not_400(
 ) -> None:
     """Unknown Gemini options are forwarded/ignored, not rejected at the route."""
     sentinel = ProviderError(
-        "reached routing sentinel",
+        _SENTINEL_MESSAGE,
         status_code=503,
         retryable=False,
         kind=ProviderFailureKind.UPSTREAM_STATUS,
@@ -848,7 +855,7 @@ def test_unrepresented_gemini_option_reaches_router_not_400(
     with patch("router_maestro.server.routes.gemini.get_router", return_value=model_router):
         response = client.post(path, json=payload)
 
-    assert response.status_code != 400, response.text
+    assert _SENTINEL_MESSAGE in response.text, response.text
     assert "Unsupported request option" not in response.text
 
 
@@ -862,7 +869,10 @@ def test_unrepresented_gemini_count_tokens_option_is_ignored_not_400(client: Tes
         },
     )
 
-    assert response.status_code != 400, response.text
+    # This path answers locally, so assert the real result rather than "not a
+    # 400" — a count actually came back, which an unrouted 404 cannot fake.
+    assert response.status_code == 200, response.text
+    assert response.json()["totalTokens"] > 0
     assert "Unsupported request option" not in response.text
 
 
@@ -917,7 +927,7 @@ def test_nested_unrepresented_gemini_option_reaches_router_not_400(
     """Nested Gemini fields Router-Maestro does not model (``allowedFunctionNames``,
     ``fileData``) are forwarded/ignored rather than rejected at the route."""
     sentinel = ProviderError(
-        "reached routing sentinel",
+        _SENTINEL_MESSAGE,
         status_code=503,
         retryable=False,
         kind=ProviderFailureKind.UPSTREAM_STATUS,
@@ -934,7 +944,14 @@ def test_nested_unrepresented_gemini_option_reaches_router_not_400(
     with patch("router_maestro.server.routes.gemini.get_router", return_value=model_router):
         response = client.post(path, json=payload)
 
-    assert response.status_code != 400, response.text
+    # Assert the positive outcome for each path: countTokens answers locally with
+    # a real count, the generate paths travel to provider work and hit the
+    # sentinel. Either way an unrouted 404 fails, unlike a bare "not a 400".
+    if path.endswith(":countTokens"):
+        assert response.status_code == 200, response.text
+        assert response.json()["totalTokens"] > 0
+    else:
+        assert _SENTINEL_MESSAGE in response.text, response.text
     assert "Unsupported request option" not in response.text
 
 
@@ -955,7 +972,7 @@ def test_unrepresented_anthropic_option_reaches_router_not_400(
     """Unknown options on the standard Anthropic route are forwarded/ignored,
     not rejected. The request reaches routing instead of a native 400."""
     sentinel = ProviderError(
-        "reached routing sentinel",
+        _SENTINEL_MESSAGE,
         status_code=503,
         retryable=False,
         kind=ProviderFailureKind.UPSTREAM_STATUS,
@@ -977,7 +994,7 @@ def test_unrepresented_anthropic_option_reaches_router_not_400(
     with patch("router_maestro.server.routes.anthropic.get_router", return_value=model_router):
         response = client.post("/v1/messages", json=payload)
 
-    assert response.status_code != 400, response.text
+    assert _SENTINEL_MESSAGE in response.text, response.text
     assert "Unsupported request option" not in response.text
 
 
@@ -988,7 +1005,7 @@ def test_nested_unrepresented_anthropic_tool_choice_reaches_router_not_400(
 ) -> None:
     """A nested unmodeled tool_choice field is forwarded/ignored, not rejected."""
     sentinel = ProviderError(
-        "reached routing sentinel",
+        _SENTINEL_MESSAGE,
         status_code=503,
         retryable=False,
         kind=ProviderFailureKind.UPSTREAM_STATUS,
@@ -1010,7 +1027,7 @@ def test_nested_unrepresented_anthropic_tool_choice_reaches_router_not_400(
     with patch("router_maestro.server.routes.anthropic.get_router", return_value=model_router):
         response = client.post("/v1/messages", json=payload)
 
-    assert response.status_code != 400, response.text
+    assert _SENTINEL_MESSAGE in response.text, response.text
     assert "Unsupported request option" not in response.text
 
 
@@ -1037,7 +1054,9 @@ def test_nested_unrepresented_anthropic_count_tokens_option_is_ignored_not_400(
     ):
         response = client.post("/v1/messages/count_tokens", json=payload)
 
-    assert response.status_code != 400, response.text
+    # Answered locally, so assert the real count came back rather than "not a 400".
+    assert response.status_code == 200, response.text
+    assert response.json()["input_tokens"] > 0
     assert "Unsupported request option" not in response.text
 
 
@@ -1076,7 +1095,7 @@ def _reaches_routing_router() -> MagicMock:
     routing was reached without reproducing the full response-encoding path.
     """
     sentinel = ProviderError(
-        "reached routing sentinel",
+        _SENTINEL_MESSAGE,
         status_code=503,
         retryable=False,
         kind=ProviderFailureKind.UPSTREAM_STATUS,
@@ -1173,12 +1192,15 @@ def test_unmodeled_client_option_passes_through_instead_of_400(
     with patch(patch_target, return_value=model_router):
         response = client.post(path, json=payload)
 
-    # The request must reach routing, not be short-circuited by an option-gate 400.
+    # Assert POSITIVELY that routing was reached: only the sentinel produces this
+    # message, so an unrouted 404 or an early option-gate 400 both fail here.
+    # Asserting merely "not a 400" would accept the 404.
+    assert _SENTINEL_MESSAGE in response.text, response.text
+    assert response.status_code == 503, response.text
+    # And the option gate specifically must not have fired.
     assert "Unsupported request option" not in response.text
     assert "is not supported by the beta" not in response.text
     assert "is not supported by the native Anthropic transport" not in response.text
-    # It got past the gate and hit the sentinel provider failure (502/503), not a 400.
-    assert response.status_code != 400, response.text
 
 
 def _routing_error(
@@ -1777,7 +1799,7 @@ def test_responses_unrepresented_reasoning_fields_reach_router_not_400(
     ``summary``, etc.) must NOT be rejected. Router-Maestro extracts ``effort`` and
     ignores the rest, so the request reaches routing instead of a native 400."""
     sentinel = ProviderError(
-        "reached routing sentinel",
+        _SENTINEL_MESSAGE,
         status_code=503,
         retryable=False,
         kind=ProviderFailureKind.UPSTREAM_STATUS,
@@ -1797,7 +1819,7 @@ def test_responses_unrepresented_reasoning_fields_reach_router_not_400(
             },
         )
 
-    assert response.status_code != 400, response.text
+    assert _SENTINEL_MESSAGE in response.text, response.text
     assert "Invalid request option" not in response.text
     assert "Unsupported request option" not in response.text
 
