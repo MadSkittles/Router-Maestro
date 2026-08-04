@@ -224,6 +224,43 @@ def _invalid_request(message: str) -> JSONResponse:
     )
 
 
+def _native_error_response(response, status_code: int) -> JSONResponse:
+    """Re-encode an upstream native error as a well-formed Anthropic envelope.
+
+    GHC's native endpoint does not return a consistent error shape: observed live
+    are a bare ``{"message": ...}``, an ``{"error": {"message": ...}}`` without a
+    ``type``, and occasionally a proper Anthropic envelope. Forwarding the first
+    two verbatim breaks clients that switch on ``error.type``, so the upstream
+    message and status are preserved inside the canonical envelope instead.
+    """
+    try:
+        body = response.json()
+    except Exception:
+        body = None
+
+    message: str | None = None
+    error_type: str | None = None
+    if isinstance(body, dict):
+        error = body.get("error")
+        if isinstance(error, dict):
+            raw_message = error.get("message")
+            message = raw_message if isinstance(raw_message, str) else None
+            raw_type = error.get("type")
+            error_type = raw_type if isinstance(raw_type, str) else None
+        elif isinstance(body.get("message"), str):
+            message = body["message"]
+    if message is None:
+        message = response.text
+
+    if error_type is None:
+        error_type = "invalid_request_error" if 400 <= status_code < 500 else "api_error"
+
+    return JSONResponse(
+        status_code=status_code,
+        content={"type": "error", "error": {"type": error_type, "message": message}},
+    )
+
+
 def _validate_explicit_requested_features(plan: RoutePlan | None) -> JSONResponse | None:
     """Reject an explicit model's known feature mismatch independently of transport."""
     if plan is None or not plan.explicit:
@@ -1168,11 +1205,7 @@ async def beta_messages(raw_request: FastAPIRequest):
                 str(e.retryable).lower(),
             )
             if isinstance(e, _NativeUpstreamStatusError):
-                try:
-                    error_body = e.response.json()
-                except Exception:
-                    error_body = {"error": {"type": "api_error", "message": e.response.text}}
-                return JSONResponse(content=error_body, status_code=e.status_code)
+                return _native_error_response(e.response, e.status_code)
             raise HTTPException(status_code=e.status_code or 502, detail=str(e))
     else:
         try:
@@ -1216,12 +1249,9 @@ async def beta_messages(raw_request: FastAPIRequest):
             actual_model,
             len(response.text.encode("utf-8", errors="replace")),
         )
-        # Forward upstream error verbatim (already Anthropic format)
-        try:
-            error_body = response.json()
-        except Exception:
-            error_body = {"error": {"type": "api_error", "message": response.text}}
-        return JSONResponse(content=error_body, status_code=response.status_code)
+        # Upstream native errors are re-encoded into the Anthropic envelope; GHC
+        # does not consistently return one (see _native_error_response).
+        return _native_error_response(response, response.status_code)
 
     if native_resolution.plan is None:
         try:

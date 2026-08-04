@@ -280,6 +280,32 @@ def test_sanitize_output_config_normalizes_effort_and_forwards_siblings():
     assert "output_config" not in dropped
 
 
+def test_sanitize_output_config_strips_siblings_ghc_rejects():
+    """Siblings GHC is known to reject are dropped, not forwarded into a 400.
+
+    Verified live on claude-opus-4.6/sonnet-4.6/haiku-4.5: ``task_budget`` inside
+    ``output_config`` always returns 400 ``Extra inputs are not permitted``. This
+    follows the same rule as ``store`` on the Responses passthrough — an option
+    the upstream is known to refuse is stripped so the request still succeeds,
+    rather than surfacing an avoidable upstream error to the client.
+    """
+    from router_maestro.providers.copilot import CopilotOutboundContract
+
+    body = {
+        "output_config": {
+            "effort": "high",
+            "task_budget": {"type": "tokens", "total": 64000},
+        }
+    }
+    assert CopilotOutboundContract.sanitize_output_config(body) == "high"
+    assert body["output_config"] == {"effort": "high"}
+
+    # Stripping the rejected sibling can empty the object; drop it entirely then.
+    only_budget = {"output_config": {"task_budget": {"type": "tokens", "total": 64000}}}
+    assert CopilotOutboundContract.sanitize_output_config(only_budget) is None
+    assert "output_config" not in only_budget
+
+
 def test_resolve_native_effort_downgrades_or_clamps_up():
     from router_maestro.providers.copilot import CopilotOutboundContract
 

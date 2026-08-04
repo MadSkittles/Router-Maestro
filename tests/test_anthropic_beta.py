@@ -5931,6 +5931,65 @@ class TestBetaMessagesEndpoint:
         assert resp.status_code == 400
         assert resp.json()["error"]["message"] == "bad model"
 
+    @pytest.mark.parametrize(
+        ("upstream_body", "expected_message"),
+        [
+            # GHC's most common native shape: a bare top-level ``message``.
+            (
+                {"message": "output_config.task_budget: Extra inputs are not permitted"},
+                "output_config.task_budget: Extra inputs are not permitted",
+            ),
+            # A nested error object that still lacks the Anthropic ``type`` fields.
+            (
+                {"error": {"message": 'output_config.effort "ultra" is not supported'}},
+                'output_config.effort "ultra" is not supported',
+            ),
+        ],
+        ids=["bare-message", "error-without-type"],
+    )
+    @patch("router_maestro.server.routes.anthropic_beta._resolve_native_model")
+    def test_upstream_error_normalized_to_anthropic_envelope(
+        self, mock_resolve, client, upstream_body, expected_message
+    ):
+        """A non-Anthropic upstream error body is re-encoded, not echoed verbatim.
+
+        GHC returns at least three different error shapes on the native endpoint
+        (bare ``{"message": ...}``, ``{"error": {"message": ...}}`` without a
+        type, and occasionally a proper Anthropic envelope). Forwarding the first
+        two unchanged breaks clients that parse ``error.type``, so the route
+        normalizes them while preserving the upstream message and status.
+        """
+        mock_provider = MagicMock(spec=CopilotProvider)
+        mock_provider.ensure_token = AsyncMock()
+
+        mock_response = MagicMock()
+        mock_response.status_code = 400
+        mock_response.json.return_value = upstream_body
+        mock_provider._send_with_auth_retry = AsyncMock(return_value=mock_response)
+        mock_resolve.return_value = _NativeModelResolution(
+            _ResolvedModel("github-copilot", "claude-sonnet-4.5", mock_provider),
+            CapabilitySupport.SUPPORTED,
+        )
+
+        with patch(
+            "router_maestro.server.routes.anthropic_beta._apply_thinking_budget_native",
+            side_effect=lambda body, _, _efforts=None: body,
+        ):
+            resp = client.post(
+                "/api/anthropic/beta/v1/messages",
+                json={
+                    "model": "claude-sonnet-4.5",
+                    "max_tokens": 100,
+                    "messages": [{"role": "user", "content": "Hi"}],
+                },
+            )
+
+        assert resp.status_code == 400
+        body = resp.json()
+        assert body["type"] == "error"
+        assert body["error"]["type"] == "invalid_request_error"
+        assert body["error"]["message"] == expected_message
+
     @patch("router_maestro.server.routes.anthropic_beta._resolve_native_model")
     def test_signature_error_triggers_retry(self, mock_resolve, client):
         """400 with signature error strips thinking and retries."""

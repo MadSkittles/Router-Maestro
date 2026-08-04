@@ -258,6 +258,20 @@ _COPILOT_RESPONSES_FORWARD_FIELDS = frozenset(
 )
 
 
+# Keys inside ``output_config`` that GHC's native Anthropic endpoint refuses.
+# Verified live on claude-opus-4.6, claude-sonnet-4.6 and claude-haiku-4.5:
+# ``task_budget`` always returns 400 ``Extra inputs are not permitted``. Claude
+# Code already carries this option behind the ``task-budgets-2026-03-13`` beta,
+# so it can arrive unprompted.
+#
+# This is the ``store`` rule applied one level down: an option the upstream is
+# known to reject is stripped so the request still succeeds. Siblings that are
+# merely unrecognized here are NOT listed — those are forwarded for GHC to
+# judge, which is what keeps a newly-supported field from being pre-emptively
+# broken by a stale local allowlist.
+_OUTPUT_CONFIG_REJECTED_BY_UPSTREAM = frozenset({"task_budget"})
+
+
 class CopilotOutboundContract(OutboundContract):
     """Copilot upstream wire contract.
 
@@ -492,6 +506,10 @@ class CopilotOutboundContract(OutboundContract):
         genuinely unknown siblings itself (``Extra inputs are not permitted``).
         Stripping them here would turn a supported feature into a silent no-op.
 
+        The exception is ``_OUTPUT_CONFIG_REJECTED_BY_UPSTREAM``: siblings GHC is
+        known to refuse are dropped so the request still succeeds, mirroring how
+        ``store`` is handled on the Responses passthrough.
+
         An unusable ``effort`` is dropped rather than rejected, but the rest of the
         object still goes upstream; ``output_config`` is removed only when nothing
         remains to send.
@@ -505,7 +523,11 @@ class CopilotOutboundContract(OutboundContract):
         if effort not in VALID_EFFORTS:
             effort = None
 
-        forwarded = {key: value for key, value in output_config.items() if key != "effort"}
+        forwarded = {
+            key: value
+            for key, value in output_config.items()
+            if key != "effort" and key not in _OUTPUT_CONFIG_REJECTED_BY_UPSTREAM
+        }
         if effort is not None:
             forwarded["effort"] = effort
 
