@@ -20,6 +20,7 @@ from router_maestro.providers.base import (
 from router_maestro.providers.tool_parsing import recover_tool_calls_from_content
 from router_maestro.routing.model_ref import validate_upstream_model_id
 from router_maestro.utils.reasoning import budget_to_effort, downgrade_for_upstream
+from router_maestro.utils.structured_output import output_format_to_response_format
 
 
 def _request_audit():
@@ -103,6 +104,9 @@ class OpenAIChatProvider(BaseProvider, ABC):
         for parameter in ("top_k", "candidate_count", "response_mime_type"):
             if getattr(request, parameter) is not None:
                 self._reject_option(request, parameter)
+        response_format = output_format_to_response_format(request.output_format)
+        if response_format is not None:
+            payload["response_format"] = response_format
         if request.stop is not None and request.stop_sequences is not None:
             self._reject_option(request, "stop")
         option_values = {

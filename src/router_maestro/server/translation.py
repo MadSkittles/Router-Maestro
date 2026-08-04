@@ -65,6 +65,12 @@ def translate_anthropic_to_openai(request: AnthropicMessagesRequest) -> ChatRequ
         thinking_budget = request.thinking.budget_tokens
 
     reasoning_effort = request.output_config.effort if request.output_config else None
+    # ``format`` is a sibling of ``effort`` that Anthropic defines for structured
+    # outputs. Carry it through explicitly so adapters either encode it or reject
+    # it; dropping it here would silently downgrade JSON output to prose.
+    output_format = (
+        getattr(request.output_config, "format", None) if request.output_config else None
+    )
 
     logger.debug(
         "Translating Anthropic request: model=%s -> %s, messages=%d, reasoning_effort=%s",
@@ -85,6 +91,7 @@ def translate_anthropic_to_openai(request: AnthropicMessagesRequest) -> ChatRequ
         thinking_budget=thinking_budget,
         thinking_type=thinking_type,
         reasoning_effort=reasoning_effort,
+        output_format=output_format,
         top_p=request.top_p,
         top_k=request.top_k,
         stop_sequences=request.stop_sequences,

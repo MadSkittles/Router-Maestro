@@ -17,6 +17,7 @@ from router_maestro.providers.base import (
 )
 from router_maestro.providers.tool_parsing import recover_tool_calls_from_content
 from router_maestro.utils import get_logger
+from router_maestro.utils.structured_output import output_format_to_response_format
 
 logger = get_logger("providers.copilot.chat_codec")
 
@@ -94,6 +95,9 @@ class CopilotChatCodec:
         for parameter in ("top_k", "candidate_count", "response_mime_type"):
             if getattr(request, parameter) is not None:
                 self.reject_option(request, parameter, provider_name=provider_name)
+        response_format = output_format_to_response_format(request.output_format)
+        if response_format is not None:
+            payload["response_format"] = response_format
         if request.stop is not None and request.stop_sequences is not None:
             self.reject_option(request, "stop", provider_name=provider_name)
         options = {

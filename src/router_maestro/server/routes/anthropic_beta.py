@@ -149,9 +149,11 @@ def _validate_beta_request_options(body: dict) -> None:
     outbound contract (``CopilotOutboundContract.forwardable_fields``)
     before forwarding, so unknown top-level keys are ignored, not echoed upstream.
 
-    Only ``output_config`` is validated here, because Router-Maestro actively
-    consumes it to shape the native reasoning-effort payload; a malformed value
-    cannot be represented and is reported instead of silently mishandled.
+    The same rule applies *inside* ``output_config``: Router-Maestro validates
+    only ``effort``, the one key it consumes to shape the native reasoning
+    payload. Siblings such as ``format`` (structured outputs, which GHC supports
+    and honors) are forwarded untouched, and GHC adjudicates anything it does not
+    recognize with a more precise error than a local allowlist could produce.
     """
     if "output_config" in body:
         output_config = body["output_config"]
@@ -161,16 +163,7 @@ def _validate_beta_request_options(body: dict) -> None:
                 parameter="output_config",
             )
 
-        unsupported_fields = sorted(set(output_config) - {"effort"})
-        if unsupported_fields:
-            parameter = f"output_config.{unsupported_fields[0]}"
-            raise RequestOptionError(
-                f"{parameter} is not supported by the native Anthropic transport",
-                parameter=parameter,
-            )
-
-        effort = output_config.get("effort")
-        if effort not in VALID_EFFORTS:
+        if "effort" in output_config and output_config["effort"] not in VALID_EFFORTS:
             raise RequestOptionError(
                 "output_config.effort must be one of " + ", ".join(VALID_EFFORTS),
                 parameter="output_config.effort",

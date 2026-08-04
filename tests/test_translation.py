@@ -174,6 +174,37 @@ class TestTextContentExtraction:
 class TestAnthropicToOpenAITranslation:
     """Tests for full request translation."""
 
+    def test_output_config_format_survives_translation(self):
+        """A structured-output schema must not be dropped on the translated path.
+
+        Claude Code's prompt-hook evaluator sends ``output_config.format``. The
+        translated path previously kept only ``effort``, so the schema vanished
+        silently and the caller got prose where it expected JSON. Carrying it on
+        a typed field means an adapter that cannot encode it must reject it
+        rather than discard it (same rule as ``response_mime_type``).
+        """
+        schema = {
+            "type": "json_schema",
+            "schema": {
+                "type": "object",
+                "properties": {"ok": {"type": "boolean"}},
+                "required": ["ok"],
+            },
+        }
+        request = AnthropicMessagesRequest.model_validate(
+            {
+                "model": "claude-sonnet-4-5",
+                "max_tokens": 100,
+                "messages": [{"role": "user", "content": "hi"}],
+                "output_config": {"effort": "low", "format": schema},
+            }
+        )
+
+        result = translate_anthropic_to_openai(request)
+
+        assert result.reasoning_effort == "low"
+        assert result.output_format == schema
+
     def test_translate_simple_request(self):
         """Test translating a simple Anthropic request."""
         request = AnthropicMessagesRequest(

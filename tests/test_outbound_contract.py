@@ -261,13 +261,20 @@ def test_reconcile_permissive_is_noop():
 # --- native Anthropic normalizers (folded in from the beta route) ---
 
 
-def test_sanitize_output_config_keeps_only_valid_effort():
+def test_sanitize_output_config_normalizes_effort_and_forwards_siblings():
     from router_maestro.providers.copilot import CopilotOutboundContract
 
+    # ``effort`` is Router-Maestro's to normalize; siblings are GHC's to judge.
     body = {"output_config": {"effort": "xhigh", "format": "json"}}
     assert CopilotOutboundContract.sanitize_output_config(body) == "xhigh"
-    assert body["output_config"] == {"effort": "xhigh"}
+    assert body["output_config"] == {"effort": "xhigh", "format": "json"}
 
+    # An unusable effort is dropped without taking the rest of the object with it.
+    partial = {"output_config": {"effort": "invalid", "format": "json"}}
+    assert CopilotOutboundContract.sanitize_output_config(partial) is None
+    assert partial["output_config"] == {"format": "json"}
+
+    # With nothing left to send, the key is removed entirely.
     dropped = {"output_config": {"effort": "invalid"}}
     assert CopilotOutboundContract.sanitize_output_config(dropped) is None
     assert "output_config" not in dropped

@@ -463,7 +463,19 @@ class CopilotOutboundContract(OutboundContract):
 
     @staticmethod
     def sanitize_output_config(body: dict) -> str | None:
-        """Keep only a valid effort supported by Copilot's native endpoint."""
+        """Normalize the effort Router-Maestro consumes, forwarding siblings intact.
+
+        Only ``effort`` is Router-Maestro's to own: it feeds effort resolution and
+        the thinking-budget precedence rules. Every other key belongs to GHC, which
+        accepts ``format`` (structured outputs, verified live: 200 with
+        schema-conforming output on both streaming and non-streaming) and rejects
+        genuinely unknown siblings itself (``Extra inputs are not permitted``).
+        Stripping them here would turn a supported feature into a silent no-op.
+
+        An unusable ``effort`` is dropped rather than rejected, but the rest of the
+        object still goes upstream; ``output_config`` is removed only when nothing
+        remains to send.
+        """
         output_config = body.get("output_config")
         if not isinstance(output_config, dict):
             body.pop("output_config", None)
@@ -471,10 +483,17 @@ class CopilotOutboundContract(OutboundContract):
 
         effort = output_config.get("effort")
         if effort not in VALID_EFFORTS:
+            effort = None
+
+        forwarded = {key: value for key, value in output_config.items() if key != "effort"}
+        if effort is not None:
+            forwarded["effort"] = effort
+
+        if not forwarded:
             body.pop("output_config", None)
             return None
 
-        body["output_config"] = {"effort": effort}
+        body["output_config"] = forwarded
         return effort
 
     @staticmethod
@@ -561,7 +580,9 @@ class CopilotOutboundContract(OutboundContract):
                 provider="github-copilot",
                 model=actual_model,
             )
-            body["output_config"] = {"effort": effort}
+            # Update effort in place: siblings the sanitizer preserved (e.g.
+            # ``format``) belong to GHC and must survive effort resolution.
+            body["output_config"] = {**body["output_config"], "effort": effort}
 
         if isinstance(client_thinking, dict) and client_thinking.get("type") == "adaptive":
             thinking = dict(client_thinking)
