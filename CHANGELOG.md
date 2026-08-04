@@ -4,6 +4,76 @@ All notable changes to Router-Maestro are documented here.
 
 ---
 
+## v0.7.9 (2026-08-04)
+
+### Fixes
+
+- **`output_config` siblings are no longer rejected on the beta Anthropic
+  route.** `_validate_beta_request_options` allowed only `effort` and returned a
+  `400` naming anything else "not supported by the native Anthropic transport" —
+  a claim that is false. Verified live against GitHub Copilot's native
+  `/v1/messages`: `output_config.format` (structured outputs) returns `200` with
+  schema-conforming output on both streaming and non-streaming, coexists with
+  `effort`, and injecting the schema moves `input_tokens` 15 → 179, proving it is
+  applied rather than ignored. The rejection broke Claude Code's prompt-hook
+  evaluator, which sends `output_config.format` and surfaced the failure as
+  `Stop hook error: Hook evaluator API error: API Error: 400`. Router-Maestro now
+  validates only `effort` — the one key it consumes — and forwards unrecognized
+  siblings for GHC to adjudicate, which it does with a more precise message than
+  a local allowlist can produce.
+
+- **A structured-output schema is no longer silently dropped.**
+  `sanitize_output_config` rewrote the body to `{"effort": effort}`, and
+  `apply_native_anthropic_thinking` popped the whole object twice more (once when
+  resolving effort, once for models without a reasoning surface). Fixing only the
+  validation would have turned a loud `400` into a silent no-op. Effort is now
+  updated in place, an unusable effort is dropped without taking its siblings
+  with it, and `output_config` is removed only when nothing remains to send.
+  Non-reasoning models keep the schema: `claude-haiku-4.5` rejects
+  `output_config.effort` but honors `format` (verified: `200`, `input_tokens`
+  158–180 against a ~18 baseline), so only the effort is stripped.
+
+- **`output_config.format` now reaches upstream on the standard route too.** The
+  translated path kept only `effort`, so callers on `/api/anthropic/v1/messages`
+  received prose where they asked for JSON — a quieter form of the same bug. The
+  schema is carried on a typed `ChatRequest.output_format` field (the same
+  discipline as the Gemini-only options) so no adapter can discard it unnoticed,
+  and is encoded as Anthropic `output_config.format` or OpenAI `response_format`
+  per wire. Forwarding on the OpenAI-shaped path is best-effort by design: GHC
+  accepts it for Claude and Gemini models alike, and rejecting instead would fail
+  requests that succeed today.
+
+- **`output_config.task_budget` is stripped instead of forwarded into a `400`.**
+  GHC refuses it on every Claude model tested (`claude-opus-4.6`,
+  `claude-sonnet-4.6`, `claude-haiku-4.5`) with `Extra inputs are not permitted`,
+  and Claude Code already carries the option behind the
+  `task-budgets-2026-03-13` beta, so it can arrive unprompted. This applies the
+  existing `store` rule one level down: an option the upstream is known to reject
+  is dropped so the request still succeeds. Siblings that are merely
+  unrecognized are still forwarded.
+
+- **Native upstream errors are re-encoded into the Anthropic envelope.** The beta
+  route forwarded upstream error bodies verbatim on the assumption they were
+  "already Anthropic format". They are not: GHC returns at least three shapes on
+  this endpoint — a bare `{"message": …}`, an `{"error": {"message": …}}` with no
+  `type`, and occasionally a proper envelope — and the shape varies by both error
+  kind and model. Clients that switch on `error.type` saw a malformed body. The
+  upstream message and status are now preserved inside the canonical envelope; a
+  well-formed upstream envelope still passes through unchanged.
+
+### Tests
+
+- **The tolerance convention is enforced by tests, not commit messages.** v0.6.0's
+  blanket option-rejection was removed in a previous release, but the rule lived
+  only in prose, so a nested carve-out inside `output_config` reintroduced the
+  same class of bug. The cross-route passthrough test now covers nested options
+  on both Anthropic surfaces alongside the existing top-level cases, and was
+  confirmed to fail against the pre-fix code. Registering the beta router in that
+  file's fixture also closed a gap where beta assertions had been hitting `404`
+  and passing vacuously.
+
+---
+
 ## v0.7.8 (2026-07-31)
 
 ### Fixes
