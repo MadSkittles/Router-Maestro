@@ -206,7 +206,7 @@ class CopilotChatCodec:
                 and completion_tokens >= max_tokens
             )
             exhausted_implicit_output_cap = (
-                request.thinking_type is None
+                request.thinking_type in (None, "disabled")
                 and has_positive_output_cap
                 and completion_tokens == max_tokens
             )

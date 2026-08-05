@@ -1022,6 +1022,23 @@ class CopilotProvider(BaseProvider):
         """
         return self._catalog.effort_values(model)
 
+    def _claude_reasoning_capable(self, model: str) -> bool:
+        """Whether ``model`` is a Claude model with a reasoning surface.
+
+        ``_claude_supports_reasoning`` only recognizes generations verified at
+        the time the static table was written, so newer families (claude-*-5
+        and beyond) fall through as unknown. When the catalog is warm its
+        advertised effort tiers are authoritative; the static table is only a
+        cold-cache fallback.
+        """
+        bare_lower = (model.split("/", 1)[1] if "/" in model else model).lower()
+        if not bare_lower.startswith("claude-"):
+            return False
+        catalog_effort_values = self._catalog_effort_values(model)
+        if catalog_effort_values is not None:
+            return bool(catalog_effort_values)
+        return _claude_supports_reasoning(bare_lower)
+
     def _get_client(self) -> httpx.AsyncClient:
         """Get or create a reusable HTTP client.
 
@@ -1166,12 +1183,7 @@ class CopilotProvider(BaseProvider):
             except (json.JSONDecodeError, TypeError, ValueError) as e:
                 self._raise_protocol_error(self.name, request.model, e)
 
-            bare_lower = (
-                request.model.split("/", 1)[1] if "/" in request.model else request.model
-            ).lower()
-            reasoning_capable = bare_lower.startswith("claude-") and _claude_supports_reasoning(
-                bare_lower
-            )
+            reasoning_capable = self._claude_reasoning_capable(request.model)
             try:
                 result = self._chat_codec.decode_response(
                     data,
