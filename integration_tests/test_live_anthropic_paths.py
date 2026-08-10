@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import httpx
+import pytest
 
 from integration_tests.conftest import (
     anthropic_compat_payload,
@@ -45,6 +46,30 @@ def test_anthropic_messages_non_streaming_api_prefix(
     assert text_blocks, data
     assert_text_response(text_blocks[0]["text"])
     assert_anthropic_usage(data["usage"])
+
+
+@pytest.mark.parametrize(
+    "endpoint",
+    ("/api/anthropic/v1/messages", "/api/anthropic/beta/v1/messages"),
+)
+@pytest.mark.parametrize("stream", [False, True], ids=["nonstream", "stream"])
+def test_anthropic_gpt5_rejects_unsupported_stop_sequences(
+    client: httpx.Client,
+    gpt5_chat_model: str,
+    endpoint: str,
+    stream: bool,
+):
+    payload = anthropic_payload(gpt5_chat_model, stream=stream)
+    payload["stop_sequences"] = ["END"]
+
+    response = client.post(endpoint, json=payload)
+
+    assert response.status_code == 400
+    assert response.headers["content-type"].startswith("application/json")
+    error = response.json()
+    assert error["type"] == "error"
+    assert error["error"]["type"] == "invalid_request_error"
+    assert "stop_sequences" in error["error"]["message"]
 
 
 def test_anthropic_messages_non_streaming_root_path(

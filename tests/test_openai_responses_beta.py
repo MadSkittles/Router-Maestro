@@ -172,6 +172,89 @@ def test_reconcile_passthrough_body_downgrades_reasoning_effort() -> None:
     assert body["include"] == ["reasoning.encrypted_content"]
 
 
+@pytest.mark.parametrize("operation", [Operation.RESPONSES, Operation.RESPONSES_STREAM])
+def test_reconcile_passthrough_body_fills_required_namespace_descriptions(
+    operation: Operation,
+) -> None:
+    contract = CopilotOutboundContract()
+    body = {
+        "model": "gpt-5.5",
+        "input": [
+            {
+                "type": "additional_tools",
+                "role": "developer",
+                "tools": [
+                    {
+                        "type": "namespace",
+                        "name": "functions",
+                        "description": "",
+                        "tools": [
+                            {
+                                "type": "function",
+                                "name": "undocumented",
+                                "description": "",
+                                "parameters": {"type": "object"},
+                            },
+                            {
+                                "type": "function",
+                                "name": "documented",
+                                "description": "Keep this description",
+                                "parameters": {"type": "object"},
+                            },
+                            {
+                                "type": "function",
+                                "name": "description_omitted",
+                                "parameters": {"type": "object"},
+                            },
+                        ],
+                    },
+                    {
+                        "type": "namespace",
+                        "name": "documented_namespace",
+                        "description": "Keep this namespace description",
+                        "tools": [{"type": "function", "name": "echo"}],
+                    },
+                    {
+                        "type": "namespace",
+                        "name": "description_omitted",
+                        "tools": [{"type": "function", "name": "echo"}],
+                    },
+                    {
+                        "type": "namespace",
+                        "name": "description_null",
+                        "description": None,
+                        "tools": [{"type": "function", "name": "echo"}],
+                    },
+                    {
+                        "type": "namespace",
+                        "name": "description_whitespace",
+                        "description": "  \n",
+                        "tools": [{"type": "function", "name": "echo"}],
+                    },
+                ],
+            }
+        ],
+    }
+
+    contract.reconcile_passthrough_body(
+        body,
+        operation=operation,
+        model="gpt-5.5",
+        catalog_effort_values=None,
+    )
+
+    additional_tools = body["input"][0]["tools"]
+    namespace = additional_tools[0]
+    assert namespace["description"] == "Tools in the functions namespace."
+    assert namespace["tools"][0]["description"] == ""
+    assert namespace["tools"][1]["description"] == "Keep this description"
+    assert "description" not in namespace["tools"][2]
+    assert additional_tools[1]["description"] == "Keep this namespace description"
+    assert additional_tools[2]["description"] == "Tools in the description_omitted namespace."
+    assert additional_tools[3]["description"] == "Tools in the description_null namespace."
+    assert additional_tools[4]["description"] == "Tools in the description_whitespace namespace."
+
+
 # ---------------------------------------------------------------------------
 # Unit tests: guard projection + terminal-outcome mapping
 # ---------------------------------------------------------------------------
@@ -504,6 +587,49 @@ def test_nonstream_passthrough_drops_unsupported_tool(client) -> None:
     assert downstream.status_code == 200
     sent_payload = provider._send_with_auth_retry.await_args.kwargs["json"]
     assert sent_payload["tools"] == [{"type": "function", "name": "echo"}]
+
+
+def test_nonstream_passthrough_replaces_nested_empty_tool_description(client) -> None:
+    provider = _native_provider()
+    plan = _responses_plan_with_efforts(provider)
+    resolution = _native_resolution(provider, plan)
+    with patch(
+        "router_maestro.server.routes.openai_responses_beta._resolve_responses_model",
+        new_callable=AsyncMock,
+        return_value=resolution,
+    ):
+        downstream = client.post(
+            "/api/openai/beta/v1/responses",
+            json={
+                "model": "github-copilot/gpt-5.5",
+                "input": [
+                    {
+                        "type": "additional_tools",
+                        "role": "developer",
+                        "tools": [
+                            {
+                                "type": "namespace",
+                                "name": "functions",
+                                "description": "",
+                                "tools": [
+                                    {
+                                        "type": "function",
+                                        "name": "echo",
+                                        "description": "Echo the input",
+                                    }
+                                ],
+                            }
+                        ],
+                    }
+                ],
+            },
+        )
+
+    assert downstream.status_code == 200
+    sent_payload = provider._send_with_auth_retry.await_args.kwargs["json"]
+    namespace = sent_payload["input"][0]["tools"][0]
+    assert namespace["description"] == "Tools in the functions namespace."
+    assert namespace["tools"][0]["description"] == "Echo the input"
 
 
 def test_nonstream_passthrough_rejects_temperature(client) -> None:

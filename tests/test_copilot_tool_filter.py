@@ -1,5 +1,7 @@
 """Tests for Copilot tool-type filtering."""
 
+from copy import deepcopy
+
 import pytest
 
 from router_maestro.providers import CopilotProvider
@@ -104,3 +106,41 @@ class TestFilterUnsupportedTools:
         tools = [{"type": "local_shell", "name": "shell"}]
         result = self.provider._filter_unsupported_tools(tools)
         assert result == tools
+
+    def test_normal_responses_fills_required_additional_namespace_description(self):
+        input_items = [
+            {
+                "type": "additional_tools",
+                "role": "developer",
+                "tools": [
+                    {
+                        "type": "namespace",
+                        "name": "functions",
+                        "description": "",
+                        "tools": [
+                            {
+                                "type": "function",
+                                "name": "wait",
+                                "description": "Wait for work",
+                            },
+                            {
+                                "type": "function",
+                                "name": "poll",
+                                "description": "",
+                            },
+                        ],
+                    }
+                ],
+            }
+        ]
+        original = deepcopy(input_items)
+
+        payload = self.provider._build_responses_payload(
+            ResponsesRequest(model="gpt-5.6-sol", input=input_items)
+        )
+
+        namespace = payload["input"][0]["tools"][0]
+        assert namespace["description"] == "Tools in the functions namespace."
+        assert namespace["tools"][0]["description"] == "Wait for work"
+        assert namespace["tools"][1]["description"] == ""
+        assert input_items == original

@@ -16,6 +16,7 @@ from router_maestro.providers.base import (
     RequestOptionError,
 )
 from router_maestro.providers.tool_parsing import recover_tool_calls_from_content
+from router_maestro.routing.capabilities import Operation
 from router_maestro.utils import get_logger
 from router_maestro.utils.structured_output import output_format_to_response_format
 
@@ -78,6 +79,7 @@ class CopilotChatCodec:
         apply_reasoning: Callable[..., None],
         catalog_effort_values: list[str] | None,
         provider_name: str,
+        allows_stop: Callable[..., bool],
     ) -> dict:
         validate_extensions(request)
         messages, _has_images = self.build_messages_payload(request)
@@ -100,11 +102,16 @@ class CopilotChatCodec:
             payload["response_format"] = response_format
         if request.stop is not None and request.stop_sequences is not None:
             self.reject_option(request, "stop", provider_name=provider_name)
+        stop = request.stop if request.stop is not None else request.stop_sequences
+        operation = Operation.CHAT_STREAM if stream else Operation.CHAT
+        if stop is not None and not allows_stop(operation, model=request.model):
+            parameter = "stop" if request.stop is not None else "stop_sequences"
+            self.reject_option(request, parameter, provider_name=provider_name)
         options = {
             "top_p": request.top_p,
             "frequency_penalty": request.frequency_penalty,
             "presence_penalty": request.presence_penalty,
-            "stop": request.stop if request.stop is not None else request.stop_sequences,
+            "stop": stop,
             "user": request.user,
             "metadata": request.metadata,
             "service_tier": request.service_tier,

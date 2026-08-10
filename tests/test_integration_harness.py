@@ -339,6 +339,19 @@ def test_anthropic_compat_payload_uses_top_p_without_temperature():
 
     assert payload["top_p"] == 1
     assert "temperature" not in payload
+    assert "stop_sequences" not in payload
+    assert payload["stream"] is True
+
+
+def test_openai_chat_compat_payload_does_not_assume_stop_support():
+    conftest = importlib.import_module("integration_tests.conftest")
+
+    payload = conftest.openai_chat_usage_payload(
+        "github-copilot/gpt-5.4",
+        stream=True,
+    )
+
+    assert "stop" not in payload
     assert payload["stream"] is True
 
 
@@ -681,6 +694,38 @@ def test_live_endpoint_selection_does_not_treat_derived_operations_as_raw_http_c
     endpoint = conftest.select_live_http_endpoint(model, {model: info})
 
     assert endpoint is getattr(conftest.LiveHttpEndpoint, "UNKNOWN", None)
+
+
+def test_chat_fixture_uses_catalog_endpoints_and_selects_current_gpt5_chat_model(monkeypatch):
+    conftest = importlib.import_module("integration_tests.conftest")
+    responses_only = "github-copilot/gpt-5.4-mini"
+    luna = "github-copilot/gpt-5.6-luna"
+    chat = "github-copilot/gpt-5.4"
+    models = [responses_only, luna, chat]
+    catalog = {
+        responses_only: ModelInfo(
+            id="gpt-5.4-mini",
+            name="GPT-5.4 Mini",
+            provider="github-copilot",
+            supported_endpoints=("/responses",),
+        ),
+        luna: ModelInfo(
+            id="gpt-5.6-luna",
+            name="GPT-5.6 Luna",
+            provider="github-copilot",
+            supported_endpoints=("/responses",),
+        ),
+        chat: ModelInfo(
+            id="gpt-5.4",
+            name="GPT-5.4",
+            provider="github-copilot",
+            supported_endpoints=("/chat/completions", "/responses"),
+        ),
+    }
+    monkeypatch.delenv("RM_INTEGRATION_MODEL", raising=False)
+
+    assert conftest._chat_capable_models(models, catalog) == [chat]
+    assert conftest.chat_model.__wrapped__(models, catalog) == chat
 
 
 def _chat_matrix_success(model: str = "github-copilot/heuristic-profile") -> httpx.Response:

@@ -68,7 +68,7 @@ def test_beta_non_streaming(client: httpx.Client, chat_model: str):
 
 
 def test_beta_non_streaming_compat_fields(client: httpx.Client, chat_model: str):
-    """Beta endpoint handles compat fields (system, top_p, stop_sequences, metadata)."""
+    """Beta endpoint handles compat fields (system, top_p, and metadata)."""
     response = client.post(BETA, json=anthropic_compat_payload(chat_model))
     assert_http_success(response)
     data = response.json()
@@ -84,10 +84,7 @@ def test_beta_non_streaming_compat_fields(client: httpx.Client, chat_model: str)
 @pytest.mark.parametrize(
     ("option_payload", "parameter"),
     [
-        (
-            {"output_config": {"effort": "low", "format": "text"}},
-            "output_config.format",
-        ),
+        ({"output_config": "low"}, "output_config"),
     ],
 )
 def test_beta_rejects_malformed_output_config(

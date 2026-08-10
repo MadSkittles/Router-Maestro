@@ -573,6 +573,37 @@ def test_copilot_chat_payload_forwards_openai_native_options() -> None:
     assert payload["service_tier"] == "default"
 
 
+@pytest.mark.parametrize("model", ["gpt-5.4", "github-copilot/gpt-5-mini"])
+@pytest.mark.parametrize("stream", [False, True], ids=["nonstream", "stream"])
+@pytest.mark.parametrize("parameter", ["stop", "stop_sequences"])
+def test_copilot_gpt5_chat_rejects_unsupported_stop(
+    model: str,
+    stream: bool,
+    parameter: str,
+) -> None:
+    provider = CopilotProvider()
+
+    with pytest.raises(RequestOptionError) as caught:
+        provider._build_chat_payload(
+            _request(model=model, **{parameter: ["END"]}),
+            stream=stream,
+        )
+
+    assert caught.value.parameter == parameter
+    assert caught.value.model == model
+
+
+def test_copilot_gemini_chat_forwards_stop() -> None:
+    provider = CopilotProvider()
+
+    payload = provider._build_chat_payload(
+        _request(model="gemini-3.5-flash", stop=["END"]),
+        stream=False,
+    )
+
+    assert payload["stop"] == ["END"]
+
+
 @pytest.mark.parametrize("parameter", ["top_k", "candidate_count", "response_mime_type"])
 def test_copilot_chat_rejects_non_chat_options(parameter) -> None:
     provider = CopilotProvider()
