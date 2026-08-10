@@ -3,6 +3,7 @@
 import hmac
 import os
 from contextlib import asynccontextmanager
+from typing import cast
 
 from fastapi import Depends, FastAPI, HTTPException, Request, Response, status
 from fastapi.exception_handlers import (
@@ -14,6 +15,7 @@ from fastapi.exception_handlers import (
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.exceptions import HTTPException as StarletteHTTPException
+from starlette.types import HTTPExceptionHandler
 
 from router_maestro import __version__
 from router_maestro.config.repository import RuntimeConfigRepository
@@ -183,9 +185,18 @@ def create_app() -> FastAPI:
     app.state.http_metrics = create_http_metrics()
     app.state.runtime_config_repository = RuntimeConfigRepository()
     app.state.router_owner = RouterOwner()
-    app.add_exception_handler(RequestValidationError, protocol_validation_exception_handler)
-    app.add_exception_handler(StarletteHTTPException, protocol_http_exception_handler)
-    app.add_exception_handler(ProviderError, protocol_provider_exception_handler)
+    app.add_exception_handler(
+        RequestValidationError,
+        cast(HTTPExceptionHandler, protocol_validation_exception_handler),
+    )
+    app.add_exception_handler(
+        StarletteHTTPException,
+        cast(HTTPExceptionHandler, protocol_http_exception_handler),
+    )
+    app.add_exception_handler(
+        ProviderError,
+        cast(HTTPExceptionHandler, protocol_provider_exception_handler),
+    )
     app.add_exception_handler(Exception, unhandled_exception_handler)
 
     # Add CORS middleware
