@@ -510,6 +510,18 @@ class CopilotOutboundContract(OutboundContract):
         """Copilot Responses rejects explicit temperature; Chat forwards it."""
         return operation not in (Operation.RESPONSES, Operation.RESPONSES_STREAM)
 
+    def allows_stop(
+        self,
+        operation: Operation,
+        *,
+        model: str | None = None,
+    ) -> bool:
+        """Copilot's GPT-5 Chat surface rejects the ``stop`` parameter."""
+        if operation not in (Operation.CHAT, Operation.CHAT_STREAM) or model is None:
+            return True
+        bare_model = model.split("/", 1)[-1].lower()
+        return not bare_model.startswith("gpt-5")
+
     # ------------------------------------------------------------------
     # Native Anthropic passthrough normalization (folded in from the beta
     # Anthropic route). These own the outbound wire knowledge; the route keeps
@@ -1643,6 +1655,7 @@ class CopilotProvider(BaseProvider):
             apply_reasoning=apply_copilot_chat_reasoning,
             catalog_effort_values=self._catalog_effort_values(request.model),
             provider_name=self.name,
+            allows_stop=self.outbound_contract.allows_stop,
         )
 
     def validate_chat_request(self, request: ChatRequest, *, stream: bool) -> None:

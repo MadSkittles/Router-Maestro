@@ -87,6 +87,15 @@ class OutboundContract(ABC):
         """Whether the upstream accepts explicit ``temperature``. Default: yes."""
         return True
 
+    def allows_stop(
+        self,
+        operation: Operation,
+        *,
+        model: str | None = None,
+    ) -> bool:
+        """Whether the upstream accepts an explicit stop sequence. Default: yes."""
+        return True
+
     def reconcile_passthrough_body(
         self,
         body: dict,

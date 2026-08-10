@@ -15,6 +15,7 @@ from integration_tests.conftest import (
     assert_text_response,
     assert_tool_call_name,
     event_payloads,
+    openai_chat_payload,
     openai_chat_tool_payload,
     openai_responses_payload,
     openai_responses_tool_payload,
@@ -73,6 +74,24 @@ def test_openai_chat_completion_streaming_returns_chunks_and_done(
     usage_payloads = [payload for payload in payloads if payload.get("usage")]
     if usage_payloads:
         assert_openai_usage(usage_payloads[-1]["usage"])
+
+
+@pytest.mark.parametrize("stream", [False, True], ids=["nonstream", "stream"])
+def test_openai_chat_gpt5_rejects_unsupported_stop(
+    client: httpx.Client,
+    gpt5_chat_model: str,
+    stream: bool,
+):
+    payload = openai_chat_payload(gpt5_chat_model, stream=stream)
+    payload["stop"] = ["END"]
+
+    response = client.post("/api/openai/v1/chat/completions", json=payload)
+
+    assert response.status_code == 400
+    assert response.headers["content-type"].startswith("application/json")
+    error = response.json()["error"]
+    assert error["type"] == "invalid_request_error"
+    assert error["param"] == "stop"
 
 
 def test_openai_chat_forced_tool_call(client: httpx.Client, tool_model: str):

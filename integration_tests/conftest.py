@@ -731,54 +731,122 @@ def gemini_family_models(copilot_models: list[str]) -> list[str]:
     return selected
 
 
+def _chat_capable_models(
+    copilot_models: list[str],
+    copilot_catalog: dict[str, ModelInfo],
+) -> list[str]:
+    """Filter to models whose live catalog permits the Chat transport."""
+    capable = []
+    for model in copilot_models:
+        info = copilot_catalog[model]
+        endpoints = info.supported_endpoints
+        if endpoints is not None:
+            if "/chat/completions" in endpoints:
+                capable.append(model)
+            continue
+        if info.operation_capabilities.get("chat") is False:
+            continue
+        if bare_model(model) not in RESPONSES_ONLY_CHAT_MODELS:
+            capable.append(model)
+    return capable
+
+
 @pytest.fixture(scope="session")
-def chat_model(copilot_models: list[str]) -> str:
+def chat_model(
+    copilot_models: list[str],
+    copilot_catalog: dict[str, ModelInfo],
+) -> str:
     """Model for OpenAI Chat, Anthropic, and Gemini compatibility paths."""
+    chat_capable = _chat_capable_models(copilot_models, copilot_catalog)
     requested = os.environ.get("RM_INTEGRATION_MODEL")
     if requested:
-        if requested in copilot_models:
+        if requested in chat_capable:
             return requested
-        pytest.fail(f"RM_INTEGRATION_MODEL={requested!r} is not in available Copilot models")
+        pytest.fail(
+            f"RM_INTEGRATION_MODEL={requested!r} is not an available Chat-capable Copilot model"
+        )
 
     preferred = (
         "github-copilot/gpt-4o-mini",
         "github-copilot/gpt-4o",
         "github-copilot/claude-haiku-4.5",
         "github-copilot/claude-sonnet-4.5",
-    )
-    return _first_available(copilot_models, preferred) or copilot_models[0]
-
-
-@pytest.fixture(scope="session")
-def tool_model(copilot_models: list[str]) -> str:
-    """Model selected for forced tool-call scenarios.
-
-    Used against ``/chat/completions`` and ``/anthropic/v1/messages``, so it must
-    be a true chat model. Responses-only models (e.g. ``gpt-5.4-mini``) reject
-    those endpoints, so they are excluded from the candidate pool.
-    """
-    requested = os.environ.get("RM_INTEGRATION_TOOL_MODEL")
-    if requested:
-        if requested in copilot_models:
-            return requested
-        pytest.fail(f"RM_INTEGRATION_TOOL_MODEL={requested!r} is not in available Copilot models")
-
-    chat_capable = [
-        model for model in copilot_models if bare_model(model) not in RESPONSES_ONLY_CHAT_MODELS
-    ]
-    preferred = (
-        "github-copilot/gpt-4o",
-        "github-copilot/gpt-4o-mini",
-        "github-copilot/claude-sonnet-4.5",
-        "github-copilot/claude-haiku-4.5",
-        "github-copilot/gpt-4.1",
+        "github-copilot/gpt-5.4",
+        "github-copilot/gemini-3.5-flash",
+        "github-copilot/gemini-3.1-pro-preview",
+        "github-copilot/gemini-3.6-flash",
+        "github-copilot/gpt-5-mini",
     )
     selected = _first_available(chat_capable, preferred)
     if selected:
         return selected
     if chat_capable:
         return chat_capable[0]
+    pytest.skip("No Chat-capable Copilot model is available")
+
+
+@pytest.fixture(scope="session")
+def tool_model(
+    copilot_models: list[str],
+    copilot_catalog: dict[str, ModelInfo],
+) -> str:
+    """Model selected for forced tool-call scenarios.
+
+    Used against ``/chat/completions`` and ``/anthropic/v1/messages``, so it must
+    be a true chat model. Responses-only models (e.g. ``gpt-5.4-mini``) reject
+    those endpoints, so they are excluded from the candidate pool.
+    """
+    chat_capable = _chat_capable_models(copilot_models, copilot_catalog)
+    tool_capable = [
+        model
+        for model in chat_capable
+        if copilot_catalog[model].feature_capabilities.get("tools") is not False
+    ]
+    requested = os.environ.get("RM_INTEGRATION_TOOL_MODEL")
+    if requested:
+        if requested in tool_capable:
+            return requested
+        pytest.fail(
+            f"RM_INTEGRATION_TOOL_MODEL={requested!r} is not an available tool-capable Chat model"
+        )
+    preferred = (
+        "github-copilot/gpt-4o",
+        "github-copilot/gpt-4o-mini",
+        "github-copilot/claude-sonnet-4.5",
+        "github-copilot/claude-haiku-4.5",
+        "github-copilot/gpt-4.1",
+        "github-copilot/gpt-5.4",
+        "github-copilot/gemini-3.5-flash",
+        "github-copilot/gemini-3.1-pro-preview",
+        "github-copilot/gemini-3.6-flash",
+        "github-copilot/gpt-5-mini",
+    )
+    selected = _first_available(tool_capable, preferred)
+    if selected:
+        return selected
+    if tool_capable:
+        return tool_capable[0]
     pytest.skip("No chat-capable Copilot model available for forced tool-call tests")
+
+
+@pytest.fixture(scope="session")
+def gpt5_chat_model(
+    copilot_models: list[str],
+    copilot_catalog: dict[str, ModelInfo],
+) -> str:
+    """One live GPT-5 Chat model for model-specific option validation."""
+    candidates = [
+        model
+        for model in _chat_capable_models(copilot_models, copilot_catalog)
+        if bare_model(model).lower().startswith("gpt-5")
+    ]
+    preferred = ("github-copilot/gpt-5.4", "github-copilot/gpt-5-mini")
+    selected = _first_available(candidates, preferred)
+    if selected:
+        return selected
+    if candidates:
+        return candidates[0]
+    pytest.skip("No GPT-5 Chat model is available")
 
 
 @pytest.fixture(scope="session")
@@ -912,7 +980,6 @@ def anthropic_compat_payload(model: str, *, stream: bool = False) -> dict[str, A
         {
             "system": "Return concise answers.",
             "top_p": 1,
-            "stop_sequences": ["\n\nHuman:"],
             "metadata": {"user_id": "router-maestro-integration"},
         }
     )
@@ -935,7 +1002,6 @@ def openai_chat_usage_payload(model: str, *, stream: bool = False) -> dict[str, 
             "top_p": 1,
             "frequency_penalty": 0,
             "presence_penalty": 0,
-            "stop": ["\n\n"],
             "user": "router-maestro-integration",
         }
     )
