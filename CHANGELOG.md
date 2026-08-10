@@ -4,6 +4,42 @@ All notable changes to Router-Maestro are documented here.
 
 ---
 
+## v0.7.10 (2026-08-10)
+
+### Fixes
+
+- **Copilot Responses namespace tools no longer fail when their description is
+  blank.** GitHub Copilot rejects namespace tools whose `description` is
+  missing, `null`, empty, or whitespace-only. Router-Maestro now normalizes
+  those values to the namespace name immediately before the outbound request,
+  while preserving non-empty namespace and function descriptions. The same
+  contract applies to both `/api/openai/v1/responses` and
+  `/api/openai/beta/v1/responses`, without mutating the caller's request body.
+
+- **Copilot GPT-5 Chat rejects unsupported stop sequences locally.** The live
+  backend rejects `stop` on GPT-5 Chat models such as `gpt-5.4` and
+  `gpt-5-mini`. Router-Maestro now returns a protocol-native `400` before the
+  upstream transport or SSE response commits, retaining the client-facing
+  parameter name: OpenAI reports `stop`, while Anthropic standard and beta
+  routes report `stop_sequences`. Other model families and providers continue
+  to forward stop sequences normally.
+
+### Tests
+
+- **Passthrough tests now prove requests positively reached routing.** Replaced
+  permissive `status != 400` assertions—which could pass on an unrouted `404`—
+  with routing sentinels or real count-token results across OpenAI, Anthropic,
+  Gemini, and beta surfaces.
+
+- **Live compatibility coverage follows the catalog transport contract.** Chat
+  and tool fixtures now select only models advertising `/chat/completions`, so
+  Responses-only models such as `gpt-5.4-mini` and `gpt-5.6-luna` cannot be used
+  for Chat probes. Regression coverage exercises the GPT-5 rejection on OpenAI
+  and Anthropic standard/beta routes in both streaming modes, and verifies the
+  namespace-description fix on both Responses paths.
+
+---
+
 ## v0.7.9 (2026-08-04)
 
 ### Fixes
