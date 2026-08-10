@@ -69,6 +69,7 @@ class CopilotResponsesCodec:
         resolve_reasoning: Callable[..., Any],
         allows_temperature: Callable[..., bool],
         filter_tools: Callable[..., list[dict] | None],
+        normalize_input: Callable[..., Any],
     ) -> dict:
         from router_maestro.routing.capabilities import Operation
 
@@ -82,7 +83,11 @@ class CopilotResponsesCodec:
             )
         payload: dict = {
             "model": request.model,
-            "input": request.input,
+            "input": normalize_input(
+                request.input,
+                operation=Operation.RESPONSES,
+                model=request.model,
+            ),
             "stream": request.stream,
         }
         if request.instructions:

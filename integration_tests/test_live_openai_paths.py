@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 import httpx
+import pytest
 
 from integration_tests.conftest import (
     assert_http_success,
@@ -19,6 +20,7 @@ from integration_tests.conftest import (
     openai_responses_tool_payload,
     parse_sse_events,
     post_openai_chat_compat_probe,
+    responses_weather_tool,
     stream_openai_chat_compat_probe,
 )
 
@@ -191,6 +193,58 @@ def test_openai_responses_forced_tool_call(client: httpx.Client, responses_model
 
     assert data["status"] == "completed"
     assert_response_has_function_call(data, "get_weather")
+    assert_responses_usage(data["usage"])
+
+
+@pytest.mark.parametrize(
+    "endpoint",
+    (
+        "/api/openai/v1/responses",
+        "/api/openai/beta/v1/responses",
+    ),
+)
+def test_openai_responses_additional_tools_normalizes_empty_namespace_description(
+    client: httpx.Client,
+    responses_model: str,
+    endpoint: str,
+):
+    """Both Responses paths should normalize Codex's empty namespace description."""
+    response = client.post(
+        endpoint,
+        json={
+            "model": responses_model,
+            "input": [
+                {
+                    "type": "additional_tools",
+                    "role": "developer",
+                    "tools": [
+                        {
+                            "type": "namespace",
+                            "name": "functions",
+                            "description": "",
+                            "tools": [responses_weather_tool()],
+                        }
+                    ],
+                },
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": "Reply with exactly the word pong.",
+                        }
+                    ],
+                },
+            ],
+            "max_output_tokens": 512,
+        },
+    )
+    assert_http_success(response)
+    data = response.json()
+
+    assert data["object"] == "response"
+    assert data["status"] == "completed", data
     assert_responses_usage(data["usage"])
 
 

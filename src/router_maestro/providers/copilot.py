@@ -272,6 +272,26 @@ _COPILOT_RESPONSES_FORWARD_FIELDS = frozenset(
 _OUTPUT_CONFIG_REJECTED_BY_UPSTREAM = frozenset({"task_budget"})
 
 
+def _normalize_copilot_tool(tool: Any) -> Any:
+    """Copy one tool definition, filling Copilot-required namespace descriptions."""
+    if not isinstance(tool, dict):
+        return tool
+    normalized = dict(tool)
+    description = normalized.get("description")
+    if normalized.get("type") == "namespace" and (
+        description is None or isinstance(description, str) and not description.strip()
+    ):
+        name = normalized.get("name")
+        if isinstance(name, str) and name:
+            normalized["description"] = f"Tools in the {name} namespace."
+        else:
+            normalized["description"] = "Tools in this namespace."
+    inner_tools = normalized.get("tools")
+    if isinstance(inner_tools, list):
+        normalized["tools"] = [_normalize_copilot_tool(inner) for inner in inner_tools]
+    return normalized
+
+
 class CopilotOutboundContract(OutboundContract):
     """Copilot upstream wire contract.
 
@@ -444,11 +464,11 @@ class CopilotOutboundContract(OutboundContract):
         for tool in tools:
             tool_type = tool.get("type", "function")
             if tool_type == "function":
-                validated.append(tool)
+                validated.append(_normalize_copilot_tool(tool))
             elif tool_type == "namespace":
                 inner = tool.get("tools")
                 if isinstance(inner, list) and inner:
-                    validated.append(tool)
+                    validated.append(_normalize_copilot_tool(tool))
                 else:
                     raise RequestOptionError(
                         "GitHub Copilot requires namespace tools to contain a non-empty tools list",
@@ -457,12 +477,34 @@ class CopilotOutboundContract(OutboundContract):
                         parameter="tools",
                     )
             elif tool_type not in self._RESPONSES_UNSUPPORTED_TOOL_TYPES:
-                validated.append(tool)
+                validated.append(_normalize_copilot_tool(tool))
             # else: silently drop tools Copilot Responses cannot express
             # (web_search, web_search_preview, code_interpreter). Clients like
             # Codex inject these unconditionally; 400-ing the whole request over
             # a tool the backend can't run is worse than dropping it.
         return validated or None
+
+    def normalize_responses_input(
+        self,
+        value: Any,
+        *,
+        operation: Operation,
+        model: str | None = None,
+    ) -> Any:
+        """Sanitize Codex additional_tools registries for Copilot Responses."""
+        if not isinstance(value, list):
+            return value
+        normalized_input = []
+        for item in value:
+            if not isinstance(item, dict) or item.get("type") != "additional_tools":
+                normalized_input.append(item)
+                continue
+            normalized_item = dict(item)
+            tools = normalized_item.get("tools")
+            if isinstance(tools, list):
+                normalized_item["tools"] = [_normalize_copilot_tool(tool) for tool in tools]
+            normalized_input.append(normalized_item)
+        return normalized_input
 
     def allows_temperature(self, operation: Operation) -> bool:
         """Copilot Responses rejects explicit temperature; Chat forwards it."""
@@ -1366,6 +1408,7 @@ class CopilotProvider(BaseProvider):
             resolve_reasoning=self.outbound_contract.resolve_reasoning,
             allows_temperature=self.outbound_contract.allows_temperature,
             filter_tools=self.outbound_contract.filter_tools,
+            normalize_input=self.outbound_contract.normalize_responses_input,
         )
 
     def validate_responses_request(self, request: ResponsesRequest) -> None:

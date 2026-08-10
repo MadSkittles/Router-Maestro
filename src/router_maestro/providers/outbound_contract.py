@@ -18,6 +18,7 @@ single source of the Copilot wire rules.
 
 from abc import ABC
 from dataclasses import dataclass
+from typing import Any
 
 from router_maestro.routing.capabilities import Operation
 
@@ -72,6 +73,16 @@ class OutboundContract(ABC):
         """Filter tools this upstream cannot express. Default: pass through."""
         return tools
 
+    def normalize_responses_input(
+        self,
+        value: Any,
+        *,
+        operation: Operation,
+        model: str | None = None,
+    ) -> Any:
+        """Normalize provider-specific Responses input items before transport."""
+        return value
+
     def allows_temperature(self, operation: Operation) -> bool:
         """Whether the upstream accepts explicit ``temperature``. Default: yes."""
         return True
@@ -100,7 +111,16 @@ class OutboundContract(ABC):
             for key in set(body) - forwardable:
                 del body[key]
 
-        # 2. Tools — filter_tools may drop unsupported types or raise on malformed.
+        # 2. Input — normalize provider-specific input extensions such as
+        # additional_tools registries before they reach the upstream schema.
+        if "input" in body:
+            body["input"] = self.normalize_responses_input(
+                body["input"],
+                operation=operation,
+                model=model,
+            )
+
+        # 3. Tools — filter_tools may drop unsupported types or raise on malformed.
         if "tools" in body:
             filtered = self.filter_tools(body.get("tools"), operation=operation, model=model)
             if filtered:
@@ -108,7 +128,7 @@ class OutboundContract(ABC):
             else:
                 body.pop("tools", None)
 
-        # 3. Temperature verdict.
+        # 4. Temperature verdict.
         if body.get("temperature") is not None and not self.allows_temperature(operation):
             from router_maestro.providers.base import RequestOptionError  # lazy: base<-contract
 
@@ -118,7 +138,7 @@ class OutboundContract(ABC):
                 parameter="temperature",
             )
 
-        # 4. Reasoning effort — only when the client sent an explicit effort.
+        # 5. Reasoning effort — only when the client sent an explicit effort.
         reasoning = body.get("reasoning")
         if isinstance(reasoning, dict) and isinstance(reasoning.get("effort"), str):
             resolution = self.resolve_reasoning(
