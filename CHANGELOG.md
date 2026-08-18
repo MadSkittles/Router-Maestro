@@ -4,6 +4,51 @@ All notable changes to Router-Maestro are documented here.
 
 ---
 
+## Unreleased
+
+### Added
+
+- **Protocol-neutral lazy generation dispatcher.** Anthropic Messages, OpenAI
+  Chat, OpenAI Responses, and Gemini generation entry points now resolve the
+  provider/model independently from the upstream Messages, Chat, or Responses
+  binding. Copilot can expose all three bindings, including the key Claude Code
+  scenario where an Anthropic request uses a Responses-only GPT model. The
+  offline contract matrix covers all 4×3 flows in streaming and non-streaming
+  modes. Gemini token counting remains a separate native-count/estimator
+  operation, and this release does not add a Gemini-native provider.
+
+- **Authenticated reasoning continuation capsules.** Provider-owned opaque
+  Responses state can cross Anthropic or Gemini boundaries in an AES-256-GCM
+  `rmr1` capsule and return to its original provider/model/binding. A shared
+  environment key supports multi-instance deployments and decrypt-only previous
+  keys support rotation; single-instance installs atomically create an
+  owner-only XDG key file. Invalid keys, tampering, and affinity mismatches fail
+  closed before provider I/O.
+
+- **Generation-attempt observability.** Prometheus now exports the bounded
+  `router_maestro_generation_attempts_total` labels `entry_protocol`,
+  `upstream_transport`, `conversion_mode`, `outcome`, and `ir_materialized`.
+  Exact provider/model/binding identities are recorded only in opt-in audit
+  attempt artifacts to avoid high-cardinality metric labels.
+
+### Changed
+
+- **Identity traffic avoids semantic IR.** Same-protocol requests and streams
+  use a copy-on-write identity path; cross-protocol attempts materialize one
+  immutable semantic request lazily and share it across eligible attempts. The
+  model route plan now controls model fallback only. A provider exhausts the
+  current model's transports before a model switch, and first stream frame
+  commitment prevents replay.
+
+- **Stable endpoints own generation behavior.** Stable Anthropic Messages and
+  OpenAI Responses paths use the shared dispatcher. Their former
+  Router-Maestro beta URLs are temporary aliases for one compatibility cycle,
+  and new CLI configuration writes stable URLs. Gemini `/v1beta` remains
+  unchanged because that segment is the Gemini protocol version, not an RM
+  beta endpoint.
+
+---
+
 ## v0.7.10 (2026-08-10)
 
 ### Fixes

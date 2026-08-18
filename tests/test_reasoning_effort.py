@@ -262,10 +262,12 @@ class TestChatRouteSchemaPassthrough:
     def test_schema_accepts_reasoning_effort(self):
         from router_maestro.server.schemas.openai import ChatCompletionRequest
 
-        req = ChatCompletionRequest(
-            model="m",
-            messages=[{"role": "user", "content": "hi"}],
-            reasoning_effort="high",
+        req = ChatCompletionRequest.model_validate(
+            {
+                "model": "m",
+                "messages": [{"role": "user", "content": "hi"}],
+                "reasoning_effort": "high",
+            }
         )
         assert req.reasoning_effort == "high"
 
@@ -281,9 +283,8 @@ class TestChatRouteSchemaPassthrough:
     def test_omitted_chat_reasoning_effort_remains_unset(self):
         from router_maestro.server.schemas.openai import ChatCompletionRequest
 
-        request = ChatCompletionRequest(
-            model="m",
-            messages=[{"role": "user", "content": "hi"}],
+        request = ChatCompletionRequest.model_validate(
+            {"model": "m", "messages": [{"role": "user", "content": "hi"}]}
         )
 
         assert request.reasoning_effort is None
@@ -292,10 +293,12 @@ class TestChatRouteSchemaPassthrough:
     def test_schema_accepts_thinking_passthrough(self):
         from router_maestro.server.schemas.openai import ChatCompletionRequest
 
-        req = ChatCompletionRequest(
-            model="m",
-            messages=[{"role": "user", "content": "hi"}],
-            thinking={"type": "enabled", "budget_tokens": 12000},
+        req = ChatCompletionRequest.model_validate(
+            {
+                "model": "m",
+                "messages": [{"role": "user", "content": "hi"}],
+                "thinking": {"type": "enabled", "budget_tokens": 12000},
+            }
         )
         assert req.thinking == {"type": "enabled", "budget_tokens": 12000}
 

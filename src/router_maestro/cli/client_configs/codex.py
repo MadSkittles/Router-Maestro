@@ -8,6 +8,7 @@ from pathlib import Path
 import tomlkit
 from rich.panel import Panel
 from rich.prompt import Prompt
+from tomlkit.items import AbstractTable, Table
 
 from router_maestro.cli.client_configs.base import (
     ClientConfig,
@@ -63,7 +64,7 @@ def _prompt_endpoint_mode(model: dict | None) -> bool:
     return choice == "2"
 
 
-def _build_router_maestro_provider_table(openai_url: str) -> tomlkit.items.Table:
+def _build_router_maestro_provider_table(openai_url: str) -> Table:
     """Build the `[model_providers.router-maestro]` TOML table for Codex user config."""
     table = tomlkit.table()
     table["name"] = "Router Maestro"
@@ -108,12 +109,12 @@ class CodexConfig(ClientConfig):
         return to_openai_official(bare_id)
 
     def prompt_extras(self, selected_dicts: list[dict | None]) -> dict:
-        main_model_dict = selected_dicts[0] if selected_dicts else None
-        return {"use_beta_endpoint": _prompt_endpoint_mode(main_model_dict)}
+        del selected_dicts
+        return {}
 
     def _openai_url(self, ctx: GenerateContext) -> str:
-        path = "/api/openai/beta/v1" if ctx.extras.get("use_beta_endpoint") else "/api/openai/v1"
-        return f"{self._base_url()}{path}"
+        del ctx
+        return f"{self._base_url()}/api/openai/v1"
 
     def write(self, *, level: str, path: Path, models: list[str], ctx: GenerateContext) -> None:
         selected_model = models[0]
@@ -133,11 +134,13 @@ class CodexConfig(ClientConfig):
 
         if level == "user":
             existing_config["model_provider"] = "router-maestro"
-            if "model_providers" not in existing_config:
-                existing_config["model_providers"] = tomlkit.table()
-            existing_config["model_providers"]["router-maestro"] = (
-                _build_router_maestro_provider_table(openai_url)
-            )
+            providers = existing_config.get("model_providers")
+            if providers is None:
+                providers = tomlkit.table()
+                existing_config["model_providers"] = providers
+            if not isinstance(providers, AbstractTable):
+                raise TypeError("model_providers must be a TOML table")
+            providers["router-maestro"] = _build_router_maestro_provider_table(openai_url)
         else:
             # Codex CLI 0.130+ rejects model_provider/model_providers at project scope.
             # Strip the keys this command wrote in older releases so the file stops

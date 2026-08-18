@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Awaitable, Callable
 from contextvars import ContextVar, Token
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Protocol, cast
@@ -272,7 +273,11 @@ class RequestContextMiddleware:
         snapshot = repository.read()
         start = getattr(owner, "start", None)
         if callable(start):
-            await start(snapshot)
+            start_owner = cast(
+                Callable[[RuntimeConfigSnapshot], Awaitable[None]],
+                start,
+            )
+            await start_owner(snapshot)
         lease = await owner.acquire()
         request_id = scope.setdefault("state", {}).get("request_id", "")
         lease_snapshot = getattr(lease, "config_snapshot", None)

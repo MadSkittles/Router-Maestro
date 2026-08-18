@@ -3,13 +3,20 @@
 import contextlib
 import json
 import re
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Callable, Mapping
 from typing import Any, NoReturn
 
 import httpx
 
 from router_maestro.auth.github_oauth import get_copilot_token
 from router_maestro.auth.storage import OAuthCredential
+from router_maestro.pipeline.beta_strip import strip_beta_tokens
+from router_maestro.protocols import WireProtocol
+from router_maestro.providers.anthropic_codec import (
+    AnthropicCodecError,
+    AnthropicStreamDecoder,
+    decode_message_response,
+)
 from router_maestro.providers.base import (
     TIMEOUT_NON_STREAMING,
     BaseProvider,
@@ -30,6 +37,14 @@ from router_maestro.providers.base import (
     TerminalOutcome,
     TransportTermination,
 )
+from router_maestro.providers.bindings import (
+    COPILOT_ANTHROPIC_MESSAGES_BINDING,
+    COPILOT_OPENAI_CHAT_BINDING,
+    COPILOT_OPENAI_RESPONSES_BINDING,
+    AttemptRequestContext,
+    EndpointBinding,
+    PreparedAttempt,
+)
 from router_maestro.providers.copilot_support.auth_session import CopilotAuthSession
 from router_maestro.providers.copilot_support.catalog import CopilotCatalog
 from router_maestro.providers.copilot_support.catalog import (
@@ -41,8 +56,10 @@ from router_maestro.providers.copilot_support.catalog import (
 from router_maestro.providers.copilot_support.chat_codec import CopilotChatCodec
 from router_maestro.providers.copilot_support.responses_codec import CopilotResponsesCodec
 from router_maestro.providers.copilot_support.transport import CopilotTransport
+from router_maestro.providers.http_executor import SharedHttpExecutor
 from router_maestro.providers.outbound_contract import OutboundContract, ReasoningResolution
 from router_maestro.routing.capabilities import Operation, ProviderCapabilities
+from router_maestro.routing.model_ref import ModelRef
 from router_maestro.utils import get_logger
 from router_maestro.utils.context_window import resolve_thinking_budget
 from router_maestro.utils.reasoning import (
@@ -56,6 +73,7 @@ logger = get_logger("providers.copilot")
 
 COPILOT_CHAT_PATH = "/chat/completions"
 COPILOT_RESPONSES_PATH = "/responses"
+COPILOT_MESSAGES_PATH = "/v1/messages"
 COPILOT_COUNT_TOKENS_PATH = "/v1/messages/count_tokens"
 
 # Internal model aliases bound to the Copilot provider. Maps a synthetic client
@@ -510,6 +528,24 @@ class CopilotOutboundContract(OutboundContract):
         """Copilot Responses rejects explicit temperature; Chat forwards it."""
         return operation not in (Operation.RESPONSES, Operation.RESPONSES_STREAM)
 
+    def allows_top_p(
+        self,
+        operation: Operation,
+        *,
+        model: str | None = None,
+    ) -> bool:
+        """Copilot GPT-5.4 rejects top_p on Responses and Messages, not Chat."""
+        if model is None or operation in (Operation.CHAT, Operation.CHAT_STREAM):
+            return True
+        bare_model = model.split("/", 1)[-1].lower()
+        if not bare_model.startswith("gpt-5.4"):
+            return True
+        return operation not in (
+            Operation.NATIVE_ANTHROPIC,
+            Operation.RESPONSES,
+            Operation.RESPONSES_STREAM,
+        )
+
     def allows_stop(
         self,
         operation: Operation,
@@ -784,12 +820,83 @@ class CopilotProvider(BaseProvider):
     _copilot_outbound_contract = CopilotOutboundContract()
 
     @property
-    def outbound_contract(self) -> OutboundContract:
+    def outbound_contract(self) -> CopilotOutboundContract:
         return self._copilot_outbound_contract
 
     @property
     def capabilities(self) -> ProviderCapabilities:
         return ProviderCapabilities(operations=frozenset(Operation))
+
+    def bindings(self) -> tuple[EndpointBinding, ...]:
+        """Declare every Copilot generation transport in one provider-owned place."""
+        bindings = getattr(self, "_generation_bindings", None)
+        if bindings is not None:
+            return bindings
+
+        dialect = CopilotProviderDialect(self)
+        executor = CopilotHttpExecutor(self)
+        bindings = (
+            EndpointBinding(
+                id=COPILOT_ANTHROPIC_MESSAGES_BINDING,
+                protocol=WireProtocol.ANTHROPIC_MESSAGES,
+                capabilities=ProviderCapabilities(
+                    operations=frozenset({Operation.NATIVE_ANTHROPIC})
+                ),
+                dialect=dialect,
+                executor=executor,
+            ),
+            EndpointBinding(
+                id=COPILOT_OPENAI_CHAT_BINDING,
+                protocol=WireProtocol.OPENAI_CHAT,
+                capabilities=ProviderCapabilities(
+                    operations=frozenset({Operation.CHAT, Operation.CHAT_STREAM})
+                ),
+                dialect=dialect,
+                executor=executor,
+            ),
+            EndpointBinding(
+                id=COPILOT_OPENAI_RESPONSES_BINDING,
+                protocol=WireProtocol.OPENAI_RESPONSES,
+                capabilities=ProviderCapabilities(
+                    operations=frozenset({Operation.RESPONSES, Operation.RESPONSES_STREAM})
+                ),
+                dialect=dialect,
+                executor=executor,
+            ),
+        )
+        self._generation_bindings = bindings
+        return bindings
+
+    def transport_preferences(
+        self,
+        ingress_protocol: WireProtocol | None = None,
+    ) -> tuple[str, ...]:
+        """Return Copilot's ingress-specific transport preference contract."""
+        preferences = {
+            WireProtocol.ANTHROPIC_MESSAGES: (
+                COPILOT_ANTHROPIC_MESSAGES_BINDING,
+                COPILOT_OPENAI_RESPONSES_BINDING,
+                COPILOT_OPENAI_CHAT_BINDING,
+            ),
+            WireProtocol.OPENAI_CHAT: (
+                COPILOT_OPENAI_CHAT_BINDING,
+                COPILOT_OPENAI_RESPONSES_BINDING,
+                COPILOT_ANTHROPIC_MESSAGES_BINDING,
+            ),
+            WireProtocol.OPENAI_RESPONSES: (
+                COPILOT_OPENAI_RESPONSES_BINDING,
+                COPILOT_OPENAI_CHAT_BINDING,
+                COPILOT_ANTHROPIC_MESSAGES_BINDING,
+            ),
+            WireProtocol.GEMINI: (
+                COPILOT_OPENAI_RESPONSES_BINDING,
+                COPILOT_OPENAI_CHAT_BINDING,
+                COPILOT_ANTHROPIC_MESSAGES_BINDING,
+            ),
+        }
+        if ingress_protocol is None:
+            return tuple(binding.id for binding in self.bindings())
+        return preferences.get(ingress_protocol, tuple(binding.id for binding in self.bindings()))
 
     # Recycle the HTTP/2 client after this many seconds to avoid GOAWAY races
     _CLIENT_MAX_AGE = 300  # 5 minutes
@@ -971,6 +1078,8 @@ class CopilotProvider(BaseProvider):
         headers_kwargs: dict | None = None,
         timeout: Any = TIMEOUT_NON_STREAMING,
         model: str | None = None,
+        prepared_headers: Mapping[str, str] | None = None,
+        strip_anthropic_beta: bool = False,
     ) -> httpx.Response:
         """Send a non-streaming Copilot request, force-refreshing once on 401/403.
 
@@ -983,6 +1092,24 @@ class CopilotProvider(BaseProvider):
         Also handles connection-level errors (HTTP/2 GOAWAY, pool timeouts) by
         recycling the HTTP client and retrying once.
         """
+        get_headers: Callable[..., dict[str, str]] = self._get_headers
+        if prepared_headers or strip_anthropic_beta:
+            header_hints = dict(prepared_headers or {})
+
+            def get_headers_with_hints(**kwargs: Any) -> dict[str, str]:
+                # Authentication and request IDs are regenerated for every retry;
+                # prepared hints contain only stable protocol-derived headers.
+                headers = {**header_hints, **self._get_headers(**kwargs)}
+                if strip_anthropic_beta:
+                    headers = {
+                        name: value
+                        for name, value in headers.items()
+                        if name.lower() != "anthropic-beta"
+                    }
+                return headers
+
+            get_headers = get_headers_with_hints
+
         return await self._transport.send_with_auth_retry(
             method,
             path,
@@ -992,7 +1119,7 @@ class CopilotProvider(BaseProvider):
             timeout=timeout,
             model=model,
             get_client=self._get_client,
-            get_headers=self._get_headers,
+            get_headers=get_headers,
             recycle_client=self._recycle_client,
             refresh_for_auth_status=self._refresh_for_auth_status,
             raise_auth_failure=self._raise_auth_failure,
@@ -1010,6 +1137,8 @@ class CopilotProvider(BaseProvider):
         json: dict,
         headers_kwargs: dict,
         model: str | None = None,
+        prepared_headers: Mapping[str, str] | None = None,
+        strip_anthropic_beta: bool = False,
     ) -> AsyncIterator[httpx.Response]:
         """Open a Copilot stream, force-refreshing and retrying once on 401/403.
 
@@ -1021,13 +1150,29 @@ class CopilotProvider(BaseProvider):
 
         Also handles connection-level errors by recycling the HTTP client.
         """
+        get_headers: Callable[..., dict[str, str]] = self._get_headers
+        if prepared_headers or strip_anthropic_beta:
+            header_hints = dict(prepared_headers or {})
+
+            def get_headers_with_hints(**kwargs: Any) -> dict[str, str]:
+                headers = {**header_hints, **self._get_headers(**kwargs)}
+                if strip_anthropic_beta:
+                    headers = {
+                        name: value
+                        for name, value in headers.items()
+                        if name.lower() != "anthropic-beta"
+                    }
+                return headers
+
+            get_headers = get_headers_with_hints
+
         async with self._transport.stream_with_auth_retry(
             path,
             json=json,
             headers_kwargs=headers_kwargs,
             model=model,
             get_client=self._get_client,
-            get_headers=self._get_headers,
+            get_headers=get_headers,
             recycle_client=self._recycle_client,
             refresh_for_auth_status=self._refresh_for_auth_status,
             raise_auth_failure=self._raise_auth_failure,
@@ -1150,12 +1295,222 @@ class CopilotProvider(BaseProvider):
                 model=model,
             )
 
+    def _build_native_messages_payload(
+        self,
+        payload: Mapping[str, Any],
+        *,
+        model: str,
+        stream: bool,
+    ) -> dict[str, Any]:
+        """Prepare one copy-on-write native Messages attempt.
+
+        The ingress body remains untouched so another transport can reuse it.
+        Copilot-specific option reconciliation and the forward allowlist live
+        here instead of in an API route.
+        """
+        body = dict(payload)
+        body["model"] = model
+        body["stream"] = stream
+        if body.get("top_p") is not None and not self.outbound_contract.allows_top_p(
+            Operation.NATIVE_ANTHROPIC,
+            model=model,
+        ):
+            raise RequestOptionError(
+                "GitHub Copilot Messages does not support request option 'top_p' for this model",
+                parameter="top_p",
+                provider=self.name,
+                model=model,
+            )
+        self.outbound_contract.reject_unpreservable_native_options(body)
+        self.outbound_contract.apply_native_anthropic_thinking(
+            body,
+            model,
+            self._catalog_effort_values(model),
+        )
+        # Identity forwarding is future-compatible: preserve fields RM does not
+        # know yet and remove only options Copilot is known to reject.
+        for field in _COPILOT_NATIVE_ANTHROPIC_LOCALLY_STRIPPED_FIELDS:
+            body.pop(field, None)
+        return body
+
+    async def messages_completion(
+        self,
+        payload: Mapping[str, Any],
+        *,
+        model: str,
+    ) -> ChatResponse:
+        """Execute Copilot's native Anthropic Messages transport."""
+        await self.ensure_token()
+        body = self._build_native_messages_payload(payload, model=model, stream=False)
+        include_reasoning = isinstance(body.get("thinking"), dict) and body["thinking"].get(
+            "type"
+        ) in {"enabled", "adaptive"}
+        try:
+            response = await self._send_with_auth_retry(
+                "POST",
+                COPILOT_MESSAGES_PATH,
+                json=body,
+                model=model,
+            )
+            response.raise_for_status()
+            try:
+                data = response.json()
+                result = decode_message_response(
+                    data,
+                    fallback_model=model,
+                    include_reasoning=include_reasoning,
+                )
+            except (json.JSONDecodeError, AnthropicCodecError, TypeError, ValueError) as error:
+                self._raise_protocol_error(self.name, model, error)
+            return result
+        except httpx.HTTPStatusError as error:
+            self._raise_unsupported_operation_if_applicable(
+                error.response.status_code,
+                error.response.content,
+                model=model,
+                cause=error,
+            )
+            self._raise_http_status_error(
+                "Copilot",
+                error,
+                logger,
+                include_body=True,
+                provider=self.name,
+                model=model,
+                signal=self._failure_signal(
+                    error.response.status_code,
+                    error.response.content,
+                ),
+            )
+        except httpx.TimeoutException as error:
+            self._raise_timeout_error(
+                "Copilot",
+                error,
+                logger,
+                provider=self.name,
+                model=model,
+            )
+        except httpx.HTTPError as error:
+            self._raise_http_error(
+                "Copilot",
+                error,
+                logger,
+                provider=self.name,
+                model=model,
+            )
+
+    async def messages_completion_stream(
+        self,
+        payload: Mapping[str, Any],
+        *,
+        model: str,
+    ) -> AsyncIterator[ChatStreamChunk]:
+        """Stream Copilot's native Anthropic Messages transport.
+
+        Authentication retries happen before any response frame is consumed.
+        Thinking signatures are never stripped or replayed on failure.
+        """
+        await self.ensure_token()
+        body = self._build_native_messages_payload(payload, model=model, stream=True)
+        include_reasoning = isinstance(body.get("thinking"), dict) and body["thinking"].get(
+            "type"
+        ) in {"enabled", "adaptive"}
+        decoder = AnthropicStreamDecoder(include_reasoning=include_reasoning)
+        try:
+            async with self._stream_with_auth_retry(
+                COPILOT_MESSAGES_PATH,
+                json=body,
+                headers_kwargs={},
+                model=model,
+            ) as response:
+                if response.status_code >= 400:
+                    error_body = await response.aread()
+                    self._raise_unsupported_operation_if_applicable(
+                        response.status_code,
+                        error_body,
+                        model=model,
+                    )
+                    response.raise_for_status()
+
+                async for line in response.aiter_lines():
+                    if not line.startswith("data: "):
+                        continue
+                    raw_data = line[6:]
+                    if not raw_data:
+                        continue
+                    try:
+                        data = json.loads(raw_data)
+                        if isinstance(data, dict) and data.get("type") == "error":
+                            error_data = data.get("error")
+                            message = (
+                                error_data.get("message")
+                                if isinstance(error_data, dict)
+                                else "Copilot Messages stream failed"
+                            )
+                            raise ProviderError(
+                                str(message),
+                                status_code=502,
+                                retryable=False,
+                                kind=ProviderFailureKind.UPSTREAM_PROTOCOL,
+                                upstream_status_code=200,
+                                provider=self.name,
+                                model=model,
+                            )
+                        chunks = decoder.decode_event(data)
+                    except (json.JSONDecodeError, AnthropicCodecError) as error:
+                        self._raise_protocol_error(self.name, model, error)
+                    for chunk in chunks:
+                        yield chunk
+                try:
+                    decoder.finalize()
+                except AnthropicCodecError as error:
+                    self._raise_protocol_error(self.name, model, error)
+        except httpx.HTTPStatusError as error:
+            try:
+                error_body = error.response.content
+            except httpx.ResponseNotRead:
+                error_body = b""
+            self._raise_unsupported_operation_if_applicable(
+                error.response.status_code,
+                error_body,
+                model=model,
+                cause=error,
+            )
+            self._raise_http_status_error(
+                "Copilot",
+                error,
+                logger,
+                stream=True,
+                include_body=True,
+                provider=self.name,
+                model=model,
+                signal=self._failure_signal(error.response.status_code, error_body),
+            )
+        except httpx.TimeoutException as error:
+            self._raise_timeout_error(
+                "Copilot",
+                error,
+                logger,
+                stream=True,
+                provider=self.name,
+                model=model,
+            )
+        except httpx.HTTPError as error:
+            self._raise_http_error(
+                "Copilot",
+                error,
+                logger,
+                stream=True,
+                provider=self.name,
+                model=model,
+            )
+
     @staticmethod
     def _sanitize_surrogates(text: str) -> str:
         """Remove lone surrogate characters that cannot be encoded as UTF-8."""
         return CopilotChatCodec.sanitize_surrogates(text)
 
-    def _sanitize_content(self, content: str | list) -> str | list:
+    def _sanitize_content(self, content: str | list | None) -> str | list | None:
         """Sanitize message content to remove lone surrogate characters."""
         return self._chat_codec.sanitize_content(content)
 
@@ -1419,6 +1774,7 @@ class CopilotProvider(BaseProvider):
             catalog_effort_values=self._catalog_effort_values(request.model),
             resolve_reasoning=self.outbound_contract.resolve_reasoning,
             allows_temperature=self.outbound_contract.allows_temperature,
+            allows_top_p=self.outbound_contract.allows_top_p,
             filter_tools=self.outbound_contract.filter_tools,
             normalize_input=self.outbound_contract.normalize_responses_input,
         )
@@ -1448,6 +1804,10 @@ class CopilotProvider(BaseProvider):
         locally-generated id 400s the next turn.
         """
         return self._responses_codec.extract_reasoning(data)
+
+    def _extract_reasoning_item(self, data: dict) -> dict[str, Any] | None:
+        """Extract the complete upstream reasoning item for lossless replay."""
+        return self._responses_codec.extract_reasoning_item(data)
 
     def _extract_tool_calls(self, data: dict) -> list[ResponsesToolCall]:
         """Extract tool calls from Responses API response.
@@ -1516,6 +1876,7 @@ class CopilotProvider(BaseProvider):
             content, refusal = self._extract_response_content(data)
             tool_calls = self._extract_tool_calls(data)
             thinking, thinking_id, thinking_sig = self._extract_reasoning(data)
+            reasoning_item = self._extract_reasoning_item(data)
 
             usage = None
             if "usage" in data:
@@ -1532,6 +1893,7 @@ class CopilotProvider(BaseProvider):
                 thinking_signature=thinking_sig,
                 terminal_outcome=terminal_outcome,
                 refusal=refusal,
+                reasoning_item=reasoning_item,
             )
         except httpx.HTTPStatusError as e:
             self._raise_unsupported_operation_if_applicable(
@@ -1661,3 +2023,512 @@ class CopilotProvider(BaseProvider):
     def validate_chat_request(self, request: ChatRequest, *, stream: bool) -> None:
         """Exercise the same Chat payload policy as actual execution."""
         self._build_chat_payload(request, stream=stream)
+
+
+_COPILOT_BINDING_SPECS = {
+    COPILOT_ANTHROPIC_MESSAGES_BINDING: (
+        WireProtocol.ANTHROPIC_MESSAGES,
+        COPILOT_MESSAGES_PATH,
+    ),
+    COPILOT_OPENAI_CHAT_BINDING: (WireProtocol.OPENAI_CHAT, COPILOT_CHAT_PATH),
+    COPILOT_OPENAI_RESPONSES_BINDING: (
+        WireProtocol.OPENAI_RESPONSES,
+        COPILOT_RESPONSES_PATH,
+    ),
+}
+_COPILOT_RESPONSES_LOCALLY_STRIPPED_FIELDS = frozenset({"store"})
+_COPILOT_STREAM_KEEPALIVE_TYPES = frozenset({"copilot_usage", "ping"})
+_COPILOT_RESPONSES_INTERNAL_RESPONSE_FIELDS = frozenset({"copilot_usage", "tool_usage"})
+_COPILOT_RESPONSES_INTERNAL_INPUT_DETAIL_FIELDS = frozenset({"cache_write_tokens"})
+# Copilot can expose Azure-style prompt filtering metadata before the first
+# Chat choice. It has no public Chat/semantic equivalent and must not make a
+# valid cross-protocol stream fail before content arrives.
+_COPILOT_CHAT_INTERNAL_RESPONSE_FIELDS = frozenset({"copilot_usage", "prompt_filter_results"})
+_COPILOT_CHAT_CHOICE_INTERNAL_FIELDS = frozenset({"content_filter_results"})
+# ``reasoning_opaque`` is Copilot-private state without a stable Chat item ID.
+# It cannot be authenticated or replayed through the protocol-neutral IR, so it
+# must not escape the provider boundary. ``reasoning_text`` remains visible and
+# is decoded as a known Chat reasoning alias by the shared runtime.
+_COPILOT_CHAT_MESSAGE_INTERNAL_FIELDS = frozenset({"padding", "reasoning_opaque"})
+_COPILOT_ANTHROPIC_INTERNAL_RESPONSE_FIELDS = frozenset({"copilot_usage", "stop_details"})
+_COPILOT_ANTHROPIC_MESSAGE_STOP_INTERNAL_FIELDS = frozenset(
+    {"copilot_usage", "amazon-bedrock-invocationMetrics"}
+)
+_COPILOT_NATIVE_ANTHROPIC_LOCALLY_STRIPPED_FIELDS = frozenset({"mcp_servers", "container"})
+
+
+class CopilotProviderDialect:
+    """Copy-on-write wire preparation for Copilot's three generation APIs."""
+
+    id = "github-copilot"
+
+    def __init__(self, provider: CopilotProvider) -> None:
+        self.provider = provider
+
+    async def prepare_attempt(
+        self,
+        *,
+        binding_id: str,
+        protocol: WireProtocol,
+        model: ModelRef,
+        payload: Mapping[str, Any],
+        stream: bool,
+        request_context: AttemptRequestContext,
+    ) -> PreparedAttempt:
+        expected_protocol, path = self._binding_spec(binding_id)
+        if protocol is not expected_protocol:
+            raise ValueError("Copilot binding protocol does not match its binding ID")
+        if model.provider != self.provider.name:
+            raise ValueError("Copilot attempt model belongs to another provider")
+
+        if protocol is WireProtocol.ANTHROPIC_MESSAGES:
+            body = self.provider._build_native_messages_payload(
+                payload,
+                model=model.upstream_id,
+                stream=stream,
+            )
+            headers = self._anthropic_headers(request_context)
+        elif protocol is WireProtocol.OPENAI_CHAT:
+            body, headers = self._prepare_chat(
+                payload,
+                model=model.upstream_id,
+                stream=stream,
+            )
+        elif protocol is WireProtocol.OPENAI_RESPONSES:
+            body, headers = self._prepare_responses(
+                payload,
+                model=model.upstream_id,
+                stream=stream,
+            )
+        else:  # pragma: no cover - the binding table is closed over three protocols
+            raise ValueError(f"Unsupported Copilot wire protocol {protocol.value!r}")
+
+        return PreparedAttempt(
+            binding_id=binding_id,
+            protocol=protocol,
+            model=model,
+            url=self.provider._url(path),
+            payload=body,
+            headers=headers,
+            stream=stream,
+            _payload_owned=True,
+        )
+
+    @staticmethod
+    def _anthropic_headers(request_context: AttemptRequestContext) -> dict[str, str]:
+        if not request_context.headers:
+            return {}
+        value = request_context.header("anthropic-beta")
+        if value is None:
+            return {}
+        from router_maestro.runtime import get_current_request_context
+
+        runtime_context = get_current_request_context()
+        stripped = strip_beta_tokens(
+            value,
+            runtime_context.config.beta_strip if runtime_context is not None else [],
+        )
+        return {"anthropic-beta": stripped} if stripped is not None else {}
+
+    def _prepare_chat(
+        self,
+        payload: Mapping[str, Any],
+        *,
+        model: str,
+        stream: bool,
+    ) -> tuple[dict[str, Any], dict[str, str]]:
+        body = dict(payload)
+        raw_messages = body.get("messages")
+        messages, has_images = self._reconcile_chat_messages(raw_messages, model=model)
+        body["messages"] = messages
+        body["model"] = model
+        body["stream"] = stream
+
+        if stream:
+            stream_options = body.get("stream_options")
+            if stream_options is None:
+                normalized_stream_options: dict[str, Any] = {}
+            elif isinstance(stream_options, Mapping):
+                normalized_stream_options = dict(stream_options)
+            else:
+                self._reject_chat_option("stream_options", model=model)
+            normalized_stream_options["include_usage"] = True
+            body["stream_options"] = normalized_stream_options
+
+        operation = Operation.CHAT_STREAM if stream else Operation.CHAT
+        if body.get("stop") is not None and not self.provider.outbound_contract.allows_stop(
+            operation,
+            model=model,
+        ):
+            self._reject_chat_option("stop", model=model)
+
+        thinking = body.pop("thinking", None)
+        thinking_budget = thinking.get("budget_tokens") if isinstance(thinking, Mapping) else None
+        reasoning_effort = body.pop("reasoning_effort", None)
+        apply_copilot_chat_reasoning(
+            body,
+            model,
+            thinking_budget,
+            reasoning_effort if isinstance(reasoning_effort, str) else None,
+            catalog_effort_values=self.provider._catalog_effort_values(model),
+        )
+
+        headers = {"X-Initiator": self._chat_initiator_from_wire(messages)}
+        if has_images:
+            headers["Copilot-Vision-Request"] = "true"
+        return body, headers
+
+    def _reconcile_chat_messages(
+        self,
+        value: Any,
+        *,
+        model: str,
+    ) -> tuple[list[Any], bool]:
+        if not isinstance(value, list):
+            raise RequestOptionError(
+                "messages must be an array",
+                parameter="messages",
+                provider=self.provider.name,
+                model=model,
+            )
+
+        messages: list[Any] = []
+        has_images = False
+        for index, raw_message in enumerate(value):
+            if not isinstance(raw_message, Mapping):
+                raise RequestOptionError(
+                    "message must be an object",
+                    parameter=f"messages[{index}]",
+                    provider=self.provider.name,
+                    model=model,
+                )
+            role = raw_message.get("role")
+            if not isinstance(role, str):
+                raise RequestOptionError(
+                    "message role must be a string",
+                    parameter=f"messages[{index}].role",
+                    provider=self.provider.name,
+                    model=model,
+                )
+            message = dict(raw_message)
+            if "content" in message:
+                message["content"] = self.provider._sanitize_content(message["content"])
+            content = message.get("content")
+            if isinstance(content, list) and any(
+                isinstance(part, Mapping) and part.get("type") == "image_url" for part in content
+            ):
+                has_images = True
+            messages.append(message)
+        return messages, has_images
+
+    @staticmethod
+    def _chat_initiator_from_wire(messages: list[Any]) -> str:
+        return (
+            "agent"
+            if any(
+                isinstance(message, Mapping) and message.get("role") in {"assistant", "tool"}
+                for message in messages
+            )
+            else "user"
+        )
+
+    def _reject_chat_option(self, parameter: str, *, model: str) -> NoReturn:
+        raise RequestOptionError(
+            f"GitHub Copilot Chat does not support request option '{parameter}'",
+            parameter=parameter,
+            provider=self.provider.name,
+            model=model,
+        )
+
+    def _prepare_responses(
+        self,
+        payload: Mapping[str, Any],
+        *,
+        model: str,
+        stream: bool,
+    ) -> tuple[dict[str, Any], dict[str, str]]:
+        if "input" not in payload:
+            raise RequestOptionError(
+                "input is required",
+                parameter="input",
+                provider=self.provider.name,
+                model=model,
+            )
+        operation = Operation.RESPONSES_STREAM if stream else Operation.RESPONSES
+        body = dict(payload)
+        for field in _COPILOT_RESPONSES_LOCALLY_STRIPPED_FIELDS:
+            body.pop(field, None)
+        if body.get("temperature") is not None:
+            raise RequestOptionError(
+                "GitHub Copilot Responses does not support request option 'temperature'",
+                parameter="temperature",
+                provider=self.provider.name,
+                model=model,
+            )
+        self.provider.outbound_contract.reconcile_passthrough_body(
+            body,
+            operation=operation,
+            model=model,
+            catalog_effort_values=self.provider._catalog_effort_values(model),
+            preserve_unknown_fields=True,
+        )
+        body["model"] = model
+        body["stream"] = stream
+        reasoning = body.get("reasoning")
+        if isinstance(reasoning, dict) and isinstance(reasoning.get("effort"), str):
+            body["reasoning"] = {"summary": "auto", **reasoning}
+            body.setdefault("include", ["reasoning.encrypted_content"])
+
+        response_input = body.get("input")
+        headers = {
+            "X-Initiator": self.provider._responses_initiator(
+                response_input if isinstance(response_input, (str, list)) else None
+            )
+        }
+        if self.provider._responses_input_has_vision(response_input):
+            headers["Copilot-Vision-Request"] = "true"
+        return body, headers
+
+    @staticmethod
+    def _binding_spec(binding_id: str) -> tuple[WireProtocol, str]:
+        try:
+            return _COPILOT_BINDING_SPECS[binding_id]
+        except KeyError:
+            raise ValueError(f"Unknown Copilot binding {binding_id!r}") from None
+
+
+class CopilotHttpExecutor(SharedHttpExecutor):
+    """Raw JSON/SSE executor shared by all Copilot endpoint bindings."""
+
+    def __init__(self, provider: CopilotProvider) -> None:
+        self.provider = provider
+        super().__init__(transport_records_audit=True)
+
+    async def _send(self, attempt: PreparedAttempt, *, timeout: Any) -> httpx.Response:
+        path = self._path(attempt)
+        await self.provider.ensure_token()
+        return await self.provider._send_with_auth_retry(
+            attempt.method,
+            path,
+            json=dict(attempt.payload),
+            timeout=timeout,
+            model=attempt.model.upstream_id,
+            prepared_headers=attempt.headers,
+            strip_anthropic_beta=(attempt.protocol is not WireProtocol.ANTHROPIC_MESSAGES),
+        )
+
+    @contextlib.asynccontextmanager
+    async def _open_stream(
+        self,
+        attempt: PreparedAttempt,
+        *,
+        timeout: Any,
+    ) -> AsyncIterator[httpx.Response]:
+        del timeout
+        path = self._path(attempt)
+        await self.provider.ensure_token()
+        async with self.provider._stream_with_auth_retry(
+            path,
+            json=dict(attempt.payload),
+            headers_kwargs={},
+            model=attempt.model.upstream_id,
+            prepared_headers=attempt.headers,
+            strip_anthropic_beta=(attempt.protocol is not WireProtocol.ANTHROPIC_MESSAGES),
+        ) as response:
+            yield response
+
+    def _skip_raw_sse_data(self, data: str, attempt: PreparedAttempt) -> bool:
+        del attempt
+        return data in {"[DONE]", "keepalive"}
+
+    def _skip_sse_frame(
+        self,
+        frame: Mapping[str, Any],
+        attempt: PreparedAttempt,
+    ) -> bool:
+        if (
+            attempt.protocol is WireProtocol.OPENAI_CHAT
+            and frame.get("choices") == []
+            and frame.get("id") in {None, ""}
+            and "prompt_filter_results" in frame
+            and frame.get("usage") is None
+            and frame.get("error") is None
+        ):
+            return True
+        return frame.get("type") in _COPILOT_STREAM_KEEPALIVE_TYPES
+
+    def _project_payload(
+        self,
+        payload: dict[str, Any],
+        attempt: PreparedAttempt,
+        *,
+        stream: bool,
+    ) -> Mapping[str, Any]:
+        return self._project_response(
+            attempt.protocol,
+            payload,
+            model=attempt.model.upstream_id,
+            stream=stream,
+        )
+
+    def _validate_attempt(self, attempt: PreparedAttempt, *, stream: bool) -> None:
+        self._path(attempt)
+        if attempt.model.provider != self.provider.name:
+            raise ValueError("Copilot executor received another provider's model")
+        if attempt.stream is not stream:
+            mode = "streaming" if stream else "non-streaming"
+            raise ValueError(f"Copilot executor received the wrong {mode} attempt mode")
+
+    @staticmethod
+    def _project_response(
+        protocol: WireProtocol,
+        payload: dict[str, Any],
+        *,
+        model: str,
+        stream: bool = False,
+    ) -> dict[str, Any]:
+        """Remove only documented Copilot-private response fields.
+
+        The raw binding deliberately preserves unknown wire extensions.  These
+        keys are the small provider-owned exception: forwarding them leaks
+        Copilot accounting/transport metadata and makes cross-protocol codecs
+        reject otherwise valid responses.
+        """
+        CopilotHttpExecutor._project_model(payload, model)
+
+        if protocol is WireProtocol.OPENAI_RESPONSES:
+            CopilotHttpExecutor._strip_responses_internal_fields(payload)
+            nested = payload.get("response")
+            if isinstance(nested, dict):
+                CopilotHttpExecutor._strip_responses_internal_fields(nested)
+                if stream:
+                    CopilotHttpExecutor._project_model(nested, model)
+            return payload
+
+        if protocol is WireProtocol.OPENAI_CHAT:
+            for field in _COPILOT_CHAT_INTERNAL_RESPONSE_FIELDS:
+                payload.pop(field, None)
+            choices = payload.get("choices")
+            if isinstance(choices, list):
+                for choice in choices:
+                    if not isinstance(choice, dict):
+                        continue
+                    for field in _COPILOT_CHAT_CHOICE_INTERNAL_FIELDS:
+                        choice.pop(field, None)
+                    for container_name in ("message", "delta"):
+                        container = choice.get(container_name)
+                        if not isinstance(container, dict):
+                            continue
+                        for field in _COPILOT_CHAT_MESSAGE_INTERNAL_FIELDS:
+                            container.pop(field, None)
+            return payload
+
+        if protocol is not WireProtocol.ANTHROPIC_MESSAGES:
+            return payload
+
+        for field in _COPILOT_ANTHROPIC_INTERNAL_RESPONSE_FIELDS:
+            payload.pop(field, None)
+        nested = payload.get("message")
+        if isinstance(nested, dict):
+            for field in _COPILOT_ANTHROPIC_INTERNAL_RESPONSE_FIELDS:
+                nested.pop(field, None)
+            if stream:
+                CopilotHttpExecutor._project_model(nested, model)
+        if stream and payload.get("type") == "message_stop":
+            for field in _COPILOT_ANTHROPIC_MESSAGE_STOP_INTERNAL_FIELDS:
+                payload.pop(field, None)
+        return payload
+
+    @staticmethod
+    def _project_model(payload: dict[str, Any], model: str) -> None:
+        """Normalize a valid Copilot response alias to the attempted catalog model."""
+        if isinstance(payload.get("model"), str):
+            payload["model"] = model
+
+    @staticmethod
+    def _strip_responses_internal_fields(payload: dict[str, Any]) -> None:
+        for field in _COPILOT_RESPONSES_INTERNAL_RESPONSE_FIELDS:
+            payload.pop(field, None)
+        usage = payload.get("usage")
+        if not isinstance(usage, dict):
+            return
+        input_details = usage.get("input_tokens_details")
+        if not isinstance(input_details, dict):
+            return
+        for field in _COPILOT_RESPONSES_INTERNAL_INPUT_DETAIL_FIELDS:
+            input_details.pop(field, None)
+
+    def _path(self, attempt: PreparedAttempt) -> str:
+        protocol, path = CopilotProviderDialect._binding_spec(attempt.binding_id)
+        if attempt.protocol is not protocol:
+            raise ValueError("Copilot attempt protocol does not match its binding ID")
+        if attempt.method != "POST":
+            raise ValueError("Copilot generation bindings require POST")
+        return path
+
+    def _raise_status(
+        self,
+        error: httpx.HTTPStatusError,
+        attempt: PreparedAttempt,
+        *,
+        stream: bool,
+    ) -> NoReturn:
+        try:
+            body = error.response.content
+        except httpx.ResponseNotRead:
+            body = b""
+        self.provider._raise_unsupported_operation_if_applicable(
+            error.response.status_code,
+            body,
+            model=attempt.model.upstream_id,
+            cause=error,
+        )
+        self.provider._raise_http_status_error(
+            "Copilot",
+            error,
+            logger,
+            stream=stream,
+            include_body=True,
+            provider=self.provider.name,
+            model=attempt.model.upstream_id,
+            signal=self.provider._failure_signal(error.response.status_code, body),
+        )
+
+    def _raise_timeout(
+        self,
+        error: httpx.TimeoutException,
+        attempt: PreparedAttempt,
+        *,
+        stream: bool,
+    ) -> NoReturn:
+        self.provider._raise_timeout_error(
+            "Copilot",
+            error,
+            logger,
+            stream=stream,
+            provider=self.provider.name,
+            model=attempt.model.upstream_id,
+        )
+
+    def _raise_http_error(
+        self,
+        error: httpx.HTTPError,
+        attempt: PreparedAttempt,
+        *,
+        stream: bool,
+    ) -> NoReturn:
+        self.provider._raise_http_error(
+            "Copilot",
+            error,
+            logger,
+            stream=stream,
+            provider=self.provider.name,
+            model=attempt.model.upstream_id,
+        )
+
+    def _raise_protocol_error(self, error: Exception, attempt: PreparedAttempt) -> NoReturn:
+        self.provider._raise_protocol_error(
+            self.provider.name,
+            attempt.model.upstream_id,
+            error,
+        )

@@ -178,6 +178,7 @@ class TestCopilotPayloadThinking:
         captured_payload = {}
 
         async def mock_post(url, json=None, headers=None, timeout=None):
+            assert isinstance(json, dict)
             captured_payload.update(json)
             mock_response = AsyncMock()
             mock_response.status_code = 200
@@ -224,6 +225,7 @@ class TestCopilotPayloadThinking:
         captured_payload = {}
 
         async def mock_post(url, json=None, headers=None, timeout=None):
+            assert isinstance(json, dict)
             captured_payload.update(json)
             mock_response = AsyncMock()
             mock_response.status_code = 200
@@ -283,6 +285,7 @@ class TestCopilotNonstreamingTools:
         captured_payload = {}
 
         async def mock_post(url, json=None, headers=None, timeout=None):
+            assert isinstance(json, dict)
             captured_payload.update(json)
             mock_response = AsyncMock()
             mock_response.status_code = 200
@@ -433,6 +436,7 @@ class TestAnthropicProviderThinking:
         captured_payload = {}
 
         async def mock_post(url, json=None, headers=None, timeout=None):
+            assert isinstance(json, dict)
             captured_payload.update(json)
             mock_response = AsyncMock()
             mock_response.status_code = 200
@@ -569,6 +573,7 @@ class TestAnthropicProviderThinking:
         captured_payload = {}
 
         async def mock_post(url, json=None, headers=None, timeout=None):
+            assert isinstance(json, dict)
             captured_payload.update(json)
             mock_response = AsyncMock()
             mock_response.status_code = 200

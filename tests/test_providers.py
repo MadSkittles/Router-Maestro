@@ -1,6 +1,7 @@
 """Tests for providers module."""
 
 import json
+from typing import cast
 from unittest.mock import AsyncMock, Mock, patch
 
 import httpx
@@ -748,7 +749,9 @@ class TestCopilotTokenRefresh:
         assert calls["n"] == 2  # original + retry
         # ensure_token called once at entry, once forced after the 403.
         assert mock_ensure.await_count == 2
-        assert mock_ensure.await_args.kwargs.get("force") is True
+        await_args = mock_ensure.await_args
+        assert await_args is not None
+        assert await_args.kwargs.get("force") is True
         assert response.content == "hi"
 
     @pytest.mark.asyncio
@@ -853,8 +856,9 @@ class TestCopilotTokenRefresh:
         ):
             await provider.ensure_token()
 
-        assert provider.auth_manager.save.call_count == 1
+        assert cast(Mock, provider.auth_manager.save).call_count == 1
         stored = provider.auth_manager.storage.get("github-copilot")
+        assert isinstance(stored, OAuthCredential)
         assert stored.access == "new-copilot"
         assert provider._cached_token == "new-copilot"
 

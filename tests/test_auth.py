@@ -27,7 +27,7 @@ class TestAuthStorage:
         storage.set("github-copilot", cred)
 
         retrieved = storage.get("github-copilot")
-        assert retrieved is not None
+        assert isinstance(retrieved, OAuthCredential)
         assert retrieved.type == AuthType.OAUTH
         assert retrieved.refresh == "refresh_token"
         assert retrieved.access == "access_token"
@@ -40,9 +40,27 @@ class TestAuthStorage:
         storage.set("openai", cred)
 
         retrieved = storage.get("openai")
-        assert retrieved is not None
+        assert isinstance(retrieved, ApiKeyCredential)
         assert retrieved.type == AuthType.API_KEY
         assert retrieved.key == "test-api-key"
+
+    def test_credential_repr_redacts_secret_fields(self):
+        """Tracebacks must not expose persisted OAuth tokens or API keys."""
+        oauth = OAuthCredential(
+            refresh="refresh-secret",
+            access="access-secret",
+            expires=1234567890,
+        )
+        api_key = ApiKeyCredential(key="api-key-secret")
+
+        assert "refresh-secret" not in repr(oauth)
+        assert "access-secret" not in repr(oauth)
+        assert "api-key-secret" not in repr(api_key)
+
+        # Repr redaction must not change the persisted credential contract.
+        assert oauth.model_dump()["refresh"] == "refresh-secret"
+        assert oauth.model_dump()["access"] == "access-secret"
+        assert api_key.model_dump()["key"] == "api-key-secret"
 
     def test_remove(self):
         """Test removing credentials."""
@@ -87,11 +105,11 @@ class TestAuthStorage:
             assert loaded.list_providers() == storage.list_providers()
 
             openai_cred = loaded.get("openai")
-            assert openai_cred is not None
+            assert isinstance(openai_cred, ApiKeyCredential)
             assert openai_cred.key == "test-key"
 
             copilot_cred = loaded.get("github-copilot")
-            assert copilot_cred is not None
+            assert isinstance(copilot_cred, OAuthCredential)
             assert copilot_cred.refresh == "refresh"
 
     def test_load_corrupt_json_returns_empty(self):

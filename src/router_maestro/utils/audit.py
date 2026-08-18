@@ -51,6 +51,23 @@ _SENSITIVE_FIELD_KEYS = frozenset(
         "privatekey",
     }
 )
+_OPAQUE_REASONING_FIELD_KEYS = frozenset(
+    {
+        "encryptedcontent",
+        "opaquestate",
+        "thoughtsignature",
+    }
+)
+_SAFE_REASONING_ITEM_FIELDS = frozenset(
+    {
+        "type",
+        "id",
+        "status",
+        "summary",
+        "encrypted_content",
+    }
+)
+_SAFE_REASONING_SUMMARY_TEXT_FIELDS = frozenset({"type", "text"})
 
 
 def is_tracing_enabled(audit_config_enabled: bool = False) -> bool:
@@ -86,16 +103,74 @@ def _safe_json(obj: Any) -> Any:
     return str(obj)
 
 
+def _normalized_field_key(key: object) -> str:
+    return "".join(character for character in str(key).casefold() if character.isalnum())
+
+
+def _is_sensitive_field(key: object, *, block_type: object) -> bool:
+    normalized_key = _normalized_field_key(key)
+    return (
+        normalized_key in _SENSITIVE_FIELD_KEYS
+        or normalized_key in _OPAQUE_REASONING_FIELD_KEYS
+        or (block_type == "thinking" and normalized_key == "signature")
+        or (block_type == "redacted_thinking" and normalized_key == "data")
+    )
+
+
+def _redact_reasoning_summary(value: Any) -> Any:
+    if not isinstance(value, list):
+        return "***"
+    redacted = []
+    for part in value:
+        if not isinstance(part, dict):
+            redacted.append("***")
+            continue
+        allowed = (
+            _SAFE_REASONING_SUMMARY_TEXT_FIELDS
+            if part.get("type") == "summary_text"
+            else frozenset({"type"})
+        )
+        redacted.append(
+            {
+                key: (
+                    "***"
+                    if key not in allowed
+                    or _is_sensitive_field(key, block_type=part.get("type"))
+                    or (key in {"type", "text"} and not isinstance(item, str))
+                    else _redact_payload(item)
+                )
+                for key, item in part.items()
+            }
+        )
+    return redacted
+
+
+def _redact_reasoning_item(value: dict[Any, Any]) -> dict[Any, Any]:
+    redacted = {}
+    for key, item in value.items():
+        if key not in _SAFE_REASONING_ITEM_FIELDS:
+            redacted[key] = "***"
+        elif _is_sensitive_field(key, block_type="reasoning"):
+            redacted[key] = "***"
+        elif key == "summary":
+            redacted[key] = _redact_reasoning_summary(item)
+        elif key in {"type", "id", "status"} and not isinstance(item, str):
+            redacted[key] = "***"
+        else:
+            redacted[key] = _redact_payload(item)
+    return redacted
+
+
 def _redact_payload(obj: Any) -> Any:
     """Return a detached value with credential-like payload fields removed."""
     value = _safe_json(obj)
     if isinstance(value, dict):
+        block_type = value.get("type")
+        if block_type == "reasoning":
+            return _redact_reasoning_item(value)
         return {
             key: (
-                "***"
-                if "".join(character for character in str(key).casefold() if character.isalnum())
-                in _SENSITIVE_FIELD_KEYS
-                else _redact_payload(item)
+                "***" if _is_sensitive_field(key, block_type=block_type) else _redact_payload(item)
             )
             for key, item in value.items()
         }
@@ -182,6 +257,39 @@ class AuditTrace:
         elif body is not None:
             record["body"] = _redact_payload(body)
         self._append_record("upstream_resp", record)
+
+    def record_dispatch_attempt(
+        self,
+        *,
+        provider: str,
+        model: str,
+        binding: str,
+        entry_protocol: str,
+        upstream_transport: str,
+        conversion_mode: str,
+        outcome: str,
+        ir_materialized: bool,
+    ) -> None:
+        """Record safe selection metadata for one generation transport attempt.
+
+        Opaque continuation state, capsule ciphertext, credentials, and payloads
+        deliberately do not belong in this record.
+        """
+        self._append_record(
+            "attempt",
+            {
+                "timestamp": time.time(),
+                "request_id": self._request_id,
+                "provider": provider,
+                "model": model,
+                "binding": binding,
+                "entry_protocol": entry_protocol,
+                "upstream_transport": upstream_transport,
+                "conversion_mode": conversion_mode,
+                "outcome": outcome,
+                "ir_materialized": ir_materialized,
+            },
+        )
 
     def record_outbound(
         self,

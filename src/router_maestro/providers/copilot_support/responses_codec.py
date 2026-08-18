@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import json
 from collections.abc import AsyncIterator, Callable
-from typing import Any
+from copy import deepcopy
+from typing import Any, NoReturn
 
 from router_maestro.providers.base import (
     BaseProvider,
@@ -68,6 +69,7 @@ class CopilotResponsesCodec:
         catalog_effort_values: list[str] | None,
         resolve_reasoning: Callable[..., Any],
         allows_temperature: Callable[..., bool],
+        allows_top_p: Callable[..., bool],
         filter_tools: Callable[..., list[dict] | None],
         normalize_input: Callable[..., Any],
     ) -> dict:
@@ -80,6 +82,16 @@ class CopilotResponsesCodec:
                 provider=provider_name,
                 model=request.model,
                 parameter="temperature",
+            )
+        if request.top_p is not None and not allows_top_p(
+            Operation.RESPONSES,
+            model=request.model,
+        ):
+            raise RequestOptionError(
+                "GitHub Copilot Responses does not support request option 'top_p' for this model",
+                provider=provider_name,
+                model=request.model,
+                parameter="top_p",
             )
         payload: dict = {
             "model": request.model,
@@ -148,6 +160,15 @@ class CopilotResponsesCodec:
             return None, None, None
         text = "".join(summary.get("text") or "" for summary in output.get("summary", []))
         return text or None, output.get("id"), output.get("encrypted_content")
+
+    @staticmethod
+    def extract_reasoning_item(data: dict) -> dict[str, Any] | None:
+        """Return the complete atomic reasoning item without projecting fields away."""
+        output = next(
+            (item for item in data.get("output", []) if item.get("type") == "reasoning"),
+            None,
+        )
+        return deepcopy(output) if output is not None else None
 
     @staticmethod
     def extract_tool_calls(data: dict) -> list[ResponsesToolCall]:
@@ -325,7 +346,7 @@ class CopilotResponsesCodec:
         provider: str,
         model: str | None,
         cause: BaseException,
-    ) -> None:
+    ) -> NoReturn:
         BaseProvider._raise_protocol_error(provider, model, cause)
 
     async def decode_stream(
@@ -345,6 +366,7 @@ class CopilotResponsesCodec:
         completed_reasoning_parts: dict[tuple[int, int], str] = {}
         reasoning_item_ids: dict[int, str] = {}
         completed_reasoning_items: dict[int, tuple[tuple[str, ...], str | None]] = {}
+        completed_reasoning_raw_items: dict[int, dict[str, Any]] = {}
         declared_output_item_types: dict[int, str] = {}
         completed_output_items: dict[int, tuple[str, str]] = {}
         emitted_reasoning_signatures: set[int] = set()
@@ -805,6 +827,9 @@ class CopilotResponsesCodec:
                             output_item_done=True,
                             thinking_id=known_item_id,
                             thinking_signature=encrypted_blob,
+                            reasoning_item=deepcopy(
+                                completed_reasoning_raw_items.get(output_index)
+                            ),
                         )
                     continue
                 if reasoning_part in completed_reasoning_parts:
@@ -1027,6 +1052,7 @@ class CopilotResponsesCodec:
                     # Copilot CAPI delivers the reasoning summary here
                     # rather than via reasoning_summary_text.delta.
                     summary_list = item.get("summary", []) or []
+                    raw_reasoning_item = deepcopy(item)
                     upstream_id = item.get("id")
                     output_index = data.get("output_index", 0)
                     known_item_id = reasoning_item_ids.get(output_index)
@@ -1060,7 +1086,19 @@ class CopilotResponsesCodec:
                             ),
                         )
                     if output_index in completed_reasoning_items:
-                        if completed_reasoning_items[output_index] != item_snapshot:
+                        completed_raw_item = deepcopy(completed_reasoning_raw_items[output_index])
+                        comparable_raw_item = deepcopy(raw_reasoning_item)
+                        if effective_item_id is not None:
+                            # Copilot can repeat the same done snapshot once
+                            # before and once after revealing the canonical ID.
+                            # Normalize only that optional identity field; all
+                            # provider-owned siblings must still match exactly.
+                            completed_raw_item["id"] = effective_item_id
+                            comparable_raw_item["id"] = effective_item_id
+                        if (
+                            completed_reasoning_items[output_index] != item_snapshot
+                            or completed_raw_item != comparable_raw_item
+                        ):
                             self._raise_protocol_error(
                                 self.name,
                                 request.model,
@@ -1068,6 +1106,8 @@ class CopilotResponsesCodec:
                                     "Responses reasoning item completed with conflicting snapshots"
                                 ),
                             )
+                        raw_reasoning_item = comparable_raw_item
+                        completed_reasoning_raw_items[output_index] = deepcopy(raw_reasoning_item)
                         if (
                             encrypted_blob
                             and effective_item_id
@@ -1086,6 +1126,7 @@ class CopilotResponsesCodec:
                                 output_item_done=True,
                                 thinking_id=effective_item_id,
                                 thinking_signature=encrypted_blob,
+                                reasoning_item=deepcopy(raw_reasoning_item),
                             )
                         continue
                     tracked_summary_indices = {
@@ -1143,6 +1184,7 @@ class CopilotResponsesCodec:
                                 thinking_id=effective_item_id,
                             )
                     completed_reasoning_items[output_index] = item_snapshot
+                    completed_reasoning_raw_items[output_index] = raw_reasoning_item
                     # Emit the upstream id and the encrypted blob
                     # separately so the route can pair them on the
                     # reasoning output item it forwards to Codex. The
@@ -1162,6 +1204,7 @@ class CopilotResponsesCodec:
                             output_item_done=True,
                             thinking_id=effective_item_id,
                             thinking_signature=encrypted_blob,
+                            reasoning_item=deepcopy(raw_reasoning_item),
                         )
                     elif effective_item_id:
                         yield ResponsesStreamChunk(
@@ -1173,6 +1216,7 @@ class CopilotResponsesCodec:
                             output_item_type="reasoning",
                             output_item_done=True,
                             thinking_id=effective_item_id,
+                            reasoning_item=deepcopy(raw_reasoning_item),
                         )
                     elif not encrypted_blob:
                         yield ResponsesStreamChunk(
@@ -1183,6 +1227,7 @@ class CopilotResponsesCodec:
                             ),
                             output_item_type="reasoning",
                             output_item_done=True,
+                            reasoning_item=deepcopy(raw_reasoning_item),
                         )
                 elif item.get("type") == "tool_search_call":
                     # Forward as kind="tool_search" so the route emits
@@ -1201,6 +1246,12 @@ class CopilotResponsesCodec:
                     else:
                         args_str = json.dumps(args)
                     call_id = item.get("call_id") or (fc and fc.get("call_id")) or ""
+                    if not isinstance(call_id, str):
+                        self._raise_protocol_error(
+                            self.name,
+                            request.model,
+                            TypeError("Responses tool_search_call call_id must be a string"),
+                        )
                     emitted_tool_call = True
                     yield ResponsesStreamChunk(
                         content="",

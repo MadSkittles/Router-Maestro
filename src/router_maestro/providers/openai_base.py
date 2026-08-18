@@ -3,11 +3,14 @@
 import contextlib
 import json
 from abc import ABC, abstractmethod
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
+from copy import deepcopy
 from logging import Logger
+from typing import Any, NoReturn, cast
 
 import httpx
 
+from router_maestro.protocols import WireProtocol
 from router_maestro.providers.base import (
     TIMEOUT_NON_STREAMING,
     TIMEOUT_STREAMING,
@@ -17,8 +20,16 @@ from router_maestro.providers.base import (
     ChatStreamChunk,
     RequestOptionError,
 )
+from router_maestro.providers.bindings import (
+    OPENAI_COMPATIBLE_CHAT_BINDING,
+    AttemptRequestContext,
+    EndpointBinding,
+    PreparedAttempt,
+)
+from router_maestro.providers.http_executor import ProviderHttpClientPool, SharedHttpExecutor
 from router_maestro.providers.tool_parsing import recover_tool_calls_from_content
-from router_maestro.routing.model_ref import validate_upstream_model_id
+from router_maestro.routing.capabilities import Operation, ProviderCapabilities
+from router_maestro.routing.model_ref import ModelRef, validate_upstream_model_id
 from router_maestro.utils.reasoning import budget_to_effort, downgrade_for_upstream
 from router_maestro.utils.structured_output import output_format_to_response_format
 
@@ -36,6 +47,30 @@ class OpenAIChatProvider(BaseProvider, ABC):
     def __init__(self, base_url: str, logger: Logger) -> None:
         self.base_url = base_url.rstrip("/")
         self._logger = logger
+        self._http_client_pool = ProviderHttpClientPool(lambda: httpx.AsyncClient())
+
+    async def close(self) -> None:
+        """Close the provider-owned reusable HTTP client."""
+        await self._http_client_pool.close()
+
+    def bindings(self) -> tuple[EndpointBinding, ...]:
+        """Expose the provider's Chat endpoint as a raw wire binding."""
+        bindings = getattr(self, "_generation_bindings", None)
+        if bindings is not None:
+            return bindings
+
+        binding = EndpointBinding(
+            id=OPENAI_COMPATIBLE_CHAT_BINDING,
+            protocol=WireProtocol.OPENAI_CHAT,
+            capabilities=ProviderCapabilities(
+                operations=frozenset({Operation.CHAT, Operation.CHAT_STREAM})
+            ),
+            dialect=OpenAICompatibleProviderDialect(self),
+            executor=OpenAICompatibleHttpExecutor(self),
+        )
+        bindings = (binding,)
+        self._generation_bindings = bindings
+        return bindings
 
     @abstractmethod
     def _get_headers(self) -> dict[str, str]:
@@ -164,7 +199,7 @@ class OpenAIChatProvider(BaseProvider, ABC):
         if audit is not None:
             audit.record_upstream("POST", url, headers, payload)
 
-        async with httpx.AsyncClient() as client:
+        async with self._http_client_pool.lease() as client:
             try:
                 response = await client.post(
                     url,
@@ -239,7 +274,7 @@ class OpenAIChatProvider(BaseProvider, ABC):
                     content=content,
                     model=model,
                     refusal=refusal,
-                    finish_reason=finish_reason,
+                    finish_reason=cast(str, finish_reason),
                     usage=usage,
                     tool_calls=tool_calls,
                 )
@@ -277,7 +312,7 @@ class OpenAIChatProvider(BaseProvider, ABC):
         if audit is not None:
             audit.record_upstream("POST", url, headers, payload)
 
-        async with httpx.AsyncClient() as client:
+        async with self._http_client_pool.lease() as client:
             try:
                 async with client.stream(
                     "POST",
@@ -424,3 +459,140 @@ class OpenAIChatProvider(BaseProvider, ABC):
                     provider=self.name,
                     model=request.model,
                 )
+
+
+class OpenAICompatibleProviderDialect:
+    """Copy-on-write preparation for an OpenAI-compatible Chat endpoint."""
+
+    id = "openai-compatible"
+
+    def __init__(self, provider: OpenAIChatProvider) -> None:
+        self.provider = provider
+
+    async def prepare_attempt(
+        self,
+        *,
+        binding_id: str,
+        protocol: WireProtocol,
+        model: ModelRef,
+        payload: Mapping[str, Any],
+        stream: bool,
+        request_context: AttemptRequestContext,
+    ) -> PreparedAttempt:
+        del request_context
+        if binding_id != OPENAI_COMPATIBLE_CHAT_BINDING:
+            raise ValueError(f"Unknown OpenAI-compatible binding {binding_id!r}")
+        if protocol is not WireProtocol.OPENAI_CHAT:
+            raise ValueError("OpenAI-compatible Chat binding requires the Chat wire protocol")
+        if model.provider != self.provider.name:
+            raise ValueError("OpenAI-compatible attempt model belongs to another provider")
+
+        body = deepcopy(dict(payload))
+        body["model"] = model.upstream_id
+        body["stream"] = stream
+        if stream:
+            stream_options = body.get("stream_options")
+            if stream_options is None:
+                normalized_stream_options: dict[str, Any] = {}
+            elif isinstance(stream_options, Mapping):
+                normalized_stream_options = deepcopy(dict(stream_options))
+            else:
+                raise RequestOptionError(
+                    "OpenAI-compatible Chat requires stream_options to be an object",
+                    provider=self.provider.name,
+                    model=model.upstream_id,
+                    parameter="stream_options",
+                )
+            normalized_stream_options["include_usage"] = True
+            body["stream_options"] = normalized_stream_options
+
+        return PreparedAttempt(
+            binding_id=binding_id,
+            protocol=protocol,
+            model=model,
+            url=f"{self.provider.base_url}/chat/completions",
+            payload=body,
+            headers=self.provider._get_headers(),
+            stream=stream,
+            _payload_owned=True,
+        )
+
+
+class OpenAICompatibleHttpExecutor(SharedHttpExecutor):
+    """Raw JSON/SSE executor shared by official and custom OpenAI providers."""
+
+    def __init__(self, provider: OpenAIChatProvider) -> None:
+        self.provider = provider
+        super().__init__(client_pool=provider._http_client_pool)
+
+    def _skip_raw_sse_data(self, data: str, attempt: PreparedAttempt) -> bool:
+        del attempt
+        return data == "[DONE]"
+
+    def _validate_attempt(self, attempt: PreparedAttempt, *, stream: bool) -> None:
+        if attempt.binding_id != OPENAI_COMPATIBLE_CHAT_BINDING:
+            raise ValueError("OpenAI-compatible executor received an unknown binding")
+        if attempt.protocol is not WireProtocol.OPENAI_CHAT:
+            raise ValueError("OpenAI-compatible executor requires the Chat wire protocol")
+        if attempt.model.provider != self.provider.name:
+            raise ValueError("OpenAI-compatible executor received another provider's model")
+        if attempt.method != "POST":
+            raise ValueError("OpenAI-compatible Chat binding requires POST")
+        if attempt.stream is not stream:
+            raise ValueError("OpenAI-compatible attempt stream mode does not match execution")
+
+    def _raise_status(
+        self,
+        error: httpx.HTTPStatusError,
+        attempt: PreparedAttempt,
+        *,
+        stream: bool,
+    ) -> NoReturn:
+        self.provider._raise_http_status_error(
+            self.provider._error_label(),
+            error,
+            self.provider._logger,
+            stream=stream,
+            include_body=stream,
+            provider=self.provider.name,
+            model=attempt.model.upstream_id,
+        )
+
+    def _raise_timeout(
+        self,
+        error: httpx.TimeoutException,
+        attempt: PreparedAttempt,
+        *,
+        stream: bool,
+    ) -> NoReturn:
+        self.provider._raise_timeout_error(
+            self.provider._error_label(),
+            error,
+            self.provider._logger,
+            stream=stream,
+            provider=self.provider.name,
+            model=attempt.model.upstream_id,
+        )
+
+    def _raise_http_error(
+        self,
+        error: httpx.HTTPError,
+        attempt: PreparedAttempt,
+        *,
+        stream: bool,
+    ) -> NoReturn:
+        self.provider._raise_http_error(
+            self.provider._error_label(),
+            error,
+            self.provider._logger,
+            stream=stream,
+            provider=self.provider.name,
+            model=attempt.model.upstream_id,
+        )
+
+    def _raise_protocol_error(self, error: Exception, attempt: PreparedAttempt) -> NoReturn:
+        self.provider._raise_protocol_error(
+            self.provider.name,
+            attempt.model.upstream_id,
+            error,
+        )

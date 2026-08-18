@@ -61,6 +61,7 @@ async def test_stream_emits_tool_calls_usage_and_finish():
     # Tool call registered with id + name on content_block_start.
     starts = [c for c in chunks if c.tool_calls and c.tool_calls[0].get("id")]
     assert len(starts) == 1
+    assert starts[0].tool_calls is not None
     assert starts[0].tool_calls[0]["id"] == "toolu_1"
     assert starts[0].tool_calls[0]["function"]["name"] == "get_weather"
     assert starts[0].tool_calls[0]["index"] == 0

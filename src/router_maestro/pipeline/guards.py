@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncGenerator, AsyncIterator, Iterable
 from enum import StrEnum
-from typing import Protocol, TypeVar
+from typing import Protocol, TypeVar, cast
 
 from router_maestro.config.priorities import GuardsConfig
 from router_maestro.providers.base import ChatStreamChunk, ResponsesStreamChunk
@@ -41,7 +41,7 @@ class GuardAbortError(Exception):
         super().__init__(f"{guard_name}: {reason}")
 
 
-_GuardT = TypeVar("_GuardT", bound=StreamGuard)
+_GuardT = TypeVar("_GuardT")
 
 
 class GuardChain:
@@ -99,7 +99,7 @@ class GuardChain:
             feed_visible_text = getattr(guard, "feed_visible_text", None)
             for kind, text in visible_text:
                 if callable(feed_visible_text):
-                    reason = feed_visible_text(text, kind)
+                    reason = cast(str | None, feed_visible_text(text, kind))
                 elif kind is GuardTextKind.CONTENT:
                     # Preserve the legacy StreamGuard contract: third-party
                     # guards historically received only ``chunk.content``.
@@ -156,7 +156,7 @@ def build_guards(
 
     guards: list[StreamGuard] = []
     if leak_guard_enabled:
-        guards.append(LeakGuard(allowed_tool_names=tool_names))
+        guards.append(cast(StreamGuard, LeakGuard(allowed_tool_names=tool_names)))
     if runaway_guard_enabled:
         guards.append(
             RunawayGuard(

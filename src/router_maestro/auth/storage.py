@@ -24,8 +24,8 @@ class OAuthCredential(BaseModel):
     """OAuth credential storage."""
 
     type: AuthType = AuthType.OAUTH
-    refresh: str = Field(..., description="Refresh token")
-    access: str = Field(..., description="Access token")
+    refresh: str = Field(..., description="Refresh token", repr=False)
+    access: str = Field(..., description="Access token", repr=False)
     expires: int = Field(default=0, description="Expiration timestamp (0 = never)")
     api_endpoint: str | None = Field(
         default=None,
@@ -37,7 +37,7 @@ class ApiKeyCredential(BaseModel):
     """API key credential storage."""
 
     type: AuthType = AuthType.API_KEY
-    key: str = Field(..., description="API key")
+    key: str = Field(..., description="API key", repr=False)
 
 
 Credential = OAuthCredential | ApiKeyCredential

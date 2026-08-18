@@ -1,5 +1,7 @@
 """Tests for the translation module."""
 
+from typing import Any, cast
+
 from router_maestro.server.schemas.anthropic import (
     AnthropicMessagesRequest,
     AnthropicTextBlock,
@@ -244,31 +246,42 @@ class TestToolResultWithToolReference:
         request = AnthropicMessagesRequest(
             model="claude-sonnet-4",
             max_tokens=1000,
-            messages=[
-                {
-                    "role": "assistant",
-                    "content": [
-                        {"type": "tool_use", "id": "toolu_123", "name": "test_tool", "input": {}}
-                    ],
-                },
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "tool_result",
-                            "tool_use_id": "toolu_123",
-                            "content": [
-                                {"type": "tool_reference", "tool_name": "mcp__github__create_pr"},
-                                {
-                                    "type": "tool_reference",
-                                    "tool_name": "mcp__github__list_issues",
-                                },
-                                {"type": "text", "text": "Tool result content"},
-                            ],
-                        }
-                    ],
-                },
-            ],
+            messages=cast(
+                Any,
+                [
+                    {
+                        "role": "assistant",
+                        "content": [
+                            {
+                                "type": "tool_use",
+                                "id": "toolu_123",
+                                "name": "test_tool",
+                                "input": {},
+                            }
+                        ],
+                    },
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "tool_result",
+                                "tool_use_id": "toolu_123",
+                                "content": [
+                                    {
+                                        "type": "tool_reference",
+                                        "tool_name": "mcp__github__create_pr",
+                                    },
+                                    {
+                                        "type": "tool_reference",
+                                        "tool_name": "mcp__github__list_issues",
+                                    },
+                                    {"type": "text", "text": "Tool result content"},
+                                ],
+                            }
+                        ],
+                    },
+                ],
+            ),
         )
 
         result = translate_anthropic_to_openai(request)
@@ -285,27 +298,35 @@ class TestToolResultWithToolReference:
         request = AnthropicMessagesRequest(
             model="claude-sonnet-4",
             max_tokens=1000,
-            messages=[
-                {
-                    "role": "assistant",
-                    "content": [
-                        {"type": "tool_use", "id": "toolu_456", "name": "list_tools", "input": {}}
-                    ],
-                },
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "tool_result",
-                            "tool_use_id": "toolu_456",
-                            "content": [
-                                {"type": "tool_reference", "tool_name": "mcp__slack__send"},
-                                {"type": "tool_reference", "tool_name": "mcp__slack__read"},
-                            ],
-                        }
-                    ],
-                },
-            ],
+            messages=cast(
+                Any,
+                [
+                    {
+                        "role": "assistant",
+                        "content": [
+                            {
+                                "type": "tool_use",
+                                "id": "toolu_456",
+                                "name": "list_tools",
+                                "input": {},
+                            }
+                        ],
+                    },
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "tool_result",
+                                "tool_use_id": "toolu_456",
+                                "content": [
+                                    {"type": "tool_reference", "tool_name": "mcp__slack__send"},
+                                    {"type": "tool_reference", "tool_name": "mcp__slack__read"},
+                                ],
+                            }
+                        ],
+                    },
+                ],
+            ),
         )
 
         result = translate_anthropic_to_openai(request)
@@ -330,6 +351,7 @@ class TestPermissiveRequestParsing:
                 "tools": [{"type": "web_search_20250305", "name": "web_search"}],
             }
         )
+        assert req.tools is not None
         assert req.tools[0].name == "web_search"
 
     def test_redacted_thinking_block_is_accepted(self):

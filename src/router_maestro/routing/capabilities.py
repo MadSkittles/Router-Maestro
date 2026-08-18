@@ -8,6 +8,7 @@ from enum import StrEnum
 from types import MappingProxyType
 from typing import TYPE_CHECKING
 
+from router_maestro.protocols.models import RequestManifest
 from router_maestro.routing.model_ref import ModelRef
 
 if TYPE_CHECKING:
@@ -140,6 +141,28 @@ class RequestFeatures:
             )
             if enabled
         )
+
+
+def model_supports_manifest(
+    feature_capabilities: Mapping[str, bool],
+    manifest: RequestManifest,
+) -> bool:
+    """Return false only when catalog metadata denies a required request feature.
+
+    File inputs intentionally have no mapping here because ``Feature`` does not
+    currently define a portable file capability. Missing catalog entries remain
+    probeable.
+    """
+    required = (
+        (Feature.TOOLS, manifest.tools),
+        (Feature.VISION, manifest.images),
+        (Feature.REASONING, manifest.reasoning),
+        (Feature.PARALLEL_TOOLS, manifest.parallel_tools),
+    )
+    return all(
+        not enabled or feature_capabilities.get(feature.value) is not False
+        for feature, enabled in required
+    )
 
 
 @dataclass(frozen=True, slots=True)

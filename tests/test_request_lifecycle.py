@@ -3,11 +3,12 @@
 import asyncio
 from dataclasses import dataclass
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from starlette.requests import ClientDisconnect
 from starlette.responses import StreamingResponse
+from starlette.types import Message as ASGIMessage
 
 from router_maestro.config.priorities import PrioritiesConfig
 from router_maestro.providers.base import (
@@ -15,12 +16,15 @@ from router_maestro.providers.base import (
     TransportTermination,
     client_cancelled_outcome,
 )
+from router_maestro.providers.copilot_support.auth_session import CopilotAuthSession
 from router_maestro.providers.copilot_support.transport import CopilotTransport
 from router_maestro.runtime.request_context import (
     RequestContext,
     RequestContextMiddleware,
+    RuntimeConfigSnapshot,
     current_request_context,
 )
+from router_maestro.utils.audit import AuditTrace
 
 
 @dataclass(frozen=True, slots=True)
@@ -34,11 +38,11 @@ class _Snapshot:
 
 
 class _Repository:
-    def __init__(self, snapshot: _Snapshot) -> None:
+    def __init__(self, snapshot: object) -> None:
         self.snapshot = snapshot
         self.read_count = 0
 
-    def read(self) -> _Snapshot:
+    def read(self) -> object:
         self.read_count += 1
         return self.snapshot
 
@@ -85,11 +89,11 @@ def _scope(repository: _Repository, owner: _Owner, path: str = "/v1/messages") -
     }
 
 
-async def _receive() -> dict[str, Any]:
+async def _receive() -> ASGIMessage:
     return {"type": "http.request", "body": b"", "more_body": False}
 
 
-async def _discard_send(_message: dict[str, Any]) -> None:
+async def _discard_send(_message: ASGIMessage) -> None:
     return None
 
 
@@ -100,7 +104,7 @@ async def test_endpoint_return_does_not_finalize_before_final_body() -> None:
     owner = _Owner(lease)
     endpoint_returned = asyncio.Event()
     allow_final_body = asyncio.Event()
-    sent: list[dict[str, Any]] = []
+    sent: list[ASGIMessage] = []
     captured: list[RequestContext] = []
 
     async def app(scope, receive, send) -> None:
@@ -114,7 +118,7 @@ async def test_endpoint_return_does_not_finalize_before_final_body() -> None:
 
     middleware = RequestContextMiddleware(app)
 
-    async def send(message: dict[str, Any]) -> None:
+    async def send(message: ASGIMessage) -> None:
         sent.append(message)
 
     task = asyncio.create_task(middleware(_scope(repository, owner), _receive, send))
@@ -248,7 +252,7 @@ async def test_streaming_response_send_disconnect_records_client_cancel() -> Non
         captured.append(current_request_context())
         await StreamingResponse(stream())(scope, receive, send)
 
-    async def disconnected_send(message: dict[str, Any]) -> None:
+    async def disconnected_send(message: ASGIMessage) -> None:
         if message["type"] == "http.response.body":
             raise OSError("client socket closed")
 
@@ -278,7 +282,7 @@ async def test_cancel_during_finalize_waits_for_release_before_propagating() -> 
     lease = BlockingLease()
     context = RequestContext(
         request_id="req",
-        config_snapshot=snapshot,
+        config_snapshot=cast(RuntimeConfigSnapshot, snapshot),
         config=snapshot.config,
         lease=lease,
     )
@@ -430,14 +434,16 @@ async def test_beta_header_strip_uses_captured_snapshot() -> None:
             return config.model_copy(deep=True)
 
     repository = _Repository(_Snapshot("ignored", "ignored"))
-    repository.snapshot = Snapshot()  # type: ignore[assignment]
+    repository.snapshot = Snapshot()
     lease = _Lease(1, object())
     owner = _Owner(lease)
     observed: list[str | None] = []
 
     async def app(scope, receive, send) -> None:
         auth = SimpleNamespace(cached_token="token", provider_name="github-copilot")
-        observed.append(CopilotTransport(auth).headers().get("anthropic-beta"))
+        observed.append(
+            CopilotTransport(cast(CopilotAuthSession, auth)).headers().get("anthropic-beta")
+        )
         await send({"type": "http.response.start", "status": 200, "headers": []})
         await send({"type": "http.response.body", "body": b"", "more_body": False})
 
@@ -474,16 +480,16 @@ async def test_pipeline_outbound_audit_is_deferred_until_context_finalize() -> N
     lease = _Lease(1, object())
     context = RequestContext(
         request_id="req",
-        config_snapshot=snapshot,
+        config_snapshot=cast(RuntimeConfigSnapshot, snapshot),
         config=snapshot.config,
         lease=lease,
-        audit=audit,  # type: ignore[arg-type]
+        audit=cast(AuditTrace, audit),
     )
     context.pipeline = RequestPipeline(
         request_id="req",
         guards=[],
         leak_guard=None,
-        audit=audit,  # type: ignore[arg-type]
+        audit=cast(AuditTrace, audit),
         config=context.config,
         defer_flush=True,
     )

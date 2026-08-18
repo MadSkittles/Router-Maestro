@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator, AsyncIterator
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -167,19 +167,20 @@ def _responses_request() -> ResponsesRequest:
 
 
 def _route_stream(protocol: str, router: _LifecycleRouter):
+    model_router = cast(Router, router)
     if protocol == "chat":
-        return chat.stream_response(router, _chat_request())
+        return chat.stream_response(model_router, _chat_request())
     if protocol == "responses":
         return responses.stream_response(
-            router,
+            model_router,
             _responses_request(),
             request_id="req-lifecycle",
             start_time=time.time(),
         )
     if protocol == "anthropic":
-        return anthropic.stream_response(router, _chat_request(), "claude-sonnet-4", 1)
+        return anthropic.stream_response(model_router, _chat_request(), "claude-sonnet-4", 1)
     if protocol == "gemini":
-        return gemini._stream_response(router, _chat_request(), "gemini-2.5-pro", 1)
+        return gemini._stream_response(model_router, _chat_request(), "gemini-2.5-pro", 1)
     raise AssertionError(f"unknown protocol: {protocol}")
 
 
@@ -282,9 +283,12 @@ async def test_never_started_primed_stream_close_closes_inner_once():
     )
     inner = lifecycle.generate()
     first_chunk = await anext(inner)
-    stream = Router.__new__(Router)._chain_first_chunk(first_chunk, inner)
+    stream = cast(
+        AsyncGenerator[ChatStreamChunk],
+        Router.__new__(Router)._chain_first_chunk(first_chunk, inner),
+    )
 
-    await stream.aclose()
+    await cast(AsyncGenerator[ChatStreamChunk], stream).aclose()
     await stream.aclose()
 
     assert lifecycle.close_count == 1
@@ -298,10 +302,13 @@ async def test_primed_stream_normal_exhaustion_closes_inner_once():
     )
     inner = lifecycle.generate()
     first_chunk = await anext(inner)
-    stream = Router.__new__(Router)._chain_first_chunk(first_chunk, inner)
+    stream = cast(
+        AsyncGenerator[ChatStreamChunk],
+        Router.__new__(Router)._chain_first_chunk(first_chunk, inner),
+    )
 
     chunks = [chunk async for chunk in stream]
-    await stream.aclose()
+    await cast(AsyncGenerator[ChatStreamChunk], stream).aclose()
 
     assert [chunk.content for chunk in chunks] == ["primed", "remaining"]
     assert lifecycle.close_count == 1
@@ -348,7 +355,7 @@ async def test_retryable_priming_failure_closes_candidate_before_fallback():
 
     assert provider_name == "secondary"
     assert primary_close_count == 1
-    await stream.aclose()
+    await cast(AsyncGenerator[ChatStreamChunk], stream).aclose()
 
 
 @pytest.mark.asyncio

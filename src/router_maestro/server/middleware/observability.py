@@ -111,7 +111,7 @@ class ObservabilityMiddleware:
             nonlocal status_code
             if message["type"] == "http.response.start":
                 status_code = str(message["status"])
-                raw_headers = list(message.get("headers", ()))
+                raw_headers: list[tuple[bytes, bytes]] = list(message.get("headers", ()))
                 raw_headers.append((REQUEST_ID_HEADER.lower().encode("ascii"), request_id.encode()))
                 message = {**message, "headers": raw_headers}
             elif message["type"] == "http.response.body" and not message.get("more_body", False):

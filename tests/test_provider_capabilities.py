@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
+from typing import cast
 from unittest.mock import AsyncMock, patch
 
 import httpx
 import pytest
 
 from router_maestro.config import PrioritiesConfig
+from router_maestro.protocols import WireProtocol
 from router_maestro.providers import (
     BaseProvider,
     ChatRequest,
@@ -256,9 +258,11 @@ def _router(
             router._models_cache[f"{provider.name}/{model.id}"] = (provider.name, model)
     router._models_cache_ttl.set(True)
     router._priorities_cache.set(
-        PrioritiesConfig(
-            priorities=priorities,
-            fallback={"strategy": strategy, "maxRetries": max_retries},
+        PrioritiesConfig.model_validate(
+            {
+                "priorities": priorities,
+                "fallback": {"strategy": strategy, "maxRetries": max_retries},
+            }
         )
     )
     return router
@@ -325,9 +329,13 @@ def test_model_capabilities_defensively_freezes_operation_and_feature_maps():
         RequestFeatures(),
     )
     with pytest.raises(TypeError):
-        capabilities.operations[Operation.CHAT] = CapabilitySupport.UNSUPPORTED
+        cast(dict[Operation, CapabilitySupport], capabilities.operations)[Operation.CHAT] = (
+            CapabilitySupport.UNSUPPORTED
+        )
     with pytest.raises(TypeError):
-        capabilities.features[Feature.TOOLS] = CapabilitySupport.SUPPORTED
+        cast(dict[Feature, CapabilitySupport], capabilities.features)[Feature.TOOLS] = (
+            CapabilitySupport.SUPPORTED
+        )
 
 
 @pytest.mark.asyncio
@@ -352,7 +360,9 @@ async def test_route_plan_freezes_catalog_reasoning_effort_values():
         Operation.NATIVE_ANTHROPIC,
         RequestFeatures(reasoning=True),
     )
-    provider._models[0].reasoning_effort_values.append("low")
+    reasoning_values = provider._models[0].reasoning_effort_values
+    assert reasoning_values is not None
+    reasoning_values.append("low")
 
     assert plan.primary.capabilities.reasoning_effort_values == ("medium", "high")
 
@@ -571,6 +581,7 @@ async def test_copilot_catalog_results_are_deep_defensive_copies():
                     {
                         "id": "catalog-model",
                         "name": "Catalog Model",
+                        "supported_endpoints": ["/chat/completions"],
                         "capabilities": {
                             "type": "chat",
                             "supports": {
@@ -593,9 +604,12 @@ async def test_copilot_catalog_results_are_deep_defensive_copies():
     ):
         first = await provider.list_models(force_refresh=True)
 
-    first[0].reasoning_effort_values.append("high")
+    first_reasoning_values = first[0].reasoning_effort_values
+    assert first_reasoning_values is not None
+    first_reasoning_values.append("high")
     first[0].operation_capabilities[Operation.CHAT] = False
     first[0].feature_capabilities[Feature.TOOLS] = False
+    first[0].transport_capabilities[WireProtocol.OPENAI_CHAT] = False
     second = await provider.list_models()
 
     assert first is not second
@@ -603,6 +617,7 @@ async def test_copilot_catalog_results_are_deep_defensive_copies():
     assert second[0].reasoning_effort_values == ["low"]
     assert second[0].operation_capabilities[Operation.CHAT] is True
     assert second[0].feature_capabilities[Feature.TOOLS] is True
+    assert second[0].transport_capabilities[WireProtocol.OPENAI_CHAT] is True
 
 
 @pytest.mark.asyncio
@@ -665,7 +680,13 @@ async def test_copilot_catalog_supported_endpoints_are_operation_authority(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("include_key", "raw_endpoints", "expected_endpoints", "expected_operations"),
+    (
+        "include_key",
+        "raw_endpoints",
+        "expected_endpoints",
+        "expected_operations",
+        "expected_transports",
+    ),
     [
         (
             False,
@@ -678,22 +699,56 @@ async def test_copilot_catalog_supported_endpoints_are_operation_authority(
                 Operation.RESPONSES_STREAM: True,
                 Operation.NATIVE_ANTHROPIC: False,
             },
+            {},
         ),
         (
             True,
             ["/chat/completions", "/responses", "/v1/messages"],
             ("/chat/completions", "/responses", "/v1/messages"),
             dict.fromkeys(Operation, True),
+            {
+                WireProtocol.ANTHROPIC_MESSAGES: True,
+                WireProtocol.OPENAI_CHAT: True,
+                WireProtocol.OPENAI_RESPONSES: True,
+            },
         ),
-        (True, [], (), dict.fromkeys(Operation, False)),
+        (
+            True,
+            ["/responses"],
+            ("/responses",),
+            {
+                Operation.CHAT: False,
+                Operation.CHAT_STREAM: False,
+                Operation.RESPONSES: True,
+                Operation.RESPONSES_STREAM: True,
+                Operation.NATIVE_ANTHROPIC: False,
+            },
+            {
+                WireProtocol.ANTHROPIC_MESSAGES: False,
+                WireProtocol.OPENAI_CHAT: False,
+                WireProtocol.OPENAI_RESPONSES: True,
+            },
+        ),
+        (
+            True,
+            [],
+            (),
+            dict.fromkeys(Operation, False),
+            {
+                WireProtocol.ANTHROPIC_MESSAGES: False,
+                WireProtocol.OPENAI_CHAT: False,
+                WireProtocol.OPENAI_RESPONSES: False,
+            },
+        ),
     ],
-    ids=["missing", "valid", "empty"],
+    ids=["missing", "all", "responses-only", "empty"],
 )
 async def test_copilot_catalog_materializes_endpoint_contract_state(
     include_key,
     raw_endpoints,
     expected_endpoints,
     expected_operations,
+    expected_transports,
 ) -> None:
     catalog_model = {
         "id": "gpt-5.4",
@@ -721,6 +776,7 @@ async def test_copilot_catalog_materializes_endpoint_contract_state(
 
     assert models[0].supported_endpoints == expected_endpoints
     assert models[0].operation_capabilities == expected_operations
+    assert models[0].transport_capabilities == expected_transports
 
 
 @pytest.mark.asyncio
@@ -755,6 +811,7 @@ async def test_copilot_catalog_missing_supported_endpoints_keeps_heuristic_unkno
         Operation.NATIVE_ANTHROPIC: False,
     }
     assert models[0].supported_endpoints is None
+    assert models[0].transport_capabilities == {}
 
 
 @pytest.mark.asyncio
@@ -1085,9 +1142,11 @@ async def test_plan_snapshots_fallback_limit_and_execution_ignores_later_config_
 
     assert [candidate.model.upstream_id for candidate in plan.fallbacks] == ["two"]
     router._priorities_cache.set(
-        PrioritiesConfig(
-            priorities=["third/three"],
-            fallback={"strategy": "priority", "maxRetries": 10},
+        PrioritiesConfig.model_validate(
+            {
+                "priorities": ["third/three"],
+                "fallback": {"strategy": "priority", "maxRetries": 10},
+            }
         )
     )
     with pytest.raises(ProviderError):

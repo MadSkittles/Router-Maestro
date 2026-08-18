@@ -208,7 +208,7 @@ class TestAuthStorage:
         storage.set("openai", cred)
 
         retrieved = storage.get("openai")
-        assert retrieved is not None
+        assert isinstance(retrieved, ApiKeyCredential)
         assert retrieved.key == "test-key"
 
     def test_get_nonexistent(self):
@@ -265,11 +265,11 @@ class TestAuthStorage:
             loaded = AuthStorage.load(path)
 
             openai_cred = loaded.get("openai")
-            assert openai_cred is not None
+            assert isinstance(openai_cred, ApiKeyCredential)
             assert openai_cred.type == AuthType.API_KEY
 
             copilot_cred = loaded.get("github-copilot")
-            assert copilot_cred is not None
+            assert isinstance(copilot_cred, OAuthCredential)
             assert copilot_cred.type == AuthType.OAUTH
             assert copilot_cred.api_endpoint == "https://api.enterprise.githubcopilot.com"
         finally:

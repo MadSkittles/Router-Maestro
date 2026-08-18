@@ -1,6 +1,7 @@
 """Tests for server model-listing routes."""
 
 import asyncio
+from typing import cast
 
 import httpx
 import pytest
@@ -242,7 +243,7 @@ async def test_openai_models_route_uses_explicitly_injected_router():
     """A direct handler call reads the injected Router argument."""
     fake_router = _FakeRouter()
 
-    response = await list_models(fake_router)
+    response = await list_models(cast(Router, fake_router))
 
     assert [model.id for model in response.data] == [
         "openai/gpt-4o",
@@ -257,9 +258,10 @@ async def test_public_model_lists_encode_provider_namespaced_upstream_id():
             return [ModelInfo(id="openrouter/auto", name="Auto", provider="openrouter")]
 
     model_router = _NamespacedRouter()
-    openai_response = await list_models(model_router)
-    anthropic_response = await list_anthropic_models(model_router=model_router)
-    admin_response = await list_admin_models(model_router)
+    typed_router = cast(Router, model_router)
+    openai_response = await list_models(typed_router)
+    anthropic_response = await list_anthropic_models(model_router=typed_router)
+    admin_response = await list_admin_models(typed_router)
 
     expected = ["openrouter/openrouter/auto"]
     assert [model.id for model in openai_response.data] == expected
@@ -281,9 +283,10 @@ async def test_public_model_lists_do_not_double_prefix_qualified_catalog_ids():
             ]
 
     model_router = _QualifiedRouter()
-    openai_response = await list_models(model_router)
-    anthropic_response = await list_anthropic_models(model_router=model_router)
-    admin_response = await list_admin_models(model_router)
+    typed_router = cast(Router, model_router)
+    openai_response = await list_models(typed_router)
+    anthropic_response = await list_anthropic_models(model_router=typed_router)
+    admin_response = await list_admin_models(typed_router)
 
     assert [model.id for model in openai_response.data] == ["github-copilot/claude-sonnet-4.6"]
     assert [model.id for model in anthropic_response.data] == ["github-copilot/claude-sonnet-4.6"]
@@ -359,7 +362,11 @@ async def test_public_model_lists_round_trip_to_same_provider_with_bare_upstream
             assert response.model == "shared-model"
 
     for provider in model_router.providers.values():
-        assert provider.requested_models == ["shared-model", "shared-model", "shared-model"]
+        assert cast(_RoundTripProvider, provider).requested_models == [
+            "shared-model",
+            "shared-model",
+            "shared-model",
+        ]
 
 
 def test_cli_model_list_does_not_double_qualify_public_id(monkeypatch):

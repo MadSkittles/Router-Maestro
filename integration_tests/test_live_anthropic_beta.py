@@ -21,6 +21,7 @@ from integration_tests.conftest import (
     anthropic_effort_payload,
     anthropic_payload,
     anthropic_reasoning_payload,
+    anthropic_thinking_replay_payload,
     anthropic_tool_choice_any_payload,
     anthropic_tool_payload,
     assert_anthropic_has_tool_use,
@@ -384,33 +385,17 @@ def test_beta_thinking_budget_matrix(
     assert not failures, "\n".join(failures)
 
 
-def test_beta_thinking_replay(client: httpx.Client, chat_model: str):
-    """Multi-turn with prior thinking block triggers try-forward retry.
-
-    The beta route first attempts to forward with the thinking block intact.
-    When Copilot rejects the invalid signature, it strips thinking blocks
-    and retries automatically — the client should see a successful response.
-    """
-    payload = {
-        "model": chat_model,
-        "max_tokens": 64,
-        "messages": [
-            {"role": "user", "content": "What is 2 + 2? Reply with just the number."},
-            {
-                "role": "assistant",
-                "content": [
-                    {
-                        "type": "thinking",
-                        "thinking": "Let me calculate: 2+2=4",
-                        "signature": "invalid-sig-from-old-route",
-                    },
-                    {"type": "text", "text": "4"},
-                ],
-            },
-            {"role": "user", "content": "Now reply with exactly the word pong."},
-        ],
-    }
-    response = client.post(BETA, json=payload, timeout=60)
+def test_beta_thinking_replay(
+    client: httpx.Client,
+    anthropic_responses_reasoning_turn: tuple[str, list[dict]],
+):
+    """The beta alias accepts an authenticated Responses reasoning capsule."""
+    model, assistant_content = anthropic_responses_reasoning_turn
+    response = client.post(
+        BETA,
+        json=anthropic_thinking_replay_payload(model, assistant_content),
+        timeout=180.0,
+    )
     assert_http_success(response)
     data = response.json()
 
@@ -418,35 +403,20 @@ def test_beta_thinking_replay(client: httpx.Client, chat_model: str):
     assert text_blocks, data
 
 
-def test_beta_thinking_replay_streaming(client: httpx.Client, chat_model: str):
-    """Streaming with invalid signature triggers try-forward retry."""
-    payload = {
-        "model": chat_model,
-        "max_tokens": 64,
-        "stream": True,
-        "messages": [
-            {"role": "user", "content": "What is 2 + 2? Reply with just the number."},
-            {
-                "role": "assistant",
-                "content": [
-                    {
-                        "type": "thinking",
-                        "thinking": "2+2=4",
-                        "signature": "bad-sig",
-                    },
-                    {"type": "text", "text": "4"},
-                ],
-            },
-            {"role": "user", "content": "Now reply with exactly the word pong."},
-        ],
-    }
-    with client.stream("POST", BETA, json=payload, timeout=120.0) as response:
+def test_beta_thinking_replay_streaming(
+    client: httpx.Client,
+    anthropic_responses_reasoning_turn: tuple[str, list[dict]],
+):
+    """The beta streaming alias replays the same authenticated capsule."""
+    model, assistant_content = anthropic_responses_reasoning_turn
+    payload = anthropic_thinking_replay_payload(model, assistant_content, stream=True)
+    with client.stream("POST", BETA, json=payload, timeout=180.0) as response:
         assert_http_success(response)
         events = parse_sse_events(response)
 
     event_names = [name for name, _payload in events]
     assert "message_start" in event_names
-    assert "message_stop" in event_names
+    assert "message_stop" in event_names, events
 
 
 # ---------------------------------------------------------------------------

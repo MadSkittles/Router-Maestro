@@ -69,9 +69,11 @@ class TestPrioritiesConfig:
 
     def test_with_fallback_dict(self):
         """Test config with fallback as dict."""
-        config = PrioritiesConfig(
-            priorities=["model-1"],
-            fallback={"strategy": "none", "maxRetries": 0},
+        config = PrioritiesConfig.model_validate(
+            {
+                "priorities": ["model-1"],
+                "fallback": {"strategy": "none", "maxRetries": 0},
+            }
         )
         assert config.fallback.strategy == FallbackStrategy.NONE
 
@@ -86,11 +88,13 @@ class TestProvidersConfig:
 
     def test_with_providers(self):
         """Test config with providers."""
-        config = ProvidersConfig(
-            providers={
-                "custom": {
-                    "baseURL": "https://api.example.com/v1",
-                    "models": {"model-1": {"name": "Model One"}},
+        config = ProvidersConfig.model_validate(
+            {
+                "providers": {
+                    "custom": {
+                        "baseURL": "https://api.example.com/v1",
+                        "models": {"model-1": {"name": "Model One"}},
+                    }
                 }
             }
         )
@@ -100,11 +104,13 @@ class TestProvidersConfig:
     @pytest.mark.parametrize("provider_name", ["", "   ", "team/p"])
     def test_rejects_provider_names_outside_public_identity_domain(self, provider_name):
         with pytest.raises(ValidationError):
-            ProvidersConfig(
-                providers={
-                    provider_name: {
-                        "baseURL": "https://api.example.com/v1",
-                        "models": {"model": {"name": "Model"}},
+            ProvidersConfig.model_validate(
+                {
+                    "providers": {
+                        provider_name: {
+                            "baseURL": "https://api.example.com/v1",
+                            "models": {"model": {"name": "Model"}},
+                        }
                     }
                 }
             )
@@ -116,7 +122,7 @@ class TestProvidersConfig:
         }
 
         with pytest.raises(ValidationError, match="case-insensitive"):
-            ProvidersConfig(providers={"foo": provider, "FOO": provider})
+            ProvidersConfig.model_validate({"providers": {"foo": provider, "FOO": provider}})
 
 
 class TestContextConfig:

@@ -116,14 +116,14 @@ class CopilotTransport:
 
     def get_client(self) -> httpx.AsyncClient:
         now = time.time()
-        needs_recycle = (
-            self.client is not None
-            and not self.client.is_closed
+        client = self.client
+        if (
+            client is not None
+            and not client.is_closed
             and self.client_created_at > 0
             and now - self.client_created_at >= self.client_max_age
-        )
-        if needs_recycle:
-            asyncio.ensure_future(self.client.aclose())
+        ):
+            asyncio.ensure_future(client.aclose())
             self.client = None
         if self.client is None or self.client.is_closed:
             self.client = httpx.AsyncClient(

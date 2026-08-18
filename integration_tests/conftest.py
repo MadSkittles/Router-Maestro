@@ -290,7 +290,8 @@ def scripted_upstream(
     server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
-    host, port = server.server_address
+    host = server.server_address[0]
+    port = server.server_address[1]
     upstream = ScriptedUpstream(f"http://{host}:{port}", requests)
     try:
         yield upstream
@@ -445,6 +446,7 @@ def live_server() -> Iterator[LiveServer]:
         env=env,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
+        text=True,
     )
 
     try:
@@ -472,6 +474,7 @@ class _RetryTransport(httpx.BaseTransport):
                 if attempt >= MAX_RETRIES_ON_TIMEOUT:
                     raise
                 time.sleep(RETRY_BACKOFF_SECONDS)
+        raise RuntimeError("retry loop exhausted")  # pragma: no cover
 
     def close(self) -> None:
         self._inner.close()
@@ -574,13 +577,14 @@ def copilot_models(
     payload = response.json()
     if not isinstance(payload, dict) or not isinstance(payload.get("data"), list):
         pytest.fail("OpenAI model endpoint returned a malformed list")
-    public_ids = [
-        model.get("id")
-        for model in payload["data"]
-        if isinstance(model, dict) and model.get("owned_by") == COPILOT_PROVIDER
-    ]
-    if any(not isinstance(model_id, str) or not model_id for model_id in public_ids):
-        pytest.fail("OpenAI model endpoint returned an invalid Copilot public ID")
+    public_ids: list[str] = []
+    for model in payload["data"]:
+        if not isinstance(model, dict) or model.get("owned_by") != COPILOT_PROVIDER:
+            continue
+        model_id = model.get("id")
+        if not isinstance(model_id, str) or not model_id:
+            pytest.fail("OpenAI model endpoint returned an invalid Copilot public ID")
+        public_ids.append(model_id)
     duplicate_ids = sorted(
         model_id for model_id in set(public_ids) if public_ids.count(model_id) > 1
     )
@@ -882,6 +886,43 @@ def responses_model(
 
 
 @pytest.fixture(scope="session")
+def responses_only_reasoning_model(
+    copilot_models: list[str],
+    copilot_catalog: dict[str, ModelInfo],
+) -> str:
+    """Responses-only GPT used to verify Anthropic reasoning-capsule replay."""
+
+    def eligible(model: str) -> bool:
+        info = copilot_catalog[model]
+        bare = bare_model(model).lower()
+        if not bare.startswith("gpt-") or not model_supports_reasoning(info):
+            return False
+        endpoints = info.supported_endpoints
+        if endpoints is None:
+            return bare in RESPONSES_ONLY_CHAT_MODELS
+        advertised = set(endpoints)
+        return (
+            "/responses" in advertised
+            and "/chat/completions" not in advertised
+            and "/v1/messages" not in advertised
+        )
+
+    candidates = [model for model in _prioritize_models(copilot_models) if eligible(model)]
+    preferred = (
+        "github-copilot/gpt-5.4-mini",
+        "github-copilot/gpt-5.3-codex",
+        "github-copilot/gpt-5.2-codex",
+        "github-copilot/gpt-5.5",
+    )
+    selected = _first_available(candidates, preferred)
+    if selected:
+        return selected
+    if candidates:
+        return candidates[0]
+    pytest.skip("No reasoning-capable Responses-only GPT is available")
+
+
+@pytest.fixture(scope="session")
 def responses_top_p_model(
     copilot_models: list[str],
     copilot_catalog: dict[str, ModelInfo],
@@ -1103,37 +1144,89 @@ def anthropic_tool_choice_any_payload(model: str, *, stream: bool = False) -> di
     return payload
 
 
-def anthropic_thinking_replay_payload(model: str, *, stream: bool = False) -> dict[str, Any]:
-    """Multi-turn Anthropic payload whose history includes a prior thinking block.
+_ANTHROPIC_REPLAY_SEED_PROMPT = "What is 2 + 2? Reply with just the number."
+_ANTHROPIC_REPLAY_FOLLOWUP_PROMPT = "Now reply with exactly the word pong."
+_ANTHROPIC_REPLAY_SEED_BUDGET = 4096
 
-    Regression guard for the thinking-leak fix: a replayed assistant turn that
-    carries a ``thinking`` block must not poison the next turn's history. The
-    request must still succeed and return fresh assistant text.
-    """
+
+def anthropic_thinking_seed_payload(model: str) -> dict[str, Any]:
+    """First Responses→Anthropic turn that must emit an authenticated capsule."""
     return {
         "model": model,
-        "max_tokens": 64,
-        "temperature": 0,
+        "max_tokens": 2048,
+        "messages": [{"role": "user", "content": _ANTHROPIC_REPLAY_SEED_PROMPT}],
+        # Copilot Responses may legitimately complete a trivial low-effort
+        # request without a reasoning item. Medium reliably exercises the
+        # opaque-state path this replay fixture exists to validate.
+        "thinking": {"type": "enabled", "budget_tokens": _ANTHROPIC_REPLAY_SEED_BUDGET},
+    }
+
+
+def anthropic_reasoning_capsules(content: Any) -> list[str]:
+    """Return Router-Maestro carriers from Anthropic reasoning blocks."""
+    if not isinstance(content, list):
+        return []
+    capsules = []
+    for block in content:
+        if not isinstance(block, dict):
+            continue
+        block_type = block.get("type")
+        if block_type == "thinking":
+            carrier = block.get("signature")
+        elif block_type == "redacted_thinking":
+            carrier = block.get("data")
+        else:
+            continue
+        if isinstance(carrier, str) and carrier.startswith("rmr1."):
+            capsules.append(carrier)
+    return capsules
+
+
+@pytest.fixture(scope="session")
+def anthropic_responses_reasoning_turn(
+    client: httpx.Client,
+    responses_only_reasoning_model: str,
+) -> tuple[str, list[dict[str, Any]]]:
+    """Capture one real Responses reasoning item encoded on the Anthropic wire."""
+    model = responses_only_reasoning_model
+    response = client.post(
+        "/api/anthropic/v1/messages",
+        json=anthropic_thinking_seed_payload(model),
+        timeout=180.0,
+    )
+    assert_http_success(response)
+    data = response.json()
+    content = data.get("content")
+    if not isinstance(content, list) or not all(isinstance(block, dict) for block in content):
+        pytest.fail(f"Responses→Anthropic seed returned malformed content: {data}")
+    capsules = anthropic_reasoning_capsules(content)
+    if not capsules:
+        pytest.fail(f"Responses→Anthropic seed did not return an RM reasoning capsule: {data}")
+    assert_anthropic_usage(data.get("usage"))
+    return model, content
+
+
+def anthropic_thinking_replay_payload(
+    model: str,
+    assistant_content: list[dict[str, Any]],
+    *,
+    stream: bool = False,
+) -> dict[str, Any]:
+    """Replay an authenticated first-turn Responses item through Anthropic."""
+    return {
+        "model": model,
+        "max_tokens": 2048,
         "stream": stream,
+        "thinking": {"type": "enabled", "budget_tokens": 1024},
         "messages": [
-            {"role": "user", "content": "What is 2 + 2? Reply with just the number."},
-            {
-                "role": "assistant",
-                "content": [
-                    {
-                        "type": "thinking",
-                        "thinking": "INTERNAL_SCRATCHPAD_SHOULD_NOT_LEAK: 2+2=4.",
-                        "signature": "sig-test",
-                    },
-                    {"type": "text", "text": "4"},
-                ],
-            },
-            {"role": "user", "content": "Now reply with exactly the word pong."},
+            {"role": "user", "content": _ANTHROPIC_REPLAY_SEED_PROMPT},
+            {"role": "assistant", "content": assistant_content},
+            {"role": "user", "content": _ANTHROPIC_REPLAY_FOLLOWUP_PROMPT},
         ],
     }
 
 
-def gemini_tool_payload(*, max_output_tokens: int = 16) -> dict[str, Any]:
+def gemini_tool_payload(*, max_output_tokens: int = 64) -> dict[str, Any]:
     """Gemini payload that requires a function call."""
     payload = gemini_payload(max_output_tokens=max_output_tokens)
     payload["contents"] = [{"role": "user", "parts": [{"text": TOOL_PROMPT}]}]

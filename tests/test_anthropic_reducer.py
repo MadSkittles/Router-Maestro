@@ -92,7 +92,10 @@ def test_nonstream_builds_ordered_blocks_usage_and_terminal() -> None:
         model="provider/upstream-model",
     )
 
-    assert [block.model_dump(exclude_none=True) for block in downstream.content] == [
+    assert [
+        block if isinstance(block, dict) else block.model_dump(exclude_none=True)
+        for block in downstream.content
+    ] == [
         {"type": "thinking", "thinking": "consider", "signature": "opaque"},
         {"type": "text", "text": "answer"},
         {"type": "text", "text": "cannot help"},
@@ -167,7 +170,8 @@ def test_stream_and_nonstream_share_content_and_terminal_rules() -> None:
         events.extend(reducer.reduce(chunk))
 
     assert _reconstruct_blocks(events) == [
-        block.model_dump(exclude_none=True) for block in nonstream.content
+        block if isinstance(block, dict) else block.model_dump(exclude_none=True)
+        for block in nonstream.content
     ]
     terminal = next(event for event in events if event["type"] == "message_delta")
     assert terminal["delta"]["stop_reason"] == nonstream.stop_reason == "tool_use"
@@ -254,9 +258,10 @@ def test_nonstream_zero_argument_tool_call_becomes_empty_object(arguments: str) 
         model="provider/upstream-model",
     )
 
-    assert [block.model_dump(exclude_none=True) for block in downstream.content] == [
-        {"type": "tool_use", "id": "tool-a", "name": "alpha", "input": {}}
-    ]
+    assert [
+        block if isinstance(block, dict) else block.model_dump(exclude_none=True)
+        for block in downstream.content
+    ] == [{"type": "tool_use", "id": "tool-a", "name": "alpha", "input": {}}]
 
 
 def test_malformed_tool_terminal_is_transactional() -> None:

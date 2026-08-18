@@ -17,6 +17,7 @@ class TestModelInfoWithOverrides:
             max_context_window_tokens=200000,
             supports_thinking=True,
             supports_vision=True,
+            transport_capabilities={"openai_responses": True},
         )
 
     def test_override_single_field(self):
@@ -65,6 +66,7 @@ class TestModelInfoWithOverrides:
         assert updated.provider == "github-copilot"
         assert updated.supports_thinking is True
         assert updated.supports_vision is True
+        assert updated.transport_capabilities == {"openai_responses": True}
 
 
 class TestModelOverrideConfig:

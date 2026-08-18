@@ -85,6 +85,12 @@ def _models(*entries: dict[str, Any]) -> tuple[int, bytes, dict[str, str]]:
     return _json_reply(200, {"data": list(entries)})
 
 
+def _request_payload(request: RecordedUpstreamRequest) -> dict[str, Any]:
+    if request.payload is None:
+        raise AssertionError(f"expected a JSON payload for {request.method} {request.path}")
+    return request.payload
+
+
 def _catalog_model(
     model: str,
     *,
@@ -136,37 +142,16 @@ def _auth(api_base: str) -> dict[str, Any]:
 
 def _assert_native_open_failure(surface: str, response: httpx.Response) -> None:
     """Require the exact native envelope for one controlled stream-open failure."""
-    if surface == "anthropic":
-        assert response.status_code == 200
-        errors = [
-            payload
-            for name, payload in parse_sse_events(response)
-            if name == "error" and isinstance(payload, dict)
-        ]
-        assert errors == [
-            {
-                "type": "error",
-                "error": {"type": "rate_limit_error", "message": "Copilot API error: 429"},
-            }
-        ]
-        return
-
-    if surface == "anthropic-beta":
-        # The native beta stream primes upstream inside the SSE generator (to keep
-        # keepalive pings flowing during a possibly minutes-long first-frame wait),
-        # so response headers commit as 200 before the open failure is known. A
-        # stream-open failure therefore surfaces as an SSE ``error`` event, mirroring
-        # the standard Anthropic path. See anthropic_beta._beta_planned_native_stream.
-        assert response.status_code == 200
-        assert response.headers["content-type"].startswith("text/event-stream")
-        errors = [
-            payload
-            for name, payload in parse_sse_events(response)
-            if name == "error" and isinstance(payload, dict)
-        ]
-        assert len(errors) == 1
-        assert errors[0]["type"] == "error"
-        assert errors[0]["error"]["type"] == "rate_limit_error"
+    if surface in {"anthropic", "anthropic-beta"}:
+        # Stable and beta aliases share the dispatcher. It primes the first valid
+        # upstream frame before committing SSE headers, so a failure while opening
+        # every transport remains an ordinary protocol-native HTTP error.
+        assert response.status_code == 429
+        assert response.headers["content-type"].startswith("application/json")
+        assert response.json() == {
+            "type": "error",
+            "error": {"type": "rate_limit_error", "message": "Copilot API error: 429"},
+        }
         return
 
     assert response.status_code == 429
@@ -217,7 +202,7 @@ def _assert_unexpected_eof_terminal(surface: str, response: httpx.Response) -> N
         assert len(errors) == 1
         assert errors[0]["code"] == 502
         assert errors[0]["status"] == "INTERNAL"
-        assert errors[0]["details"] == []
+        assert errors[0]["details"] == [{"reason": "unexpected_eof"}]
 
 
 @contextmanager
@@ -247,7 +232,7 @@ def _controlled_copilot(
                 yield client, upstream
 
 
-def test_operation_routing_uses_catalog_capability_and_exact_responses_payload(tmp_path: Path):
+def test_operation_routing_exhausts_transport_before_model_fallback(tmp_path: Path):
     def responder(request: RecordedUpstreamRequest):
         if request.path == "/models":
             return _models(
@@ -255,7 +240,7 @@ def test_operation_routing_uses_catalog_capability_and_exact_responses_payload(t
                 _catalog_model("responses-only", endpoints=["/responses"]),
             )
         if request.path == "/responses":
-            return _responses_success(request.payload["model"])
+            return _responses_success(_request_payload(request)["model"])
         return _json_reply(500, {"error": "wrong operation"})
 
     with _controlled_copilot(
@@ -280,7 +265,7 @@ def test_operation_routing_uses_catalog_capability_and_exact_responses_payload(t
     assert response.json()["model"] == "github-copilot/responses-only"
     request = select_recorded_request(upstream.requests, method="POST", path="/responses")
     assert_exact_outbound_payload(
-        request.payload,
+        _request_payload(request),
         {
             "model": "responses-only",
             "input": "ping",
@@ -292,7 +277,26 @@ def test_operation_routing_uses_catalog_capability_and_exact_responses_payload(t
             "service_tier": "default",
         },
     )
-    assert not [r for r in upstream.requests if r.path == "/chat/completions"]
+    chat_request = select_recorded_request(
+        upstream.requests,
+        method="POST",
+        path="/chat/completions",
+    )
+    assert_exact_outbound_payload(
+        _request_payload(chat_request),
+        {
+            "model": "chat-only",
+            "messages": [
+                {"role": "system", "content": "answer exactly"},
+                {"role": "user", "content": "ping"},
+            ],
+            "stream": False,
+            "max_tokens": 17,
+            "top_p": 0.7,
+            "metadata": {"case": "operation-routing"},
+            "service_tier": "default",
+        },
+    )
 
 
 def test_capability_mismatch_is_precommit_and_never_calls_upstream(tmp_path: Path):
@@ -389,9 +393,9 @@ def test_automatic_fallback_skips_feature_incompatible_candidates(tmp_path: Path
                     tools=True,
                 ),
             )
-        if request.payload["model"] == "primary-tools":
+        if _request_payload(request)["model"] == "primary-tools":
             return _json_reply(503, {"error": {"message": "retry", "type": "server_error"}})
-        if request.payload["model"] == "fallback-tools":
+        if _request_payload(request)["model"] == "fallback-tools":
             return _chat_success("fallback-tools")
         return _json_reply(500, {"error": "feature-incompatible candidate was executed"})
 
@@ -424,7 +428,7 @@ def test_automatic_fallback_skips_feature_incompatible_candidates(tmp_path: Path
     assert response.status_code == 200, response.text
     assert response.json()["model"] == "github-copilot/fallback-tools"
     attempts = [
-        request.payload["model"]
+        _request_payload(request)["model"]
         for request in upstream.requests
         if request.path == "/chat/completions"
     ]
@@ -438,7 +442,7 @@ def test_precommit_failure_falls_back_and_reports_actual_model_identity(tmp_path
                 _catalog_model("primary", endpoints=["/chat/completions"]),
                 _catalog_model("fallback", endpoints=["/chat/completions"]),
             )
-        if request.payload["model"] == "primary":
+        if _request_payload(request)["model"] == "primary":
             return _json_reply(503, {"error": {"message": "retry", "type": "server_error"}})
         return _chat_success("fallback")
 
@@ -503,7 +507,7 @@ def test_precommit_failure_falls_back_and_reports_actual_model_identity(tmp_path
             "gemini",
             "/api/gemini/v1beta/models/github-copilot/stream-model:streamGenerateContent",
             {"contents": [{"role": "user", "parts": [{"text": "ping"}]}]},
-            "/chat/completions",
+            "/responses",
         ),
     ],
 )
@@ -539,7 +543,7 @@ def test_stream_postcommit_failure_is_normalized_once_and_never_replays(tmp_path
                 _catalog_model("primary", endpoints=["/chat/completions"]),
                 _catalog_model("fallback", endpoints=["/chat/completions"]),
             )
-        if request.payload["model"] == "fallback":
+        if _request_payload(request)["model"] == "fallback":
             return _chat_success("fallback")
         return _sse_reply(
             {"choices": [{"delta": {"content": "partial"}, "finish_reason": None}]},
@@ -616,7 +620,7 @@ def test_stream_postcommit_failure_is_normalized_once_and_never_replays(tmp_path
                 "max_tokens": 8,
                 "messages": [{"role": "user", "content": "ping"}],
             },
-            "/chat/completions",
+            "/v1/messages",
         ),
         (
             "anthropic-beta",
@@ -633,7 +637,7 @@ def test_stream_postcommit_failure_is_normalized_once_and_never_replays(tmp_path
             "gemini",
             "/api/gemini/v1beta/models/github-copilot/eof-model:streamGenerateContent",
             {"contents": [{"role": "user", "parts": [{"text": "ping"}]}]},
-            "/chat/completions",
+            "/responses",
         ),
     ],
 )
@@ -691,7 +695,7 @@ def test_beta_enabled_budget_effort_payload_is_exact_in_both_modes(tmp_path: Pat
     def responder(request: RecordedUpstreamRequest):
         if request.path == "/models":
             return _models(_catalog_model("claude-controlled", endpoints=["/v1/messages"]))
-        if request.payload["stream"]:
+        if _request_payload(request)["stream"]:
             return (
                 200,
                 b"event: message_start\ndata: "
@@ -734,7 +738,7 @@ def test_beta_enabled_budget_effort_payload_is_exact_in_both_modes(tmp_path: Pat
     assert len(attempts) == 2
     for stream, request in zip((False, True), attempts, strict=True):
         assert_exact_outbound_payload(
-            request.payload,
+            _request_payload(request),
             {
                 "model": "claude-controlled",
                 "messages": [{"role": "user", "content": "ping"}],
@@ -752,7 +756,7 @@ def test_standard_anthropic_enabled_budget_effort_payload_is_exact_in_both_modes
     def responder(request: RecordedUpstreamRequest):
         if request.path == "/models":
             return _models(_catalog_model("claude-controlled", endpoints=["/chat/completions"]))
-        if request.payload["stream"]:
+        if _request_payload(request)["stream"]:
             return _sse_reply(
                 {
                     "model": "claude-controlled",
@@ -801,7 +805,7 @@ def test_standard_anthropic_enabled_budget_effort_payload_is_exact_in_both_modes
         }
         if stream:
             expected["stream_options"] = {"include_usage": True}
-        assert_exact_outbound_payload(request.payload, expected)
+        assert_exact_outbound_payload(_request_payload(request), expected)
 
 
 def test_chat_reasoning_effort_downgraded_to_catalog_tier(tmp_path: Path):
@@ -812,7 +816,7 @@ def test_chat_reasoning_effort_downgraded_to_catalog_tier(tmp_path: Path):
         if request.path == "/models":
             return _models(_catalog_model("chat-model", endpoints=["/chat/completions"]))
         if request.path == "/chat/completions":
-            return _chat_success(request.payload["model"])
+            return _chat_success(_request_payload(request)["model"])
         return _json_reply(500, {"error": "wrong operation"})
 
     with _controlled_copilot(
@@ -831,7 +835,7 @@ def test_chat_reasoning_effort_downgraded_to_catalog_tier(tmp_path: Path):
 
     assert response.status_code == 200, response.text
     request = select_recorded_request(upstream.requests, method="POST", path="/chat/completions")
-    assert request.payload["reasoning_effort"] == "high"
+    assert _request_payload(request)["reasoning_effort"] == "high"
 
 
 def test_responses_reasoning_effort_downgraded_to_catalog_tier(tmp_path: Path):
@@ -842,7 +846,7 @@ def test_responses_reasoning_effort_downgraded_to_catalog_tier(tmp_path: Path):
         if request.path == "/models":
             return _models(_catalog_model("responses-model", endpoints=["/responses"]))
         if request.path == "/responses":
-            return _responses_success(request.payload["model"])
+            return _responses_success(_request_payload(request)["model"])
         return _json_reply(500, {"error": "wrong operation"})
 
     with _controlled_copilot(
@@ -861,7 +865,7 @@ def test_responses_reasoning_effort_downgraded_to_catalog_tier(tmp_path: Path):
 
     assert response.status_code == 200, response.text
     request = select_recorded_request(upstream.requests, method="POST", path="/responses")
-    assert request.payload["reasoning"]["effort"] == "high"
+    assert _request_payload(request)["reasoning"]["effort"] == "high"
 
 
 @pytest.mark.parametrize(

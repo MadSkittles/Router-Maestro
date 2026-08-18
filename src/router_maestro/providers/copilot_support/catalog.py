@@ -11,6 +11,7 @@ from typing import Any, NoReturn
 
 import httpx
 
+from router_maestro.protocols import WireProtocol
 from router_maestro.providers.base import (
     TIMEOUT_NON_STREAMING,
     ModelInfo,
@@ -74,6 +75,22 @@ def normalize_supported_endpoints(model: Mapping[str, Any]) -> tuple[str, ...] |
     return tuple(supported_endpoints)
 
 
+def transport_capabilities(
+    supported_endpoints: tuple[str, ...] | None,
+) -> dict[str, bool]:
+    """Map an explicit Copilot endpoint contract to wire-protocol support."""
+    if supported_endpoints is None:
+        return {}
+    endpoints = set(supported_endpoints)
+    return {
+        WireProtocol.ANTHROPIC_MESSAGES: any(
+            endpoint.endswith("/messages") for endpoint in endpoints
+        ),
+        WireProtocol.OPENAI_CHAT: "/chat/completions" in endpoints,
+        WireProtocol.OPENAI_RESPONSES: "/responses" in endpoints,
+    }
+
+
 def normalize_catalog_boolean(supports: Mapping[str, Any], key: str) -> bool | None:
     if key not in supports:
         return None
@@ -130,17 +147,15 @@ def operation_capabilities(
     bare_model_id = model_id.split("/", 1)[1] if "/" in model_id else model_id
     supported_endpoints = normalize_endpoints(model)
     if supported_endpoints is not None:
-        endpoints = set(supported_endpoints)
-        chat = "/chat/completions" in endpoints
-        responses = "/responses" in endpoints
+        transports = transport_capabilities(supported_endpoints)
+        chat = transports[WireProtocol.OPENAI_CHAT]
+        responses = transports[WireProtocol.OPENAI_RESPONSES]
         return {
             Operation.CHAT: chat,
             Operation.CHAT_STREAM: chat,
             Operation.RESPONSES: responses,
             Operation.RESPONSES_STREAM: responses,
-            Operation.NATIVE_ANTHROPIC: any(
-                endpoint.endswith("/messages") for endpoint in endpoints
-            ),
+            Operation.NATIVE_ANTHROPIC: transports[WireProtocol.ANTHROPIC_MESSAGES],
         }
 
     operations: dict[str, bool] = {
@@ -267,6 +282,7 @@ class CopilotCatalog:
                             else {}
                         ),
                     },
+                    transport_capabilities=transport_capabilities(supported_endpoints),
                 )
             )
         return models

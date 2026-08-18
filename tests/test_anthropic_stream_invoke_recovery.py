@@ -11,11 +11,13 @@ a real ``tool_use`` block and promoting the stop reason to ``tool_use``.
 
 import json
 from collections.abc import AsyncGenerator
+from typing import cast
 
 import pytest
 
 from router_maestro.providers import ChatRequest, Message
 from router_maestro.providers.base import ChatStreamChunk
+from router_maestro.routing.router import Router
 from router_maestro.server.routes.anthropic import stream_response
 
 
@@ -62,7 +64,10 @@ async def _run(chunks, *, tools=None) -> list[dict]:
         async def chat_completion_stream(self, req):
             return await _fake_stream(*chunks)
 
-    frames = [frame async for frame in stream_response(_Router(), request, "claude-opus-4-8")]
+    frames = [
+        frame
+        async for frame in stream_response(cast(Router, _Router()), request, "claude-opus-4-8")
+    ]
     return _parse_events(frames)
 
 

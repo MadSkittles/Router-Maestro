@@ -2,30 +2,72 @@
 
 ## Overview
 
-Router-Maestro uses an internal hub-and-spoke architecture. OpenAI Chat,
-Anthropic, and Gemini requests are normalized to a typed `ChatRequest`; OpenAI
-Responses uses a typed `ResponsesRequest`. The router builds one immutable,
-capability-aware route plan, providers execute the selected wire operation, and
-the entry protocol encodes the result.
+Router-Maestro separates the ingress protocol, model route, and provider
+transport. Anthropic Messages, OpenAI Chat, OpenAI Responses, and Gemini
+generation requests enter one dispatcher. The current provider bindings expose
+Anthropic Messages, OpenAI Chat, or OpenAI Responses upstream, producing a 4×3
+generation matrix.
 
 ```
-Anthropic Request ──► translate_anthropic_to_openai() ──► ChatRequest ──► Provider ──► ChatResponse ──► build_anthropic_response() ──► Anthropic Response
-OpenAI Request ──────────────── (passthrough) ──────────► ChatRequest ──► Provider ──► ChatResponse ──────────── (passthrough) ──────────────► OpenAI Response
-OpenAI Responses ───────────── typed normalization ─────► ResponsesRequest ──► Provider/bridge ──► Responses output
-Gemini Request ─────────────── protocol translation ────► ChatRequest ──► Provider ──► ChatResponse ──► Gemini Response
+thin route -> RequestEnvelope -> model candidates -> ProviderHandler
+           -> TransportPlan -> identity wire path or lazy Semantic IR
+           -> provider binding -> response/event bridge -> ingress encoder
 ```
 
-Routing and translation are separate decisions. A `ModelRef` always identifies
-one provider plus one upstream model. A provider may adapt an operation (for
-example, Chat through its Responses transport), and the beta Anthropic route
-may adapt a model lacking native Anthropic transport through the standard
-translated path. Neither adaptation is model fallback. Selecting another
-`ModelRef` is allowed only by the frozen route plan after a retryable execution
-failure.
+`RequestEnvelope` retains the raw JSON and only performs a shallow manifest
+inspection for model, stream mode, capabilities, and continuation affinity. If
+ingress and binding protocols match, request and response handling use a
+copy-on-write identity path and semantic IR is never materialized. A
+cross-protocol attempt decodes one typed `SemanticRequest` lazily; later
+eligible attempts share that immutable instance. Streaming conversions decode
+and encode `SemanticEvent` values per frame instead of buffering a complete
+response.
+
+Routing and translation are independent decisions. `GenerationRoutePlan`
+contains provider/model candidates only; it never freezes a protocol
+conversion. `ProviderHandler` owns binding availability and transport order.
+All compatible transports for one model are tried before a retryable failure
+can switch to the next `ModelRef`, and transport changes do not consume the
+model fallback limit. The first valid upstream stream frame commits the
+candidate and forbids transport or model replay.
+
+| Ingress | Preferred Copilot transports |
+|---|---|
+| Anthropic Messages | Messages → Responses → Chat |
+| OpenAI Chat | Chat → Responses → Messages |
+| OpenAI Responses | Responses → Chat → Messages |
+| Gemini | Responses → Chat → Messages |
+
+Provider registrations remain narrower than this dispatcher matrix: Copilot
+registers all three bindings, Anthropic registers Messages, and OpenAI/custom
+providers register their existing Chat binding. There is no Gemini-native
+provider yet. Gemini `generateContent` and `streamGenerateContent` still use the
+shared dispatcher, while Gemini and Anthropic token-count endpoints remain
+separate native-count/estimator operations.
+
+### Reasoning continuation capsules
+
+Responses reasoning state that must cross an Anthropic or Gemini boundary is
+sealed as `rmr1.<key-id>.<payload>` with AES-256-GCM. Anthropic
+`thinking.signature`/`redacted_thinking.data` and Gemini `thoughtSignature`
+carry the capsule; returning through a compatible Responses binding restores
+the original reasoning item. Chat has no reliable opaque continuation slot, so
+such a request is not eligible for Chat fallback.
+
+Capsules and `previous_response_id` establish provider/model/transport
+affinity. Unknown keys, tampering, version errors, or provenance mismatch fail
+closed before provider I/O. Keys, capsule plaintext, and restored provider state
+must not be logged. Deployment and rotation requirements are documented in
+`docs/deployment.md`.
 
 ---
 
 ## Translation Paths
+
+The functions named below remain compatibility facades for legacy DTO call
+sites and reducers. Dispatcher traffic uses the corresponding protocol runtime
+and semantic codecs; `ChatRequest` and `ResponsesRequest` are no longer the
+core cross-protocol IR.
 
 ### Path 1: Anthropic → Internal (Request Inbound)
 
@@ -180,11 +222,12 @@ completed, incomplete, failed, cancelled, or unknown. Only an explicit
 | Clean provider EOF without an explicit terminal | HTTP `200` after commitment | Encode `unexpected_eof` as a non-success in-stream terminal |
 | Downstream disconnect | Already-committed status if any | Record cancellation and finalize resources; do not manufacture success |
 
-The standard Anthropic stream emits a protocol `ping` while the Router opens
-and primes the provider stream. Consequently, an open/first-chunk failure after
-that ping is already post-commit and is encoded in-stream. OpenAI Chat,
-Responses, Gemini, and beta-native Anthropic open/prime before returning their
-stream response, so their corresponding early failures can still be non-2xx.
+All shared-dispatcher streams open and prime the first valid provider frame
+before returning their HTTP stream response, so an early open/first-frame
+failure can still be non-2xx. After commitment, the Anthropic stream may emit
+protocol `ping` keepalives, and all protocols encode later failures in-stream
+without transport or model replay. The Anthropic beta alias has the same
+behavior as the stable path.
 
 Native OpenAI Responses status is part of the response body, not a replacement
 HTTP status. Non-stream `status: "incomplete"`, `"failed"`, or `"cancelled"`
@@ -267,10 +310,11 @@ if resolution.effort is not None:
 - Otherwise uses the budget fallback format:
   `{"type":"enabled","budget_tokens":16000}`
 
-The beta native Copilot route preserves a valid `output_config.effort` and
-rejects unsupported siblings such as `output_config.format` with an Anthropic
-`invalid_request_error` and HTTP 400 before provider or SSE commitment. Explicit
-effort removes only an adaptive `thinking.budget_tokens`; manual enabled thinking
+The Copilot Messages binding preserves a valid `output_config.effort`; other
+explicit fields pass through only when its outbound contract can represent
+them, otherwise validation returns an Anthropic `invalid_request_error` and
+HTTP 400 before provider or SSE commitment. Explicit effort removes only an
+adaptive `thinking.budget_tokens`; manual enabled thinking
 keeps its required budget before forwarding when `budget_tokens < max_tokens`.
 If enabled thinking omits `budget_tokens`, the configured server default is used.
 Present `max_tokens` and `thinking.budget_tokens` values must be positive,
@@ -297,7 +341,7 @@ unknown catalog strings remain strict upstream-protocol errors.
 The Copilot provider's outbound contract
 (`CopilotOutboundContract.resolve_reasoning` in `providers/copilot.py`) owns the
 single reasoning-effort rule for Chat, Responses, and — via the shared
-`pick_closest_effort` primitive — the native beta route. It chooses one of two
+`pick_closest_effort` primitive — the Messages binding. It chooses one of two
 paths per request, decided solely by whether `catalog_effort_values` is `None`.
 
 **`catalog_effort_values` comes from the in-memory model cache only**
@@ -347,12 +391,11 @@ requested `xhigh` down to `high`; `gpt-5-mini` (tops at `high`) maps `max`/`xhig
 down to `high`; `gpt-5.6-*` (advertises `max`) preserves a requested `max`
 unchanged.
 
-Standard Anthropic routing first freezes a `RoutePlan`, then resolves thinking
-budget and reasoning support separately from every candidate's immutable
-capability and `max_output_tokens` snapshot. The candidate-specific transformed
-requests are rebound to that same ordered pool for validation and execution, so
-runtime fallback uses the limits of the model that actually receives the
-request. No priority, retry limit, or provider/model identity is recomputed.
+Anthropic dispatcher routing first freezes a model-only `GenerationRoutePlan`.
+Thinking budget, reasoning support, and representability are then evaluated for
+the concrete provider/model/binding attempt. Candidate-specific validation uses
+the limits of the model that will receive the request; protocol conversion is
+prepared only when that attempt is actually tried.
 
 #### OpenAI / OpenAI-Compatible (`providers/openai_base.py`)
 - Direct passthrough of OpenAI format
@@ -379,13 +422,15 @@ OpenAI-native HTTP 400 before provider selection or I/O.
 | Entry and provider use different names/shapes | Translate without changing semantics |
 | Requested reasoning tier is unavailable | On `minimal < low < medium < high < xhigh < max`, use the highest supported tier no greater than requested, or reject if none exists |
 | Unknown reasoning tier or sub-`low` token budget | Reject; do not guess a tier or increase effort |
-| Semantic option cannot be represented | Return the entry protocol's native HTTP 400 error |
+| Semantic option cannot be represented | Return the entry protocol's native HTTP 400 error before provider I/O |
 | Unknown provider extension | Reject; extensions cannot overwrite core payload fields |
 
 OpenAI errors use `invalid_request_error`, Anthropic errors use an
 `invalid_request_error` envelope, and Gemini errors use `INVALID_ARGUMENT`.
 Static capability/option failures are non-retryable and never authorize a model
-switch.
+switch. Cross-protocol codecs use an explicit field-coverage registry: an
+unmodeled explicit field is rejected with its parameter path rather than being
+silently discarded.
 
 The concrete provider policy is intentionally conservative:
 
@@ -416,8 +461,9 @@ Some protocol information still has no lossless counterpart:
 
 | Field | Boundary behavior | Reason |
 |---|---|---|
-| OpenAI `refusal` → Anthropic/Gemini | Mapped to text at the final protocol boundary | Neither target protocol has an equivalent refusal wire type |
-| Assistant `thinking` blocks in Anthropic → legacy OpenAI history | Omitted from visible assistant content | OpenAI assistant history has no lossless slot for Anthropic replay signatures |
+| OpenAI `refusal` → Anthropic | Mapped to text at the final protocol boundary | Anthropic has no equivalent refusal content-block type |
+| OpenAI `refusal` → Gemini | Rejected before provider I/O | Gemini has no equivalent refusal part, and text would lose the refusal distinction |
+| Assistant `thinking` blocks in Anthropic → legacy OpenAI history | Legacy facade omits visible reasoning; dispatcher capsules preserve compatible Responses continuation | Chat has no lossless opaque continuation slot |
 | Images/documents in `tool_result` | Preserved as a follow-up multimodal user message | OpenAI `tool` messages accept text only |
 | `tool_reference` blocks | User message translation | Logged and skipped |
 
@@ -450,6 +496,13 @@ match across providers.
 
 Both call `router.list_models()`, which aggregates and de-duplicates `ModelInfo`
 from all providers. Successful OpenAI Chat/Responses, Anthropic, Gemini, and
-beta-native responses likewise report the qualified model that actually served
+beta-alias responses likewise report the qualified model that actually served
 the request. If execution falls back, the response reports the fallback
 candidate rather than the originally requested alias.
+
+Stable generation paths are `/v1/messages` (also
+`/api/anthropic/v1/messages`), `/api/openai/v1/chat/completions`, and
+`/api/openai/v1/responses`. The former Router-Maestro beta Messages and
+Responses URLs are temporary aliases to the same dispatcher, not separate
+transport implementations. Gemini keeps `/api/gemini/v1beta/...`: `v1beta` is
+the Gemini protocol version and is unrelated to the RM beta aliases.

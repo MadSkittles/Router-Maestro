@@ -1,8 +1,8 @@
 """Claude Code (`~/.claude/settings.json`) config generation.
 
 Claude Code is the only client that selects two models (main + small/fast),
-injects synthetic 1M-context variants, and offers the auto-compact-window and
-beta-endpoint prompts. All of that lives here.
+injects synthetic 1M-context variants, and offers the auto-compact-window
+prompt. All of that lives here.
 """
 
 from __future__ import annotations
@@ -278,14 +278,11 @@ class ClaudeCodeConfig(ClientConfig):
 
     def prompt_extras(self, selected_dicts: list[dict | None]) -> dict:
         main_model_dict = selected_dicts[0] if selected_dicts else None
-        return {
-            "auto_compact_window": _prompt_auto_compact_window(main_model_dict),
-            "use_beta_endpoint": _prompt_endpoint_mode(main_model_dict),
-        }
+        return {"auto_compact_window": _prompt_auto_compact_window(main_model_dict)}
 
     def _anthropic_url(self, ctx: GenerateContext) -> str:
-        path = "/api/anthropic/beta" if ctx.extras.get("use_beta_endpoint") else "/api/anthropic"
-        return f"{self._base_url()}{path}"
+        del ctx
+        return f"{self._base_url()}/api/anthropic"
 
     def write(self, *, level: str, path: Path, models: list[str], ctx: GenerateContext) -> None:
         main_model, fast_model = models[0], models[1]

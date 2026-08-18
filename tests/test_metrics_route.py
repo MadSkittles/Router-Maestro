@@ -7,10 +7,16 @@ from fastapi.testclient import TestClient
 from prometheus_client.parser import text_string_to_metric_families
 from starlette.responses import StreamingResponse
 
+from router_maestro.protocols import ConversionMode, WireProtocol
 from router_maestro.server.app import METRICS_TOKEN_ENV, create_app
+from router_maestro.server.dispatcher import (
+    DispatchAttemptObservation,
+    DispatchAttemptOutcome,
+)
 from router_maestro.server.middleware import REQUEST_ID_HEADER
 from router_maestro.server.observability import (
     CONTENT_TYPE_LATEST,
+    GENERATION_ATTEMPTS_TOTAL,
     HTTP_REQUEST_DURATION_SECONDS,
     HTTP_REQUESTS_TOTAL,
 )
@@ -345,3 +351,31 @@ def test_metrics_registry_is_isolated_per_app(monkeypatch):
     assert metric_sample_value(first_metrics.text, HTTP_REQUESTS_TOTAL, labels) == 1
     with pytest.raises(AssertionError, match="metric sample not found"):
         metric_sample_value(second_metrics.text, HTTP_REQUESTS_TOTAL, labels)
+
+
+def test_generation_attempt_metric_uses_only_bounded_protocol_labels(monkeypatch):
+    monkeypatch.delenv(METRICS_TOKEN_ENV, raising=False)
+    app = create_app()
+    app.state.http_metrics.observe_dispatch_attempt(
+        DispatchAttemptObservation(
+            entry_protocol=WireProtocol.ANTHROPIC_MESSAGES,
+            upstream_transport=WireProtocol.OPENAI_RESPONSES,
+            conversion_mode=ConversionMode.SEMANTIC_IR,
+            outcome=DispatchAttemptOutcome.SELECTED,
+            ir_materialized=True,
+        )
+    )
+
+    response = TestClient(app).get("/metrics")
+
+    labels = {
+        "entry_protocol": "anthropic_messages",
+        "upstream_transport": "openai_responses",
+        "conversion_mode": "semantic_ir",
+        "outcome": "selected",
+        "ir_materialized": "true",
+    }
+    assert metric_sample_value(response.text, GENERATION_ATTEMPTS_TOTAL, labels) == 1
+    assert "provider=" not in response.text
+    assert "model=" not in response.text
+    assert "binding=" not in response.text

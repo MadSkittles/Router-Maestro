@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal, cast
 
 from router_maestro.providers.base import (
     ChatResponse,
@@ -28,6 +28,14 @@ from router_maestro.server.schemas.anthropic import (
 from router_maestro.utils.tokens import map_openai_stop_reason_to_anthropic
 
 Event = dict[str, Any]
+AnthropicStopReason = Literal[
+    "end_turn",
+    "max_tokens",
+    "stop_sequence",
+    "tool_use",
+    "pause_turn",
+    "refusal",
+]
 
 
 class AnthropicStreamProtocolError(ProviderError):
@@ -89,12 +97,15 @@ def _validated_usage(usage: object) -> dict[str, Any]:
     return usage
 
 
-def _anthropic_stop_reason(finish_reason: str | None) -> str | None:
+def _anthropic_stop_reason(finish_reason: str | None) -> AnthropicStopReason | None:
     if finish_reason not in {None, "stop", "length", "tool_calls", "content_filter"}:
         raise AnthropicStreamProtocolError(
             f"canonical stream has non-success terminal reason: {finish_reason}"
         )
-    return map_openai_stop_reason_to_anthropic(finish_reason)
+    return cast(
+        AnthropicStopReason | None,
+        map_openai_stop_reason_to_anthropic(finish_reason),
+    )
 
 
 def _parse_tool_call(tool_call: dict[str, Any]) -> ToolCall:
@@ -522,7 +533,7 @@ class AnthropicReducer:
 
         explicitly_indexed = sorted(
             (call for call in self.state.tool_calls if call.upstream_index is not None),
-            key=lambda call: call.upstream_index,
+            key=lambda call: cast(int, call.upstream_index),
         )
         indexless = sorted(
             (call for call in self.state.tool_calls if call.upstream_index is None),

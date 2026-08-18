@@ -170,7 +170,55 @@ def test_anthropic_forced_tool_call(client: httpx.Client, tool_model: str):
     assert_http_success(response)
     data = response.json()
 
-    assert data["stop_reason"] == "tool_use"
+    assert data["stop_reason"] == "tool_use", data
+    assert_anthropic_has_tool_use(data, "get_weather")
+    assert_anthropic_usage(data["usage"])
+
+
+def test_anthropic_responses_only_gpt_text(
+    client: httpx.Client,
+    responses_only_reasoning_model: str,
+):
+    """Stable Messages endpoint reaches a GPT model exposed only via Responses."""
+    payload = anthropic_payload(responses_only_reasoning_model)
+    payload.pop("temperature")
+    # Responses reasoning tokens share the output budget.  A 16-token probe can
+    # legitimately finish after reasoning without producing visible text.
+    payload["max_tokens"] = 512
+    response = client.post(
+        "/api/anthropic/v1/messages",
+        json=payload,
+        timeout=180.0,
+    )
+    assert_http_success(response)
+    data = response.json()
+
+    assert data["model"] == responses_only_reasoning_model
+    text = "".join(
+        block.get("text", "") for block in data["content"] if block.get("type") == "text"
+    )
+    assert_text_response(text)
+    assert_anthropic_usage(data["usage"])
+
+
+def test_anthropic_responses_only_gpt_forced_tool(
+    client: httpx.Client,
+    responses_only_reasoning_model: str,
+):
+    """Claude Code-style Anthropic tools work through Copilot Responses."""
+    payload = anthropic_tool_payload(responses_only_reasoning_model)
+    payload.pop("temperature")
+    payload["max_tokens"] = 512
+    response = client.post(
+        "/api/anthropic/v1/messages",
+        json=payload,
+        timeout=180.0,
+    )
+    assert_http_success(response)
+    data = response.json()
+
+    assert data["model"] == responses_only_reasoning_model
+    assert data["stop_reason"] == "tool_use", data
     assert_anthropic_has_tool_use(data, "get_weather")
     assert_anthropic_usage(data["usage"])
 

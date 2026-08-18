@@ -48,11 +48,13 @@ def _client(tmp_path):
 def test_admin_get_returns_complete_config_revision_and_etag(tmp_path):
     client, repository, _owner = _client(tmp_path)
     repository.write_compat(
-        PrioritiesConfig(
-            priorities=["github-copilot/gpt-5"],
-            model_overrides={"gpt-5": {"max_output_tokens": 8192}},
-            beta_strip=["prompt-caching-*"],
-            audit={"enabled": True, "trace_dir": "/tmp/traces"},
+        PrioritiesConfig.model_validate(
+            {
+                "priorities": ["github-copilot/gpt-5"],
+                "model_overrides": {"gpt-5": {"max_output_tokens": 8192}},
+                "beta_strip": ["prompt-caching-*"],
+                "audit": {"enabled": True, "trace_dir": "/tmp/traces"},
+            }
         )
     )
 

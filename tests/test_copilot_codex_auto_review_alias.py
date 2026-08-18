@@ -149,22 +149,11 @@ async def test_unauthenticated_alias_still_404s_no_silent_pass() -> None:
 
 
 @pytest.mark.asyncio
-async def test_beta_responses_resolver_rewrites_model_to_target(monkeypatch) -> None:
-    """Real-layer: the beta Responses route resolves the alias to the target.
-
-    Drives ``_resolve_responses_model`` — the exact resolver the beta passthrough
-    route feeds into ``body["model"] = resolution.actual_model`` — with a real
-    Router. A request whose ``model`` is ``codex-auto-review`` must yield
-    ``actual_model == "gpt-5.4-mini"``, i.e. the id sent upstream to GHC. This is
-    the layer Codex's guardian request actually hits, not a helper below it.
-    """
-    from router_maestro.routing.capabilities import RequestFeatures
-    from router_maestro.server.routes import openai_responses_beta as beta
+async def test_generation_resolver_rewrites_model_to_target() -> None:
+    """The shared dispatcher planner resolves the guardian alias to its target."""
+    from router_maestro.routing.generation_plan import plan_generation_route
 
     router = _make_router(AliasCopilotMock())
-    monkeypatch.setattr(beta, "get_router", lambda: router)
+    resolution = await plan_generation_route(router, ALIAS)
 
-    resolution = await beta._resolve_responses_model(ALIAS, Operation.RESPONSES, RequestFeatures())
-
-    assert resolution.provider_name == "github-copilot"
-    assert resolution.actual_model == TARGET
+    assert resolution.primary.model == ModelRef("github-copilot", TARGET)

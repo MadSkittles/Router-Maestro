@@ -1,6 +1,8 @@
 """Tests for provider base classes and error handling."""
 
 import logging
+from collections.abc import Callable
+from typing import cast
 
 import pytest
 
@@ -177,6 +179,7 @@ class TestChatResponse:
             finish_reason="stop",
             usage={"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
         )
+        assert response.usage is not None
         assert response.usage["total_tokens"] == 15
 
     def test_legacy_positional_constructor_keeps_finish_reason_position(self):
@@ -304,7 +307,7 @@ class TestBaseProviderAbstract:
     def test_cannot_instantiate_base_provider(self):
         """Test that BaseProvider cannot be instantiated directly."""
         with pytest.raises(TypeError):
-            BaseProvider()
+            cast(Callable[[], BaseProvider], BaseProvider)()
 
     @pytest.mark.asyncio
     async def test_base_provider_default_implementations(self):

@@ -21,7 +21,11 @@ from router_maestro import __version__
 from router_maestro.config.repository import RuntimeConfigRepository
 from router_maestro.providers import ProviderError
 from router_maestro.routing.router import RouterOwner
-from router_maestro.runtime import RequestContextMiddleware
+from router_maestro.runtime import (
+    REASONING_CAPSULE_KEY_ENV,
+    RequestContextMiddleware,
+    load_reasoning_capsule_codec,
+)
 from router_maestro.server.middleware import (
     REQUEST_ID_HEADER,
     ObservabilityMiddleware,
@@ -59,6 +63,19 @@ async def lifespan(app: FastAPI):
     log_level = os.environ.get("ROUTER_MAESTRO_LOG_LEVEL", "INFO")
     setup_logging(level=log_level)
     logger.info("Router-Maestro server starting up")
+
+    # Load once at startup so invalid environment/file state fails closed before
+    # any request can emit an opaque reasoning capsule.  Every request and every
+    # router generation owned by this process shares the same rotating keyring.
+    if getattr(app.state, "reasoning_capsule_codec", None) is None:
+        app.state.reasoning_capsule_codec = load_reasoning_capsule_codec()
+    if REASONING_CAPSULE_KEY_ENV in os.environ:
+        logger.info("Reasoning capsule key loaded from the environment")
+    else:
+        logger.warning(
+            "Reasoning capsule key loaded from the local XDG data file; "
+            "multi-instance deployments must configure a shared environment key"
+        )
 
     repository: RuntimeConfigRepository = app.state.runtime_config_repository
     owner: RouterOwner = app.state.router_owner
@@ -185,6 +202,7 @@ def create_app() -> FastAPI:
     app.state.http_metrics = create_http_metrics()
     app.state.runtime_config_repository = RuntimeConfigRepository()
     app.state.router_owner = RouterOwner()
+    app.state.reasoning_capsule_codec = None
     app.add_exception_handler(
         RequestValidationError,
         cast(HTTPExceptionHandler, protocol_validation_exception_handler),

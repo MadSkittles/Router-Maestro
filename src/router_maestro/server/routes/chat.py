@@ -4,11 +4,15 @@ import asyncio
 import json
 import time
 import uuid
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, AsyncIterator, Mapping
+from typing import Any, cast
 
 from fastapi import APIRouter
+from fastapi import Request as FastAPIRequest
+from fastapi.responses import JSONResponse
 from pydantic import ValidationError
 
+from router_maestro.protocols import WireProtocol
 from router_maestro.providers import (
     ChatRequest,
     Message,
@@ -25,6 +29,15 @@ from router_maestro.providers import (
 )
 from router_maestro.routing import Router, get_router
 from router_maestro.routing.model_ref import qualify_model_id
+from router_maestro.runtime.reasoning_capsule import ReasoningCapsuleCodec
+from router_maestro.server.dependencies import (
+    generation_dispatcher_is_configured,
+    get_reasoning_capsule_codec,
+)
+from router_maestro.server.generation_pipeline import (
+    attempt_observer_for_request,
+    build_generation_pipeline,
+)
 from router_maestro.server.protocols import client_error_response
 from router_maestro.server.protocols.errors import postcommit_error_data, protocol_error_response
 from router_maestro.server.routes._outcomes import record_chat_response_outcome
@@ -94,7 +107,10 @@ def make_chat_usage(raw_usage: dict | None) -> ChatCompletionUsage | None:
 
 
 @router.post("/api/openai/v1/chat/completions")
-async def chat_completions(request: ChatCompletionRequest):
+async def chat_completions(
+    request: ChatCompletionRequest,
+    raw_request: FastAPIRequest = cast(FastAPIRequest, None),
+):
     """Handle chat completion requests."""
     logger.info(
         "Received chat completion request: model=%s, stream=%s",
@@ -130,39 +146,6 @@ async def chat_completions(request: ChatCompletionRequest):
         )
     model_router = get_router()
 
-    # Convert to internal format
-    messages = []
-    for m in request.messages:
-        tool_calls_raw = None
-        if m.tool_calls:
-            tool_calls_raw = [tc.model_dump() for tc in m.tool_calls]
-        messages.append(
-            Message(
-                role=m.role,
-                content=m.content,
-                tool_call_id=m.tool_call_id,
-                tool_calls=tool_calls_raw,
-                refusal=m.refusal,
-            )
-        )
-
-    chat_request = ChatRequest(
-        model=request.model,
-        messages=messages,
-        temperature=request.temperature,
-        max_tokens=request.max_tokens,
-        stream=request.stream,
-        tools=request.tools,
-        tool_choice=request.tool_choice,
-        top_p=request.top_p,
-        frequency_penalty=request.frequency_penalty,
-        presence_penalty=request.presence_penalty,
-        stop=request.stop,
-        user=request.user,
-        metadata=request.metadata,
-        service_tier=request.service_tier,
-    )
-
     # Reasoning / thinking passthrough.
     # Prefer OpenAI-style ``reasoning_effort``; also accept Anthropic-style
     # ``thinking`` for SDKs that forward it via the OpenAI endpoint.
@@ -190,6 +173,62 @@ async def chat_completions(request: ChatCompletionRequest):
             ),
             "openai",
         )
+    # Every production Router generation uses the shared protocol dispatcher.
+    # Non-Router doubles retain the compatibility implementation below for
+    # direct route tests during the migration cycle.
+    if isinstance(model_router, Router) and generation_dispatcher_is_configured(raw_request):
+        capsule_codec = _reasoning_capsule_codec(raw_request)
+        try:
+            payload = await raw_request.json()
+            if isinstance(payload, Mapping):
+                payload = dict(payload)
+                if thinking is not None:
+                    payload["thinking"] = thinking.model_dump(exclude_none=True)
+            return await _dispatch_chat_generation(
+                model_router,
+                raw_request,
+                payload,
+                capsule_codec,
+                include_usage=(
+                    stream_options.include_usage if stream_options is not None else None
+                ),
+            )
+        except ProviderError as error:
+            return protocol_error_response(error, "openai_chat")
+
+    # Compatibility-only DTO construction stays below the production
+    # dispatcher branch so an identity request is never rebuilt as ChatRequest.
+    messages = []
+    for message in request.messages:
+        tool_calls_raw = None
+        if message.tool_calls:
+            tool_calls_raw = [tool_call.model_dump() for tool_call in message.tool_calls]
+        messages.append(
+            Message(
+                role=message.role,
+                content=message.content,
+                tool_call_id=message.tool_call_id,
+                tool_calls=tool_calls_raw,
+                refusal=message.refusal,
+            )
+        )
+
+    chat_request = ChatRequest(
+        model=request.model,
+        messages=messages,
+        temperature=request.temperature,
+        max_tokens=request.max_tokens,
+        stream=request.stream,
+        tools=request.tools,
+        tool_choice=request.tool_choice,
+        top_p=request.top_p,
+        frequency_penalty=request.frequency_penalty,
+        presence_penalty=request.presence_penalty,
+        stop=request.stop,
+        user=request.user,
+        metadata=request.metadata,
+        service_tier=request.service_tier,
+    )
     if effort:
         chat_request.reasoning_effort = effort
         chat_request.thinking_budget = effort_to_budget(effort)
@@ -267,6 +306,126 @@ async def chat_completions(request: ChatCompletionRequest):
         if isinstance(e, RequestOptionError):
             return client_error_response(e, "openai")
         return protocol_error_response(e, "openai_chat")
+
+
+def _reasoning_capsule_codec(raw_request: FastAPIRequest | None) -> ReasoningCapsuleCodec:
+    """Return the startup-owned capsule state required by generation dispatch."""
+    if raw_request is None:
+        raise RuntimeError("generation dispatch requires a FastAPI request")
+    return get_reasoning_capsule_codec(raw_request)
+
+
+async def _dispatch_chat_generation(
+    model_router: Router,
+    raw_request: FastAPIRequest,
+    payload: Mapping[str, Any],
+    capsule_codec: ReasoningCapsuleCodec,
+    *,
+    include_usage: bool | None,
+):
+    """Run the stable Chat endpoint through the shared generation dispatcher."""
+    pipeline = build_generation_pipeline(
+        model_router,
+        capsule_codec,
+        WireProtocol.OPENAI_CHAT,
+        payload,
+        path=raw_request.url.path,
+        query=dict(raw_request.query_params),
+        headers=dict(raw_request.headers),
+        attempt_observer=attempt_observer_for_request(raw_request),
+    )
+    if pipeline.envelope.stream:
+        opened = await pipeline.dispatcher.dispatch_stream(model_router, pipeline.envelope)
+        frames = pipeline.responses.encode_stream(opened, pipeline.envelope.runtime)
+        return sse_streaming_response(
+            _chat_sse_frames(frames, include_usage=include_usage),
+        )
+
+    result = await pipeline.dispatcher.dispatch(model_router, pipeline.envelope)
+    encoded = await pipeline.responses.encode_result(result, pipeline.envelope.runtime)
+    return JSONResponse(content=dict(encoded))
+
+
+async def _chat_sse_frames(
+    frames: AsyncIterator[Mapping[str, Any]],
+    *,
+    include_usage: bool | None,
+) -> AsyncGenerator[str]:
+    """Serialize dispatcher Chat frames and preserve the public SSE contract."""
+    pending_usage: Mapping[str, Any] | None = None
+    pending_terminal: Mapping[str, Any] | None = None
+    try:
+        async for frame in frames:
+            data = dict(frame)
+            if _is_chat_usage_frame(data):
+                pending_usage = data
+                continue
+
+            if "error" in data:
+                yield f"data: {json.dumps(data)}\n\n"
+                return
+            if _is_chat_terminal_frame(data):
+                if pending_terminal is not None:
+                    raise RuntimeError("Chat stream emitted multiple terminal frames")
+                pending_terminal = data
+                continue
+            if pending_terminal is not None:
+                raise RuntimeError("Chat stream emitted data after its terminal frame")
+            yield f"data: {json.dumps(data)}\n\n"
+
+        if pending_terminal is not None:
+            terminal = dict(pending_terminal)
+            terminal_usage = terminal.pop("usage", None)
+            usage_frame = dict(pending_usage) if pending_usage is not None else None
+            if terminal_usage is not None and usage_frame is None:
+                usage_frame = _chat_usage_frame(terminal, terminal_usage)
+            if include_usage is None and usage_frame is not None:
+                terminal["usage"] = usage_frame.get("usage")
+
+            yield f"data: {json.dumps(terminal)}\n\n"
+            if include_usage is True and usage_frame is not None:
+                yield f"data: {json.dumps(usage_frame)}\n\n"
+            yield "data: [DONE]\n\n"
+    except asyncio.CancelledError:
+        raise
+    except Exception as error:
+        data = postcommit_error_data(error, "openai_chat")
+        yield f"data: {json.dumps(data)}\n\n"
+    finally:
+        await close_async_iterator(frames)
+
+
+def _is_chat_usage_frame(frame: Mapping[str, Any]) -> bool:
+    choices = frame.get("choices")
+    return bool(frame.get("usage")) and isinstance(choices, list) and not choices
+
+
+def _is_chat_terminal_frame(frame: Mapping[str, Any]) -> bool:
+    choices = frame.get("choices")
+    return isinstance(choices, list) and any(
+        isinstance(choice, Mapping) and choice.get("finish_reason") is not None
+        for choice in choices
+    )
+
+
+def _chat_usage_frame(
+    terminal: Mapping[str, Any],
+    usage: object,
+) -> dict[str, Any]:
+    frame = {
+        key: terminal[key]
+        for key in (
+            "id",
+            "object",
+            "created",
+            "model",
+            "system_fingerprint",
+            "service_tier",
+        )
+        if key in terminal
+    }
+    frame.update({"choices": [], "usage": usage})
+    return frame
 
 
 async def stream_response(
@@ -349,14 +508,17 @@ async def stream_response(
                     "Chunk received after explicit terminal",
                     code="upstream_protocol_error",
                 )
+                terminal_error = terminal_outcome.error
+                if terminal_error is None:
+                    raise RuntimeError("Protocol error outcome is missing its terminal error")
                 yield _stream_error(
-                    terminal_outcome.error.message,
-                    terminal_outcome.error.code,
+                    terminal_error.message,
+                    terminal_error.code,
                 )
                 pipeline.finish(
                     wire_status=200,
                     outcome=terminal_outcome,
-                    body_summary=terminal_outcome.error.message,
+                    body_summary=terminal_error.message,
                 )
                 return
 
@@ -442,9 +604,12 @@ async def stream_response(
 
         if terminal_outcome is None:
             terminal_outcome = unexpected_eof_outcome()
+            terminal_error = terminal_outcome.error
+            if terminal_error is None:
+                raise RuntimeError("Unexpected EOF outcome is missing its terminal error")
             yield _stream_error(
-                terminal_outcome.error.message,
-                terminal_outcome.error.code,
+                terminal_error.message,
+                terminal_error.code,
             )
         else:
             final_chunk = ChatCompletionChunk(

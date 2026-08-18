@@ -1,8 +1,10 @@
 """OpenAI provider implementation."""
 
+from typing import cast
+
 import httpx
 
-from router_maestro.auth import AuthManager, AuthType
+from router_maestro.auth import ApiKeyCredential, AuthManager, AuthType
 from router_maestro.providers.base import ModelInfo, ProviderError, ProviderFailureKind
 from router_maestro.providers.openai_base import OpenAIChatProvider, _request_audit
 from router_maestro.utils import get_logger
@@ -37,7 +39,7 @@ class OpenAIProvider(OpenAIChatProvider):
                 kind=ProviderFailureKind.AUTHENTICATION,
                 provider=self.name,
             )
-        return cred.key
+        return cast(ApiKeyCredential, cred).key
 
     def _get_headers(self) -> dict[str, str]:
         """Get headers for OpenAI API requests."""

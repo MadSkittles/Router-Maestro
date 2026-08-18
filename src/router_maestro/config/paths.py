@@ -43,6 +43,7 @@ def get_config_dir() -> Path:
 # File paths
 AUTH_FILE = get_data_dir() / "auth.json"
 SERVER_CONFIG_FILE = get_data_dir() / "server.json"
+REASONING_CAPSULE_KEYS_FILE = get_data_dir() / "reasoning-capsule-keys.json"
 PROVIDERS_FILE = get_config_dir() / "providers.json"
 PRIORITIES_FILE = get_config_dir() / "priorities.json"
 CONTEXTS_FILE = get_config_dir() / "contexts.json"

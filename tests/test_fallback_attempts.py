@@ -8,12 +8,13 @@ import logging
 from collections.abc import AsyncIterator
 from copy import deepcopy
 from dataclasses import FrozenInstanceError
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 import httpx
 import pytest
 
 from router_maestro.providers import (
+    BaseProvider,
     ChatRequest,
     ChatStreamChunk,
     Message,
@@ -172,7 +173,7 @@ async def _execute(
             object(),
             fallback,
             lambda request, _model: request,
-            lambda provider, request: provider.complete(request),
+            lambda provider, request: cast(_AttemptProvider, provider).complete(request),
         )
 
     stream, provider_name = await router._execute_plan_stream(
@@ -180,7 +181,7 @@ async def _execute(
         object(),
         fallback,
         lambda request, _model: request,
-        lambda provider, request: provider.open_stream(request),
+        lambda provider, request: cast(_AttemptProvider, provider).open_stream(request),
         "test",
     )
     return [chunk.content async for chunk in stream], provider_name
@@ -213,9 +214,10 @@ async def _exercise_candidate_request_isolation(
 
     if mode == "nonstream":
 
-        async def complete(provider: _AttemptProvider, candidate_request: Any) -> str:
+        async def complete(provider: BaseProvider, candidate_request: Any) -> str:
+            attempt_provider = cast(_AttemptProvider, provider)
             seen.append(candidate_request)
-            if provider is primary:
+            if attempt_provider is primary:
                 mutate(candidate_request)
                 raise retryable
             return "secondary success"
@@ -230,12 +232,14 @@ async def _exercise_candidate_request_isolation(
         return seen, result, provider_name
 
     def open_stream(
-        provider: _AttemptProvider,
+        provider: BaseProvider,
         candidate_request: Any,
     ) -> AsyncIterator[ChatStreamChunk | ResponsesStreamChunk]:
+        attempt_provider = cast(_AttemptProvider, provider)
+
         async def chunks() -> AsyncIterator[ChatStreamChunk | ResponsesStreamChunk]:
             seen.append(candidate_request)
-            if provider is primary:
+            if attempt_provider is primary:
                 mutate(candidate_request)
                 raise retryable
             if operation is Operation.CHAT_STREAM:
@@ -559,7 +563,7 @@ async def test_all_retryable_exhaustion_raises_last_failure_with_read_only_ledge
     assert "raw-secret-body" not in repr(attempts)
     assert "safe tertiary" not in repr(attempts)
     with pytest.raises((AttributeError, FrozenInstanceError)):
-        attempts[-1].retryable = False
+        setattr(attempts[-1], "retryable", False)
 
 
 @pytest.mark.asyncio
@@ -821,7 +825,7 @@ async def test_execution_uses_candidate_objects_without_reloading_mutated_router
             object(),
             True,
             lambda request, _model: request,
-            lambda provider, request: provider.complete(request),
+            lambda provider, request: cast(_AttemptProvider, provider).complete(request),
         )
         assert result == "snapshot success"
     else:
@@ -830,7 +834,7 @@ async def test_execution_uses_candidate_objects_without_reloading_mutated_router
             object(),
             True,
             lambda request, _model: request,
-            lambda provider, request: provider.open_stream(request),
+            lambda provider, request: cast(_AttemptProvider, provider).open_stream(request),
             "test",
         )
         assert [chunk.content async for chunk in stream] == ["snapshot success"]
@@ -887,7 +891,7 @@ async def test_stream_postcommit_failure_propagates_without_switching_and_closes
             object(),
             True,
             lambda request, _model: request,
-            lambda provider, request: provider.open_stream(request),
+            lambda provider, request: cast(_AttemptProvider, provider).open_stream(request),
             "test",
         )
         contents: list[str] = []

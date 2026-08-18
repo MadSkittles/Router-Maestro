@@ -1,6 +1,7 @@
 """Typed provider failure and malformed upstream protocol regressions."""
 
 from collections.abc import AsyncIterator
+from typing import Any, cast
 from unittest.mock import AsyncMock, patch
 
 import httpx
@@ -518,6 +519,7 @@ async def test_copilot_padded_model_id_serves_and_renews_defensive_stale_snapsho
     assert cached is not stale
     assert models is not cached
     assert models[0] is not stale[0]
+    assert cached is not None
     assert cached[0] is not stale[0]
     assert models[0] is not cached[0]
     assert provider._models_ttl_cache._timestamp > 0
@@ -679,7 +681,7 @@ async def test_router_isolates_malformed_model_catalog_and_lists_healthy_provide
     class _Priorities:
         priorities: tuple[str, ...] = ()
 
-    router._models_cache_ttl = _ModelsTTL()
+    router._models_cache_ttl = cast(Any, _ModelsTTL())
     router._ensure_providers_fresh = lambda: None  # type: ignore[method-assign]
     router._apply_model_overrides = lambda: None  # type: ignore[method-assign]
     router._get_priorities_config = lambda: _Priorities()  # type: ignore[method-assign]
@@ -1616,7 +1618,9 @@ async def test_copilot_chat_explicit_effort_uses_only_sent_output_cap_for_empty_
 
     response = await provider.chat_completion(request)
 
-    sent_payload = provider._send_with_auth_retry.await_args.kwargs["json"]
+    await_args = provider._send_with_auth_retry.await_args
+    assert await_args is not None
+    sent_payload = await_args.kwargs["json"]
     assert request.thinking_budget == 1024
     assert sent_payload["reasoning_effort"] == "high"
     assert "thinking_budget" not in sent_payload
@@ -3200,7 +3204,7 @@ async def test_copilot_exact_bare_400_sets_nonretryable_signal() -> None:
     assert error.status_code == 400
     assert error.upstream_status_code == 400
     assert error.retryable is False
-    assert getattr(error, "signal", None) is not None
+    assert error.signal is not None
     assert error.signal.value == "copilot_bare_bad_request"
 
 
@@ -3468,13 +3472,11 @@ def test_shared_http_status_errors_are_typed_and_safe(
     ],
 )
 def test_shared_transport_errors_are_typed_and_safe(cause: httpx.HTTPError) -> None:
-    raiser = (
-        BaseProvider._raise_timeout_error
-        if isinstance(cause, httpx.TimeoutException)
-        else BaseProvider._raise_http_error
-    )
     with pytest.raises(ProviderError) as exc_info:
-        raiser("Example", cause, get_logger("test.provider_failure"))
+        if isinstance(cause, httpx.TimeoutException):
+            BaseProvider._raise_timeout_error("Example", cause, get_logger("test.provider_failure"))
+        else:
+            BaseProvider._raise_http_error("Example", cause, get_logger("test.provider_failure"))
 
     error = exc_info.value
     assert error.kind is ProviderFailureKind.TRANSPORT
@@ -3533,7 +3535,7 @@ def _stream_plan(*providers: object) -> RoutePlan:
     for index, provider in enumerate(providers, start=1):
         name = getattr(provider, "name", None) or f"provider-{index}"
         if getattr(provider, "name", None) is None:
-            provider.name = name
+            setattr(provider, "name", name)
         ref = ModelRef(name, f"m{index}")
         capabilities = ModelCapabilities(
             model=ref,
@@ -3570,7 +3572,7 @@ async def test_router_empty_stream_is_protocol_failure_and_closed_once() -> None
             object(),
             True,
             lambda request, _model: request,
-            lambda provider, request: provider.open(request),
+            lambda provider, request: cast(_PreparedStreamProvider, provider).open(request),
             "test",
         )
 
@@ -3605,7 +3607,7 @@ async def test_router_falls_back_when_adapter_stream_has_no_canonical_chunk(
         lambda provider, request: (
             provider.open(request)
             if isinstance(provider, _PreparedStreamProvider)
-            else provider.stream(request)
+            else cast(_StreamProvider, provider).stream(request)
         ),
         "test",
     )
@@ -3643,7 +3645,7 @@ async def test_router_accepts_usage_only_or_terminal_first_canonical_chunk(chunk
         object(),
         True,
         lambda request, _model: request,
-        lambda provider, request: provider.stream(request),
+        lambda provider, request: cast(_StreamProvider, provider).stream(request),
         "test",
     )
 
@@ -3916,7 +3918,7 @@ async def test_router_falls_back_on_protocol_failure_before_first_canonical_chun
         object(),
         True,
         lambda request, _model: request,
-        lambda provider, request: provider.stream(request),
+        lambda provider, request: cast(_StreamProvider, provider).stream(request),
         "test",
     )
 
@@ -3943,7 +3945,7 @@ async def test_router_never_switches_provider_after_first_canonical_chunk() -> N
         object(),
         True,
         lambda request, _model: request,
-        lambda provider, request: provider.stream(request),
+        lambda provider, request: cast(_StreamProvider, provider).stream(request),
         "test",
     )
 

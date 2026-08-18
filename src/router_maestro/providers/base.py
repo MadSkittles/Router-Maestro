@@ -16,6 +16,8 @@ from router_maestro.providers.outbound_contract import (
 from router_maestro.routing.capabilities import Operation, ProviderCapabilities
 
 if TYPE_CHECKING:
+    from router_maestro.protocols import WireProtocol
+    from router_maestro.providers.bindings import EndpointBinding
     from router_maestro.routing.attempts import AttemptRecord
     from router_maestro.routing.model_ref import ModelRef
 
@@ -410,6 +412,10 @@ class ModelInfo:
     # that intentionally return a public ``provider/model`` ID must opt in so
     # namespaced upstream IDs are never guessed from string shape.
     id_is_qualified: bool = False
+    # Wire-protocol availability advertised by the upstream model catalog.
+    # Appended so existing positional construction remains compatible. Missing
+    # keys mean unknown; explicit ``False`` means the catalog denied support.
+    transport_capabilities: dict[str, bool] = field(default_factory=dict)
 
     def with_overrides(
         self,
@@ -441,6 +447,7 @@ class ModelInfo:
             operation_capabilities=self.operation_capabilities,
             feature_capabilities=self.feature_capabilities,
             id_is_qualified=self.id_is_qualified,
+            transport_capabilities=self.transport_capabilities,
         )
 
 
@@ -522,6 +529,11 @@ class ResponsesResponse:
     refusal: str | None = None
     # Router-selected identity; see ChatResponse.selected_model.
     selected_model: ModelRef | None = None
+    # Complete upstream Responses reasoning output item.  This is additive to
+    # the legacy thinking/id/signature views above so callers that only know
+    # those fields remain compatible while protocol bridges can preserve
+    # provider-owned siblings verbatim (including fields introduced later).
+    reasoning_item: dict[str, Any] | None = None
 
 
 @dataclass
@@ -554,6 +566,10 @@ class ResponsesStreamChunk:
     provenance_only: bool = False
     output_item_type: str | None = None
     output_item_done: bool = False
+    # Complete upstream reasoning item snapshot, normally attached to the
+    # output_item.done chunk.  The summary/id/signature fields remain populated
+    # for legacy consumers; semantic bridges prefer this lossless snapshot.
+    reasoning_item: dict[str, Any] | None = None
 
 
 class ProviderFailureKind(StrEnum):
@@ -698,7 +714,9 @@ class BaseProvider(ABC):
         Yields:
             Chat completion chunks
         """
-        pass
+        if False:  # pragma: no cover - marks the abstract contract as an async generator
+            yield ChatStreamChunk(content="")
+        raise NotImplementedError
 
     @abstractmethod
     async def list_models(self) -> list[ModelInfo]:
@@ -728,6 +746,57 @@ class BaseProvider(ABC):
         resolution; aliases are never added to the model catalog.
         """
         return {}
+
+    def bindings(self) -> tuple[EndpointBinding, ...]:
+        """Expose legacy Chat/Responses methods as endpoint bindings.
+
+        Existing providers do not need to opt into the new transport layer.
+        Providers can override this method when they are ready to supply
+        protocol-native dialect and executor bindings.
+        """
+        from router_maestro.protocols import WireProtocol
+        from router_maestro.providers.bindings import (
+            LEGACY_OPENAI_CHAT_BINDING,
+            LEGACY_OPENAI_RESPONSES_BINDING,
+            legacy_endpoint_binding,
+        )
+
+        operations = self.capabilities.operations
+        chat_operations = operations & frozenset({Operation.CHAT, Operation.CHAT_STREAM})
+        responses_operations = operations & frozenset(
+            {Operation.RESPONSES, Operation.RESPONSES_STREAM}
+        )
+        bindings = []
+        if chat_operations:
+            bindings.append(
+                legacy_endpoint_binding(
+                    binding_id=LEGACY_OPENAI_CHAT_BINDING,
+                    protocol=WireProtocol.OPENAI_CHAT,
+                    operations=chat_operations,
+                )
+            )
+        if responses_operations:
+            bindings.append(
+                legacy_endpoint_binding(
+                    binding_id=LEGACY_OPENAI_RESPONSES_BINDING,
+                    protocol=WireProtocol.OPENAI_RESPONSES,
+                    operations=responses_operations,
+                )
+            )
+        return tuple(bindings)
+
+    def transport_preferences(
+        self,
+        ingress_protocol: WireProtocol | None = None,
+    ) -> tuple[str, ...]:
+        """Return binding IDs in provider-preferred order.
+
+        Identity-first selection is applied by the dispatcher before this
+        provider-specific tie breaker. The compatibility default follows the
+        stable order returned by :meth:`bindings`.
+        """
+        del ingress_protocol
+        return tuple(binding.id for binding in self.bindings())
 
     async def ensure_token(self) -> None:
         """Ensure the provider has a valid token.
@@ -1009,3 +1078,39 @@ class BaseProvider(ABC):
         # Make this a generator (required for type checking)
         if False:
             yield ResponsesStreamChunk(content="")
+
+    async def messages_completion(
+        self,
+        payload: Mapping[str, Any],
+        *,
+        model: str,
+    ) -> ChatResponse:
+        """Execute a native Anthropic Messages payload when a binding supports it."""
+        del payload
+        raise ProviderError(
+            "Provider does not support Anthropic Messages API",
+            status_code=501,
+            retryable=False,
+            kind=ProviderFailureKind.UNSUPPORTED_OPERATION,
+            provider=self.name,
+            model=model,
+        )
+
+    async def messages_completion_stream(
+        self,
+        payload: Mapping[str, Any],
+        *,
+        model: str,
+    ) -> AsyncIterator[ChatStreamChunk]:
+        """Stream a native Anthropic Messages payload when a binding supports it."""
+        del payload
+        raise ProviderError(
+            "Provider does not support Anthropic Messages API",
+            status_code=501,
+            retryable=False,
+            kind=ProviderFailureKind.UNSUPPORTED_OPERATION,
+            provider=self.name,
+            model=model,
+        )
+        if False:
+            yield ChatStreamChunk(content="")

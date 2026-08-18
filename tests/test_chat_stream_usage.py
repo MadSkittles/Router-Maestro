@@ -2,7 +2,7 @@
 
 import json
 from collections.abc import AsyncIterator
-from typing import Any
+from typing import Any, cast
 
 import httpx
 import pytest
@@ -11,6 +11,7 @@ from fastapi.testclient import TestClient
 
 from router_maestro.providers import ChatRequest, ChatStreamChunk, CopilotProvider, Message
 from router_maestro.providers.openai_compat import OpenAICompatibleProvider
+from router_maestro.routing.router import Router
 from router_maestro.server.routes.chat import router as chat_router
 from router_maestro.server.routes.chat import stream_response
 
@@ -139,7 +140,7 @@ async def test_openai_chat_stream_emits_usage_only_chunk():
         stream=True,
     )
 
-    raw_events = [event async for event in stream_response(router, request)]  # type: ignore[arg-type]
+    raw_events = [event async for event in stream_response(cast(Router, router), request)]
     events = _parse_chat_stream_events(raw_events)
 
     usage_events = [event for event in events if event.get("usage")]
@@ -177,7 +178,7 @@ async def test_openai_chat_stream_keeps_usage_chunk_after_explicit_finish():
         stream=True,
     )
 
-    raw_events = [event async for event in stream_response(router, request)]  # type: ignore[arg-type]
+    raw_events = [event async for event in stream_response(cast(Router, router), request)]
     events = _parse_chat_stream_events(raw_events)
 
     assert raw_events[-1] == "data: [DONE]\n\n"
@@ -232,8 +233,8 @@ async def test_openai_chat_stream_include_usage_emits_one_independent_tail_chunk
 
     raw_events = [
         event
-        async for event in stream_response(  # type: ignore[arg-type]
-            _StubRouter(chunks),
+        async for event in stream_response(
+            cast(Router, _StubRouter(chunks)),
             request,
             include_usage=True,
         )
@@ -270,8 +271,8 @@ async def test_openai_chat_stream_include_usage_omits_tail_when_provider_has_no_
 
     raw_events = [
         event
-        async for event in stream_response(  # type: ignore[arg-type]
-            router,
+        async for event in stream_response(
+            cast(Router, router),
             request,
             include_usage=True,
         )
@@ -301,8 +302,8 @@ async def test_openai_chat_stream_exclude_usage_suppresses_all_provider_usage():
 
     raw_events = [
         event
-        async for event in stream_response(  # type: ignore[arg-type]
-            router,
+        async for event in stream_response(
+            cast(Router, router),
             request,
             include_usage=False,
         )
@@ -380,7 +381,7 @@ async def test_openai_chat_stream_emits_refusal_delta_without_text_content():
         stream=True,
     )
 
-    raw_events = [event async for event in stream_response(router, request)]  # type: ignore[arg-type]
+    raw_events = [event async for event in stream_response(cast(Router, router), request)]
     events = _parse_chat_stream_events(raw_events)
 
     refusal_events = [

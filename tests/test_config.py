@@ -929,8 +929,8 @@ class TestCodexConfig:
             "wire_api": "responses",
         }
 
-    def test_beta_endpoint_choice_writes_beta_base_url(self, tmp_path, monkeypatch):
-        """Choosing beta for a Responses-eligible Copilot model writes the beta URL."""
+    def test_old_beta_endpoint_choice_now_writes_stable_base_url(self, tmp_path, monkeypatch):
+        """New configs use the stable dispatcher even if an old extra requests beta."""
         home, _ = _setup_codex_env(monkeypatch, tmp_path, level_choice="1", endpoint_choice="2")
 
         cli_config.codex_config(id_style=IdStyle.QUALIFIED)
@@ -938,7 +938,7 @@ class TestCodexConfig:
         with open(home / ".codex" / "config.toml", "rb") as f:
             data = tomllib.load(f)
         provider = data["model_providers"]["router-maestro"]
-        assert provider["base_url"] == "http://localhost:8080/api/openai/beta/v1"
+        assert provider["base_url"] == "http://localhost:8080/api/openai/v1"
 
     def test_qualified_server_model_writes_single_provider_prefix(self, tmp_path, monkeypatch):
         home, _ = _setup_codex_env(monkeypatch, tmp_path, level_choice="1")
@@ -1030,7 +1030,7 @@ class TestCodexConfig:
         assert data["model_providers"]["other"]["name"] == "User Custom"
 
 
-def test_claude_config_qualified_models_write_single_prefix_and_offer_beta(
+def test_claude_config_qualified_models_write_single_prefix_and_stable_url(
     tmp_path,
     monkeypatch,
 ):
@@ -1051,7 +1051,7 @@ def test_claude_config_qualified_models_write_single_prefix_and_offer_beta(
     data = json.loads((home / ".claude" / "settings.json").read_text(encoding="utf-8"))
     assert data["env"]["ANTHROPIC_MODEL"] == "github-copilot/claude-opus-4.6"
     assert data["env"]["ANTHROPIC_SMALL_FAST_MODEL"] == "github-copilot/gpt-5.5"
-    assert data["env"]["ANTHROPIC_BASE_URL"].endswith("/api/anthropic/beta")
+    assert data["env"]["ANTHROPIC_BASE_URL"].endswith("/api/anthropic")
 
 
 def test_claude_config_writes_provider_qualified_native_1m_key(tmp_path, monkeypatch):

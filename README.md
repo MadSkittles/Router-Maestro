@@ -16,9 +16,11 @@ Router-Maestro acts as a proxy that gives you access to models from multiple pro
 ### Core
 
 - **Multi-provider support**: GitHub Copilot (OAuth), OpenAI, Anthropic, and custom OpenAI-compatible endpoints
-- **Dual API compatibility**: Both OpenAI (`/api/openai/v1/...`) and Anthropic (`/v1/messages`) API formats
+- **Four ingress protocols**: Anthropic Messages, OpenAI Chat Completions,
+  OpenAI Responses, and Gemini generation all use the same dispatcher
 - **Gemini API compatibility**: Gemini REST API format (`/api/gemini/v1beta/...`) for Gemini CLI/SDK
-- **Cross-provider translation**: Seamlessly route OpenAI requests to Anthropic providers and vice versa
+- **Lazy cross-protocol translation**: Native protocol pairs use a copy-on-write
+  identity path; only cross-protocol attempts materialize the shared semantic IR
 - **Intelligent routing**: Priority-based model selection with automatic fallback on failure
 - **Deterministic model matching**: Public model IDs are provider-qualified, while convenient bare aliases (for example, `opus-4-6`) are matched by score and routed according to the configured priorities
 - **CLI management**: Full command-line interface for configuration and server control
@@ -47,11 +49,12 @@ Router-Maestro acts as a proxy that gives you access to models from multiple pro
   downward-substitution target. Effort does not route through `-high` or
   `-xhigh` model suffixes.
 - **Anthropic adaptive effort passthrough**: `output_config.effort` is preserved
-  across standard and beta-native Anthropic routes. Explicit effort replaces
-  an adaptive thinking budget, while manual `thinking.type="enabled"` retains
-  its protocol-required `budget_tokens` when `budget_tokens < max_tokens`.
-  Omitting `budget_tokens` uses the configured server default. The beta-native
-  route rejects present token limits unless they are positive, non-boolean
+  across the stable route and its beta compatibility alias. Explicit effort
+  replaces an adaptive thinking budget, while manual
+  `thinking.type="enabled"` retains its protocol-required `budget_tokens` when
+  `budget_tokens < max_tokens`.
+  Omitting `budget_tokens` uses the configured server default. The Messages
+  runtime rejects present token limits unless they are positive, non-boolean
   integers. If an exact reasoning tier is unavailable, Router-Maestro may use
   the highest advertised tier that does not exceed the request. It never
   silently raises reasoning effort, cost, or latency; a request with no valid
@@ -288,7 +291,13 @@ that native status, Router-Maestro returns that entry protocol's error envelope.
 
 ### Cross-Provider Translation
 
-Router-Maestro automatically translates between OpenAI and Anthropic formats:
+Router-Maestro separates the client protocol from the provider transport. Its
+generation dispatcher accepts Anthropic Messages, OpenAI Chat, OpenAI
+Responses, or Gemini and can select an upstream Messages, Chat, or Responses
+binding. This gives the current implementation a 4×3 transport matrix; it does
+not imply that every provider or model advertises all three transports.
+
+For example:
 
 ```bash
 # Use Anthropic API with OpenAI provider
@@ -297,6 +306,15 @@ POST /v1/messages  {"model": "openai/gpt-4o", ...}
 # Use OpenAI API with Anthropic provider
 POST /api/openai/v1/chat/completions  {"model": "anthropic/claude-3-5-sonnet", ...}
 ```
+
+When ingress and upstream use the same protocol, Router-Maestro preserves the
+wire payload on a copy-on-write identity fast path and does not create semantic
+IR. A cross-protocol attempt decodes semantic IR lazily, at most once per
+request, and reuses the immutable result across eligible transport attempts.
+The model route plan chooses provider/model candidates only. For each model,
+the provider handler exhausts its compatible transports before model fallback
+can move to the next candidate; that transport switch does not consume the
+model fallback limit.
 
 Accepted semantic options are either preserved, translated, or rejected; they
 are not silently dropped. Unsupported options use the client's native error
@@ -314,11 +332,12 @@ provider I/O. OpenAI Responses reasoning currently represents only
 `reasoning.effort`; `reasoning.summary` and other sibling fields are rejected
 with their exact parameter path instead of being ignored.
 
-The beta Anthropic endpoint uses Copilot's native Anthropic transport when the
-selected model advertises it. If that transport is unavailable, the same
-selected model is adapted through the standard translated path. This is a
-transport adaptation, not permission to choose a different model; model
-fallback still requires a retryable execution failure.
+For Copilot, the dispatcher can try Messages, Chat, or Responses according to
+the ingress protocol and catalog capabilities. Consequently Claude Code can use
+a Copilot GPT model that is available only through Responses while continuing
+to call the stable Anthropic Messages endpoint. The former Router-Maestro beta
+Messages and Responses paths remain aliases of this dispatcher for one
+compatibility cycle; new CLI configuration writes stable URLs.
 
 For standard Anthropic thinking requests, budget and reasoning validation use
 the capability and output-token snapshot of the same frozen route candidate
@@ -326,9 +345,10 @@ that will execute the request. Validation never consults a different provider's
 same-named catalog entry and then silently changes candidates.
 
 OpenAI Chat and Responses preserve refusals as typed `refusal` data, including
-streaming deltas and assistant history. Anthropic and Gemini do not expose an
-equivalent refusal wire type, so only those protocol boundaries map refusal
-content to text.
+streaming deltas and assistant history. Anthropic has no equivalent content
+block and maps refusal content to text. Gemini has no equivalent refusal part,
+so a cross-protocol conversion to Gemini rejects it before provider I/O rather
+than silently changing it into ordinary model text.
 
 For OpenAI Chat streaming, `stream_options: {"include_usage": true}` emits a
 final usage-only chunk with `choices: []` immediately before `[DONE]`.
@@ -419,9 +439,15 @@ curl http://localhost:8080/api/openai/v1/chat/completions \
     "stream": false
   }'
 
+# Responses
+POST /api/openai/v1/responses
+
 # List models
 GET /api/openai/v1/models
 ```
+
+`POST /api/openai/beta/v1/responses` remains a temporary compatibility alias
+for the stable Responses path.
 
 The list `id` and every successful Chat/Responses response `model` are
 provider-qualified (`provider/model-id`). A fallback response reports the
@@ -442,6 +468,10 @@ POST /api/anthropic/v1/messages
 # Count tokens
 POST /v1/messages/count_tokens
 ```
+
+`POST /api/anthropic/beta/v1/messages` remains a temporary compatibility alias
+for the stable dispatcher. Prefer `/v1/messages` or
+`/api/anthropic/v1/messages` in new Claude Code configuration.
 
 ### Admin
 
@@ -471,6 +501,13 @@ POST /api/gemini/v1beta/models/{model}:countTokens
 }
 ```
 
+Gemini's `v1beta` segment is the Gemini wire-protocol version, not a
+Router-Maestro beta endpoint, so it is not deprecated with the RM beta aliases.
+`countTokens` remains a separate operation using the existing native count or
+estimator path; it is not one of the generation transports. Router-Maestro does
+not currently register a Gemini-native provider binding, but the Gemini ingress
+can target Messages, Chat, or Responses providers.
+
 ## Configuration
 
 ### File Locations
@@ -486,6 +523,23 @@ Following XDG Base Directory specification:
 | **Data** | `~/.local/share/router-maestro/` | |
 | | `auth.json` | Provider OAuth and API-key credentials |
 | | `server.json` | Legacy server state; current server API keys are stored in `contexts.json` |
+| | `reasoning-capsule-keys.json` | Auto-generated owner-only reasoning replay key ring |
+
+### Reasoning Capsule Keys
+
+Cross-protocol reasoning replay uses authenticated `rmr1` capsules so opaque
+provider state is never exposed as plaintext to another wire protocol. Without
+environment configuration, Router-Maestro atomically creates and reuses
+`~/.local/share/router-maestro/reasoning-capsule-keys.json` with mode `0600`.
+An invalid, unreadable, or corrupt key source fails server startup rather than
+silently replacing the key.
+
+Multi-instance deployments must set the same unpadded base64url-encoded 32-byte
+key in `ROUTER_MAESTRO_REASONING_CAPSULE_KEY` on every instance. During
+rotation, place comma-separated old keys in
+`ROUTER_MAESTRO_REASONING_CAPSULE_PREVIOUS_KEYS`; they decrypt existing
+capsules but never encrypt new ones. See [docs/deployment.md](docs/deployment.md)
+for the rollout order and fail-closed behavior.
 
 ### Custom Providers
 
@@ -558,7 +612,10 @@ router-maestro model refresh
 Router-Maestro exposes a top-level Prometheus endpoint at `/metrics` with
 HTTP request counters, request duration histograms, and request IDs on
 responses via `X-Request-ID`. Streaming request durations are recorded after
-the response body finishes.
+the response body finishes. Generation attempts also expose bounded
+`entry_protocol`, `upstream_transport`, `conversion_mode`, `outcome`, and
+`ir_materialized` labels. Provider, model, and binding identities are kept out
+of Prometheus and are available only in opt-in audit attempt records.
 
 ```bash
 curl http://localhost:8080/metrics
@@ -837,15 +894,15 @@ Configure in `~/.config/router-maestro/priorities.json`:
 }
 ```
 
-The five streaming encoders (OpenAI Chat, OpenAI Responses, standard
-Anthropic, beta-native Anthropic, and Gemini) attach these guards to their
-stream processing. `beta_strip` is also live: matching tokens are removed from
-the inbound `anthropic-beta` header before Copilot transport, and remaining
-tokens are forwarded. The broader request context is separate from this stream
-pipeline: it owns one immutable config/router generation, request ID, audit,
-terminal outcome, and cleanup for streaming and non-stream inference and token
-counting routes. Streaming cleanup finishes at the final ASGI body frame, not
-when the endpoint returns a stream object.
+The four protocol streaming encoders (OpenAI Chat, OpenAI Responses,
+Anthropic, and Gemini) attach these guards to their stream processing. The beta
+Anthropic URL reuses the same encoder. `beta_strip` is also live: matching
+tokens are removed from the inbound `anthropic-beta` header before Copilot
+transport, and remaining tokens are forwarded. The broader request context is
+separate from this stream pipeline: it owns one immutable config/router
+generation, request ID, audit, terminal outcome, and cleanup for streaming and
+non-stream inference and token counting routes. Streaming cleanup finishes at
+the final ASGI body frame, not when the endpoint returns a stream object.
 
 **Audit Tracing** (opt-in, for debugging):
 
@@ -925,4 +982,10 @@ RM_INTEGRATION_MODELS=github-copilot/gpt-4o,github-copilot/claude-sonnet-4.5 mak
 RM_INTEGRATION_MAX_MODELS=8 make integration-test
 RM_INTEGRATION_MAX_REASONING_MODELS=3 make integration-test
 RM_INTEGRATION_MAX_REASONING_MODELS=0 make integration-test  # full reasoning sweep
+```
+
+### Request Preparation Benchmark
+
+```bash
+uv run python scripts/benchmark_request_preparation.py --iterations 1000
 ```

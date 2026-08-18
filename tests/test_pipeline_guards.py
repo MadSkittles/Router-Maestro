@@ -2,6 +2,7 @@
 
 import importlib
 from types import SimpleNamespace
+from typing import cast
 
 import pytest
 
@@ -9,6 +10,7 @@ import router_maestro.pipeline as pipeline_api
 import router_maestro.runtime.request_context as request_context_module
 from router_maestro.config.priorities import PrioritiesConfig
 from router_maestro.pipeline.beta_strip import strip_beta_tokens
+from router_maestro.pipeline.guards import StreamGuard
 from router_maestro.pipeline.leak_guard import LeakGuard
 from router_maestro.pipeline.request_pipeline import RequestPipeline
 from router_maestro.pipeline.runaway_guard import RunawayGuard
@@ -75,7 +77,7 @@ def test_legacy_custom_guard_receives_only_content_text():
 @pytest.mark.parametrize("field", ["content", "refusal", "thinking"])
 def test_guard_chain_leak_scans_each_human_visible_text_field(field):
     leak_guard = LeakGuard()
-    chain = pipeline_api.GuardChain([leak_guard])
+    chain = pipeline_api.GuardChain([cast(StreamGuard, leak_guard)])
     payload = {"content": "", "refusal": None, "thinking": None}
     payload[field] = '<channel source="guard-test">visible</channel>'
     chunk = ResponsesStreamChunk(**payload)
@@ -88,7 +90,7 @@ def test_guard_chain_leak_scans_each_human_visible_text_field(field):
 def test_guard_chain_separates_visible_leak_text_from_opaque_counted_payloads():
     leak_guard = LeakGuard()
     runaway_guard = RunawayGuard(max_bytes=10_000, max_deltas=50_000)
-    chain = pipeline_api.GuardChain([leak_guard, runaway_guard])
+    chain = pipeline_api.GuardChain([cast(StreamGuard, leak_guard), runaway_guard])
     chunk = ResponsesStreamChunk(
         content="content",
         refusal="refusal",
@@ -112,7 +114,7 @@ def test_guard_chain_separates_visible_leak_text_from_opaque_counted_payloads():
         chunk.thinking,
         chunk.thinking_id,
         chunk.thinking_signature,
-        chunk.tool_call.arguments,
+        chunk.tool_call.arguments if chunk.tool_call is not None else None,
     )
     assert runaway_guard._total_bytes == sum(
         len(payload.encode("utf-8")) for payload in counted_payloads if payload is not None
@@ -122,7 +124,7 @@ def test_guard_chain_separates_visible_leak_text_from_opaque_counted_payloads():
 
 def test_guard_chain_recovers_invoke_from_content_but_not_refusal_or_thinking():
     leak_guard = LeakGuard(allowed_tool_names={"Read"})
-    chain = pipeline_api.GuardChain([leak_guard])
+    chain = pipeline_api.GuardChain([cast(StreamGuard, leak_guard)])
     invoke = '<invoke name="Read"><parameter name="file_path">/tmp/x</parameter></invoke>'
 
     assert (
@@ -145,7 +147,7 @@ def test_guard_chain_recovers_invoke_from_content_but_not_refusal_or_thinking():
 
 def test_leak_guard_scanner_state_is_isolated_between_visible_text_kinds():
     leak_guard = LeakGuard()
-    chain = pipeline_api.GuardChain([leak_guard])
+    chain = pipeline_api.GuardChain([cast(StreamGuard, leak_guard)])
 
     assert chain.feed_chunk(ResponsesStreamChunk(content="```")) is None
     result = chain.feed_chunk(
@@ -160,7 +162,7 @@ def test_leak_guard_scanner_state_is_isolated_between_visible_text_kinds():
 
 def test_leak_guard_never_joins_control_envelope_across_visible_text_kinds():
     leak_guard = LeakGuard()
-    chain = pipeline_api.GuardChain([leak_guard])
+    chain = pipeline_api.GuardChain([cast(StreamGuard, leak_guard)])
 
     assert chain.feed_chunk(ResponsesStreamChunk(content="<tick>content")) is None
     result = chain.feed_chunk(
@@ -470,7 +472,8 @@ class TestRunawayGuard:
     @pytest.mark.parametrize("field", ["thinking", "refusal"])
     def test_responses_payload_fields_use_utf8_bytes_and_trip_max_bytes(self, field):
         guard = RunawayGuard(max_bytes=5, max_deltas=50_000)
-        chunk = ResponsesStreamChunk(content="", **{field: "猫猫"})
+        chunk = ResponsesStreamChunk(content="")
+        setattr(chunk, field, "猫猫")
 
         result = guard.feed_chunk(chunk)
 
