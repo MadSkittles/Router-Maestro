@@ -355,6 +355,74 @@ def test_anthropic_responses_only_gpt_forced_tool(
     assert_anthropic_usage(data["usage"])
 
 
+def test_anthropic_responses_only_gpt_replays_error_tool_result(
+    client: httpx.Client,
+    responses_only_tool_model: str,
+):
+    """Claude Code can replay a failed tool result through Copilot Responses."""
+    first_payload = anthropic_tool_payload(responses_only_tool_model)
+    first_payload.pop("temperature")
+    first_payload["max_tokens"] = 512
+    first_payload["context_management"] = {
+        "edits": [{"type": "clear_thinking_20251015", "keep": "all"}]
+    }
+
+    first_response = client.post(
+        "/api/anthropic/v1/messages?beta=true",
+        json=first_payload,
+        timeout=180.0,
+    )
+    assert_http_success(first_response)
+    first_data = first_response.json()
+    tool_uses = [block for block in first_data["content"] if block.get("type") == "tool_use"]
+    assert len(tool_uses) == 1, first_data
+    tool_use_id = tool_uses[0].get("id")
+    assert isinstance(tool_use_id, str) and tool_use_id, first_data
+
+    second_payload = {
+        "model": responses_only_tool_model,
+        "max_tokens": 512,
+        "context_management": {"edits": [{"type": "clear_thinking_20251015", "keep": "all"}]},
+        "tools": first_payload["tools"],
+        "messages": [
+            first_payload["messages"][0],
+            {"role": "assistant", "content": first_data["content"]},
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": tool_use_id,
+                        "content": "The weather service failed with exit status 1.",
+                        "is_error": True,
+                        "cache_control": {"type": "ephemeral"},
+                    },
+                    {
+                        "type": "text",
+                        "text": "Acknowledge the failed tool call briefly without retrying it.",
+                    },
+                ],
+            },
+        ],
+    }
+
+    second_response = client.post(
+        "/api/anthropic/v1/messages?beta=true",
+        json=second_payload,
+        timeout=180.0,
+    )
+    assert second_response.status_code != 400, second_response.text
+    assert_http_success(second_response)
+    second_data = second_response.json()
+
+    assert second_data["type"] == "message"
+    assert second_data["role"] == "assistant"
+    assert second_data["model"] == responses_only_tool_model
+    assert isinstance(second_data["content"], list)
+    assert second_data["content"], second_data
+    assert_anthropic_usage(second_data["usage"])
+
+
 def test_anthropic_responses_only_gpt_forced_tool_streaming(
     client: httpx.Client,
     responses_only_tool_model: str,

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping
 
 import pytest
@@ -248,17 +249,63 @@ async def test_responses_custom_output_namespace_round_trips_and_matches_call() 
 
 
 @pytest.mark.asyncio
-async def test_responses_tool_result_rejects_error_and_function_output_namespace() -> None:
+async def test_responses_tool_result_preserves_error_and_rejects_function_namespace() -> None:
     runtime = OpenAIResponsesRuntime()
 
-    with pytest.raises(ProtocolRepresentabilityError) as error_raised:
+    encoded = await runtime.encode_request(
+        SemanticRequest(
+            model="gpt-example",
+            input=(ToolResult(call_id="call_1", content=(TextContent("bad"),), is_error=True),),
+        )
+    )
+    wire_result = encoded["input"][0]
+    assert wire_result["type"] == "function_call_output"
+    assert json.loads(wire_result["output"]) == {
+        "$router_maestro": {"type": "tool_result", "version": 1},
+        "is_error": True,
+        "output": "bad",
+    }
+
+    decoded = await runtime.decode_request(encoded)
+    result = decoded.input[0]
+    assert isinstance(result, ToolResult)
+    assert result.content == (TextContent("bad"),)
+    assert result.is_error is True
+
+    with pytest.raises(ProtocolRepresentabilityError) as multi_block_error:
         await runtime.encode_request(
             SemanticRequest(
                 model="gpt-example",
-                input=(ToolResult(call_id="call_1", content=(TextContent("bad"),), is_error=True),),
+                input=(
+                    ToolResult(
+                        call_id="call_1",
+                        content=(TextContent("first"), TextContent("second")),
+                        is_error=True,
+                    ),
+                ),
             )
         )
-    assert error_raised.value.path == "input[0].is_error"
+    assert multi_block_error.value.path == "input[0].content"
+
+    with pytest.raises(ProtocolRepresentabilityError) as search_error:
+        await runtime.encode_request(
+            SemanticRequest(
+                model="gpt-example",
+                input=(
+                    ToolResult(
+                        call_id="call_1",
+                        kind="tool_search",
+                        is_error=True,
+                        structured_content={
+                            "execution": "client",
+                            "status": "completed",
+                            "tools": (),
+                        },
+                    ),
+                ),
+            )
+        )
+    assert search_error.value.path == "input[0].is_error"
 
     with pytest.raises(ProtocolRepresentabilityError) as namespace_raised:
         await runtime.encode_request(
@@ -291,6 +338,98 @@ async def test_responses_tool_result_rejects_error_and_function_output_namespace
             }
         )
     assert wire_namespace.value.path == "input[0].namespace"
+
+
+@pytest.mark.asyncio
+async def test_responses_tool_result_projection_escapes_literal_envelopes() -> None:
+    runtime = OpenAIResponsesRuntime()
+    literal = json.dumps(
+        {
+            "$router_maestro": {"type": "tool_result", "version": 1},
+            "is_error": True,
+            "output": "literal",
+        },
+        separators=(",", ":"),
+    )
+
+    encoded = await runtime.encode_request(
+        SemanticRequest(
+            model="gpt-example",
+            input=(ToolResult(call_id="call_1", content=(TextContent(literal),)),),
+        )
+    )
+    projected = json.loads(encoded["input"][0]["output"])
+    assert projected == {
+        "$router_maestro": {"type": "tool_result", "version": 1},
+        "is_error": False,
+        "output": literal,
+    }
+
+    decoded = await runtime.decode_request(encoded)
+    result = decoded.input[0]
+    assert isinstance(result, ToolResult)
+    assert result.content == (TextContent(literal),)
+    assert result.is_error is False
+
+
+@pytest.mark.asyncio
+async def test_responses_tool_result_projection_decodes_only_one_error_layer() -> None:
+    runtime = OpenAIResponsesRuntime()
+    literal = json.dumps(
+        {
+            "$router_maestro": {"type": "tool_result", "version": 1},
+            "is_error": False,
+            "output": "literal",
+        },
+        separators=(",", ":"),
+    )
+
+    encoded = await runtime.encode_request(
+        SemanticRequest(
+            model="gpt-example",
+            input=(
+                ToolResult(
+                    call_id="call_1",
+                    content=(TextContent(literal),),
+                    is_error=True,
+                ),
+            ),
+        )
+    )
+    decoded = await runtime.decode_request(encoded)
+    result = decoded.input[0]
+    assert isinstance(result, ToolResult)
+    assert result.content == (TextContent(literal),)
+    assert result.is_error is True
+
+
+@pytest.mark.asyncio
+async def test_responses_tool_result_projection_rejects_unknown_version() -> None:
+    runtime = OpenAIResponsesRuntime()
+    output = json.dumps(
+        {
+            "$router_maestro": {"type": "tool_result", "version": 2},
+            "is_error": True,
+            "output": "bad",
+        },
+        separators=(",", ":"),
+    )
+
+    with pytest.raises(ProtocolDecodeError) as raised:
+        await runtime.decode_request(
+            {
+                "model": "gpt-example",
+                "input": [
+                    {
+                        "type": "function_call_output",
+                        "call_id": "call_1",
+                        "output": output,
+                    }
+                ],
+            }
+        )
+
+    assert raised.value.path == "input[0].output"
 
 
 @pytest.mark.asyncio

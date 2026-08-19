@@ -33,6 +33,16 @@ All notable changes to Router-Maestro are documented here.
 
 ### Changed
 
+- **Anthropic tool failures retain their error semantics across OpenAI
+  transports.** When an Anthropic `tool_result` with `is_error: true` crosses to
+  OpenAI Responses or Chat, Router-Maestro now projects the flag and ordinary
+  tool output into a versioned JSON content envelope instead of rejecting the
+  request or losing the distinction. The Responses and Chat decoders restore
+  the original semantic tool result on replay, including its position in mixed
+  tool/text history. Literal non-error output that resembles the envelope is
+  escaped so it remains literal, and an unknown projection version fails closed
+  rather than being silently misinterpreted.
+
 - **Claude Code no-op context editing can use Responses-only models.** Anthropic
   requests that explicitly preserve all thinking turns with
   `clear_thinking_20251015` and `keep: "all"` now cross to Chat or Responses

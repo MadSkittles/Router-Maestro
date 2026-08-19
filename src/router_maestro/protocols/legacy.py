@@ -7,6 +7,7 @@ import json
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any, cast
 
+from router_maestro.protocols._tool_result_projection import project_tool_result_output
 from router_maestro.protocols._wire import reject, thaw_json
 from router_maestro.protocols.models import (
     FileContent,
@@ -130,9 +131,10 @@ def _legacy_message(
         result = message.content[0]
         if result.item_id is not None:
             reject(_PROTOCOL, parameter, "legacy Chat tool results lack item IDs")
-        if result.is_error:
-            reject(_PROTOCOL, parameter, "legacy Chat tool results cannot mark errors")
-        content = _legacy_tool_result_content(result, parameter=parameter)
+        content = project_tool_result_output(
+            _legacy_tool_result_content(result, parameter=parameter),
+            is_error=result.is_error,
+        )
         return message_cls(
             role="tool",
             content=content,

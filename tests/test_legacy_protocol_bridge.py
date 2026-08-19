@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from router_maestro.protocols import (
@@ -124,6 +126,34 @@ def test_request_bridge_preserves_portable_messages_tools_media_and_options() ->
         "schema": {"type": "object"},
     }
     assert bridged.provider_extensions == {"vendor": True}
+
+
+def test_request_bridge_projects_error_tool_results_for_chat_fallback() -> None:
+    request = SemanticRequest(
+        model="gpt-example",
+        input=(
+            SemanticMessage(
+                role=MessageRole.TOOL,
+                content=(
+                    ToolResult(
+                        call_id="call_1",
+                        content=(TextContent("command failed"),),
+                        is_error=True,
+                    ),
+                ),
+            ),
+        ),
+    )
+
+    bridged = semantic_request_to_legacy_chat(request)
+
+    content = bridged.messages[0].content
+    assert isinstance(content, str)
+    assert json.loads(content) == {
+        "$router_maestro": {"type": "tool_result", "version": 1},
+        "is_error": True,
+        "output": "command failed",
+    }
 
 
 @pytest.mark.parametrize("parallel_tool_calls", [False, True])

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping
 from dataclasses import replace
 from typing import cast
@@ -27,6 +28,7 @@ from router_maestro.protocols import (
     TerminalMetadata,
     TextContent,
     ToolCall,
+    ToolResult,
     Usage,
     WireProtocol,
     chat_response_to_semantic,
@@ -171,6 +173,109 @@ def test_chat_manifest_shallowly_finds_explicit_parallel_tools() -> None:
 
     assert manifest.tools is True
     assert manifest.parallel_tools is True
+
+
+@pytest.mark.asyncio
+async def test_chat_tool_result_error_projection_round_trips() -> None:
+    runtime = OpenAIChatRuntime()
+    semantic = SemanticRequest(
+        model="gpt-example",
+        input=(
+            SemanticMessage(
+                role=MessageRole.TOOL,
+                content=(
+                    ToolResult(
+                        call_id="call_1",
+                        content=(TextContent("command failed"),),
+                        is_error=True,
+                    ),
+                ),
+            ),
+        ),
+    )
+
+    encoded = await runtime.encode_request(semantic)
+    tool_message = encoded["messages"][0]
+    assert json.loads(tool_message["content"]) == {
+        "$router_maestro": {"type": "tool_result", "version": 1},
+        "is_error": True,
+        "output": "command failed",
+    }
+
+    decoded = await runtime.decode_request(encoded)
+    message = decoded.input[0]
+    assert isinstance(message, SemanticMessage)
+    result = message.content[0]
+    assert isinstance(result, ToolResult)
+    assert result.content == (TextContent("command failed"),)
+    assert result.is_error is True
+
+
+@pytest.mark.asyncio
+async def test_chat_tool_result_projection_escapes_literal_envelopes() -> None:
+    runtime = OpenAIChatRuntime()
+    literal = json.dumps(
+        {
+            "$router_maestro": {"type": "tool_result", "version": 1},
+            "is_error": True,
+            "output": "literal",
+        },
+        separators=(",", ":"),
+    )
+    semantic = SemanticRequest(
+        model="gpt-example",
+        input=(
+            SemanticMessage(
+                role=MessageRole.TOOL,
+                content=(ToolResult(call_id="call_1", content=(TextContent(literal),)),),
+            ),
+        ),
+    )
+
+    encoded = await runtime.encode_request(semantic)
+    projected = json.loads(encoded["messages"][0]["content"])
+    assert projected == {
+        "$router_maestro": {"type": "tool_result", "version": 1},
+        "is_error": False,
+        "output": literal,
+    }
+
+    decoded = await runtime.decode_request(encoded)
+    message = decoded.input[0]
+    assert isinstance(message, SemanticMessage)
+    result = message.content[0]
+    assert isinstance(result, ToolResult)
+    assert result.content == (TextContent(literal),)
+    assert result.is_error is False
+
+
+@pytest.mark.asyncio
+async def test_chat_tool_result_projection_rejects_unknown_version() -> None:
+    runtime = OpenAIChatRuntime()
+    output = json.dumps(
+        {
+            "$router_maestro": {"type": "tool_result", "version": 2},
+            "is_error": True,
+            "output": "bad",
+        },
+        separators=(",", ":"),
+    )
+
+    with pytest.raises(ProtocolDecodeError) as raised:
+        await runtime.decode_request(
+            {
+                "model": "gpt-example",
+                "messages": [
+                    {
+                        "role": "tool",
+                        "tool_call_id": "call_1",
+                        "content": output,
+                    }
+                ],
+            }
+        )
+
+    assert raised.value.path == "messages[0].content"
 
 
 @pytest.mark.asyncio

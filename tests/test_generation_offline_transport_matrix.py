@@ -538,3 +538,90 @@ async def test_anthropic_context_management_noop_reaches_responses_transport() -
     attempt = provider.executor.attempts[0]
     assert attempt.protocol is WireProtocol.OPENAI_RESPONSES
     assert "context_management" not in attempt.payload
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "target",
+    (WireProtocol.OPENAI_RESPONSES, WireProtocol.OPENAI_CHAT),
+    ids=("responses", "chat"),
+)
+async def test_anthropic_error_tool_result_reaches_one_upstream_attempt(
+    target: WireProtocol,
+) -> None:
+    provider = _MatrixProvider(target)
+    router = _router(provider)
+    source_payload = {
+        "model": _PUBLIC_MODEL,
+        "max_tokens": 64,
+        "messages": [
+            {"role": "user", "content": "run the command"},
+            {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": "call_matrix_error",
+                        "name": "Bash",
+                        "input": {"command": "exit 1"},
+                    }
+                ],
+            },
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "call_matrix_error",
+                        "content": "command failed",
+                        "is_error": True,
+                    }
+                ],
+            },
+        ],
+        "stream": False,
+    }
+    pipeline = build_generation_pipeline(
+        router,
+        ReasoningCapsuleCodec(bytes([73]) * 32),
+        WireProtocol.ANTHROPIC_MESSAGES,
+        source_payload,
+        path="/api/anthropic/v1/messages",
+    )
+
+    result = await pipeline.dispatcher.dispatch(router, pipeline.envelope)
+    downstream = await pipeline.responses.encode_result(result, pipeline.envelope.runtime)
+
+    assert downstream["type"] == "message"
+    assert pipeline.envelope.materialization_count == 1
+    assert provider.dialect.prepare_count == 1
+    assert len(provider.executor.attempts) == 1
+    attempt = provider.executor.attempts[0]
+    assert attempt.protocol is target
+    assert attempt.stream is False
+
+    expected_error_output = {
+        "$router_maestro": {"type": "tool_result", "version": 1},
+        "is_error": True,
+        "output": "command failed",
+    }
+    if target is WireProtocol.OPENAI_RESPONSES:
+        tool_call = next(
+            item for item in attempt.payload["input"] if item["type"] == "function_call"
+        )
+        tool_result = next(
+            item for item in attempt.payload["input"] if item["type"] == "function_call_output"
+        )
+        assert tool_call["call_id"] == "call_matrix_error"
+        assert tool_result["call_id"] == "call_matrix_error"
+        assert json.loads(tool_result["output"]) == expected_error_output
+    else:
+        assistant = next(
+            message for message in attempt.payload["messages"] if message["role"] == "assistant"
+        )
+        tool_result = next(
+            message for message in attempt.payload["messages"] if message["role"] == "tool"
+        )
+        assert assistant["tool_calls"][0]["id"] == "call_matrix_error"
+        assert tool_result["tool_call_id"] == "call_matrix_error"
+        assert json.loads(tool_result["content"]) == expected_error_output

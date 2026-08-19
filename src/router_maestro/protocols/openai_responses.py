@@ -9,6 +9,11 @@ from contextvars import ContextVar
 from dataclasses import replace
 from typing import Any, Literal, cast
 
+from router_maestro.protocols._tool_result_projection import (
+    ToolResultProjectionError,
+    project_tool_result_output,
+    unproject_tool_result_output,
+)
 from router_maestro.protocols._wire import is_reasoning_capsule_carrier
 from router_maestro.protocols.models import (
     ContentBlock,
@@ -2104,9 +2109,14 @@ def _decode_tool_result(value: Mapping[str, Any], *, parameter: str) -> ToolResu
             protocol=_PROTOCOL,
             parameter=parameter,
         )
+        try:
+            output, is_error = unproject_tool_result_output(value.get("output"))
+        except ToolResultProjectionError as exc:
+            decode_reject(_PROTOCOL, f"{parameter}.output", str(exc))
         return ToolResult(
             call_id=call_id,
-            content=_decode_tool_output(value.get("output"), parameter=f"{parameter}.output"),
+            content=_decode_tool_output(output, parameter=f"{parameter}.output"),
+            is_error=is_error,
             item_id=item_id,
             kind=("custom" if item_type == "custom_tool_call_output" else "function"),
             namespace=(
@@ -2634,9 +2644,13 @@ def _encode_tool_call(call: ToolCall, *, parameter: str) -> dict[str, Any]:
 
 
 def _encode_tool_result(result: ToolResult, *, parameter: str) -> dict[str, Any]:
-    if result.is_error:
-        reject(_PROTOCOL, f"{parameter}.is_error", "Responses cannot mark tool output errors")
     if result.kind == "tool_search":
+        if result.is_error:
+            reject(
+                _PROTOCOL,
+                f"{parameter}.is_error",
+                "tool-search output cannot mark errors",
+            )
         if result.namespace is not None:
             reject(
                 _PROTOCOL,
@@ -2702,10 +2716,20 @@ def _encode_tool_result(result: ToolResult, *, parameter: str) -> dict[str, Any]
             f"{parameter}.kind",
             f"unsupported tool result kind {result.kind!r}",
         )
+    output = _encode_tool_output(result, parameter=parameter)
+    if result.is_error and not isinstance(output, str):
+        reject(
+            _PROTOCOL,
+            f"{parameter}.content",
+            "Responses cannot preserve error semantics for multi-block tool output",
+        )
     payload: dict[str, Any] = {
         "type": result_type,
         "call_id": result.call_id,
-        "output": _encode_tool_output(result, parameter=parameter),
+        "output": project_tool_result_output(
+            output,
+            is_error=result.is_error,
+        ),
     }
     if result.item_id is not None:
         payload["id"] = result.item_id

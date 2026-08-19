@@ -117,6 +117,38 @@ request schema rather than being folded into user text. Images and documents
 inside `tool_result.content` cannot remain on an OpenAI `tool` message, so they
 are preserved in a follow-up multimodal user message after the tool result.
 
+#### Cross-protocol tool-result error projection
+
+Anthropic `tool_result.is_error` is retained in the semantic IR. OpenAI
+Responses `function_call_output` and OpenAI Chat `tool` messages have no
+equivalent error flag, so cross-protocol encoders place the flag and the
+ordinary encoded tool output in a Router-Maestro-owned JSON content envelope:
+
+```json
+{
+  "$router_maestro": {"type": "tool_result", "version": 1},
+  "is_error": true,
+  "output": "command failed"
+}
+```
+
+For Responses, the serialized envelope is the `function_call_output.output`
+string. For Chat, it is the tool message's `content` string. Decoding either
+form restores the original `ToolResult`, including `is_error`, content, call ID,
+and its order relative to surrounding messages. This makes Anthropic tool
+history portable through a Responses or Chat attempt and back through a later
+protocol conversion.
+
+Ordinary successful tool outputs keep their existing wire form. If literal
+non-error output would itself parse as a Router-Maestro tool-result envelope,
+the encoder wraps it with `is_error: false`; decoding removes only the outer
+projection and preserves the literal value. A recognized marker with an unknown
+`version` is rejected at the tool-output path before provider I/O. The decoder
+does not guess a future format or silently reinterpret it as either success or
+failure. A failed Responses tool result whose output requires multiple content
+blocks is also rejected before provider I/O, because wrapping the array as text
+would lose its multimodal wire semantics.
+
 **Assistant messages** (`_handle_assistant_message`):
 - `text` blocks → concatenated into `content`
 - `thinking` blocks → omitted from legacy OpenAI assistant history; replaying

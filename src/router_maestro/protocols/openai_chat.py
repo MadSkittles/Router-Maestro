@@ -2,12 +2,18 @@
 
 from __future__ import annotations
 
+import json
 import time
 from collections.abc import Mapping
 from contextvars import ContextVar
 from dataclasses import replace
 from typing import Any, cast
 
+from router_maestro.protocols._tool_result_projection import (
+    ToolResultProjectionError,
+    project_tool_result_output,
+    unproject_tool_result_output,
+)
 from router_maestro.protocols.models import (
     FileContent,
     ImageContent,
@@ -1012,7 +1018,6 @@ def _decode_message(value: object, *, parameter: str) -> SemanticMessage:
     except ValueError:
         decode_reject(_PROTOCOL, f"{parameter}.role", f"unsupported role {role_value!r}")
     name = optional_string(message.get("name"), protocol=_PROTOCOL, parameter=f"{parameter}.name")
-    content = _decode_content(message.get("content"), parameter=f"{parameter}.content")
 
     if role is MessageRole.TOOL:
         call_id = require_string(
@@ -1023,12 +1028,18 @@ def _decode_message(value: object, *, parameter: str) -> SemanticMessage:
         )
         if message.get("tool_calls") is not None or message.get("refusal") is not None:
             decode_reject(_PROTOCOL, parameter, "tool messages cannot contain calls or refusal")
+        try:
+            output, is_error = unproject_tool_result_output(message.get("content"))
+        except ToolResultProjectionError as exc:
+            decode_reject(_PROTOCOL, f"{parameter}.content", str(exc))
+        content = _decode_content(output, parameter=f"{parameter}.content")
         return SemanticMessage(
             role=role,
             name=name,
-            content=(ToolResult(call_id=call_id, content=content),),
+            content=(ToolResult(call_id=call_id, content=content, is_error=is_error),),
         )
 
+    content = _decode_content(message.get("content"), parameter=f"{parameter}.content")
     if message.get("tool_call_id") is not None:
         decode_reject(
             _PROTOCOL,
@@ -1412,8 +1423,6 @@ def _encode_tool_result_message(message: SemanticMessage, *, parameter: str) -> 
         )
     if result.item_id is not None:
         reject(_PROTOCOL, f"{parameter}.content.item_id", "Chat tool results lack item IDs")
-    if result.is_error:
-        reject(_PROTOCOL, f"{parameter}.content.is_error", "Chat cannot mark tool errors")
     pieces = []
     for index, part in enumerate(result.content):
         if not isinstance(part, TextContent):
@@ -1430,12 +1439,13 @@ def _encode_tool_result_message(message: SemanticMessage, *, parameter: str) -> 
                 f"{parameter}.content",
                 "cannot combine text and structured tool result content",
             )
-        import json
-
         pieces.append(json.dumps(thaw_json(result.structured_content), ensure_ascii=False))
     payload: dict[str, Any] = {
         "role": "tool",
-        "content": "".join(pieces),
+        "content": project_tool_result_output(
+            "".join(pieces),
+            is_error=result.is_error,
+        ),
         "tool_call_id": result.call_id,
     }
     if message.name is not None:

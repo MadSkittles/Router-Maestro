@@ -216,6 +216,103 @@ async def test_anthropic_tool_history_replays_to_responses_without_item_ids() ->
 
 
 @pytest.mark.asyncio
+async def test_anthropic_error_tool_history_replays_to_responses_without_losing_order() -> None:
+    semantic = await AnthropicMessagesRuntime().decode_request(
+        _request(
+            {"role": "user", "content": "run the checks"},
+            {
+                "role": "assistant",
+                "content": [
+                    {"type": "tool_use", "id": "call_1", "name": "Bash", "input": {}},
+                ],
+            },
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "call_1",
+                        "content": "first command failed",
+                        "is_error": True,
+                        "cache_control": {"type": "ephemeral"},
+                    },
+                    {"type": "text", "text": "continue with the fallback"},
+                ],
+            },
+            {
+                "role": "assistant",
+                "content": [
+                    {"type": "tool_use", "id": "call_2", "name": "Bash", "input": {}},
+                ],
+            },
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "call_2",
+                        "content": "second command failed",
+                        "is_error": True,
+                    }
+                ],
+            },
+        )
+    )
+
+    encoded = await OpenAIResponsesRuntime().encode_request(semantic)
+    input_items = encoded["input"]
+    error_outputs = [
+        json.loads(item["output"])
+        for item in input_items
+        if item.get("type") == "function_call_output"
+    ]
+
+    assert [item["output"] for item in error_outputs] == [
+        "first command failed",
+        "second command failed",
+    ]
+    assert all(item["is_error"] is True for item in error_outputs)
+    first_call_index = next(
+        index
+        for index, item in enumerate(input_items)
+        if item.get("type") == "function_call" and item.get("call_id") == "call_1"
+    )
+    first_result_index = next(
+        index
+        for index, item in enumerate(input_items)
+        if item.get("type") == "function_call_output" and item.get("call_id") == "call_1"
+    )
+    trailing_text_index = next(
+        index
+        for index, item in enumerate(input_items)
+        if item.get("type") == "message"
+        and any(part.get("text") == "continue with the fallback" for part in item["content"])
+    )
+    second_call_index = next(
+        index
+        for index, item in enumerate(input_items)
+        if item.get("type") == "function_call" and item.get("call_id") == "call_2"
+    )
+    second_result_index = next(
+        index
+        for index, item in enumerate(input_items)
+        if item.get("type") == "function_call_output" and item.get("call_id") == "call_2"
+    )
+    assert (
+        first_call_index
+        < first_result_index
+        < trailing_text_index
+        < second_call_index
+        < second_result_index
+    )
+
+    decoded = await OpenAIResponsesRuntime().decode_request(encoded)
+    decoded_results = [item for item in decoded.input if isinstance(item, ToolResult)]
+    assert len(decoded_results) == 2
+    assert all(result.is_error for result in decoded_results)
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "context_management",
     [
