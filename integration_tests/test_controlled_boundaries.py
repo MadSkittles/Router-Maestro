@@ -299,6 +299,147 @@ def test_operation_routing_exhausts_transport_before_model_fallback(tmp_path: Pa
     )
 
 
+def test_anthropic_responses_tool_stream_accepts_rotating_copilot_item_ids(
+    tmp_path: Path,
+):
+    final_item = {
+        "type": "function_call",
+        "id": "fc-canonical",
+        "call_id": "call-weather",
+        "name": "get_weather",
+        "arguments": '{"city":"Shanghai"}',
+        "status": "completed",
+    }
+
+    def responder(request: RecordedUpstreamRequest):
+        if request.path == "/models":
+            return _models(_catalog_model("responses-tool", endpoints=["/responses"]))
+        if request.path == "/responses":
+            model = _request_payload(request)["model"]
+            return _sse_reply(
+                {
+                    "type": "response.created",
+                    "response": {
+                        "id": "opaque-response-created",
+                        "model": model,
+                        "status": "in_progress",
+                        "output": [],
+                        "usage": None,
+                    },
+                },
+                {
+                    "type": "response.output_item.added",
+                    "output_index": 0,
+                    "item": {
+                        **final_item,
+                        "id": "opaque-item-added",
+                        "arguments": "",
+                        "status": "in_progress",
+                    },
+                },
+                {
+                    "type": "response.function_call_arguments.delta",
+                    "item_id": "opaque-item-delta-one",
+                    "output_index": 0,
+                    "delta": '{"city":"',
+                },
+                {
+                    "type": "response.function_call_arguments.delta",
+                    "item_id": "opaque-item-delta-two",
+                    "output_index": 0,
+                    "delta": 'Shanghai"}',
+                },
+                {
+                    "type": "response.function_call_arguments.done",
+                    "item_id": "opaque-item-arguments-done",
+                    "output_index": 0,
+                    "arguments": final_item["arguments"],
+                },
+                {
+                    "type": "response.output_item.done",
+                    "output_index": 0,
+                    "item": final_item,
+                },
+                {
+                    "type": "response.completed",
+                    "response": {
+                        "id": "opaque-response-terminal",
+                        "model": model,
+                        "status": "completed",
+                        "output": [final_item],
+                        "usage": {"input_tokens": 8, "output_tokens": 5, "total_tokens": 13},
+                        "error": None,
+                        "incomplete_details": None,
+                    },
+                },
+            )
+        return _json_reply(500, {"error": "wrong operation"})
+
+    with _controlled_copilot(
+        tmp_path,
+        responder,
+        priorities=["github-copilot/responses-tool"],
+    ) as (client, upstream):
+        response = client.post(
+            "/api/anthropic/v1/messages?beta=true",
+            json={
+                "model": "github-copilot/responses-tool",
+                "stream": True,
+                "max_tokens": 128,
+                "messages": [{"role": "user", "content": "Use the weather tool."}],
+                "tools": [
+                    {
+                        "name": "get_weather",
+                        "description": "Get weather for a city.",
+                        "input_schema": {
+                            "type": "object",
+                            "properties": {"city": {"type": "string"}},
+                            "required": ["city"],
+                        },
+                    }
+                ],
+                "tool_choice": {"type": "tool", "name": "get_weather"},
+                "context_management": {
+                    "edits": [{"type": "clear_thinking_20251015", "keep": "all"}]
+                },
+            },
+        )
+
+    assert response.status_code == 200, response.text
+    events = parse_sse_events(response)
+    event_names = [name for name, _payload in events]
+    payloads = [payload for _name, payload in events if isinstance(payload, dict)]
+    assert "error" not in event_names
+    tool_starts = [
+        payload
+        for payload in payloads
+        if payload.get("type") == "content_block_start"
+        and payload.get("content_block", {}).get("type") == "tool_use"
+    ]
+    assert len(tool_starts) == 1
+    assert tool_starts[0]["content_block"] == {
+        "type": "tool_use",
+        "id": "call-weather",
+        "name": "get_weather",
+        "input": {},
+    }
+    argument_deltas = [
+        payload["delta"]["partial_json"]
+        for payload in payloads
+        if payload.get("type") == "content_block_delta"
+        and payload.get("delta", {}).get("type") == "input_json_delta"
+    ]
+    assert "".join(argument_deltas) == final_item["arguments"]
+    assert event_names.count("content_block_stop") == 1
+    assert event_names.count("message_stop") == 1
+    assert (
+        next(payload for name, payload in events if name == "message_delta")["delta"]["stop_reason"]
+        == "tool_use"
+    )
+    attempts = [request for request in upstream.requests if request.path != "/models"]
+    assert [request.path for request in attempts] == ["/responses"]
+
+
 def test_capability_mismatch_is_precommit_and_never_calls_upstream(tmp_path: Path):
     def responder(request: RecordedUpstreamRequest):
         if request.path == "/models":

@@ -923,6 +923,55 @@ def responses_only_reasoning_model(
 
 
 @pytest.fixture(scope="session")
+def responses_only_tool_model(
+    copilot_models: list[str],
+    copilot_catalog: dict[str, ModelInfo],
+) -> str:
+    """Responses-only GPT used for Anthropic streaming tool conversion."""
+
+    def eligible(model: str) -> bool:
+        info = copilot_catalog[model]
+        if not bare_model(model).lower().startswith("gpt-"):
+            return False
+        if info.feature_capabilities.get("tools") is False:
+            return False
+        endpoints = info.supported_endpoints
+        if endpoints is None:
+            return bare_model(model).lower() in RESPONSES_ONLY_CHAT_MODELS
+        advertised = set(endpoints)
+        return (
+            "/responses" in advertised
+            and "/chat/completions" not in advertised
+            and "/v1/messages" not in advertised
+        )
+
+    requested = os.environ.get("RM_INTEGRATION_RESPONSES_ONLY_TOOL_MODEL")
+    candidates = [model for model in _prioritize_models(copilot_models) if eligible(model)]
+    if requested:
+        if requested in candidates:
+            return requested
+        pytest.fail(
+            "RM_INTEGRATION_RESPONSES_ONLY_TOOL_MODEL="
+            f"{requested!r} is not an available tool-capable Responses-only GPT"
+        )
+    preferred = (
+        "github-copilot/gpt-5.6-sol",
+        "github-copilot/gpt-5.6-terra",
+        "github-copilot/gpt-5.6-luna",
+        "github-copilot/gpt-5.4-mini",
+        "github-copilot/gpt-5.3-codex",
+        "github-copilot/gpt-5.2-codex",
+        "github-copilot/gpt-5.5",
+    )
+    selected = _first_available(candidates, preferred)
+    if selected:
+        return selected
+    if candidates:
+        return candidates[0]
+    pytest.skip("No tool-capable Responses-only GPT is available")
+
+
+@pytest.fixture(scope="session")
 def responses_top_p_model(
     copilot_models: list[str],
     copilot_catalog: dict[str, ModelInfo],

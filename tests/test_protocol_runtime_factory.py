@@ -146,6 +146,7 @@ def test_responses_target_runtime_is_frozen_to_provider_and_binding() -> None:
     assert runtime.provider_name == "github-copilot"
     assert runtime.binding_id == COPILOT_OPENAI_RESPONSES_BINDING
     assert runtime.allow_per_event_response_ids is True
+    assert runtime.defer_intermediate_item_ids is True
 
 
 def test_responses_id_quirk_is_not_enabled_for_other_provider_bindings() -> None:
@@ -159,3 +160,4 @@ def test_responses_id_quirk_is_not_enabled_for_other_provider_bindings() -> None
 
     assert isinstance(runtime, OpenAIResponsesRuntime)
     assert runtime.allow_per_event_response_ids is False
+    assert runtime.defer_intermediate_item_ids is False

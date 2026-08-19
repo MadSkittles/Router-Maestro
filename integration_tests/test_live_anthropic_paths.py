@@ -272,6 +272,48 @@ def test_anthropic_responses_only_gpt_forced_tool(
     assert_anthropic_usage(data["usage"])
 
 
+def test_anthropic_responses_only_gpt_forced_tool_streaming(
+    client: httpx.Client,
+    responses_only_tool_model: str,
+):
+    """Responses-only Copilot tool streams survive per-event opaque item IDs."""
+    payload = anthropic_tool_payload(responses_only_tool_model, stream=True)
+    payload.pop("temperature")
+    payload["max_tokens"] = 512
+    payload["context_management"] = {"edits": [{"type": "clear_thinking_20251015", "keep": "all"}]}
+
+    with client.stream(
+        "POST",
+        "/api/anthropic/v1/messages?beta=true",
+        json=payload,
+        timeout=180.0,
+    ) as response:
+        assert_http_success(response)
+        events = parse_sse_events(response)
+
+    event_names = [name for name, _payload in events]
+    payloads = event_payloads(events)
+    assert "error" not in event_names, events
+    tool_starts = [
+        payload
+        for payload in payloads
+        if isinstance(payload, dict)
+        and payload.get("type") == "content_block_start"
+        and payload.get("content_block", {}).get("type") == "tool_use"
+    ]
+    assert len(tool_starts) == 1, payloads
+    assert tool_starts[0]["content_block"]["name"] == "get_weather"
+    assert any(
+        payload.get("delta", {}).get("type") == "input_json_delta"
+        for payload in payloads
+        if isinstance(payload, dict)
+    )
+    message_delta = next(payload for name, payload in events if name == "message_delta")
+    assert message_delta["delta"]["stop_reason"] == "tool_use"
+    assert_anthropic_usage(message_delta["usage"])
+    assert event_names.count("message_stop") == 1
+
+
 def test_anthropic_forced_tool_call_streaming(
     client: httpx.Client,
     tool_model: str,

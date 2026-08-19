@@ -138,6 +138,7 @@ class OpenAIResponsesRuntime:
         provider_name: str | None = "openai",
         binding_id: str | None = None,
         allow_per_event_response_ids: bool = False,
+        defer_intermediate_item_ids: bool = False,
     ) -> None:
         if provider_name == "":
             raise ValueError("provider_name must be non-empty when provided")
@@ -146,6 +147,7 @@ class OpenAIResponsesRuntime:
         self.provider_name = provider_name
         self.binding_id = binding_id
         self.allow_per_event_response_ids = allow_per_event_response_ids
+        self.defer_intermediate_item_ids = defer_intermediate_item_ids
         self._stream_decoder: ContextVar[OpenAIResponsesStreamDecoder | None] = ContextVar(
             f"openai_responses_stream_decoder_{id(self)}",
             default=None,
@@ -212,6 +214,7 @@ class OpenAIResponsesRuntime:
             binding_id=self.binding_id,
             sequence_start=sequence_start,
             allow_per_event_response_ids=self.allow_per_event_response_ids,
+            defer_intermediate_item_ids=self.defer_intermediate_item_ids,
         )
 
     def new_stream_encoder(
@@ -274,10 +277,12 @@ class OpenAIResponsesStreamDecoder:
         binding_id: str | None = None,
         sequence_start: int = 0,
         allow_per_event_response_ids: bool = False,
+        defer_intermediate_item_ids: bool = False,
     ) -> None:
         self.provider_name = provider_name
         self.binding_id = binding_id
         self.allow_per_event_response_ids = allow_per_event_response_ids
+        self.defer_intermediate_item_ids = defer_intermediate_item_ids
         self._sequence = sequence_start
         self._started = False
         self._terminal = False
@@ -381,7 +386,7 @@ class OpenAIResponsesStreamDecoder:
                 (
                     SemanticEventType.REASONING_DELTA,
                     {
-                        "item_id": self._optional_frame_string(frame, "item_id"),
+                        "item_id": self._intermediate_item_id(frame),
                         "output_index": self._frame_index(frame, "output_index"),
                         "content_index": self._frame_index(frame, "summary_index"),
                         "delta": require_string(
@@ -410,7 +415,7 @@ class OpenAIResponsesStreamDecoder:
                 (
                     SemanticEventType.OUTPUT_ITEM,
                     {
-                        "item_id": self._optional_frame_string(frame, "item_id"),
+                        "item_id": self._intermediate_item_id(frame),
                         "output_index": self._frame_index(frame, "output_index"),
                         "content_index": self._frame_index(frame, "summary_index"),
                         "metadata": {
@@ -441,7 +446,7 @@ class OpenAIResponsesStreamDecoder:
                 (
                     SemanticEventType.TOOL_ARGUMENTS_DELTA,
                     {
-                        "item_id": self._optional_frame_string(frame, "item_id"),
+                        "item_id": self._intermediate_item_id(frame),
                         "output_index": output_index,
                         "delta": require_string(
                             frame.get("delta"),
@@ -461,7 +466,7 @@ class OpenAIResponsesStreamDecoder:
                 (
                     SemanticEventType.OUTPUT_ITEM,
                     {
-                        "item_id": self._optional_frame_string(frame, "item_id"),
+                        "item_id": self._intermediate_item_id(frame),
                         "output_index": output_index,
                         "metadata": {
                             "output_item_type": (
@@ -596,6 +601,8 @@ class OpenAIResponsesStreamDecoder:
         }:
             decode_reject(_PROTOCOL, "stream.item.type", f"unsupported item {item_type!r}")
         item_id = self._optional_mapping_string(item, "id", path="stream.item")
+        if not done and self.defer_intermediate_item_ids:
+            item_id = None
         return [
             (
                 SemanticEventType.OUTPUT_ITEM,
@@ -665,7 +672,7 @@ class OpenAIResponsesStreamDecoder:
         lifecycle = (
             SemanticEventType.OUTPUT_ITEM,
             {
-                "item_id": self._optional_frame_string(frame, "item_id"),
+                "item_id": self._intermediate_item_id(frame),
                 "output_index": output_index,
                 "content_index": content_index,
                 "metadata": {
@@ -755,7 +762,7 @@ class OpenAIResponsesStreamDecoder:
             decode_reject(_PROTOCOL, "stream.delta", "delta followed a completed content part")
         parts[key] = parts.get(key, "") + delta
         return self._part_delta_spec(
-            item_id=self._optional_frame_string(frame, "item_id"),
+            item_id=self._intermediate_item_id(frame),
             output_index=output_index,
             content_index=content_index,
             refusal=refusal,
@@ -792,7 +799,7 @@ class OpenAIResponsesStreamDecoder:
             return []
         return [
             self._part_delta_spec(
-                item_id=self._optional_frame_string(frame, "item_id"),
+                item_id=self._intermediate_item_id(frame),
                 output_index=output_index,
                 content_index=content_index,
                 refusal=refusal,
@@ -1002,7 +1009,7 @@ class OpenAIResponsesStreamDecoder:
         return (
             SemanticEventType.OUTPUT_ITEM,
             {
-                "item_id": self._optional_frame_string(frame, "item_id"),
+                "item_id": self._intermediate_item_id(frame),
                 "output_index": self._frame_index(frame, "output_index"),
                 "content_index": self._frame_index(frame, "content_index"),
                 "metadata": {
@@ -1021,7 +1028,7 @@ class OpenAIResponsesStreamDecoder:
         return (
             SemanticEventType.OUTPUT_ITEM,
             {
-                "item_id": self._optional_frame_string(frame, "item_id"),
+                "item_id": self._intermediate_item_id(frame),
                 "output_index": self._frame_index(frame, "output_index"),
                 "content_index": summary_index,
                 "metadata": {
@@ -1048,6 +1055,14 @@ class OpenAIResponsesStreamDecoder:
         field: str,
     ) -> str | None:
         return optional_string(frame.get(field), protocol=_PROTOCOL, parameter=f"stream.{field}")
+
+    def _intermediate_item_id(self, frame: Mapping[str, Any]) -> str | None:
+        item_id = self._optional_frame_string(frame, "item_id")
+        # Copilot re-obfuscates item IDs across SSE events. Correlate transient
+        # events by their typed indices and retain only output_item.done's ID.
+        if self.defer_intermediate_item_ids:
+            return None
+        return item_id
 
     def _optional_mapping_string(
         self,

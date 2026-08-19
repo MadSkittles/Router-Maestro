@@ -123,12 +123,14 @@ class ProtocolRuntimeFactory:
                 default_model=model,
             )
         if protocol is WireProtocol.OPENAI_RESPONSES:
+            copilot_obfuscated_stream_ids = (
+                provider == "github-copilot" and binding == COPILOT_OPENAI_RESPONSES_BINDING
+            )
             return OpenAIResponsesRuntime(
                 provider_name=provider,
                 binding_id=binding,
-                allow_per_event_response_ids=(
-                    provider == "github-copilot" and binding == COPILOT_OPENAI_RESPONSES_BINDING
-                ),
+                allow_per_event_response_ids=copilot_obfuscated_stream_ids,
+                defer_intermediate_item_ids=copilot_obfuscated_stream_ids,
             )
         if protocol is WireProtocol.GEMINI:
             return GeminiRuntime(

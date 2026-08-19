@@ -1143,9 +1143,12 @@ def test_responses_stream_preserves_validated_content_part_lifecycle_order() -> 
 
     assert [event.sequence for event in started + added + done] == [3, 4, 5, 6]
     assert added[0].item is None
+    assert added[0].item_id == "msg_1"
     assert added[0].metadata["content_part_added"] is True
     assert done[0].type is SemanticEventType.TEXT_DELTA
+    assert done[0].item_id == "msg_1"
     assert done[0].delta == "hello"
+    assert done[1].item_id == "msg_1"
     assert done[1].metadata["content_part_done"] is True
     content_part = done[1].metadata["content_part"]
     assert isinstance(content_part, Mapping)
@@ -1178,6 +1181,7 @@ def test_responses_stream_reasoning_added_is_provenance_until_done() -> None:
     decoder = OpenAIResponsesRuntime(
         provider_name="github-copilot",
         binding_id="copilot-openai-responses",
+        defer_intermediate_item_ids=True,
     ).new_stream_decoder()
     decoder.decode(
         {
@@ -1197,6 +1201,24 @@ def test_responses_stream_reasoning_added_is_provenance_until_done() -> None:
             },
         }
     )
+    delta = decoder.decode(
+        {
+            "type": "response.reasoning_summary_text.delta",
+            "item_id": "ephemeral-delta",
+            "output_index": 0,
+            "summary_index": 0,
+            "delta": "plan",
+        }
+    )
+    summary_done = decoder.decode(
+        {
+            "type": "response.reasoning_summary_text.done",
+            "item_id": "ephemeral-summary-done",
+            "output_index": 0,
+            "summary_index": 0,
+            "text": "plan",
+        }
+    )
     done = decoder.decode(
         {
             "type": "response.output_item.done",
@@ -1211,11 +1233,60 @@ def test_responses_stream_reasoning_added_is_provenance_until_done() -> None:
     )
 
     assert added[0].item is None
+    assert added[0].item_id is None
     assert added[0].metadata["provenance_only"] is True
+    assert delta[0].type is SemanticEventType.REASONING_DELTA
+    assert delta[0].item_id is None
+    assert summary_done[0].item_id is None
+    assert summary_done[0].metadata["content_part_done"] is True
     assert isinstance(done[0].item, ReasoningSummary)
     assert done[0].item_id == "canonical"
     assert done[0].item.opaque_state is not None
     assert done[0].item.opaque_state.item_id == "canonical"
+
+
+@pytest.mark.parametrize(
+    ("frame", "path"),
+    [
+        (
+            {
+                "type": "response.function_call_arguments.delta",
+                "item_id": 7,
+                "output_index": 0,
+                "delta": "{}",
+            },
+            "stream.item_id",
+        ),
+        (
+            {
+                "type": "response.output_item.added",
+                "output_index": 0,
+                "item": {
+                    "type": "function_call",
+                    "id": 7,
+                    "call_id": "call_1",
+                    "name": "lookup",
+                    "arguments": "",
+                },
+            },
+            "stream.item.id",
+        ),
+    ],
+)
+def test_responses_stream_deferred_item_ids_still_validate_wire_types(
+    frame: dict[str, object],
+    path: str,
+) -> None:
+    decoder = OpenAIResponsesRuntime(
+        provider_name="github-copilot",
+        binding_id="copilot-openai-responses",
+        defer_intermediate_item_ids=True,
+    ).new_stream_decoder()
+
+    with pytest.raises(ProtocolDecodeError) as raised:
+        decoder.decode(frame)
+
+    assert raised.value.path == path
 
 
 def test_responses_stream_message_snapshots_emit_only_missing_suffix_before_terminal() -> None:

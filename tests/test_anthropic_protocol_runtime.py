@@ -1114,10 +1114,22 @@ def test_stream_encoder_reuses_tool_identity_for_followup_argument_deltas() -> N
     )
 
 
-def test_responses_tool_stream_uses_call_id_for_one_anthropic_tool_block() -> None:
-    responses = OpenAIResponsesRuntime().new_stream_decoder()
+@pytest.mark.parametrize(
+    "copilot_rotating_ids",
+    [False, True],
+    ids=["stable-ids", "copilot-rotating-ids"],
+)
+def test_responses_tool_stream_uses_call_id_for_one_anthropic_tool_block(
+    copilot_rotating_ids: bool,
+) -> None:
+    responses = OpenAIResponsesRuntime(
+        provider_name="github-copilot" if copilot_rotating_ids else "openai",
+        binding_id="copilot-openai-responses" if copilot_rotating_ids else None,
+        allow_per_event_response_ids=copilot_rotating_ids,
+        defer_intermediate_item_ids=copilot_rotating_ids,
+    ).new_stream_decoder()
     anthropic = AnthropicMessagesRuntime().new_stream_encoder()
-    item_id = "fc_67f2d8a9737c4e17a8f89d57"
+    item_id = "fc_canonical" if copilot_rotating_ids else "fc_67f2d8a9737c4e17a8f89d57"
     call_id = "call_Pw3vQCRnTQkzvU5s"
     tool_item = {
         "type": "function_call",
@@ -1128,10 +1140,10 @@ def test_responses_tool_stream_uses_call_id_for_one_anthropic_tool_block() -> No
         "status": "completed",
     }
     response = {
-        "id": "resp_8f3c",
+        "id": "resp_terminal",
         "object": "response",
         "created_at": 1,
-        "model": "gpt-5.2",
+        "model": "gpt-5.6-sol" if copilot_rotating_ids else "gpt-5.2",
         "status": "completed",
         "output": [tool_item],
         "usage": {"input_tokens": 8, "output_tokens": 5, "total_tokens": 13},
@@ -1141,43 +1153,73 @@ def test_responses_tool_stream_uses_call_id_for_one_anthropic_tool_block() -> No
     upstream_frames = (
         {
             "type": "response.created",
-            "response": {**response, "status": "in_progress", "output": [], "usage": None},
+            "response": {
+                **response,
+                "id": "opaque_response_created" if copilot_rotating_ids else response["id"],
+                "status": "in_progress",
+                "output": [],
+                "usage": None,
+            },
         },
         {
             "type": "response.output_item.added",
             "output_index": 0,
-            "item": {**tool_item, "arguments": "", "status": "in_progress"},
+            "item": {
+                **tool_item,
+                "id": "opaque_item_added" if copilot_rotating_ids else item_id,
+                "arguments": "",
+                "status": "in_progress",
+            },
         },
         {
             "type": "response.function_call_arguments.delta",
-            "item_id": item_id,
+            "item_id": "opaque_item_delta_one" if copilot_rotating_ids else item_id,
             "output_index": 0,
             "delta": '{"city":"',
         },
         {
             "type": "response.function_call_arguments.delta",
-            "item_id": item_id,
+            "item_id": "opaque_item_delta_two" if copilot_rotating_ids else item_id,
             "output_index": 0,
             "delta": 'Paris"}',
         },
         {
             "type": "response.function_call_arguments.done",
-            "item_id": item_id,
+            "item_id": "opaque_item_arguments_done" if copilot_rotating_ids else item_id,
             "output_index": 0,
             "arguments": tool_item["arguments"],
         },
+        {"type": "response.output_item.done", "output_index": 0, "item": tool_item},
         {
-            "type": "response.output_item.done",
-            "output_index": 0,
-            "item": tool_item,
+            "type": "response.completed",
+            "response": {
+                **response,
+                "id": "opaque_response_terminal" if copilot_rotating_ids else response["id"],
+            },
         },
-        {"type": "response.completed", "response": response},
     )
 
+    semantic_events = []
     downstream_frames = []
     for upstream_frame in upstream_frames:
-        for event in responses.decode(upstream_frame):
+        events = responses.decode(upstream_frame)
+        semantic_events.extend(events)
+        for event in events:
             downstream_frames.extend(anthropic.encode(event))
+
+    intermediate_tool_events = [
+        event
+        for event in semantic_events
+        if event.type is SemanticEventType.TOOL_ARGUMENTS_DELTA
+        or (event.type is SemanticEventType.OUTPUT_ITEM and event.item is None)
+    ]
+    assert intermediate_tool_events
+    expected_intermediate_id = None if copilot_rotating_ids else item_id
+    assert all(event.item_id == expected_intermediate_id for event in intermediate_tool_events)
+    final_tool = next(event for event in semantic_events if isinstance(event.item, ToolCall))
+    assert final_tool.item_id == item_id
+    assert final_tool.item is not None
+    assert final_tool.item.item_id == item_id
 
     tool_starts = [
         frame
@@ -1207,6 +1249,57 @@ def test_responses_tool_stream_uses_call_id_for_one_anthropic_tool_block() -> No
         == "tool_use"
     )
     assert anthropic.terminal is True
+
+
+def test_anthropic_rejects_rotating_responses_item_ids_without_copilot_quirk() -> None:
+    responses = OpenAIResponsesRuntime().new_stream_decoder()
+    anthropic = AnthropicMessagesRuntime().new_stream_encoder()
+    response = {
+        "id": "resp_stable",
+        "object": "response",
+        "created_at": 1,
+        "model": "gpt-example",
+        "status": "in_progress",
+        "output": [],
+        "usage": None,
+    }
+    upstream_frames = (
+        {"type": "response.created", "response": response},
+        {
+            "type": "response.output_item.added",
+            "output_index": 0,
+            "item": {
+                "type": "function_call",
+                "id": "fc_added",
+                "call_id": "call_weather",
+                "name": "get_weather",
+                "arguments": "",
+                "status": "in_progress",
+            },
+        },
+        {
+            "type": "response.function_call_arguments.delta",
+            "item_id": "fc_delta_one",
+            "output_index": 0,
+            "delta": '{"city":"',
+        },
+    )
+    for upstream_frame in upstream_frames:
+        for event in responses.decode(upstream_frame):
+            anthropic.encode(event)
+
+    with pytest.raises(ProtocolRepresentabilityError) as raised:
+        for event in responses.decode(
+            {
+                "type": "response.function_call_arguments.delta",
+                "item_id": "fc_delta_two",
+                "output_index": 0,
+                "delta": 'Paris"}',
+            }
+        ):
+            anthropic.encode(event)
+
+    assert raised.value.path == "event.item_id"
 
 
 def test_responses_refusal_stream_projects_text_with_refusal_terminal() -> None:

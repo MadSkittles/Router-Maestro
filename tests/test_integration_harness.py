@@ -300,6 +300,13 @@ def test_controlled_postcommit_protocol_failure_is_not_misclassified_as_eof(tmp_
     boundaries.test_stream_postcommit_failure_is_normalized_once_and_never_replays(tmp_path)
 
 
+def test_controlled_anthropic_responses_tool_stream_accepts_rotating_item_ids(tmp_path):
+    """Keep the real Copilot Responses-to-Anthropic tool stream in default CI."""
+    boundaries = importlib.import_module("integration_tests.test_controlled_boundaries")
+
+    boundaries.test_anthropic_responses_tool_stream_accepts_rotating_copilot_item_ids(tmp_path)
+
+
 def test_controlled_automatic_fallback_filters_required_features(tmp_path):
     """Keep capability-aware fallback execution in the default CI suite."""
     boundaries = importlib.import_module("integration_tests.test_controlled_boundaries")
