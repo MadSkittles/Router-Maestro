@@ -1226,7 +1226,7 @@ def test_responses_stream_reasoning_added_is_provenance_until_done() -> None:
             "item": {
                 "type": "reasoning",
                 "id": "canonical",
-                "summary": [],
+                "summary": [{"type": "summary_text", "text": "plan"}],
                 "encrypted_content": "canonical-state",
             },
         }

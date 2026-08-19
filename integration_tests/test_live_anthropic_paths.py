@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 import httpx
 import pytest
 
@@ -9,6 +11,9 @@ from integration_tests.conftest import (
     anthropic_compat_payload,
     anthropic_count_tokens_payload,
     anthropic_payload,
+    anthropic_reasoning_capsules,
+    anthropic_thinking_replay_payload,
+    anthropic_thinking_seed_payload,
     anthropic_tool_payload,
     assert_anthropic_has_tool_use,
     assert_anthropic_usage,
@@ -17,6 +22,42 @@ from integration_tests.conftest import (
     event_payloads,
     parse_sse_events,
 )
+
+
+def _assistant_content_from_anthropic_stream(
+    events: list[tuple[str | None, Any]],
+) -> list[dict[str, Any]]:
+    """Rebuild the assistant history exactly as Claude Code does from deltas."""
+    blocks: dict[int, dict[str, Any]] = {}
+    for _event_name, payload in events:
+        if not isinstance(payload, dict):
+            continue
+        frame_type = payload.get("type")
+        index = payload.get("index")
+        if not isinstance(index, int):
+            continue
+        if frame_type == "content_block_start":
+            block = payload.get("content_block")
+            if isinstance(block, dict):
+                blocks[index] = dict(block)
+            continue
+        if frame_type != "content_block_delta" or index not in blocks:
+            continue
+        delta = payload.get("delta")
+        if not isinstance(delta, dict):
+            continue
+        delta_type = delta.get("type")
+        if delta_type == "thinking_delta":
+            blocks[index]["thinking"] = blocks[index].get("thinking", "") + delta.get(
+                "thinking", ""
+            )
+        elif delta_type == "signature_delta":
+            blocks[index]["signature"] = blocks[index].get("signature", "") + delta.get(
+                "signature", ""
+            )
+        elif delta_type == "text_delta":
+            blocks[index]["text"] = blocks[index].get("text", "") + delta.get("text", "")
+    return [blocks[index] for index in sorted(blocks)]
 
 
 def test_anthropic_messages_non_streaming_api_prefix(
@@ -248,6 +289,48 @@ def test_anthropic_responses_only_gpt_stream_with_noop_context_management(
         for payload in event_payloads(events)
         if isinstance(payload, dict)
     )
+
+
+def test_anthropic_responses_only_gpt_stream_reasoning_replays_next_turn(
+    client: httpx.Client,
+    responses_only_reasoning_model: str,
+):
+    """Claude Code can persist a streamed capsule and replay it on the next turn."""
+    seed = anthropic_thinking_seed_payload(responses_only_reasoning_model)
+    seed["stream"] = True
+    with client.stream(
+        "POST",
+        "/api/anthropic/v1/messages",
+        json=seed,
+        timeout=180.0,
+    ) as response:
+        assert_http_success(response)
+        events = parse_sse_events(response)
+
+    assistant_content = _assistant_content_from_anthropic_stream(events)
+    capsules = anthropic_reasoning_capsules(assistant_content)
+    assert len(capsules) == 1, assistant_content
+    assert not any(
+        block.get("type") == "thinking" and block.get("signature") == ""
+        for block in assistant_content
+    ), assistant_content
+    assert [name for name, _payload in events].count("message_stop") == 1
+
+    replay = client.post(
+        "/api/anthropic/v1/messages",
+        json=anthropic_thinking_replay_payload(
+            responses_only_reasoning_model,
+            assistant_content,
+        ),
+        timeout=180.0,
+    )
+    assert_http_success(replay)
+    data = replay.json()
+    text = "".join(
+        block.get("text", "") for block in data["content"] if block.get("type") == "text"
+    )
+    assert_text_response(text)
+    assert_anthropic_usage(data["usage"])
 
 
 def test_anthropic_responses_only_gpt_forced_tool(

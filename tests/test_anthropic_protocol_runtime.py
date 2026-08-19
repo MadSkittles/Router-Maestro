@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping
 
 import pytest
@@ -152,7 +153,6 @@ async def test_request_decodes_tools_media_options_and_tool_result_error() -> No
     assert isinstance(assistant, SemanticMessage)
     assert assistant.content[0] == ToolCall(
         call_id="call_1",
-        item_id="call_1",
         name="lookup",
         arguments={"q": 1},
     )
@@ -171,6 +171,48 @@ async def test_request_decodes_tools_media_options_and_tool_result_error() -> No
     assert semantic.reasoning.budget_tokens == 32
     assert semantic.reasoning.effort == "high"
     assert semantic.structured_output == {"type": "json_schema", "schema": {"type": "object"}}
+
+
+@pytest.mark.asyncio
+async def test_anthropic_tool_history_replays_to_responses_without_item_ids() -> None:
+    semantic = await AnthropicMessagesRuntime().decode_request(
+        _request(
+            {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": "call_1",
+                        "name": "lookup",
+                        "input": {"q": 1},
+                    }
+                ],
+            },
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "call_1",
+                        "content": "ok",
+                    }
+                ],
+            },
+        )
+    )
+
+    encoded = await OpenAIResponsesRuntime().encode_request(semantic)
+    tool_call = next(item for item in encoded["input"] if item["type"] == "function_call")
+    tool_result = next(item for item in encoded["input"] if item["type"] == "function_call_output")
+
+    assert tool_call["call_id"] == "call_1"
+    assert tool_call["name"] == "lookup"
+    assert "id" not in tool_call
+    assert tool_result == {
+        "type": "function_call_output",
+        "call_id": "call_1",
+        "output": "ok",
+    }
 
 
 @pytest.mark.asyncio
@@ -572,6 +614,21 @@ async def test_invalid_capsule_error_is_sanitized() -> None:
 
 
 @pytest.mark.asyncio
+async def test_empty_thinking_signature_triggers_claude_code_recovery_error() -> None:
+    runtime = AnthropicMessagesRuntime()
+
+    with pytest.raises(ProtocolDecodeError) as raised:
+        await runtime.decode_request(
+            _request(
+                _assistant_reasoning({"type": "thinking", "thinking": "summary", "signature": ""})
+            )
+        )
+
+    assert raised.value.path == "messages[0].content[0].signature"
+    assert raised.value.reason == "Invalid signature in thinking block"
+
+
+@pytest.mark.asyncio
 async def test_foreign_opaque_state_requires_and_uses_capsule_encoder() -> None:
     state = OpaqueState(
         origin_protocol=WireProtocol.OPENAI_RESPONSES,
@@ -955,14 +1012,65 @@ def test_stream_encoder_uses_capsule_hook_and_closes_one_terminal() -> None:
     assert started[0]["type"] == "message_start"
     assert reasoning[0]["content_block"] == {
         "type": "thinking",
-        "thinking": "trace",
-        "signature": "rmr1.key.payload",
+        "thinking": "",
+    }
+    assert reasoning[1] == {
+        "type": "content_block_delta",
+        "index": 0,
+        "delta": {"type": "thinking_delta", "thinking": "trace"},
+    }
+    assert reasoning[2] == {
+        "type": "content_block_delta",
+        "index": 0,
+        "delta": {"type": "signature_delta", "signature": "rmr1.key.payload"},
     }
     assert reasoning[-1] == {"type": "content_block_stop", "index": 0}
     assert [frame["type"] for frame in terminal] == ["message_delta", "message_stop"]
     assert calls == [(state, WireProtocol.ANTHROPIC_MESSAGES, "gpt-example", "rs_1")]
     with pytest.raises(ProtocolRepresentabilityError, match="after terminal"):
         encoder.encode(SemanticEvent(type=SemanticEventType.TEXT_DELTA, delta="late"))
+
+
+@pytest.mark.asyncio
+async def test_unsigned_reasoning_stream_replays_to_responses_without_empty_signature() -> None:
+    encoder = AnthropicMessagesRuntime().new_stream_encoder(
+        model="gpt-example",
+        response_id="msg_1",
+    )
+    frames = encoder.encode(
+        SemanticEvent(
+            type=SemanticEventType.OUTPUT_ITEM,
+            response_id="msg_1",
+            output_index=0,
+            item=ReasoningSummary("trace"),
+            metadata={"output_item_done": True},
+        )
+    )
+
+    start = next(frame for frame in frames if frame["type"] == "content_block_start")
+    block = dict(start["content_block"])
+    for frame in frames:
+        if frame["type"] != "content_block_delta":
+            continue
+        delta = frame["delta"]
+        if delta["type"] == "thinking_delta":
+            block["thinking"] += delta["thinking"]
+        elif delta["type"] == "signature_delta":
+            block["signature"] = block.get("signature", "") + delta["signature"]
+
+    assert block == {"type": "thinking", "thinking": "trace"}
+
+    semantic = await AnthropicMessagesRuntime().decode_request(
+        _request(_assistant_reasoning(block))
+    )
+    encoded = await OpenAIResponsesRuntime().encode_request(semantic)
+
+    assert encoded["input"] == [
+        {
+            "type": "reasoning",
+            "summary": [{"type": "summary_text", "text": "trace"}],
+        }
+    ]
 
 
 def test_stream_encoder_preserves_usage_totals_when_reasoning_breakdown_is_present() -> None:
@@ -1249,6 +1357,293 @@ def test_responses_tool_stream_uses_call_id_for_one_anthropic_tool_block(
         == "tool_use"
     )
     assert anthropic.terminal is True
+
+
+@pytest.mark.asyncio
+async def test_responses_reasoning_summary_envelopes_do_not_split_anthropic_blocks() -> None:
+    model = "gpt-5.6-sol"
+    binding_id = "copilot-openai-responses"
+    raw_reasoning_items = [
+        {
+            "type": "reasoning",
+            "id": "rs-A",
+            "encrypted_content": "ENC_A",
+            "summary": [{"type": "summary_text", "text": "reason A"}],
+            "provider_metadata": {"slot": "A"},
+        },
+        {
+            "type": "reasoning",
+            "id": "rs-B",
+            "encrypted_content": "ENC_B",
+            "summary": [{"type": "summary_text", "text": "reason B"}],
+            "provider_metadata": {"slot": "B"},
+        },
+    ]
+    tool_items = [
+        {
+            "type": "function_call",
+            "id": "fc-A",
+            "call_id": "call-A",
+            "name": "lookup_a",
+            "arguments": '{"value":"A"}',
+            "status": "completed",
+        },
+        {
+            "type": "function_call",
+            "id": "fc-B",
+            "call_id": "call-B",
+            "name": "lookup_b",
+            "arguments": '{"value":"B"}',
+            "status": "completed",
+        },
+    ]
+    response = {
+        "id": "resp-terminal",
+        "object": "response",
+        "created_at": 1,
+        "model": model,
+        "status": "completed",
+        "output": [
+            raw_reasoning_items[0],
+            tool_items[0],
+            raw_reasoning_items[1],
+            tool_items[1],
+        ],
+        "usage": {"input_tokens": 8, "output_tokens": 12, "total_tokens": 20},
+        "error": None,
+        "incomplete_details": None,
+    }
+
+    upstream_frames = [
+        {
+            "type": "response.created",
+            "response": {
+                **response,
+                "id": "opaque-response-created",
+                "status": "in_progress",
+                "output": [],
+                "usage": None,
+            },
+        }
+    ]
+    for item_number, (output_index, reasoning, tool) in enumerate(
+        zip((0, 2), raw_reasoning_items, tool_items, strict=True),
+        start=1,
+    ):
+        summary_text = reasoning["summary"][0]["text"]
+        upstream_frames.extend(
+            [
+                {
+                    "type": "response.output_item.added",
+                    "output_index": output_index,
+                    "item": {
+                        "type": "reasoning",
+                        "id": f"opaque-reasoning-added-{item_number}",
+                        "summary": [],
+                    },
+                },
+                {
+                    "type": "response.reasoning_summary_part.added",
+                    "item_id": f"opaque-reasoning-part-added-{item_number}",
+                    "output_index": output_index,
+                    "summary_index": 0,
+                    "part": {"type": "summary_text", "text": ""},
+                },
+                {
+                    "type": "response.reasoning_summary_text.delta",
+                    "item_id": f"opaque-reasoning-delta-{item_number}",
+                    "output_index": output_index,
+                    "summary_index": 0,
+                    "delta": summary_text,
+                },
+                {
+                    "type": "response.reasoning_summary_text.done",
+                    "item_id": f"opaque-reasoning-text-done-{item_number}",
+                    "output_index": output_index,
+                    "summary_index": 0,
+                    "text": summary_text,
+                },
+                {
+                    "type": "response.reasoning_summary_part.done",
+                    "item_id": f"opaque-reasoning-part-done-{item_number}",
+                    "output_index": output_index,
+                    "summary_index": 0,
+                    "part": {"type": "summary_text", "text": summary_text},
+                },
+                {
+                    "type": "response.output_item.done",
+                    "output_index": output_index,
+                    "item": reasoning,
+                },
+                {
+                    "type": "response.output_item.added",
+                    "output_index": output_index + 1,
+                    "item": {
+                        **tool,
+                        "id": f"opaque-tool-added-{item_number}",
+                        "arguments": "",
+                        "status": "in_progress",
+                    },
+                },
+                {
+                    "type": "response.function_call_arguments.delta",
+                    "item_id": f"opaque-tool-delta-{item_number}",
+                    "output_index": output_index + 1,
+                    "delta": tool["arguments"],
+                },
+                {
+                    "type": "response.function_call_arguments.done",
+                    "item_id": f"opaque-tool-arguments-done-{item_number}",
+                    "output_index": output_index + 1,
+                    "arguments": tool["arguments"],
+                },
+                {
+                    "type": "response.output_item.done",
+                    "output_index": output_index + 1,
+                    "item": tool,
+                },
+            ]
+        )
+    upstream_frames.append(
+        {
+            "type": "response.completed",
+            "response": {**response, "id": "opaque-response-terminal"},
+        }
+    )
+
+    capsule_states: dict[str, OpaqueState] = {}
+    capsule_calls: list[OpaqueState] = []
+
+    def encode_capsule(
+        state: OpaqueState,
+        *,
+        protocol: WireProtocol,
+        model: str,
+        item_id: str,
+    ) -> str:
+        assert protocol is WireProtocol.ANTHROPIC_MESSAGES
+        assert model == "gpt-5.6-sol"
+        assert item_id == state.item_id
+        capsule = f"rmr1.test.{state.item_id}"
+        capsule_states[capsule] = state
+        capsule_calls.append(state)
+        return capsule
+
+    responses = OpenAIResponsesRuntime(
+        provider_name="github-copilot",
+        binding_id=binding_id,
+        allow_per_event_response_ids=True,
+        defer_intermediate_item_ids=True,
+    ).new_stream_decoder()
+    anthropic = AnthropicMessagesRuntime(encode_opaque_state=encode_capsule).new_stream_encoder()
+    downstream_frames = []
+    for upstream_frame in upstream_frames:
+        for event in responses.decode(upstream_frame):
+            downstream_frames.extend(anthropic.encode(event))
+
+    for output_index in (0, 2):
+        starts = [
+            frame
+            for frame in downstream_frames
+            if frame["type"] == "content_block_start" and frame["index"] == output_index
+        ]
+        stops = [
+            frame
+            for frame in downstream_frames
+            if frame["type"] == "content_block_stop" and frame["index"] == output_index
+        ]
+        assert len(starts) == 1
+        assert len(stops) == 1
+
+    thinking_text = {
+        output_index: "".join(
+            frame["delta"]["thinking"]
+            for frame in downstream_frames
+            if frame["type"] == "content_block_delta"
+            and frame["index"] == output_index
+            and frame["delta"]["type"] == "thinking_delta"
+        )
+        for output_index in (0, 2)
+    }
+    signatures = {
+        output_index: [
+            frame["delta"]["signature"]
+            for frame in downstream_frames
+            if frame["type"] == "content_block_delta"
+            and frame["index"] == output_index
+            and frame["delta"]["type"] == "signature_delta"
+        ]
+        for output_index in (0, 2)
+    }
+    assert thinking_text == {0: "reason A", 2: "reason B"}
+    assert signatures == {0: ["rmr1.test.rs-A"], 2: ["rmr1.test.rs-B"]}
+    assert [state.item_id for state in capsule_calls] == ["rs-A", "rs-B"]
+    assert [frame["type"] for frame in downstream_frames].count("message_stop") == 1
+
+    blocks: dict[int, dict] = {}
+    tool_argument_fragments: dict[int, list[str]] = {}
+    for frame in downstream_frames:
+        frame_type = frame["type"]
+        if frame_type == "content_block_start":
+            index = frame["index"]
+            blocks[index] = dict(frame["content_block"])
+            if blocks[index]["type"] == "tool_use":
+                tool_argument_fragments[index] = []
+        elif frame_type == "content_block_delta":
+            index = frame["index"]
+            delta = frame["delta"]
+            if delta["type"] == "thinking_delta":
+                blocks[index]["thinking"] += delta["thinking"]
+            elif delta["type"] == "signature_delta":
+                blocks[index]["signature"] = blocks[index].get("signature", "") + delta["signature"]
+            elif delta["type"] == "input_json_delta":
+                tool_argument_fragments[index].append(delta["partial_json"])
+        elif frame_type == "content_block_stop":
+            index = frame["index"]
+            if blocks[index]["type"] == "tool_use":
+                fragments = "".join(tool_argument_fragments[index])
+                blocks[index]["input"] = json.loads(fragments or "{}")
+
+    def decode_capsule(
+        value: str,
+        *,
+        protocol: WireProtocol,
+        model: str,
+        item_id: str,
+    ) -> OpaqueState:
+        assert protocol is WireProtocol.ANTHROPIC_MESSAGES
+        assert model == "gpt-5.6-sol"
+        assert item_id.startswith("anthropic-thinking-")
+        return capsule_states[value]
+
+    assistant_content = [blocks[index] for index in sorted(blocks)]
+    semantic = await AnthropicMessagesRuntime(decode_opaque_state=decode_capsule).decode_request(
+        _request({"role": "assistant", "content": assistant_content}, model=model)
+    )
+    replayed = await OpenAIResponsesRuntime(
+        provider_name="github-copilot",
+        binding_id=binding_id,
+    ).encode_request(semantic)
+    replayed_reasoning = [item for item in replayed["input"] if item["type"] == "reasoning"]
+    replayed_tools = [item for item in replayed["input"] if item["type"] == "function_call"]
+
+    assert replayed_reasoning == raw_reasoning_items
+    assert replayed_tools == [
+        {
+            "type": "function_call",
+            "call_id": "call-A",
+            "status": "completed",
+            "name": "lookup_a",
+            "arguments": '{"value":"A"}',
+        },
+        {
+            "type": "function_call",
+            "call_id": "call-B",
+            "status": "completed",
+            "name": "lookup_b",
+            "arguments": '{"value":"B"}',
+        },
+    ]
 
 
 def test_anthropic_rejects_rotating_responses_item_ids_without_copilot_quirk() -> None:

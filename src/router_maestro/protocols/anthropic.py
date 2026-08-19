@@ -1062,33 +1062,65 @@ class AnthropicStreamEncoder:
             )
             existing = self._blocks.get(index)
             if existing is None:
-                self._blocks[index] = _AnthropicEncodeBlock(
-                    raw["type"],
-                    item_id=(
-                        item.opaque_state.item_id
-                        if item.opaque_state is not None
-                        else event.item_id
-                    ),
+                item_id = (
+                    item.opaque_state.item_id if item.opaque_state is not None else event.item_id
                 )
-                frames.append({"type": "content_block_start", "index": index, "content_block": raw})
-            elif existing.block_type != "thinking" or raw["type"] != "thinking":
+                if raw["type"] == "thinking":
+                    # Claude Code persists continuation state from
+                    # signature_delta. A complete Responses reasoning item can
+                    # first appear only at output_item.done, so project that
+                    # snapshot through the normal incremental lifecycle.
+                    frames.extend(self._ensure_block(index, "thinking", item_id=item_id))
+                    if item.text:
+                        frames.append(
+                            {
+                                "type": "content_block_delta",
+                                "index": index,
+                                "delta": {
+                                    "type": "thinking_delta",
+                                    "thinking": item.text,
+                                },
+                            }
+                        )
+                    signature = raw.get("signature")
+                    if isinstance(signature, str):
+                        frames.append(
+                            {
+                                "type": "content_block_delta",
+                                "index": index,
+                                "delta": {
+                                    "type": "signature_delta",
+                                    "signature": signature,
+                                },
+                            }
+                        )
+                else:
+                    self._blocks[index] = _AnthropicEncodeBlock(
+                        raw["type"],
+                        item_id=item_id,
+                    )
+                    frames.append(
+                        {"type": "content_block_start", "index": index, "content_block": raw}
+                    )
+            elif existing.block_type != "thinking":
                 reject(_PROTOCOL, "event.item", "reasoning state conflicts with open block")
             else:
-                signature = raw.get("signature")
+                if raw["type"] == "thinking":
+                    signature = raw.get("signature")
+                elif raw["type"] == "redacted_thinking":
+                    # The final opaque state event intentionally carries no
+                    # duplicate summary text. If visible thinking deltas have
+                    # already opened this block, its capsule belongs in the
+                    # thinking signature rather than a second redacted block.
+                    signature = raw.get("data")
+                else:
+                    reject(_PROTOCOL, "event.item", "reasoning state conflicts with open block")
                 if isinstance(signature, str):
                     frames.append(
                         {
                             "type": "content_block_delta",
                             "index": index,
                             "delta": {"type": "signature_delta", "signature": signature},
-                        }
-                    )
-                if item.text:
-                    frames.append(
-                        {
-                            "type": "content_block_delta",
-                            "index": index,
-                            "delta": {"type": "thinking_delta", "thinking": item.text},
                         }
                     )
         else:
@@ -1763,7 +1795,6 @@ def _decode_tool_use(value: object, *, parameter: str) -> ToolCall:
     )
     return ToolCall(
         call_id=call_id,
-        item_id=call_id,
         name=require_string(
             block.get("name"),
             protocol=_PROTOCOL,
@@ -1845,6 +1876,12 @@ def _decode_reasoning_block(
             protocol=_PROTOCOL,
             parameter=f"{parameter}.signature",
         )
+        if signature == "":
+            decode_reject(
+                _PROTOCOL,
+                f"{parameter}.signature",
+                "Invalid signature in thinking block",
+            )
     elif block_type == "redacted_thinking":
         text = ""
         signature = require_string(

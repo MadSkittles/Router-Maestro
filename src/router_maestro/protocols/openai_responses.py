@@ -296,6 +296,8 @@ class OpenAIResponsesStreamDecoder:
         self._completed_text_parts: dict[tuple[int, int], str] = {}
         self._refusal_parts: dict[tuple[int, int], str] = {}
         self._completed_refusal_parts: dict[tuple[int, int], str] = {}
+        self._reasoning_parts: dict[tuple[int, int], str] = {}
+        self._completed_reasoning_parts: dict[tuple[int, int], str] = {}
 
     @property
     def terminal(self) -> bool:
@@ -383,26 +385,27 @@ class OpenAIResponsesStreamDecoder:
             specs.append(self._part_done_spec(frame, output_item_type="message"))
         elif frame_type == "response.reasoning_summary_text.delta":
             specs.append(
-                (
-                    SemanticEventType.REASONING_DELTA,
-                    {
-                        "item_id": self._intermediate_item_id(frame),
-                        "output_index": self._frame_index(frame, "output_index"),
-                        "content_index": self._frame_index(frame, "summary_index"),
-                        "delta": require_string(
-                            frame.get("delta"),
-                            protocol=_PROTOCOL,
-                            parameter="stream.delta",
-                        ),
-                        "metadata": {
-                            "output_item_type": "reasoning",
-                            "reasoning_summary_index": self._frame_index(frame, "summary_index"),
-                        },
-                    },
+                self._decode_reasoning_delta(
+                    frame,
+                    delta=require_string(
+                        frame.get("delta"),
+                        protocol=_PROTOCOL,
+                        parameter="stream.delta",
+                    ),
                 )
             )
         elif frame_type == "response.reasoning_summary_text.done":
-            self._validate_snapshot(frame, field="text")
+            specs.extend(
+                self._decode_reasoning_snapshot(
+                    frame,
+                    snapshot=require_string(
+                        frame.get("text"),
+                        protocol=_PROTOCOL,
+                        parameter="stream.text",
+                    ),
+                    parameter="stream.text",
+                )
+            )
             specs.append(self._reasoning_part_done_spec(frame))
         elif frame_type in {
             "response.reasoning_summary_part.added",
@@ -411,22 +414,19 @@ class OpenAIResponsesStreamDecoder:
             part = require_mapping(frame.get("part"), protocol=_PROTOCOL, parameter="stream.part")
             if part.get("type") != "summary_text":
                 decode_reject(_PROTOCOL, "stream.part.type", "must be summary_text")
-            specs.append(
-                (
-                    SemanticEventType.OUTPUT_ITEM,
-                    {
-                        "item_id": self._intermediate_item_id(frame),
-                        "output_index": self._frame_index(frame, "output_index"),
-                        "content_index": self._frame_index(frame, "summary_index"),
-                        "metadata": {
-                            "output_item_type": "reasoning",
-                            "reasoning_summary_index": self._frame_index(frame, "summary_index"),
-                            "output_item_done": frame_type.endswith(".done"),
-                            "summary_part": thaw_json(part),
-                        },
-                    },
-                )
+            done = frame_type.endswith(".done")
+            snapshot_specs = self._decode_reasoning_snapshot(
+                frame,
+                snapshot=require_string(
+                    part.get("text"),
+                    protocol=_PROTOCOL,
+                    parameter="stream.part.text",
+                ),
+                parameter="stream.part.text",
+                complete=done,
             )
+            lifecycle = self._reasoning_part_lifecycle_spec(frame, part=part, done=done)
+            specs.extend((*snapshot_specs, lifecycle) if done else (lifecycle, *snapshot_specs))
         elif frame_type in {
             "response.function_call_arguments.delta",
             "response.custom_tool_call_input.delta",
@@ -555,8 +555,7 @@ class OpenAIResponsesStreamDecoder:
         if previous is not None and previous.get("type") != item_type:
             decode_reject(_PROTOCOL, "stream.item.type", "output item type changed")
         self._items[output_index] = item
-        if done:
-            self._done_items.add(output_index)
+        specs: list[tuple[SemanticEventType, dict[str, Any]]] = []
         decoded_item: object | None = None
         if done and item_type == "reasoning":
             if not self._model:
@@ -565,13 +564,62 @@ class OpenAIResponsesStreamDecoder:
                     "stream.item",
                     "reasoning output requires response model context",
                 )
-            decoded_item = _decode_reasoning_item(
+            decoded_reasoning = _decode_reasoning_item(
                 item,
                 parameter="stream.item",
                 model=self._model,
                 provider_name=self.provider_name,
                 binding_id=self.binding_id,
             )
+            decoded_item = ReasoningSummary(
+                "",
+                opaque_state=decoded_reasoning.opaque_state,
+            )
+            summary = require_list(
+                item.get("summary", []),
+                protocol=_PROTOCOL,
+                parameter="stream.item.summary",
+            )
+            tracked_indices = {
+                summary_index
+                for part_output_index, summary_index in (
+                    set(self._reasoning_parts) | set(self._completed_reasoning_parts)
+                )
+                if part_output_index == output_index
+            }
+            final_indices = set(range(len(summary)))
+            if not tracked_indices.issubset(final_indices):
+                decode_reject(
+                    _PROTOCOL,
+                    "stream.item.summary",
+                    "reasoning item omitted a streamed summary part",
+                )
+            item_id = self._optional_mapping_string(item, "id", path="stream.item")
+            for summary_index, raw_part in enumerate(summary):
+                path = f"stream.item.summary[{summary_index}]"
+                part = require_mapping(raw_part, protocol=_PROTOCOL, parameter=path)
+                part_type = require_string(
+                    part.get("type"),
+                    protocol=_PROTOCOL,
+                    parameter=f"{path}.type",
+                )
+                if part_type != "summary_text":
+                    decode_reject(_PROTOCOL, f"{path}.type", "must be summary_text")
+                specs.extend(
+                    self._decode_reasoning_snapshot(
+                        {
+                            "item_id": item_id,
+                            "output_index": output_index,
+                            "summary_index": summary_index,
+                        },
+                        snapshot=require_string(
+                            part.get("text"),
+                            protocol=_PROTOCOL,
+                            parameter=f"{path}.text",
+                        ),
+                        parameter=f"{path}.text",
+                    )
+                )
         elif done and item_type in {
             "function_call",
             "custom_tool_call",
@@ -587,11 +635,13 @@ class OpenAIResponsesStreamDecoder:
                     "Responses output message must be assistant",
                 )
             item_id = self._optional_mapping_string(item, "id", path="stream.item")
-            return self._decode_message_snapshot(
+            specs = self._decode_message_snapshot(
                 message,
                 item_id=item_id,
                 output_index=output_index,
             )
+            self._done_items.add(output_index)
+            return specs
         elif item_type not in {
             "message",
             "reasoning",
@@ -600,10 +650,12 @@ class OpenAIResponsesStreamDecoder:
             "tool_search_call",
         }:
             decode_reject(_PROTOCOL, "stream.item.type", f"unsupported item {item_type!r}")
+        if done:
+            self._done_items.add(output_index)
         item_id = self._optional_mapping_string(item, "id", path="stream.item")
         if not done and self.defer_intermediate_item_ids:
             item_id = None
-        return [
+        specs.append(
             (
                 SemanticEventType.OUTPUT_ITEM,
                 {
@@ -617,7 +669,8 @@ class OpenAIResponsesStreamDecoder:
                     },
                 },
             )
-        ]
+        )
+        return specs
 
     def _decode_content_part_lifecycle(
         self,
@@ -806,6 +859,85 @@ class OpenAIResponsesStreamDecoder:
                 delta=suffix,
             )
         ]
+
+    def _decode_reasoning_delta(
+        self,
+        frame: Mapping[str, Any],
+        *,
+        delta: str,
+    ) -> tuple[SemanticEventType, dict[str, Any]]:
+        output_index = self._frame_index(frame, "output_index")
+        summary_index = self._frame_index(frame, "summary_index")
+        key = (output_index, summary_index)
+        if output_index in self._done_items:
+            decode_reject(_PROTOCOL, "stream.delta", "delta followed a completed reasoning item")
+        if key in self._completed_reasoning_parts:
+            decode_reject(_PROTOCOL, "stream.delta", "delta followed a completed reasoning part")
+        self._reasoning_parts[key] = self._reasoning_parts.get(key, "") + delta
+        return self._reasoning_delta_spec(
+            item_id=self._intermediate_item_id(frame),
+            output_index=output_index,
+            summary_index=summary_index,
+            delta=delta,
+        )
+
+    def _decode_reasoning_snapshot(
+        self,
+        frame: Mapping[str, Any],
+        *,
+        snapshot: str,
+        parameter: str,
+        complete: bool = True,
+    ) -> list[tuple[SemanticEventType, dict[str, Any]]]:
+        output_index = self._frame_index(frame, "output_index")
+        summary_index = self._frame_index(frame, "summary_index")
+        key = (output_index, summary_index)
+        previous_snapshot = self._completed_reasoning_parts.get(key)
+        if previous_snapshot is not None:
+            if previous_snapshot != snapshot:
+                decode_reject(_PROTOCOL, parameter, "conflicts with completed reasoning part")
+            return []
+        if output_index in self._done_items:
+            decode_reject(_PROTOCOL, parameter, "reasoning part followed a completed item")
+        accumulated = self._reasoning_parts.get(key, "")
+        if not snapshot.startswith(accumulated):
+            decode_reject(_PROTOCOL, parameter, "conflicts with streamed reasoning deltas")
+        suffix = snapshot[len(accumulated) :]
+        self._reasoning_parts[key] = snapshot
+        if complete:
+            self._completed_reasoning_parts[key] = snapshot
+        if not suffix:
+            return []
+        return [
+            self._reasoning_delta_spec(
+                item_id=self._intermediate_item_id(frame),
+                output_index=output_index,
+                summary_index=summary_index,
+                delta=suffix,
+            )
+        ]
+
+    @staticmethod
+    def _reasoning_delta_spec(
+        *,
+        item_id: str | None,
+        output_index: int,
+        summary_index: int,
+        delta: str,
+    ) -> tuple[SemanticEventType, dict[str, Any]]:
+        return (
+            SemanticEventType.REASONING_DELTA,
+            {
+                "item_id": item_id,
+                "output_index": output_index,
+                "content_index": summary_index,
+                "delta": delta,
+                "metadata": {
+                    "output_item_type": "reasoning",
+                    "reasoning_summary_index": summary_index,
+                },
+            },
+        )
 
     def _decode_message_snapshot(
         self,
@@ -1040,8 +1172,36 @@ class OpenAIResponsesStreamDecoder:
             },
         )
 
-    def _validate_snapshot(self, frame: Mapping[str, Any], *, field: str) -> None:
-        require_string(frame.get(field), protocol=_PROTOCOL, parameter=f"stream.{field}")
+    def _reasoning_part_lifecycle_spec(
+        self,
+        frame: Mapping[str, Any],
+        *,
+        part: Mapping[str, Any],
+        done: bool,
+    ) -> tuple[SemanticEventType, dict[str, Any]]:
+        output_index = self._frame_index(frame, "output_index")
+        summary_index = self._frame_index(frame, "summary_index")
+        if output_index in self._done_items and not done:
+            decode_reject(
+                _PROTOCOL,
+                "stream.type",
+                "reasoning part event followed a completed item",
+            )
+        return (
+            SemanticEventType.OUTPUT_ITEM,
+            {
+                "item_id": self._intermediate_item_id(frame),
+                "output_index": output_index,
+                "content_index": summary_index,
+                "metadata": {
+                    "output_item_type": "reasoning",
+                    "reasoning_summary_index": summary_index,
+                    "summary_part": thaw_json(part),
+                    "content_part_done" if done else "content_part_added": True,
+                    "provenance_only": True,
+                },
+            },
+        )
 
     def _frame_index(self, frame: Mapping[str, Any], field: str) -> int:
         value = optional_int(frame.get(field, 0), protocol=_PROTOCOL, parameter=f"stream.{field}")
