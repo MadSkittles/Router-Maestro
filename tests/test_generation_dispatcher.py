@@ -560,7 +560,7 @@ async def test_gemini_structured_output_reaches_target_wire_field(
     "target_protocol", [WireProtocol.OPENAI_CHAT, WireProtocol.OPENAI_RESPONSES]
 )
 @pytest.mark.asyncio
-async def test_anthropic_tool_cache_control_fails_before_provider_io(
+async def test_anthropic_ephemeral_tool_cache_hint_reaches_cross_protocol_provider(
     target_protocol: WireProtocol,
 ) -> None:
     binding = _binding(target_protocol, target_protocol.value)
@@ -581,23 +581,23 @@ async def test_anthropic_tool_cache_control_fails_before_provider_io(
             ],
         },
     )
-    execution = _Execution()
+    execution = _Execution(actions={("alpha", target_protocol.value): "ok"})
 
-    with pytest.raises(ProviderError) as raised:
-        await GenerationDispatcher(
-            {
-                target_protocol: (
-                    OpenAIChatRuntime()
-                    if target_protocol is WireProtocol.OPENAI_CHAT
-                    else OpenAIResponsesRuntime()
-                )
-            },
-            execution=execution,
-        ).dispatch(router, envelope)
+    result = await GenerationDispatcher(
+        {
+            target_protocol: (
+                OpenAIChatRuntime()
+                if target_protocol is WireProtocol.OPENAI_CHAT
+                else OpenAIResponsesRuntime()
+            )
+        },
+        execution=execution,
+    ).dispatch(router, envelope)
 
-    assert raised.value.status_code == 400
-    assert raised.value.parameter == "tools[0].cache_control"
-    assert execution.calls == []
+    assert result.value == "ok"
+    assert len(execution.calls) == 1
+    outbound_tools = execution.calls[0][2]["tools"]
+    assert "cache_control" not in outbound_tools[0]
 
 
 @pytest.mark.parametrize("stream", [False, True])
@@ -1302,6 +1302,62 @@ async def test_stream_later_representability_error_preserves_first_upstream_fail
         ("primary", "chat")
     ]
     assert execution.calls == []
+
+
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.asyncio
+async def test_anthropic_active_context_edit_does_not_override_native_failure(
+    stream: bool,
+) -> None:
+    messages = _binding(WireProtocol.ANTHROPIC_MESSAGES, "messages")
+    responses = _binding(WireProtocol.OPENAI_RESPONSES, "responses")
+    provider = _Provider("alpha", "one", (messages, responses))
+    router = _router((provider,), max_retries=0)
+    envelope = RequestEnvelope(
+        AnthropicMessagesRuntime(),
+        {
+            "model": "alpha/one",
+            "max_tokens": 64,
+            "messages": [{"role": "user", "content": "hello"}],
+            "stream": stream,
+            "context_management": {
+                "edits": [
+                    {
+                        "type": "clear_thinking_20251015",
+                        "keep": {"type": "thinking_turns", "value": 1},
+                    }
+                ]
+            },
+        },
+    )
+    primary_failure = _retryable("native messages failed", status_code=503)
+    execution = _Execution(
+        actions={("alpha", "messages"): primary_failure},
+        streams={("alpha", "messages"): primary_failure},
+    )
+    observations: list[DispatchAttemptObservation] = []
+    dispatcher = GenerationDispatcher(
+        {WireProtocol.OPENAI_RESPONSES: OpenAIResponsesRuntime()},
+        execution=execution,
+        attempt_observer=observations.append,
+    )
+
+    with pytest.raises(ProviderError) as raised:
+        if stream:
+            await dispatcher.dispatch_stream(router, envelope)
+        else:
+            await dispatcher.dispatch(router, envelope)
+
+    assert raised.value is primary_failure
+    assert envelope.materialization_count == 1
+    calls = execution.stream_calls if stream else execution.calls
+    assert [(provider_name, binding) for provider_name, binding, _ in calls] == [
+        ("alpha", "messages")
+    ]
+    assert [observation.outcome for observation in observations] == [
+        DispatchAttemptOutcome.RETRYABLE_FAILURE,
+        DispatchAttemptOutcome.UNREPRESENTABLE,
+    ]
 
 
 @pytest.mark.asyncio

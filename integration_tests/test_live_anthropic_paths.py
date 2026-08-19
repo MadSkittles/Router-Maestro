@@ -182,6 +182,7 @@ def test_anthropic_responses_only_gpt_text(
     """Stable Messages endpoint reaches a GPT model exposed only via Responses."""
     payload = anthropic_payload(responses_only_reasoning_model)
     payload.pop("temperature")
+    payload["context_management"] = {"edits": [{"type": "clear_thinking_20251015", "keep": "all"}]}
     # Responses reasoning tokens share the output budget.  A 16-token probe can
     # legitimately finish after reasoning without producing visible text.
     payload["max_tokens"] = 512
@@ -199,6 +200,54 @@ def test_anthropic_responses_only_gpt_text(
     )
     assert_text_response(text)
     assert_anthropic_usage(data["usage"])
+
+
+def test_anthropic_responses_only_gpt_stream_with_noop_context_management(
+    client: httpx.Client,
+    responses_only_reasoning_model: str,
+):
+    """Claude Code's no-op context edit streams through Copilot Responses."""
+    payload = anthropic_payload(responses_only_reasoning_model, stream=True)
+    payload.pop("temperature")
+    payload["max_tokens"] = 512
+    payload["system"] = [
+        {
+            "type": "text",
+            "text": "Reply with a short plain-text answer.",
+            "cache_control": {"type": "ephemeral"},
+        }
+    ]
+    payload["messages"] = [
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "text",
+                    "text": "Reply with exactly: context management stream ok",
+                    "cache_control": {"type": "ephemeral"},
+                }
+            ],
+        }
+    ]
+    payload["context_management"] = {"edits": [{"type": "clear_thinking_20251015", "keep": "all"}]}
+
+    with client.stream(
+        "POST",
+        "/api/anthropic/v1/messages?beta=true",
+        json=payload,
+        timeout=180.0,
+    ) as response:
+        assert_http_success(response)
+        events = parse_sse_events(response)
+
+    event_names = [name for name, _payload in events]
+    assert "message_start" in event_names
+    assert "message_stop" in event_names
+    assert any(
+        payload.get("delta", {}).get("type") == "text_delta"
+        for payload in event_payloads(events)
+        if isinstance(payload, dict)
+    )
 
 
 def test_anthropic_responses_only_gpt_forced_tool(

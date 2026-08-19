@@ -70,6 +70,7 @@ _REQUEST_FIELDS = frozenset(
         "tools",
         "tool_choice",
         "thinking",
+        "context_management",
         "service_tier",
         "output_config",
     }
@@ -1295,6 +1296,7 @@ def _decode_request(
 ) -> SemanticRequest:
     body = require_mapping(payload, protocol=_PROTOCOL, parameter="request")
     reject_unknown_keys(body, _REQUEST_FIELDS, protocol=_PROTOCOL, parameter="")
+    context_management = _decode_context_management(body.get("context_management"))
     model = require_string(
         body.get("model"), protocol=_PROTOCOL, parameter="model", allow_empty=False
     )
@@ -1369,8 +1371,171 @@ def _decode_request(
             body.get("service_tier"), protocol=_PROTOCOL, parameter="service_tier"
         ),
         metadata=metadata,
+        provider_extensions=(
+            {"context_management": context_management} if context_management is not None else {}
+        ),
         explicit_fields=frozenset(body),
     )
+
+
+def _decode_context_management(value: object) -> dict[str, Any] | None:
+    """Normalize exact no-ops and preserve active edits for target rejection.
+
+    Active context editing is provider-side stateful behavior and has no exact
+    Chat or Responses equivalent.  Claude Code currently sends
+    ``clear_thinking_20251015`` with ``keep: \"all\"`` even when routing to a
+    Responses-only model.  That edit explicitly preserves every thinking turn,
+    so consuming it without emitting an outbound field is lossless.  Other
+    structurally valid edits are retained as a provider extension so target
+    runtimes reject them as unrepresentable without overriding an earlier
+    retryable native-transport failure.
+    """
+    if value is None:
+        return None
+    config = require_mapping(
+        value,
+        protocol=_PROTOCOL,
+        parameter="context_management",
+    )
+    if "edits" not in config:
+        return None if not config else thaw_json(config)
+    edits = require_list(
+        config["edits"],
+        protocol=_PROTOCOL,
+        parameter="context_management.edits",
+    )
+    exact_noop = set(config) == {"edits"}
+    for index, raw_edit in enumerate(edits):
+        parameter = f"context_management.edits[{index}]"
+        edit = require_mapping(raw_edit, protocol=_PROTOCOL, parameter=parameter)
+        edit_type = require_string(
+            edit.get("type"),
+            protocol=_PROTOCOL,
+            parameter=f"{parameter}.type",
+            allow_empty=False,
+        )
+        _validate_context_management_edit(edit, edit_type=edit_type, parameter=parameter)
+        exact_noop = exact_noop and (
+            set(edit) == {"type", "keep"}
+            and edit_type == "clear_thinking_20251015"
+            and _is_context_management_keep_all(edit.get("keep"))
+        )
+    if exact_noop:
+        return None
+    return thaw_json(config)
+
+
+def _validate_context_management_edit(
+    edit: Mapping[str, Any],
+    *,
+    edit_type: str,
+    parameter: str,
+) -> None:
+    """Validate fields whose Anthropic wire schema is known.
+
+    Unknown edit types and extra members remain opaque so a native Messages
+    binding can forward future protocol additions unchanged. Known members of
+    the two published edit variants must still be structurally valid; otherwise
+    the request is malformed at ingress rather than merely unrepresentable by a
+    later target protocol.
+    """
+    if edit_type == "clear_thinking_20251015":
+        if "keep" in edit:
+            _validate_clear_thinking_keep(edit["keep"], parameter=f"{parameter}.keep")
+        return
+    if edit_type != "clear_tool_uses_20250919":
+        return
+
+    if "trigger" in edit:
+        _validate_context_management_count_selector(
+            edit["trigger"],
+            parameter=f"{parameter}.trigger",
+            allowed_types=frozenset({"input_tokens", "tool_uses"}),
+        )
+    if "keep" in edit:
+        _validate_context_management_count_selector(
+            edit["keep"],
+            parameter=f"{parameter}.keep",
+            allowed_types=frozenset({"tool_uses"}),
+        )
+    if "clear_at_least" in edit and edit["clear_at_least"] is not None:
+        _validate_context_management_count_selector(
+            edit["clear_at_least"],
+            parameter=f"{parameter}.clear_at_least",
+            allowed_types=frozenset({"input_tokens"}),
+        )
+    if "exclude_tools" in edit and edit["exclude_tools"] is not None:
+        tools = require_list(
+            edit["exclude_tools"],
+            protocol=_PROTOCOL,
+            parameter=f"{parameter}.exclude_tools",
+        )
+        for index, tool_name in enumerate(tools):
+            require_string(
+                tool_name,
+                protocol=_PROTOCOL,
+                parameter=f"{parameter}.exclude_tools[{index}]",
+                allow_empty=False,
+            )
+    if "clear_tool_inputs" in edit:
+        _validate_clear_tool_inputs(
+            edit["clear_tool_inputs"],
+            parameter=f"{parameter}.clear_tool_inputs",
+        )
+
+
+def _is_context_management_keep_all(value: object) -> bool:
+    return value == "all" or (
+        isinstance(value, Mapping) and set(value) == {"type"} and value.get("type") == "all"
+    )
+
+
+def _validate_clear_thinking_keep(value: object, *, parameter: str) -> None:
+    if isinstance(value, str):
+        if value != "all":
+            decode_reject(_PROTOCOL, parameter, 'must be "all" or an object')
+        return
+    _validate_context_management_count_selector(
+        value,
+        parameter=parameter,
+        allowed_types=frozenset({"all", "thinking_turns"}),
+    )
+
+
+def _validate_context_management_count_selector(
+    value: object,
+    *,
+    parameter: str,
+    allowed_types: frozenset[str],
+) -> None:
+    selector = require_mapping(value, protocol=_PROTOCOL, parameter=parameter)
+    selector_type = require_string(
+        selector.get("type"),
+        protocol=_PROTOCOL,
+        parameter=f"{parameter}.type",
+        allow_empty=False,
+    )
+    if selector_type not in allowed_types:
+        expected = ", ".join(sorted(allowed_types))
+        decode_reject(_PROTOCOL, f"{parameter}.type", f"must be one of: {expected}")
+    if selector_type == "all":
+        return
+    count = selector.get("value")
+    if not isinstance(count, int) or isinstance(count, bool):
+        decode_reject(_PROTOCOL, f"{parameter}.value", "must be an integer")
+
+
+def _validate_clear_tool_inputs(value: object, *, parameter: str) -> None:
+    if value is None or isinstance(value, bool):
+        return
+    tools = require_list(value, protocol=_PROTOCOL, parameter=parameter)
+    for index, tool_name in enumerate(tools):
+        require_string(
+            tool_name,
+            protocol=_PROTOCOL,
+            parameter=f"{parameter}[{index}]",
+            allow_empty=False,
+        )
 
 
 def _decode_system(value: object) -> SemanticMessage:
@@ -1475,7 +1640,7 @@ def _decode_text_block(value: object, *, parameter: str) -> TextContent:
         protocol=_PROTOCOL,
         parameter=parameter,
     )
-    _reject_cache_control(block, parameter=parameter)
+    _consume_cache_control(block, parameter=parameter)
     block_type = require_string(
         block.get("type", "text"), protocol=_PROTOCOL, parameter=f"{parameter}.type"
     )
@@ -1494,7 +1659,7 @@ def _decode_image(value: object, *, parameter: str) -> ImageContent:
         protocol=_PROTOCOL,
         parameter=parameter,
     )
-    _reject_cache_control(block, parameter=parameter)
+    _consume_cache_control(block, parameter=parameter)
     source = require_mapping(
         block.get("source"), protocol=_PROTOCOL, parameter=f"{parameter}.source"
     )
@@ -1530,7 +1695,7 @@ def _decode_document(value: object, *, parameter: str) -> FileContent:
         protocol=_PROTOCOL,
         parameter=parameter,
     )
-    _reject_cache_control(block, parameter=parameter)
+    _consume_cache_control(block, parameter=parameter)
     for unsupported in ("context", "citations"):
         if block.get(unsupported) is not None:
             decode_reject(_PROTOCOL, f"{parameter}.{unsupported}", "field is not modeled")
@@ -1589,7 +1754,7 @@ def _decode_tool_use(value: object, *, parameter: str) -> ToolCall:
         protocol=_PROTOCOL,
         parameter=parameter,
     )
-    _reject_cache_control(block, parameter=parameter)
+    _consume_cache_control(block, parameter=parameter)
     call_id = require_string(
         block.get("id"), protocol=_PROTOCOL, parameter=f"{parameter}.id", allow_empty=False
     )
@@ -1617,7 +1782,7 @@ def _decode_tool_result(value: object, *, parameter: str) -> ToolResult:
         protocol=_PROTOCOL,
         parameter=parameter,
     )
-    _reject_cache_control(block, parameter=parameter)
+    _consume_cache_control(block, parameter=parameter)
     raw_content = block.get("content", "")
     if isinstance(raw_content, str):
         content = (TextContent(raw_content),)
@@ -1753,7 +1918,7 @@ def _decode_tools(value: object) -> tuple[ToolDefinition, ...]:
             protocol=_PROTOCOL,
             parameter=path,
         )
-        _reject_cache_control(tool, parameter=path)
+        _consume_cache_control(tool, parameter=path)
         schema = tool.get("input_schema") or {"type": "object", "properties": {}}
         schema = require_mapping(schema, protocol=_PROTOCOL, parameter=f"{path}.input_schema")
         tools.append(
@@ -1778,12 +1943,49 @@ def _decode_tools(value: object) -> tuple[ToolDefinition, ...]:
     return tuple(tools)
 
 
-def _reject_cache_control(value: Mapping[str, Any], *, parameter: str) -> None:
-    if "cache_control" in value:
-        decode_reject(
+def _consume_cache_control(value: Mapping[str, Any], *, parameter: str) -> None:
+    """Consume Anthropic's standard ephemeral cache hint on semantic paths.
+
+    The hint changes provider cache placement, not model-visible request
+    semantics. Chat and Responses providers own their own automatic prompt
+    caching, so the exact standard hint is an explicit advisory no-op when the
+    request crosses protocols. Native Messages identity traffic still forwards
+    the original object unchanged.
+    """
+    if "cache_control" not in value:
+        return
+    path = f"{parameter}.cache_control"
+    raw_cache_control = value["cache_control"]
+    if raw_cache_control is None:
+        return
+    cache_control = require_mapping(raw_cache_control, protocol=_PROTOCOL, parameter=path)
+    cache_type = require_string(
+        cache_control.get("type"),
+        protocol=_PROTOCOL,
+        parameter=f"{path}.type",
+        allow_empty=False,
+    )
+    if "ttl" in cache_control:
+        ttl = require_string(
+            cache_control["ttl"],
+            protocol=_PROTOCOL,
+            parameter=f"{path}.ttl",
+            allow_empty=False,
+        )
+        if ttl not in {"5m", "1h"}:
+            decode_reject(_PROTOCOL, f"{path}.ttl", 'must be "5m" or "1h"')
+    unknown = sorted(set(cache_control) - {"type"})
+    if unknown:
+        reject(
             _PROTOCOL,
-            f"{parameter}.cache_control",
-            "field is not portable across protocols",
+            f"{path}.{unknown[0]}",
+            "cache option is not portable across protocols",
+        )
+    if cache_type != "ephemeral":
+        reject(
+            _PROTOCOL,
+            f"{path}.type",
+            "only the standard ephemeral cache hint is portable across protocols",
         )
 
 

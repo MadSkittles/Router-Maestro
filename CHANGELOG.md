@@ -33,6 +33,15 @@ All notable changes to Router-Maestro are documented here.
 
 ### Changed
 
+- **Claude Code no-op context editing can use Responses-only models.** Anthropic
+  requests that explicitly preserve all thinking turns with
+  `clear_thinking_20251015` and `keep: "all"` now cross to Chat or Responses
+  without a local representability error. Standard ephemeral `cache_control`
+  hints are explicitly consumed as target-owned cache advice on cross-protocol
+  paths, while native Messages still forwards them unchanged. Active context
+  edits and additional cache-policy fields remain representability errors
+  instead of being silently dropped.
+
 - **Identity traffic avoids semantic IR.** Same-protocol requests and streams
   use a copy-on-write identity path; cross-protocol attempts materialize one
   immutable semantic request lazily and share it across eligible attempts. The

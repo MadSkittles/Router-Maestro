@@ -509,3 +509,32 @@ async def test_offline_generation_transport_matrix(
 
     assert source_payload == original_payload
     assert pipeline.envelope.raw_payload == original_payload
+
+
+@pytest.mark.asyncio
+async def test_anthropic_context_management_noop_reaches_responses_transport() -> None:
+    provider = _MatrixProvider(WireProtocol.OPENAI_RESPONSES)
+    router = _router(provider)
+    source_payload = _IngressCase(WireProtocol.ANTHROPIC_MESSAGES, "anthropic").payload(
+        stream=False
+    )
+    source_payload["context_management"] = {
+        "edits": [{"type": "clear_thinking_20251015", "keep": "all"}]
+    }
+    pipeline = build_generation_pipeline(
+        router,
+        ReasoningCapsuleCodec(bytes([73]) * 32),
+        WireProtocol.ANTHROPIC_MESSAGES,
+        source_payload,
+        path="/api/anthropic/v1/messages",
+    )
+
+    result = await pipeline.dispatcher.dispatch(router, pipeline.envelope)
+    downstream = await pipeline.responses.encode_result(result, pipeline.envelope.runtime)
+
+    assert downstream["type"] == "message"
+    assert pipeline.envelope.materialization_count == 1
+    assert len(provider.executor.attempts) == 1
+    attempt = provider.executor.attempts[0]
+    assert attempt.protocol is WireProtocol.OPENAI_RESPONSES
+    assert "context_management" not in attempt.payload

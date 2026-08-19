@@ -374,12 +374,37 @@ def test_stable_anthropic_route_uses_responses_only_model_for_text_and_tools() -
 def test_stable_anthropic_route_streams_responses_only_model() -> None:
     provider = _ResponsesOnlyProvider([])
     client, model_router = _client(provider)
+    payload = _payload(stream=True)
+    payload["system"] = [
+        {
+            "type": "text",
+            "text": "Answer concisely.",
+            "cache_control": {"type": "ephemeral"},
+        }
+    ]
+    payload["messages"] = [
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "text",
+                    "text": "hello",
+                    "cache_control": {"type": "ephemeral"},
+                }
+            ],
+        }
+    ]
+    payload["context_management"] = {"edits": [{"type": "clear_thinking_20251015", "keep": "all"}]}
 
     with patch(
         "router_maestro.server.routes.anthropic.get_router",
         return_value=model_router,
     ):
-        with client.stream("POST", "/v1/messages", json=_payload(stream=True)) as response:
+        with client.stream(
+            "POST",
+            "/api/anthropic/v1/messages?beta=true",
+            json=payload,
+        ) as response:
             body = "".join(response.iter_text())
 
     assert response.status_code == 200
@@ -388,6 +413,7 @@ def test_stable_anthropic_route_streams_responses_only_model() -> None:
     assert '"text": "hello"' in body
     assert "event: message_stop" in body
     assert len(provider.requests) == 1
+    assert provider.requests[0].provider_extensions == {}
 
 
 def test_beta_anthropic_path_is_an_alias_of_the_shared_dispatcher() -> None:

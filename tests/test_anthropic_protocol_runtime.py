@@ -175,11 +175,195 @@ async def test_request_decodes_tools_media_options_and_tool_result_error() -> No
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("payload", "parameter"),
+    "context_management",
+    [
+        None,
+        {},
+        {"edits": []},
+        {"edits": [{"type": "clear_thinking_20251015", "keep": "all"}]},
+        {"edits": [{"type": "clear_thinking_20251015", "keep": {"type": "all"}}]},
+    ],
+)
+async def test_context_management_exact_noops_decode_for_cross_protocol_requests(
+    context_management: object,
+) -> None:
+    runtime = AnthropicMessagesRuntime()
+
+    semantic = await runtime.decode_request(_request(context_management=context_management))
+    encoded = await OpenAIResponsesRuntime().encode_request(semantic)
+
+    assert encoded["model"] == "gpt-example"
+    assert "context_management" not in encoded
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "context_management",
+    [
+        {
+            "edits": [
+                {
+                    "type": "clear_thinking_20251015",
+                    "keep": {"type": "thinking_turns", "value": 1},
+                }
+            ]
+        },
+        {"edits": [{"type": "clear_tool_uses_20250919"}]},
+        {
+            "edits": [
+                {
+                    "type": "clear_tool_uses_20250919",
+                    "trigger": {"type": "input_tokens", "value": 100_000},
+                    "keep": {"type": "tool_uses", "value": 3},
+                    "clear_at_least": {"type": "input_tokens", "value": 1_000},
+                    "exclude_tools": ["keep_me"],
+                    "clear_tool_inputs": ["discard_input_for_me"],
+                }
+            ]
+        },
+        {
+            "edits": [
+                {
+                    "type": "clear_tool_uses_20250919",
+                    "clear_at_least": None,
+                    "exclude_tools": None,
+                    "clear_tool_inputs": None,
+                }
+            ]
+        },
+        {"edits": [{"type": "clear_thinking_20251015", "keep": "all", "future": True}]},
+        {"edits": [{"type": "future_edit_20260101", "future": {"shape": True}}]},
+    ],
+)
+async def test_active_or_unknown_context_management_is_target_unrepresentable(
+    context_management: object,
+) -> None:
+    semantic = await AnthropicMessagesRuntime().decode_request(
+        _request(context_management=context_management)
+    )
+
+    assert "context_management" in semantic.provider_extensions
+    with pytest.raises(ProtocolRepresentabilityError) as raised:
+        await OpenAIResponsesRuntime().encode_request(semantic)
+
+    assert raised.value.path == "context_management"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("context_management", "parameter"),
+    [
+        ([], "context_management"),
+        ({"edits": {}}, "context_management.edits"),
+        ({"edits": ["clear"]}, "context_management.edits[0]"),
+        ({"edits": [{"type": 1}]}, "context_management.edits[0].type"),
+        (
+            {"edits": [{"type": "clear_thinking_20251015", "keep": 7}]},
+            "context_management.edits[0].keep",
+        ),
+        (
+            {
+                "edits": [
+                    {
+                        "type": "clear_thinking_20251015",
+                        "keep": {"type": "tool_uses", "value": 1},
+                    }
+                ]
+            },
+            "context_management.edits[0].keep.type",
+        ),
+        (
+            {
+                "edits": [
+                    {
+                        "type": "clear_thinking_20251015",
+                        "keep": {"type": "thinking_turns", "value": "1"},
+                    }
+                ]
+            },
+            "context_management.edits[0].keep.value",
+        ),
+        (
+            {
+                "edits": [
+                    {
+                        "type": "clear_tool_uses_20250919",
+                        "trigger": {"type": "input_tokens", "value": False},
+                    }
+                ]
+            },
+            "context_management.edits[0].trigger.value",
+        ),
+        (
+            {
+                "edits": [
+                    {
+                        "type": "clear_tool_uses_20250919",
+                        "exclude_tools": ["valid", 3],
+                    }
+                ]
+            },
+            "context_management.edits[0].exclude_tools[1]",
+        ),
+        (
+            {
+                "edits": [
+                    {
+                        "type": "clear_tool_uses_20250919",
+                        "keep": "all",
+                    }
+                ]
+            },
+            "context_management.edits[0].keep",
+        ),
+        (
+            {
+                "edits": [
+                    {
+                        "type": "clear_tool_uses_20250919",
+                        "clear_tool_inputs": ["valid", 3],
+                    }
+                ]
+            },
+            "context_management.edits[0].clear_tool_inputs[1]",
+        ),
+    ],
+)
+async def test_malformed_context_management_is_an_ingress_decode_error(
+    context_management: object,
+    parameter: str,
+) -> None:
+    with pytest.raises(ProtocolDecodeError) as raised:
+        await AnthropicMessagesRuntime().decode_request(
+            _request(context_management=context_management)
+        )
+
+    assert raised.value.path == parameter
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "payload",
     [
         pytest.param(
-            _request(system=[{"type": "text", "text": "system", "cache_control": None}]),
-            "system[0].cache_control",
+            _request(
+                {
+                    "role": "user",
+                    "content": [{"type": "text", "text": "hello", "cache_control": None}],
+                }
+            ),
+            id="explicit-null",
+        ),
+        pytest.param(
+            _request(
+                system=[
+                    {
+                        "type": "text",
+                        "text": "system",
+                        "cache_control": {"type": "ephemeral"},
+                    }
+                ]
+            ),
             id="system-text",
         ),
         pytest.param(
@@ -191,7 +375,6 @@ async def test_request_decodes_tools_media_options_and_tool_result_error() -> No
                     ],
                 }
             ),
-            "messages[0].content[0].cache_control",
             id="message-text",
         ),
         pytest.param(
@@ -211,7 +394,6 @@ async def test_request_decodes_tools_media_options_and_tool_result_error() -> No
                     ],
                 }
             ),
-            "messages[0].content[0].cache_control",
             id="image",
         ),
         pytest.param(
@@ -227,7 +409,6 @@ async def test_request_decodes_tools_media_options_and_tool_result_error() -> No
                     ],
                 }
             ),
-            "messages[0].content[0].cache_control",
             id="document",
         ),
         pytest.param(
@@ -245,7 +426,6 @@ async def test_request_decodes_tools_media_options_and_tool_result_error() -> No
                     ],
                 }
             ),
-            "messages[0].content[0].cache_control",
             id="tool-use",
         ),
         pytest.param(
@@ -262,7 +442,6 @@ async def test_request_decodes_tools_media_options_and_tool_result_error() -> No
                     ],
                 }
             ),
-            "messages[0].content[0].cache_control",
             id="tool-result",
         ),
         pytest.param(
@@ -275,16 +454,60 @@ async def test_request_decodes_tools_media_options_and_tool_result_error() -> No
                     }
                 ]
             ),
-            "tools[0].cache_control",
             id="tool-definition",
         ),
     ],
 )
-async def test_explicit_cache_control_is_rejected_before_cross_protocol_loss(
+async def test_standard_ephemeral_cache_control_is_an_advisory_cross_protocol_noop(
     payload: dict,
+) -> None:
+    semantic = await AnthropicMessagesRuntime().decode_request(payload)
+
+    assert semantic.provider_extensions == {}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("cache_control", "error_type", "parameter"),
+    [
+        (
+            {"type": "ephemeral", "ttl": "1h"},
+            ProtocolRepresentabilityError,
+            "messages[0].content[0].cache_control.ttl",
+        ),
+        (
+            {"type": "ephemeral", "ttl": 60},
+            ProtocolDecodeError,
+            "messages[0].content[0].cache_control.ttl",
+        ),
+        (
+            {"type": "ephemeral", "ttl": "forever"},
+            ProtocolDecodeError,
+            "messages[0].content[0].cache_control.ttl",
+        ),
+        (
+            {"type": "persistent"},
+            ProtocolRepresentabilityError,
+            "messages[0].content[0].cache_control.type",
+        ),
+        ({}, ProtocolDecodeError, "messages[0].content[0].cache_control.type"),
+        ({"type": 1}, ProtocolDecodeError, "messages[0].content[0].cache_control.type"),
+        ("ephemeral", ProtocolDecodeError, "messages[0].content[0].cache_control"),
+    ],
+)
+async def test_nonstandard_cache_control_is_rejected_with_exact_path(
+    cache_control: object,
+    error_type: type[ProtocolDecodeError] | type[ProtocolRepresentabilityError],
     parameter: str,
 ) -> None:
-    with pytest.raises(ProtocolDecodeError) as raised:
+    payload = _request(
+        {
+            "role": "user",
+            "content": [{"type": "text", "text": "hello", "cache_control": cache_control}],
+        }
+    )
+
+    with pytest.raises(error_type) as raised:
         await AnthropicMessagesRuntime().decode_request(payload)
 
     assert raised.value.path == parameter
