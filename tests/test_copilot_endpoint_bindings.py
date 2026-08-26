@@ -24,6 +24,7 @@ from router_maestro.protocols import (
     SemanticResponse,
     WireProtocol,
 )
+from router_maestro.protocols._tool_namespace import decode_namespaced_tool_name
 from router_maestro.providers.base import (
     ProviderError,
     ProviderFailureKind,
@@ -41,6 +42,13 @@ from router_maestro.routing.model_ref import ModelRef
 
 def _binding(provider: CopilotProvider, protocol: WireProtocol):
     return next(binding for binding in provider.bindings() if binding.protocol is protocol)
+
+
+def test_namespaced_tool_decoder_accepts_legacy_base64_names() -> None:
+    assert decode_namespaced_tool_name("rmns_0b_bWNwX19xbWQc3RhdHVz") == (
+        "mcp__qmd",
+        "status",
+    )
 
 
 @pytest.mark.asyncio
@@ -108,6 +116,62 @@ async def test_grok_responses_binding_flattens_and_restores_namespace_tools() ->
     )
     assert projected["output"][0]["name"] == "status"
     assert projected["output"][0]["namespace"] == "mcp__qmd"
+
+
+@pytest.mark.asyncio
+async def test_grok_responses_binding_compacts_long_namespace_tool_names() -> None:
+    provider = CopilotProvider()
+    binding = _binding(provider, WireProtocol.OPENAI_RESPONSES)
+    namespace = "mcp__ado_o365exchange"
+    name = "core_list_project_teams"
+    attempt = await binding.prepare_attempt(
+        model=ModelRef(provider=provider.name, upstream_id="grok-4.6"),
+        payload={
+            "model": "github-copilot/grok-4.6",
+            "input": "hello",
+            "tools": [
+                {
+                    "type": "namespace",
+                    "name": namespace,
+                    "description": "ADO tools",
+                    "tools": [
+                        {
+                            "type": "function",
+                            "name": name,
+                            "parameters": {
+                                "type": "object",
+                                "properties": {},
+                                "additionalProperties": False,
+                            },
+                        }
+                    ],
+                }
+            ],
+        },
+        stream=False,
+    )
+
+    encoded_name = attempt.payload["tools"][0]["name"]
+    assert len(encoded_name) <= 64
+
+    projected = CopilotHttpExecutor._project_response(
+        WireProtocol.OPENAI_RESPONSES,
+        {
+            "id": "resp_1",
+            "model": "grok-4.6",
+            "output": [
+                {
+                    "type": "function_call",
+                    "call_id": "call_1",
+                    "name": encoded_name,
+                    "arguments": "{}",
+                }
+            ],
+        },
+        model="grok-4.6",
+    )
+    assert projected["output"][0]["name"] == name
+    assert projected["output"][0]["namespace"] == namespace
 
 
 @pytest.mark.asyncio
