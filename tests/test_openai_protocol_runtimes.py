@@ -10,6 +10,7 @@ from typing import cast
 import pytest
 
 from router_maestro.protocols import (
+    AnthropicMessagesRuntime,
     FrozenJsonValue,
     GeminiRuntime,
     MessageRole,
@@ -1166,12 +1167,71 @@ def test_chat_stream_provider_context_supplies_omitted_wire_identity() -> None:
     ]
     assert events[0].metadata["model"] == "gpt-example"
     assert events[1].delta == ""
-    assert events[1].metadata == {"call_id": "toolu_1", "name": "lookup"}
+    assert events[1].output_index is None
+    assert events[1].metadata == {
+        "call_id": "toolu_1",
+        "name": "lookup",
+        "tool_index": 0,
+    }
 
     with pytest.raises(ProtocolDecodeError, match="stream.id"):
         OpenAIChatRuntime().new_stream_decoder().decode(
             {"choices": [{"delta": {}, "finish_reason": "stop"}]}
         )
+
+
+def test_chat_reasoning_then_tool_uses_distinct_anthropic_blocks() -> None:
+    decoder = OpenAIChatRuntime(
+        origin_provider="github-copilot",
+        default_model="gemini-example",
+    ).new_stream_decoder()
+    first = decoder.decode(
+        {
+            "id": "chat_1",
+            "model": "gemini-example",
+            "choices": [
+                {
+                    "index": 0,
+                    "delta": {"reasoning_text": "plan"},
+                    "finish_reason": None,
+                }
+            ],
+        }
+    )
+    second = decoder.decode(
+        {
+            "id": "chat_1",
+            "model": "gemini-example",
+            "choices": [
+                {
+                    "index": 0,
+                    "delta": {
+                        "tool_calls": [
+                            {
+                                "index": 0,
+                                "id": "call_1",
+                                "type": "function",
+                                "function": {"name": "lookup", "arguments": "{}"},
+                            }
+                        ]
+                    },
+                    "finish_reason": None,
+                }
+            ],
+        }
+    )
+    encoder = AnthropicMessagesRuntime().new_stream_encoder(
+        model="github-copilot/gemini-example",
+        response_id="msg_1",
+    )
+
+    frames = [frame for event in (*first, *second) for frame in encoder.encode(event)]
+
+    starts = [frame for frame in frames if frame["type"] == "content_block_start"]
+    assert [(frame["index"], frame["content_block"]["type"]) for frame in starts] == [
+        (0, "thinking"),
+        (1, "tool_use"),
+    ]
 
 
 def test_responses_stream_runtime_preserves_reasoning_state_and_terminal_order() -> None:

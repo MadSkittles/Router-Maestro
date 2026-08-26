@@ -252,6 +252,7 @@ class OpenAIChatStreamDecoder:
         self._response_id: str | None = None
         self._model = default_model
         self._allow_missing_identity = default_model is not None
+        self._tool_calls: dict[int, dict[str, str]] = {}
 
     @property
     def terminal(self) -> bool:
@@ -610,6 +611,8 @@ class OpenAIChatStreamDecoder:
                     protocol=_PROTOCOL,
                     parameter=f"{path}.index",
                 )
+                if call_index is None:  # pragma: no cover - default is the loop index
+                    decode_reject(_PROTOCOL, f"{path}.index", "tool index is required")
                 function = require_mapping(
                     call.get("function", {}),
                     protocol=_PROTOCOL,
@@ -635,18 +638,20 @@ class OpenAIChatStreamDecoder:
                     namespaced = decode_namespaced_tool_name(name)
                     if namespaced is not None:
                         namespace, name = namespaced
+                state = self._tool_calls.setdefault(call_index, {})
                 if call_id is not None:
-                    metadata["call_id"] = call_id
+                    state["call_id"] = call_id
                 if name is not None:
-                    metadata["name"] = name
+                    state["name"] = name
                 if namespace is not None:
-                    metadata["namespace"] = namespace
+                    state["namespace"] = namespace
+                metadata.update(state)
+                metadata["tool_index"] = call_index
                 specs.append(
                     (
                         SemanticEventType.TOOL_ARGUMENTS_DELTA,
                         {
-                            "output_index": call_index,
-                            "item_id": call_id,
+                            "item_id": state.get("call_id"),
                             "delta": optional_string(
                                 function.get("arguments"),
                                 protocol=_PROTOCOL,
