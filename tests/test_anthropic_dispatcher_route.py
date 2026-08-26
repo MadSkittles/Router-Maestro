@@ -189,6 +189,11 @@ class _TopPContractCopilotProvider(CopilotProvider):
     def is_authenticated(self) -> bool:
         return True
 
+    async def ensure_token(self) -> None:
+        """Keep the fake provider independent of developer-machine Copilot auth."""
+
+        return None
+
 
 class _ChatOnlyCopilotProvider(CopilotProvider):
     async def list_models(self, force_refresh: bool = False) -> list[ModelInfo]:
