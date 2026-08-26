@@ -366,9 +366,21 @@ def test_stable_responses_route_streams_cross_protocol_text_and_tool_events() ->
     assert response.status_code == 200, body
     events = _sse_events(body)
     event_types = [event["type"] for event in events]
-    assert "response.created" in event_types
-    assert "response.output_text.delta" in event_types
-    assert "response.function_call_arguments.delta" in event_types
+    assert event_types.index("response.output_item.added") < event_types.index(
+        "response.output_text.delta"
+    )
+    assert event_types.index("response.content_part.added") < event_types.index(
+        "response.output_text.delta"
+    )
+    message_done_index = next(
+        index
+        for index, event in enumerate(events)
+        if event["type"] == "response.output_item.done" and event["output_index"] == 0
+    )
+    assert event_types.index("response.output_text.done") < message_done_index
+    assert event_types.index("response.function_call_arguments.delta") < event_types.index(
+        "response.function_call_arguments.done"
+    )
     assert event_types[-1] == "response.completed"
     completed = events[-1]["response"]
     assert completed["model"] == "chat-only/chat-model"

@@ -21,6 +21,7 @@ from router_maestro.protocols import (
     ProtocolRepresentabilityError,
     ReasoningConfig,
     ReasoningSummary,
+    RefusalContent,
     SemanticEvent,
     SemanticEventType,
     SemanticMessage,
@@ -1824,6 +1825,109 @@ def test_responses_stream_encoder_opens_tool_item_from_chat_delta() -> None:
     ]
     assert first[1]["item"]["name"] == "get_weather"
     assert second[0]["type"] == "response.function_call_arguments.delta"
+
+    terminal = encoder.encode(
+        SemanticEvent(
+            type=SemanticEventType.TERMINAL,
+            terminal=TerminalMetadata(finish_reason="tool_calls", response_status="completed"),
+        )
+    )
+    assert [frame["type"] for frame in terminal] == [
+        "response.function_call_arguments.done",
+        "response.output_item.done",
+        "response.completed",
+    ]
+
+
+def test_responses_stream_encoder_emits_complete_message_lifecycle() -> None:
+    encoder = OpenAIResponsesRuntime().new_stream_encoder(
+        model="gpt-example",
+        response_id="resp_1",
+    )
+
+    first = encoder.encode(SemanticEvent(type=SemanticEventType.TEXT_DELTA, delta="hel"))
+    second = encoder.encode(SemanticEvent(type=SemanticEventType.TEXT_DELTA, delta="lo"))
+    terminal = encoder.encode(
+        SemanticEvent(
+            type=SemanticEventType.TERMINAL,
+            terminal=TerminalMetadata(finish_reason="stop", response_status="completed"),
+        )
+    )
+
+    assert [frame["type"] for frame in first] == [
+        "response.created",
+        "response.output_item.added",
+        "response.content_part.added",
+        "response.output_text.delta",
+    ]
+    assert [frame["type"] for frame in second] == ["response.output_text.delta"]
+    assert [frame["type"] for frame in terminal] == [
+        "response.output_text.done",
+        "response.content_part.done",
+        "response.output_item.done",
+        "response.completed",
+    ]
+    assert terminal[-2]["item"]["content"][0]["text"] == "hello"
+    assert terminal[-1]["response"]["output"][0]["status"] == "completed"
+
+
+def test_responses_stream_encoder_emits_complete_reasoning_lifecycle() -> None:
+    encoder = OpenAIResponsesRuntime().new_stream_encoder(
+        model="gpt-example",
+        response_id="resp_1",
+    )
+
+    first = encoder.encode(SemanticEvent(type=SemanticEventType.REASONING_DELTA, delta="plan"))
+    terminal = encoder.encode(
+        SemanticEvent(
+            type=SemanticEventType.TERMINAL,
+            terminal=TerminalMetadata(finish_reason="stop", response_status="completed"),
+        )
+    )
+
+    assert [frame["type"] for frame in first] == [
+        "response.created",
+        "response.output_item.added",
+        "response.reasoning_summary_part.added",
+        "response.reasoning_summary_text.delta",
+    ]
+    assert [frame["type"] for frame in terminal] == [
+        "response.reasoning_summary_text.done",
+        "response.reasoning_summary_part.done",
+        "response.output_item.done",
+        "response.completed",
+    ]
+    assert terminal[-2]["item"]["summary"] == [{"type": "summary_text", "text": "plan"}]
+
+
+def test_responses_stream_encoder_emits_complete_refusal_lifecycle() -> None:
+    encoder = OpenAIResponsesRuntime().new_stream_encoder(
+        model="gpt-example",
+        response_id="resp_1",
+    )
+
+    first = encoder.encode(
+        SemanticEvent(type=SemanticEventType.OUTPUT_ITEM, item=RefusalContent("no"))
+    )
+    terminal = encoder.encode(
+        SemanticEvent(
+            type=SemanticEventType.TERMINAL,
+            terminal=TerminalMetadata(finish_reason="stop", response_status="completed"),
+        )
+    )
+
+    assert [frame["type"] for frame in first] == [
+        "response.created",
+        "response.output_item.added",
+        "response.content_part.added",
+        "response.refusal.delta",
+    ]
+    assert [frame["type"] for frame in terminal] == [
+        "response.refusal.done",
+        "response.content_part.done",
+        "response.output_item.done",
+        "response.completed",
+    ]
 
 
 def test_chat_stream_encoder_emits_standard_chunks_and_terminal_last() -> None:

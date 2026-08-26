@@ -6,6 +6,7 @@ import json
 import time
 from collections.abc import Mapping
 from contextvars import ContextVar
+from copy import deepcopy
 from dataclasses import replace
 from typing import Any, Literal, cast
 
@@ -1281,6 +1282,10 @@ class OpenAIResponsesStreamEncoder:
         self._pending_error: TerminalMetadata | None = None
         self._pending_usage = None
         self._output: dict[int, dict[str, Any]] = {}
+        self._announced_output_indices: set[int] = set()
+        self._announced_message_parts: set[tuple[int, int]] = set()
+        self._announced_reasoning_parts: set[tuple[int, int]] = set()
+        self._completed_output_indices: set[int] = set()
         self._implicit_output_indices: dict[tuple[str, str], int] = {}
         self._claimed_output_indices: set[int] = set()
         self._next_output_index = 0
@@ -1346,30 +1351,43 @@ class OpenAIResponsesStreamEncoder:
         output_index = self._event_output_index(event)
         item_id = event.item_id
         if event.type is SemanticEventType.TEXT_DELTA:
+            content_index = event.content_index or 0
+            frames = self._ensure_message_part_started(
+                output_index,
+                item_id=item_id,
+                content_index=content_index,
+                part_type="output_text",
+            )
             message = self._append_message_delta(
                 output_index,
                 item_id=item_id,
-                content_index=event.content_index or 0,
+                content_index=content_index,
                 part_type="output_text",
                 delta=event.delta or "",
             )
-            return [
+            frames.append(
                 {
                     "type": "response.output_text.delta",
                     "item_id": item_id or message["id"],
                     "output_index": output_index,
-                    "content_index": event.content_index or 0,
+                    "content_index": content_index,
                     "delta": event.delta or "",
                 }
-            ]
+            )
+            return frames
         if event.type is SemanticEventType.REASONING_DELTA:
-            reasoning = self._reasoning_snapshot(output_index, item_id=item_id)
             summary_index = self._reasoning_index(event)
+            frames = self._ensure_reasoning_part_started(
+                output_index,
+                item_id=item_id,
+                summary_index=summary_index,
+            )
+            reasoning = self._reasoning_snapshot(output_index, item_id=item_id)
             summary = reasoning["summary"]
             while len(summary) <= summary_index:
                 summary.append({"type": "summary_text", "text": ""})
             summary[summary_index]["text"] += event.delta or ""
-            return [
+            frames.append(
                 {
                     "type": "response.reasoning_summary_text.delta",
                     "item_id": item_id or reasoning["id"],
@@ -1377,7 +1395,8 @@ class OpenAIResponsesStreamEncoder:
                     "summary_index": summary_index,
                     "delta": event.delta or "",
                 }
-            ]
+            )
+            return frames
         if event.type is SemanticEventType.TOOL_ARGUMENTS_DELTA:
             item_type = event.metadata.get("output_item_type", "function_call")
             if item_type == "custom_tool_call":
@@ -1405,7 +1424,7 @@ class OpenAIResponsesStreamEncoder:
                     "call_id": call_id,
                     "name": name,
                     "arguments": "",
-                    "status": "completed",
+                    "status": "in_progress",
                 }
                 namespace = event.metadata.get("namespace")
                 if isinstance(namespace, str) and namespace:
@@ -1415,9 +1434,10 @@ class OpenAIResponsesStreamEncoder:
                     {
                         "type": "response.output_item.added",
                         "output_index": output_index,
-                        "item": dict(raw_item),
+                        "item": deepcopy(raw_item),
                     }
                 )
+                self._announced_output_indices.add(output_index)
             if raw_item is None or raw_item.get("type") != item_type:
                 reject(
                     _PROTOCOL,
@@ -1444,57 +1464,190 @@ class OpenAIResponsesStreamEncoder:
         if item is None:
             return []
         if isinstance(item, TextContent):
+            content_index = event.content_index or 0
+            frames = self._ensure_message_part_started(
+                output_index,
+                item_id=item_id,
+                content_index=content_index,
+                part_type="output_text",
+            )
             message = self._append_message_delta(
                 output_index,
                 item_id=item_id,
-                content_index=event.content_index or 0,
+                content_index=content_index,
                 part_type="output_text",
                 delta=item.text,
             )
-            return [
+            frames.append(
                 {
                     "type": "response.output_text.delta",
                     "item_id": item_id or message["id"],
                     "output_index": output_index,
-                    "content_index": event.content_index or 0,
+                    "content_index": content_index,
                     "delta": item.text,
                 }
-            ]
+            )
+            return frames
         if isinstance(item, RefusalContent):
+            content_index = event.content_index or 0
+            frames = self._ensure_message_part_started(
+                output_index,
+                item_id=item_id,
+                content_index=content_index,
+                part_type="refusal",
+            )
             message = self._append_message_delta(
                 output_index,
                 item_id=item_id,
-                content_index=event.content_index or 0,
+                content_index=content_index,
                 part_type="refusal",
                 delta=item.refusal,
             )
-            return [
+            frames.append(
                 {
                     "type": "response.refusal.delta",
                     "item_id": item_id or message["id"],
                     "output_index": output_index,
-                    "content_index": event.content_index or 0,
+                    "content_index": content_index,
                     "delta": item.refusal,
                 }
-            ]
+            )
+            return frames
         raw_item = self._encode_item(item, event=event)
-        if (
+        legacy_tool_declaration = (
             isinstance(item, ToolCall)
             and item.kind == "function"
             and not item.arguments
             and "tool_index" in event.metadata
-        ):
+        )
+        if legacy_tool_declaration:
             # Legacy Chat emits a declaration followed by argument deltas.
             raw_item["arguments"] = ""
         self._output[output_index] = raw_item
-        done = event.metadata.get("output_item_done", True) is True
-        return [
-            {
-                "type": ("response.output_item.done" if done else "response.output_item.added"),
-                "output_index": output_index,
-                "item": raw_item,
+        done = event.metadata.get("output_item_done", not legacy_tool_declaration) is True
+        frames = []
+        if output_index not in self._announced_output_indices:
+            announced_item = deepcopy(raw_item)
+            if "status" in announced_item:
+                announced_item["status"] = "in_progress"
+            frames.append(
+                {
+                    "type": "response.output_item.added",
+                    "output_index": output_index,
+                    "item": announced_item,
+                }
+            )
+            self._announced_output_indices.add(output_index)
+        if done:
+            frames.append(
+                {
+                    "type": "response.output_item.done",
+                    "output_index": output_index,
+                    "item": deepcopy(raw_item),
+                }
+            )
+            self._completed_output_indices.add(output_index)
+        return frames
+
+    def _ensure_message_part_started(
+        self,
+        output_index: int,
+        *,
+        item_id: str | None,
+        content_index: int,
+        part_type: str,
+    ) -> list[Mapping[str, Any]]:
+        raw_item = self._output.get(output_index)
+        if raw_item is None:
+            raw_item = {
+                "type": "message",
+                "id": item_id or f"msg_{output_index}",
+                "role": "assistant",
+                "status": "in_progress",
+                "content": [],
             }
-        ]
+            self._output[output_index] = raw_item
+        if raw_item.get("type") != "message":
+            reject(_PROTOCOL, "event.output_index", "message output index is already in use")
+        if item_id is not None and raw_item.get("id") != item_id:
+            reject(_PROTOCOL, "event.item_id", "message item ID changed within stream")
+
+        frames: list[Mapping[str, Any]] = []
+        if output_index not in self._announced_output_indices:
+            frames.append(
+                {
+                    "type": "response.output_item.added",
+                    "output_index": output_index,
+                    "item": {
+                        "type": "message",
+                        "id": raw_item["id"],
+                        "role": "assistant",
+                        "status": "in_progress",
+                        "content": [],
+                    },
+                }
+            )
+            self._announced_output_indices.add(output_index)
+
+        content = raw_item.get("content")
+        if not isinstance(content, list):  # pragma: no cover - built locally
+            reject(_PROTOCOL, "event.output_index", "message content must be an array")
+        while len(content) <= content_index:
+            next_index = len(content)
+            next_type = part_type if next_index == content_index else "output_text"
+            field = "refusal" if next_type == "refusal" else "text"
+            content.append({"type": next_type, field: ""})
+        part = content[content_index]
+        if part.get("type") != part_type:
+            reject(_PROTOCOL, "event.content_index", "message content type changed")
+        key = (output_index, content_index)
+        if key not in self._announced_message_parts:
+            frames.append(
+                {
+                    "type": "response.content_part.added",
+                    "item_id": raw_item["id"],
+                    "output_index": output_index,
+                    "content_index": content_index,
+                    "part": self._wire_message_part(part),
+                }
+            )
+            self._announced_message_parts.add(key)
+        return frames
+
+    def _ensure_reasoning_part_started(
+        self,
+        output_index: int,
+        *,
+        item_id: str | None,
+        summary_index: int,
+    ) -> list[Mapping[str, Any]]:
+        reasoning = self._reasoning_snapshot(output_index, item_id=item_id)
+        frames: list[Mapping[str, Any]] = []
+        if output_index not in self._announced_output_indices:
+            frames.append(
+                {
+                    "type": "response.output_item.added",
+                    "output_index": output_index,
+                    "item": deepcopy(reasoning),
+                }
+            )
+            self._announced_output_indices.add(output_index)
+        summary = reasoning["summary"]
+        while len(summary) <= summary_index:
+            summary.append({"type": "summary_text", "text": ""})
+        key = (output_index, summary_index)
+        if key not in self._announced_reasoning_parts:
+            frames.append(
+                {
+                    "type": "response.reasoning_summary_part.added",
+                    "item_id": reasoning["id"],
+                    "output_index": output_index,
+                    "summary_index": summary_index,
+                    "part": deepcopy(summary[summary_index]),
+                }
+            )
+            self._announced_reasoning_parts.add(key)
+        return frames
 
     def _event_output_index(self, event: SemanticEvent) -> int:
         """Resolve absent legacy indices without colliding unlike output items."""
@@ -1544,7 +1697,7 @@ class OpenAIResponsesStreamEncoder:
                 "type": "message",
                 "id": item_id or f"msg_{output_index}",
                 "role": "assistant",
-                "status": "completed",
+                "status": "in_progress",
                 "content": [],
             }
             self._output[output_index] = raw_item
@@ -1566,6 +1719,17 @@ class OpenAIResponsesStreamEncoder:
             reject(_PROTOCOL, "event.content_index", "message content must be text")
         part[field] = previous + delta
         return raw_item
+
+    @staticmethod
+    def _wire_message_part(part: Mapping[str, Any]) -> dict[str, Any]:
+        if part.get("type") == "refusal":
+            return {"type": "refusal", "refusal": part.get("refusal", "")}
+        return {
+            "type": "output_text",
+            "text": part.get("text", ""),
+            "annotations": [],
+            "logprobs": [],
+        }
 
     def _reasoning_snapshot(
         self,
@@ -1622,6 +1786,7 @@ class OpenAIResponsesStreamEncoder:
         )
         if terminal.error_code is not None or terminal.error_message is not None:
             status = "failed"
+        frames = self._close_open_output_items()
         response = self._response(status)
         if self._pending_usage is not None:
             response["usage"] = encode_stream_usage(
@@ -1653,7 +1818,105 @@ class OpenAIResponsesStreamEncoder:
         }.get(status)
         if event_type is None:
             reject(_PROTOCOL, "event.terminal.response_status", "unsupported value")
-        return ({"type": event_type, "response": response},)
+        frames.append({"type": event_type, "response": response})
+        return tuple(frames)
+
+    def _close_open_output_items(self) -> list[Mapping[str, Any]]:
+        frames: list[Mapping[str, Any]] = []
+        for output_index in sorted(self._output):
+            if output_index in self._completed_output_indices:
+                continue
+            raw_item = self._output[output_index]
+            item_type = raw_item.get("type")
+            item_id = raw_item.get("id")
+            if item_type == "message":
+                content = raw_item.get("content", [])
+                if not isinstance(content, list):  # pragma: no cover - built locally
+                    reject(_PROTOCOL, "event.output_index", "message content must be an array")
+                for content_index, part in enumerate(content):
+                    if (output_index, content_index) not in self._announced_message_parts:
+                        continue
+                    if part.get("type") == "refusal":
+                        frames.append(
+                            {
+                                "type": "response.refusal.done",
+                                "item_id": item_id,
+                                "output_index": output_index,
+                                "content_index": content_index,
+                                "refusal": part.get("refusal", ""),
+                            }
+                        )
+                    else:
+                        frames.append(
+                            {
+                                "type": "response.output_text.done",
+                                "item_id": item_id,
+                                "output_index": output_index,
+                                "content_index": content_index,
+                                "text": part.get("text", ""),
+                            }
+                        )
+                    frames.append(
+                        {
+                            "type": "response.content_part.done",
+                            "item_id": item_id,
+                            "output_index": output_index,
+                            "content_index": content_index,
+                            "part": self._wire_message_part(part),
+                        }
+                    )
+                raw_item["status"] = "completed"
+            elif item_type == "reasoning":
+                summary = raw_item.get("summary", [])
+                if not isinstance(summary, list):  # pragma: no cover - built locally
+                    reject(_PROTOCOL, "event.output_index", "reasoning summary must be an array")
+                for summary_index, part in enumerate(summary):
+                    if (output_index, summary_index) not in self._announced_reasoning_parts:
+                        continue
+                    frames.extend(
+                        [
+                            {
+                                "type": "response.reasoning_summary_text.done",
+                                "item_id": item_id,
+                                "output_index": output_index,
+                                "summary_index": summary_index,
+                                "text": part.get("text", ""),
+                            },
+                            {
+                                "type": "response.reasoning_summary_part.done",
+                                "item_id": item_id,
+                                "output_index": output_index,
+                                "summary_index": summary_index,
+                                "part": deepcopy(part),
+                            },
+                        ]
+                    )
+            elif item_type in {"function_call", "custom_tool_call"}:
+                field = "input" if item_type == "custom_tool_call" else "arguments"
+                frames.append(
+                    {
+                        "type": (
+                            "response.custom_tool_call_input.done"
+                            if item_type == "custom_tool_call"
+                            else "response.function_call_arguments.done"
+                        ),
+                        "item_id": item_id,
+                        "output_index": output_index,
+                        field: raw_item.get(field, ""),
+                    }
+                )
+                raw_item["status"] = "completed"
+
+            if output_index in self._announced_output_indices:
+                frames.append(
+                    {
+                        "type": "response.output_item.done",
+                        "output_index": output_index,
+                        "item": deepcopy(raw_item),
+                    }
+                )
+            self._completed_output_indices.add(output_index)
+        return frames
 
     def _response(self, status: str) -> dict[str, Any]:
         return {
