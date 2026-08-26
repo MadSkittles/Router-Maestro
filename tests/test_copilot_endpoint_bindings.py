@@ -683,6 +683,14 @@ async def test_copilot_bindings_isolate_anthropic_beta_header(
                             "reasoning_text": "private model reasoning",
                             "reasoning_opaque": "provider-only-state",
                             "padding": "private",
+                            "tool_calls": [
+                                {
+                                    "index": 0,
+                                    "id": "call_1",
+                                    "type": "function",
+                                    "function": {"name": "lookup", "arguments": "{}"},
+                                }
+                            ],
                         },
                     }
                 ],
@@ -707,6 +715,13 @@ async def test_copilot_bindings_isolate_anthropic_beta_header(
                             "role": "assistant",
                             "content": "pong",
                             "reasoning_text": "private model reasoning",
+                            "tool_calls": [
+                                {
+                                    "id": "call_1",
+                                    "type": "function",
+                                    "function": {"name": "lookup", "arguments": "{}"},
+                                }
+                            ],
                         },
                     }
                 ],

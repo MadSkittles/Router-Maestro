@@ -2071,10 +2071,17 @@ def _decode_reasoning(value: object, *, effort: str | None) -> ReasoningConfig |
         thinking = require_mapping(value, protocol=_PROTOCOL, parameter="thinking")
         reject_unknown_keys(
             thinking,
-            frozenset({"type", "budget_tokens"}),
+            frozenset({"type", "budget_tokens", "display"}),
             protocol=_PROTOCOL,
             parameter="thinking",
         )
+        display = optional_string(
+            thinking.get("display"),
+            protocol=_PROTOCOL,
+            parameter="thinking.display",
+        )
+        if display not in {None, "omitted"}:
+            decode_reject(_PROTOCOL, "thinking.display", "only omitted display is supported")
         thinking_type = require_string(
             thinking.get("type", "enabled"),
             protocol=_PROTOCOL,

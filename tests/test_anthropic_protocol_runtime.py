@@ -174,6 +174,27 @@ async def test_request_decodes_tools_media_options_and_tool_result_error() -> No
 
 
 @pytest.mark.asyncio
+async def test_claude_code_omitted_thinking_display_is_consumed() -> None:
+    semantic = await AnthropicMessagesRuntime().decode_request(
+        _request(thinking={"type": "adaptive", "display": "omitted"})
+    )
+
+    assert semantic.reasoning is not None
+    assert semantic.reasoning.enabled is True
+    assert semantic.reasoning.budget_tokens is None
+
+
+@pytest.mark.asyncio
+async def test_unknown_thinking_display_remains_a_decode_error() -> None:
+    with pytest.raises(ProtocolDecodeError) as raised:
+        await AnthropicMessagesRuntime().decode_request(
+            _request(thinking={"type": "adaptive", "display": "visible"})
+        )
+
+    assert raised.value.path == "thinking.display"
+
+
+@pytest.mark.asyncio
 async def test_anthropic_tool_history_replays_to_responses_without_item_ids() -> None:
     semantic = await AnthropicMessagesRuntime().decode_request(
         _request(

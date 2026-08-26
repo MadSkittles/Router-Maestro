@@ -2425,6 +2425,12 @@ class CopilotHttpExecutor(SharedHttpExecutor):
                             continue
                         for field in _COPILOT_CHAT_MESSAGE_INTERNAL_FIELDS:
                             container.pop(field, None)
+                        if container_name == "message":
+                            tool_calls = container.get("tool_calls")
+                            if isinstance(tool_calls, list):
+                                for tool_call in tool_calls:
+                                    if isinstance(tool_call, dict):
+                                        tool_call.pop("index", None)
             return payload
 
         if protocol is not WireProtocol.ANTHROPIC_MESSAGES:
