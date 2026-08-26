@@ -26,12 +26,14 @@ Claude example:
 
 ```bash
 claude -p --model "github-copilot/MODEL" --no-session-persistence \
-  --tools="" "Reply with exactly: OK MODEL"
+  --prompt-suggestions=false --tools="" --output-format json \
+  "Reply with exactly: OPAQUE_UNIQUE_TOKEN" | jq -r '.result'
 ```
 
 Keep the empty tools value attached with `=`. Current Claude Code versions parse `--tools` as a
 variadic option, so `--tools ""` before the prompt can consume the prompt and fail without sending
-a request.
+a request. Prefer an opaque alphanumeric token and inspect `.result`; model/family names inside the
+requested phrase can trigger harmless rewriting that makes an exact-match smoke test noisy.
 
 Codex example:
 
@@ -123,10 +125,15 @@ For the representative paths:
 | Client path | Expected entry | Expected upstream | Mode | IR |
 |---|---|---|---|---|
 | Claude → Chat-only Gemini | `anthropic_messages` | `openai_chat` | `semantic_ir` | `true` |
+| Claude → Responses Grok/MAI | `anthropic_messages` | `openai_responses` | `semantic_ir` | `true` |
+| Codex → Chat-only Gemini | `openai_responses` | `openai_chat` | `semantic_ir` | `true` |
 | Codex → Responses Grok | `openai_responses` | `openai_responses` | `identity` | `false` |
+| Codex → Responses MAI | `openai_responses` | `openai_responses` | `identity` | `false` |
 
 Every final request must have HTTP 200 and `outcome=selected`. Confirm that no post-frame replay or
-unexpected model/transport switch occurred.
+unexpected model/transport switch occurred. Correlate by request ID and selected model: clients may
+launch auxiliary title, memory, or summarization requests with a different model while the tested
+turn is running. Record those separately instead of attributing them to the requested path.
 
 ## Failure investigation
 
@@ -144,6 +151,9 @@ Known regression signatures worth checking:
   is missing from `model_catalog_json`, so Codex may use incorrect context and tool capabilities.
 - `Grok namespace members must be functions` immediately after a custom model catalog change: the
   generated entry inherited a model-specific code-mode tool surface instead of neutral metadata.
+- `OutputTextDelta without active item` on Codex → Chat: the Responses encoder emitted a text delta
+  before `response.output_item.added` and `response.content_part.added`; verify the full
+  `added → delta → done → completed` lifecycle.
 - `namespaced tool name exceeds the function-name limit`: function-only transport projection is
   expanding MCP namespace/name pairs beyond the provider limit.
 - second-turn Copilot 400 after a successful Codex response: an unverifiable `encrypted_content`
