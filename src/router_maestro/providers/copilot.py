@@ -2162,6 +2162,7 @@ _COPILOT_BINDING_SPECS = {
 _COPILOT_RESPONSES_LOCALLY_STRIPPED_FIELDS = frozenset({"store"})
 _COPILOT_STREAM_KEEPALIVE_TYPES = frozenset({"copilot_usage", "ping"})
 _COPILOT_RESPONSES_INTERNAL_RESPONSE_FIELDS = frozenset({"copilot_usage", "tool_usage"})
+_COPILOT_RESPONSES_INTERNAL_USAGE_FIELDS = frozenset({"context_details"})
 _COPILOT_RESPONSES_INTERNAL_INPUT_DETAIL_FIELDS = frozenset({"cache_write_tokens"})
 # Copilot can expose Azure-style prompt filtering metadata before the first
 # Chat choice. It has no public Chat/semantic equivalent and must not make a
@@ -2595,6 +2596,8 @@ class CopilotHttpExecutor(SharedHttpExecutor):
         usage = payload.get("usage")
         if not isinstance(usage, dict):
             return
+        for field in _COPILOT_RESPONSES_INTERNAL_USAGE_FIELDS:
+            usage.pop(field, None)
         input_details = usage.get("input_tokens_details")
         if not isinstance(input_details, dict):
             return

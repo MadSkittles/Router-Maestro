@@ -924,6 +924,35 @@ async def test_copilot_executor_strips_only_private_nonstream_response_fields(
     assert result == expected
 
 
+def test_copilot_responses_stream_strips_private_usage_context_details() -> None:
+    projected = CopilotHttpExecutor._project_response(
+        WireProtocol.OPENAI_RESPONSES,
+        {
+            "type": "response.completed",
+            "response": {
+                "id": "resp_1",
+                "model": "grok-4.6",
+                "status": "completed",
+                "output": [],
+                "usage": {
+                    "input_tokens": 2,
+                    "output_tokens": 1,
+                    "total_tokens": 3,
+                    "context_details": {"private": True},
+                },
+            },
+        },
+        model="grok-4.6",
+        stream=True,
+    )
+
+    assert projected["response"]["usage"] == {
+        "input_tokens": 2,
+        "output_tokens": 1,
+        "total_tokens": 3,
+    }
+
+
 @pytest.mark.parametrize("payload", [{"future": {"kept": True}}, {"model": 42}])
 def test_copilot_model_projection_preserves_missing_or_invalid_model(payload: dict) -> None:
     expected = deepcopy(payload)
