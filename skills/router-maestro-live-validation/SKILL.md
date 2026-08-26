@@ -23,8 +23,9 @@ Before running, read [references/live-client-runbook.md](references/live-client-
   memory after both tool-result round trips.
 - Preserve audit evidence and never print credentials, reasoning blobs, capsules, or decrypted
   provider state.
-- Report client warnings separately from request failures. A warning is not a pass blocker unless
-  it changes the requested behavior.
+- Report client warnings separately from request failures. Codex model-metadata fallback warnings
+  are failures because they can silently change the tool surface and context limits; unrelated
+  client warnings are blockers only when they change the requested behavior.
 
 ## Completion gate
 
@@ -32,6 +33,6 @@ Do not call the live suite complete until:
 
 1. Claude and Codex both pass every multi-turn round on the same final image.
 2. Audit confirms the expected transport and conversion mode for every final request.
-3. The local full test suite, Ruff, formatting check, and BasedPyright are clean.
-4. Both clients have exited back to the shell prompt and temporary files are gone.
-
+3. Codex used explicit metadata for every selected custom model, with no fallback-metadata warning.
+4. The local full test suite, Ruff, formatting check, and BasedPyright are clean.
+5. Both clients have exited back to the shell prompt and temporary files are gone.

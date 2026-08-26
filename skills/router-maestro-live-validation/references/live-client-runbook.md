@@ -26,8 +26,12 @@ Claude example:
 
 ```bash
 claude -p --model "github-copilot/MODEL" --no-session-persistence \
-  "Reply with exactly: OK MODEL" --tools ""
+  --tools="" "Reply with exactly: OK MODEL"
 ```
+
+Keep the empty tools value attached with `=`. Current Claude Code versions parse `--tools` as a
+variadic option, so `--tools ""` before the prompt can consume the prompt and fail without sending
+a request.
 
 Codex example:
 
@@ -38,6 +42,21 @@ codex exec \
   -m "github-copilot/MODEL" \
   --ephemeral --skip-git-repo-check -s read-only \
   "Reply with exactly: OK MODEL"
+```
+
+For a qualified model slug that is not in Codex's bundled catalog, first verify that the active
+config supplies a `model_catalog_json` entry generated for the installed Codex version. Treat
+`Model metadata for ... not found. Defaulting to fallback metadata` as a failed smoke test. After
+catalog or config changes, force one ordinary shell-tool call and confirm Codex emits the standard
+shell tool rather than a nested custom tool:
+
+```bash
+codex exec \
+  -c 'model_provider="router-maestro-hk"' \
+  -c 'web_search="disabled"' \
+  -m "github-copilot/grok-4.6" \
+  --ephemeral --skip-git-repo-check -s read-only \
+  "Use the shell tool once to run printf METADATA_TOOL_OK, then reply exactly: METADATA PASS"
 ```
 
 Record one PASS/FAIL result per `(client, model)`. Retry one isolated transient 5xx once. Do not
@@ -121,6 +140,10 @@ unexpected model/transport switch occurred.
 
 Known regression signatures worth checking:
 
+- `Model metadata for ... not found. Defaulting to fallback metadata`: the selected qualified slug
+  is missing from `model_catalog_json`, so Codex may use incorrect context and tool capabilities.
+- `Grok namespace members must be functions` immediately after a custom model catalog change: the
+  generated entry inherited a model-specific code-mode tool surface instead of neutral metadata.
 - `namespaced tool name exceeds the function-name limit`: function-only transport projection is
   expanding MCP namespace/name pairs beyond the provider limit.
 - second-turn Copilot 400 after a successful Codex response: an unverifiable `encrypted_content`
@@ -150,3 +173,4 @@ Report:
 - offline test, lint, formatting, and type-check results;
 - warnings that remain but did not fail behavior.
 
+Do not list a model-metadata fallback warning as tolerated; it invalidates the Codex result.
