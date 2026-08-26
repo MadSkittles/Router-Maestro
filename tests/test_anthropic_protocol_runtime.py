@@ -92,6 +92,20 @@ def test_manifest_finds_features_and_capsules_without_invoking_decoder() -> None
     assert decode_calls == 0
 
 
+def test_manifest_ignores_empty_reasoning_carriers() -> None:
+    runtime = AnthropicMessagesRuntime()
+    payload = _request(
+        _assistant_reasoning({"type": "thinking", "thinking": "", "signature": ""}),
+        _assistant_reasoning({"type": "redacted_thinking", "data": ""}),
+    )
+
+    manifest = runtime.inspect_request(payload)
+
+    assert manifest.reasoning is True
+    assert manifest.reasoning_capsules == ()
+    assert manifest.opaque_continuation is False
+
+
 @pytest.mark.asyncio
 async def test_request_decodes_tools_media_options_and_tool_result_error() -> None:
     runtime = AnthropicMessagesRuntime()

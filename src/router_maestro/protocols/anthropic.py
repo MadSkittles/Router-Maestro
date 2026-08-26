@@ -274,8 +274,9 @@ def _inspect_message_features(value: object) -> tuple[bool, bool, bool, tuple[st
                 if block_type == "redacted_thinking"
                 else None
             )
-            if field is not None and isinstance(candidate.get(field), str):
-                carriers.append(candidate[field])
+            carrier = candidate.get(field) if field is not None else None
+            if isinstance(carrier, str) and carrier:
+                carriers.append(carrier)
             for nested in candidate.values():
                 visit(nested)
         elif isinstance(candidate, list | tuple):
