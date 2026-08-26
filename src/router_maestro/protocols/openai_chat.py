@@ -1505,10 +1505,9 @@ def _encode_message(
         item = SemanticMessage(role=MessageRole.ASSISTANT, content=(item,))
     if not isinstance(item, SemanticMessage):
         reject(_PROTOCOL, path, f"{type(item).__name__} cannot be encoded as a chat message")
-    if item.item_id is not None:
-        reject(_PROTOCOL, f"{path}.item_id", "Chat messages do not carry item IDs")
-    if item.status is not None:
-        reject(_PROTOCOL, f"{path}.status", "Chat messages do not carry item status")
+    # Responses message item IDs and lifecycle status belong to the container,
+    # not its ordered role/content semantics. Chat has no corresponding fields,
+    # so cross-protocol request projection intentionally consumes them here.
     if item.role is MessageRole.TOOL:
         return _encode_tool_result_message(item, parameter=path)
 

@@ -730,7 +730,13 @@ async def test_responses_codex_controls_and_namespace_encode_to_chat() -> None:
             "model": "gemini-test",
             "input": [
                 {"role": "developer", "content": "Follow project instructions."},
-                {"role": "user", "content": "hello"},
+                {
+                    "type": "message",
+                    "id": "msg_user_1",
+                    "status": "completed",
+                    "role": "user",
+                    "content": "hello",
+                },
             ],
             "stream": True,
             "reasoning": {"effort": "xhigh", "summary": "auto"},
