@@ -263,6 +263,59 @@ async def test_cross_chat_attempt_preserves_copilot_reasoning_opaque_for_runtime
     assert delta["reasoning_opaque"] == "provider-state"
 
 
+@pytest.mark.asyncio
+async def test_gemini_chat_binding_normalizes_nullable_tool_schema() -> None:
+    provider = CopilotProvider()
+    binding = _binding(provider, WireProtocol.OPENAI_CHAT)
+    parameters = {
+        "type": "object",
+        "properties": {
+            "query": {"type": ["string", "null"]},
+            "options": {
+                "type": ["object", "null"],
+                "properties": {
+                    "limit": {"type": ["integer", "null"]},
+                },
+            },
+            "severity": {
+                "type": ["array", "null"],
+                "items": {"type": "integer"},
+                "enum": [0, 1, 2],
+            },
+        },
+    }
+
+    attempt = await binding.prepare_attempt(
+        model=ModelRef(provider=provider.name, upstream_id="gemini-3.6-flash"),
+        payload={
+            "model": "github-copilot/gemini-3.6-flash",
+            "messages": [{"role": "user", "content": "hello"}],
+            "tools": [
+                {
+                    "type": "function",
+                    "function": {"name": "search", "parameters": parameters},
+                }
+            ],
+        },
+        stream=False,
+    )
+
+    normalized = attempt.payload["tools"][0]["function"]["parameters"]
+    assert normalized["properties"]["query"] == {"type": "string", "nullable": True}
+    assert normalized["properties"]["options"]["type"] == "object"
+    assert normalized["properties"]["options"]["nullable"] is True
+    assert normalized["properties"]["options"]["properties"]["limit"] == {
+        "type": "integer",
+        "nullable": True,
+    }
+    assert normalized["properties"]["severity"] == {
+        "type": "array",
+        "nullable": True,
+        "items": {"type": "integer", "enum": [0, 1, 2]},
+    }
+    assert parameters["properties"]["query"]["type"] == ["string", "null"]
+
+
 class _IdentityRuntime:
     def __init__(self, protocol: WireProtocol) -> None:
         self.protocol = protocol

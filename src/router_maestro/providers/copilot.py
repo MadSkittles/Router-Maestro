@@ -314,6 +314,59 @@ def _normalize_copilot_tool(tool: Any) -> Any:
     return normalized
 
 
+def _normalize_gemini_schema_types(value: Any) -> Any:
+    """Project nullable JSON Schema unions to Gemini's OpenAPI-style shape."""
+    if isinstance(value, list):
+        return [_normalize_gemini_schema_types(item) for item in value]
+    if not isinstance(value, Mapping):
+        return value
+
+    normalized = {key: _normalize_gemini_schema_types(item) for key, item in value.items()}
+    schema_type = normalized.get("type")
+    if isinstance(schema_type, list) and all(isinstance(item, str) for item in schema_type):
+        non_null_types = [item for item in schema_type if item != "null"]
+        if "null" in schema_type and len(non_null_types) == 1:
+            normalized["type"] = non_null_types[0]
+            normalized["nullable"] = True
+        elif "null" in schema_type and len(non_null_types) > 1:
+            normalized["type"] = non_null_types
+    enum = normalized.get("enum")
+    if (
+        normalized.get("type") == "array"
+        and isinstance(enum, list)
+        and enum
+        and not any(isinstance(item, list) for item in enum)
+    ):
+        items = normalized.get("items")
+        normalized_items = dict(items) if isinstance(items, Mapping) else {}
+        normalized_items.setdefault("enum", enum)
+        normalized["items"] = normalized_items
+        normalized.pop("enum", None)
+    return normalized
+
+
+def _normalize_gemini_chat_tools(tools: Any, *, model: str) -> Any:
+    if not model.split("/", 1)[-1].lower().startswith("gemini-") or not isinstance(tools, list):
+        return tools
+
+    normalized_tools = []
+    for raw_tool in tools:
+        if not isinstance(raw_tool, Mapping):
+            normalized_tools.append(raw_tool)
+            continue
+        tool = dict(raw_tool)
+        function = tool.get("function")
+        if isinstance(function, Mapping):
+            normalized_function = dict(function)
+            if "parameters" in normalized_function:
+                normalized_function["parameters"] = _normalize_gemini_schema_types(
+                    normalized_function["parameters"]
+                )
+            tool["function"] = normalized_function
+        normalized_tools.append(tool)
+    return normalized_tools
+
+
 def _requires_namespace_flattening(model: str) -> bool:
     return model.split("/", 1)[-1].lower().startswith("grok-")
 
@@ -2151,7 +2204,7 @@ class CopilotProvider(BaseProvider):
 
     def _build_chat_payload(self, request: ChatRequest, *, stream: bool) -> dict:
         """Build a Copilot Chat payload with an explicit option policy."""
-        return self._chat_codec.build_payload(
+        payload = self._chat_codec.build_payload(
             request,
             stream=stream,
             validate_extensions=self._validate_provider_extensions,
@@ -2160,6 +2213,12 @@ class CopilotProvider(BaseProvider):
             provider_name=self.name,
             allows_stop=self.outbound_contract.allows_stop,
         )
+        tools = _normalize_gemini_chat_tools(payload.get("tools"), model=request.model)
+        if tools is None:
+            payload.pop("tools", None)
+        else:
+            payload["tools"] = tools
+        return payload
 
     def validate_chat_request(self, request: ChatRequest, *, stream: bool) -> None:
         """Exercise the same Chat payload policy as actual execution."""
@@ -2295,6 +2354,11 @@ class CopilotProviderDialect:
         raw_messages = body.get("messages")
         messages, has_images = self._reconcile_chat_messages(raw_messages, model=model)
         body["messages"] = messages
+        tools = _normalize_gemini_chat_tools(body.get("tools"), model=model)
+        if tools is None:
+            body.pop("tools", None)
+        else:
+            body["tools"] = tools
         body["model"] = model
         body["stream"] = stream
 
