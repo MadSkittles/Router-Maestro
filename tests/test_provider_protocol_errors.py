@@ -2,7 +2,7 @@
 
 from collections.abc import AsyncIterator
 from typing import Any, cast
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, call, patch
 
 import httpx
 import pytest
@@ -448,6 +448,200 @@ async def test_copilot_model_catalog_materializes_valid_full_entry() -> None:
     assert model.supports_vision is False
     assert model.reasoning_effort_values == ["none", "minimal", "low", "high", "max"]
     assert model.feature_capabilities[Feature.REASONING] is True
+
+
+@pytest.mark.asyncio
+async def test_copilot_model_catalog_exposes_paid_context_tiers() -> None:
+    provider = CopilotProvider()
+    provider.ensure_token = AsyncMock()  # type: ignore[method-assign]
+    provider._send_with_auth_retry = AsyncMock(  # type: ignore[method-assign]
+        return_value=_response_for_payload(
+            {
+                "data": [
+                    {
+                        "id": "gpt-5.6-sol",
+                        "capabilities": {
+                            "limits": {
+                                "max_prompt_tokens": 272_000,
+                                "max_output_tokens": 128_000,
+                                "max_context_window_tokens": 1_050_000,
+                            }
+                        },
+                        "billing": {
+                            "token_prices": {
+                                "default": {
+                                    "input_price": 1,
+                                    "output_price": 5,
+                                    "max_prompt_tokens": 272_000,
+                                },
+                                "long_context": {
+                                    "input_price": 2,
+                                    "output_price": 5,
+                                    "max_prompt_tokens": 922_000,
+                                },
+                            }
+                        },
+                    }
+                ]
+            }
+        )
+    )
+
+    model = (await provider.list_models(force_refresh=True))[0]
+
+    assert [option.tier for option in model.context_window_options] == [
+        "default",
+        "long_context",
+    ]
+    assert [option.max_prompt_tokens for option in model.context_window_options] == [
+        272_000,
+        922_000,
+    ]
+    assert [option.is_default for option in model.context_window_options] == [True, False]
+
+
+@pytest.mark.asyncio
+async def test_copilot_model_catalog_defaults_to_free_long_context() -> None:
+    provider = CopilotProvider()
+    provider.ensure_token = AsyncMock()  # type: ignore[method-assign]
+    provider._send_with_auth_retry = AsyncMock(  # type: ignore[method-assign]
+        return_value=_response_for_payload(
+            {
+                "data": [
+                    {
+                        "id": "free-long-context",
+                        "capabilities": {
+                            "limits": {
+                                "max_prompt_tokens": 200_000,
+                                "max_output_tokens": 64_000,
+                                "max_context_window_tokens": 1_000_000,
+                            }
+                        },
+                        "billing": {
+                            "token_prices": {
+                                "default": {
+                                    "input_price": 1,
+                                    "output_price": 5,
+                                    "max_prompt_tokens": 200_000,
+                                },
+                                "long_context": {
+                                    "input_price": 1,
+                                    "output_price": 5,
+                                    "max_prompt_tokens": 936_000,
+                                },
+                            }
+                        },
+                    }
+                ]
+            }
+        )
+    )
+
+    model = (await provider.list_models(force_refresh=True))[0]
+
+    assert [option.max_prompt_tokens for option in model.context_window_options] == [
+        200_000,
+        936_000,
+    ]
+    assert [option.is_default for option in model.context_window_options] == [False, True]
+
+
+@pytest.mark.asyncio
+async def test_copilot_model_catalog_rejects_invalid_context_tier_limit() -> None:
+    provider = CopilotProvider()
+    provider.ensure_token = AsyncMock()  # type: ignore[method-assign]
+    provider._send_with_auth_retry = AsyncMock(  # type: ignore[method-assign]
+        return_value=_response_for_payload(
+            {
+                "data": [
+                    {
+                        "id": "model",
+                        "billing": {
+                            "token_prices": {
+                                "default": {
+                                    "input_price": 1,
+                                    "output_price": 5,
+                                    "max_prompt_tokens": "272000",
+                                }
+                            }
+                        },
+                    }
+                ]
+            }
+        )
+    )
+
+    with pytest.raises(ProviderError) as exc_info:
+        await provider.list_models(force_refresh=True)
+
+    _assert_protocol_failure(exc_info.value, provider="github-copilot", model=None)
+
+
+@pytest.mark.asyncio
+async def test_copilot_model_catalog_refreshes_legacy_client_token_for_billing() -> None:
+    provider = CopilotProvider()
+    provider.ensure_token = AsyncMock()  # type: ignore[method-assign]
+    old_payload = {
+        "data": [
+            {
+                "id": "gpt-5.6-sol",
+                "warning_message": (
+                    "Your billing plan has changed to usage-based billing and model "
+                    "multipliers no longer apply. Please update your client to the latest "
+                    "version to see the new billing information."
+                ),
+                "capabilities": {
+                    "limits": {
+                        "max_prompt_tokens": 922_000,
+                        "max_output_tokens": 128_000,
+                        "max_context_window_tokens": 1_050_000,
+                    }
+                },
+            }
+        ]
+    }
+    new_payload = {
+        "data": [
+            {
+                "id": "gpt-5.6-sol",
+                "capabilities": {
+                    "limits": {
+                        "max_prompt_tokens": 922_000,
+                        "max_output_tokens": 128_000,
+                        "max_context_window_tokens": 1_050_000,
+                    }
+                },
+                "billing": {
+                    "token_prices": {
+                        "default": {
+                            "input_price": 200,
+                            "output_price": 1000,
+                            "max_prompt_tokens": 272_000,
+                        },
+                        "long_context": {
+                            "input_price": 400,
+                            "output_price": 1500,
+                            "max_prompt_tokens": 922_000,
+                        },
+                    }
+                },
+            }
+        ]
+    }
+    provider._send_with_auth_retry = AsyncMock(  # type: ignore[method-assign]
+        side_effect=[_response_for_payload(old_payload), _response_for_payload(new_payload)]
+    )
+
+    model = (await provider.list_models(force_refresh=True))[0]
+
+    assert provider.ensure_token.await_args_list == [call(), call(force=True)]
+    assert provider._send_with_auth_retry.await_count == 2
+    for request in provider._send_with_auth_retry.await_args_list:
+        assert request.kwargs["headers_kwargs"] == {"intent": "model-access"}
+    assert [option.max_prompt_tokens for option in model.context_window_options] == [
+        272_000,
+        922_000,
+    ]
 
 
 @pytest.mark.asyncio

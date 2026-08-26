@@ -41,6 +41,7 @@ def test_openai_models_include_github_copilot_models(client: httpx.Client):
         model.get("max_context_window_tokens") or model.get("max_prompt_tokens")
         for model in copilot_models
     )
+    assert any(model.get("context_window_options") for model in copilot_models)
 
 
 def test_anthropic_models_include_github_copilot_models(client: httpx.Client):
@@ -56,3 +57,4 @@ def test_anthropic_models_include_github_copilot_models(client: httpx.Client):
         model.get("max_context_window_tokens") or model.get("max_prompt_tokens")
         for model in data["data"]
     )
+    assert any(model.get("context_window_options") for model in data["data"])

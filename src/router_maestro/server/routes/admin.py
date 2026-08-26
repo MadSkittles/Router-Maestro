@@ -48,6 +48,7 @@ from router_maestro.server.schemas.admin import (
     PrioritiesResponse,
     PrioritiesUpdateRequest,
 )
+from router_maestro.server.schemas.model_catalog import ContextWindowOption
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
 
@@ -399,6 +400,14 @@ async def list_models(model_router: Router = Depends(get_app_router)) -> ModelsR
                 max_prompt_tokens=model.max_prompt_tokens,
                 max_output_tokens=model.max_output_tokens,
                 max_context_window_tokens=model.max_context_window_tokens,
+                context_window_options=[
+                    ContextWindowOption(
+                        tier=option.tier,
+                        max_prompt_tokens=option.max_prompt_tokens,
+                        is_default=option.is_default,
+                    )
+                    for option in model.effective_context_window_options()
+                ],
                 operation_capabilities=dict(model.operation_capabilities),
             )
             for model in models

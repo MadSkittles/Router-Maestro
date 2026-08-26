@@ -1199,6 +1199,7 @@ class CopilotProvider(BaseProvider):
         *,
         messages: list[Message] | None = None,
         response_input: str | list[dict[str, Any]] | None = None,
+        intent: str = "conversation-panel",
     ) -> dict[str, str]:
         """Get headers for Copilot API requests.
 
@@ -1209,6 +1210,7 @@ class CopilotProvider(BaseProvider):
             vision_request,
             messages=messages,
             response_input=response_input,
+            intent=intent,
         )
 
     def _catalog_effort_values(self, model: str) -> list[str] | None:
@@ -2043,7 +2045,9 @@ _COPILOT_RESPONSES_INTERNAL_INPUT_DETAIL_FIELDS = frozenset({"cache_write_tokens
 # Copilot can expose Azure-style prompt filtering metadata before the first
 # Chat choice. It has no public Chat/semantic equivalent and must not make a
 # valid cross-protocol stream fail before content arrives.
-_COPILOT_CHAT_INTERNAL_RESPONSE_FIELDS = frozenset({"copilot_usage", "prompt_filter_results"})
+_COPILOT_CHAT_INTERNAL_RESPONSE_FIELDS = frozenset(
+    {"copilot_info_messages", "copilot_usage", "prompt_filter_results"}
+)
 _COPILOT_CHAT_CHOICE_INTERNAL_FIELDS = frozenset({"content_filter_results"})
 # ``reasoning_opaque`` is Copilot-private state without a stable Chat item ID.
 # It cannot be authenticated or replayed through the protocol-neutral IR, so it

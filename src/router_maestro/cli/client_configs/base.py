@@ -26,6 +26,7 @@ from rich.prompt import Confirm, Prompt
 from rich.table import Table
 
 from router_maestro.cli.client import ServerNotRunningError, get_admin_client
+from router_maestro.cli.client_configs.prompts import select_dropdown, supports_dropdowns
 from router_maestro.config.server import get_current_context_api_key
 from router_maestro.routing.model_ref import qualify_model_id
 
@@ -45,17 +46,39 @@ class IdStyle(StrEnum):
     OFFICIAL = "official"
 
 
+class ContextWindowChoice(StrEnum):
+    """Client-side context window hint attached to a selected model."""
+
+    DEFAULT = "default"
+    CONTEXT_200K = "200k"
+    CONTEXT_1M = "1m"
+
+
+@dataclass(frozen=True)
+class ModelSelection:
+    """One named model slot selected by a client config wizard."""
+
+    slot: str
+    model: dict | None
+    context_window: ContextWindowChoice = ContextWindowChoice.DEFAULT
+
+
 @dataclass
 class GenerateContext:
     """Everything a client's ``write``/``render_success`` needs beyond paths.
 
-    ``extras`` carries client-specific prompt results (Claude Code uses
-    ``auto_compact_window`` and ``use_beta_endpoint``).
+    ``selections`` preserves the model slot and context choice used to produce
+    each entry in the resolved model mapping.
     """
 
     id_style: IdStyle
-    selected_dicts: list[dict | None]
+    selections: tuple[ModelSelection, ...]
     extras: dict = field(default_factory=dict)
+
+    @property
+    def selected_dicts(self) -> list[dict | None]:
+        """Compatibility view of the selected model dictionaries."""
+        return [selection.model for selection in self.selections]
 
 
 def _backup_if_exists(path: Path) -> None:
@@ -101,9 +124,10 @@ def _display_models(models: list[dict]) -> None:
     table.add_column("#", style="dim")
     table.add_column("Model Key", style="green")
     table.add_column("Name", style="white")
+    table.add_column("Contexts", style="cyan")
     for i, model in enumerate(models, 1):
         key = model.get("display_key", _model_key(model))
-        table.add_row(str(i), key, model["name"])
+        table.add_row(str(i), key, model["name"], _context_windows_label(model))
     console.print(table)
 
 
@@ -124,18 +148,52 @@ def _select_model(models: list[dict], prompt: str, default: str = "0") -> str:
     return _model_key(selected) if selected else "router-maestro"
 
 
-def _select_model_dict(models: list[dict], prompt: str, default: str = "0") -> dict | None:
+def _select_model_dict(
+    models: list[dict],
+    prompt: str,
+    default: str = "0",
+    *,
+    default_model: dict | None = None,
+    allow_auto: bool = True,
+) -> dict | None:
     """Prompt the user to select a model and return the model dict.
 
-    Returns ``None`` for the auto-routing choice (``0`` or invalid input).
+    Interactive terminals receive a searchable dropdown. The numeric prompt is
+    retained for non-interactive/test environments.
     """
+    if supports_dropdowns():
+        choices: list[tuple[str, dict | None]] = []
+        if allow_auto:
+            choices.append(("router-maestro — Auto routing", None))
+        choices.extend((_model_choice_label(model), model) for model in models)
+        selected_default = default_model
+        if selected_default is None and not allow_auto and models:
+            selected_default = models[0]
+        return select_dropdown(
+            prompt,
+            choices,
+            default=selected_default,
+            searchable=True,
+        )
+
+    if default_model is not None:
+        for index, model in enumerate(models, 1):
+            if model == default_model:
+                default = str(index)
+                break
     choice = Prompt.ask(prompt, default=default)
-    if choice != "0" and choice.isdigit():
+    if choice == "0" and allow_auto:
+        return None
+    if choice.isdigit():
         idx = int(choice) - 1
         if 0 <= idx < len(models):
             return models[idx]
+    if allow_auto:
         console.print(f"[yellow]Invalid selection '{choice}', using auto-routing.[/yellow]")
-    return None
+        return None
+    fallback = default_model or (models[0] if models else None)
+    console.print(f"[yellow]Invalid selection '{choice}', keeping the default model.[/yellow]")
+    return fallback
 
 
 def _model_key(model: dict) -> str:
@@ -190,6 +248,54 @@ def _upstream_context_window(model: dict) -> int | None:
     return None
 
 
+def _model_choice_label(model: dict) -> str:
+    """Build the searchable display label for one catalog model."""
+    model_key = model.get("display_key", _model_key(model))
+    name = model.get("name") or model_key
+    return f"{model_key} — {name} — {_context_windows_label(model)}"
+
+
+def _context_window_limits(model: dict) -> list[int]:
+    """Return server-advertised context choices, with a legacy scalar fallback."""
+    limits: list[int] = []
+    options = model.get("context_window_options")
+    if isinstance(options, list):
+        for option in options:
+            if not isinstance(option, dict):
+                continue
+            value = option.get("max_prompt_tokens")
+            if (
+                isinstance(value, int)
+                and not isinstance(value, bool)
+                and value > 0
+                and value not in limits
+            ):
+                limits.append(value)
+    if limits:
+        return limits
+
+    context = _upstream_context_window(model)
+    return [context] if context is not None else []
+
+
+def _context_windows_label(model: dict) -> str:
+    limits = _context_window_limits(model)
+    if not limits:
+        return "unknown"
+    return " / ".join(_format_token_count(limit) for limit in limits)
+
+
+def _format_token_count(tokens: int) -> str:
+    if tokens >= 1_000_000:
+        value = int(tokens / 100_000) / 10
+        return f"{value:g}M"
+    if tokens > 900_000:
+        return "1M"
+    if tokens >= 1_000:
+        return f"{round(tokens / 1_000)}K"
+    return str(tokens)
+
+
 class ClientConfig(ABC):
     """A supported client whose config Router-Maestro can generate.
 
@@ -216,12 +322,14 @@ class ClientConfig(ABC):
         """Return the ``(user_label, project_label)`` shown in Step 1."""
 
     @abstractmethod
-    def write(self, *, level: str, path: Path, models: list[str], ctx: GenerateContext) -> None:
+    def write(
+        self, *, level: str, path: Path, models: dict[str, str], ctx: GenerateContext
+    ) -> None:
         """Persist the generated config to ``path``."""
 
     @abstractmethod
     def render_success(
-        self, *, level: str, path: Path, models: list[str], ctx: GenerateContext
+        self, *, level: str, path: Path, models: dict[str, str], ctx: GenerateContext
     ) -> None:
         """Print the post-generation success panel."""
 
@@ -240,16 +348,23 @@ class ClientConfig(ABC):
     # ---- overridable hooks (single-model, no injection, no extras) ------
 
     def load_models(self) -> list[dict]:
-        """Fetch and display the model list. Claude Code overrides to inject 1M."""
+        """Fetch and display the live model list."""
         return _fetch_and_display_models()
 
-    def select_models(self, models: list[dict]) -> list[dict | None]:
+    def select_models(self, models: list[dict], *, level: str, path: Path) -> list[ModelSelection]:
         """Prompt for the model(s) this client writes (default: one)."""
+        del level, path
         console.print("\n[bold]Step 2: Select model[/bold]")
-        return [_select_model_dict(models, "Enter number (or 0 for auto-routing)")]
+        return [
+            ModelSelection(
+                slot="main",
+                model=_select_model_dict(models, "Select model (or auto-routing)"),
+            )
+        ]
 
-    def prompt_extras(self, selected_dicts: list[dict | None]) -> dict:
+    def prompt_extras(self, selections: list[ModelSelection]) -> dict:
         """Prompt for any client-specific options (default: none)."""
+        del selections
         return {}
 
     # ---- id-style resolution (base-owned) ------------------------------
@@ -258,8 +373,8 @@ class ClientConfig(ABC):
         """Whether ``model`` could be written as an official id.
 
         The auto-routing sentinel and entries carrying an explicit
-        ``wire_key``/``custom_key`` (e.g. Claude's injected 1M variants) are
-        never converted, so they never gate the prompt on.
+        ``wire_key``/``custom_key`` are never converted, so they never gate the
+        prompt on.
         """
         if model is None or "wire_key" in model or "custom_key" in model:
             return False
@@ -289,8 +404,8 @@ class ClientConfig(ABC):
         """Resolve one selected model dict to the string written into config.
 
         ``None`` -> the auto-routing sentinel. An explicit ``wire_key``/
-        ``custom_key`` (Claude 1M variants) is returned unchanged regardless of
-        style. Under ``OFFICIAL``, native models are converted to the vendor's
+        ``custom_key`` is returned unchanged regardless of style. Under
+        ``OFFICIAL``, native models are converted to the vendor's
         spelling; non-native models stay provider-qualified (with a warning),
         since dropping the prefix would be meaningless for another vendor.
         """
@@ -309,6 +424,10 @@ class ClientConfig(ABC):
             )
             return qualified
         return self.to_official_id(bare)
+
+    def resolve_model_selection(self, selection: ModelSelection, id_style: IdStyle) -> str:
+        """Resolve a typed model selection to the string written to config."""
+        return self.resolve_model_string(selection.model, id_style)
 
     # ---- shared resolvers ----------------------------------------------
 
@@ -340,10 +459,13 @@ class ClientConfig(ABC):
         level, path = self._select_level_and_path()
         _backup_if_exists(path)
         models = self.load_models()
-        selected = self.select_models(models)
-        id_style = self.resolve_id_style(id_style, selected)
-        extras = self.prompt_extras(selected)
-        model_strings = [self.resolve_model_string(d, id_style) for d in selected]
-        ctx = GenerateContext(id_style=id_style, selected_dicts=selected, extras=extras)
+        selections = self.select_models(models, level=level, path=path)
+        id_style = self.resolve_id_style(id_style, [selection.model for selection in selections])
+        extras = self.prompt_extras(selections)
+        model_strings = {
+            selection.slot: self.resolve_model_selection(selection, id_style)
+            for selection in selections
+        }
+        ctx = GenerateContext(id_style=id_style, selections=tuple(selections), extras=extras)
         self.write(level=level, path=path, models=model_strings, ctx=ctx)
         self.render_success(level=level, path=path, models=model_strings, ctx=ctx)

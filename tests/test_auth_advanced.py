@@ -93,6 +93,11 @@ class TestGitHubOAuth:
 
         assert token.token == "copilot-token"
         assert token.api_endpoint == "https://api.enterprise.githubcopilot.com"
+        headers = client.get.await_args.kwargs["headers"]
+        assert headers["Editor-Version"] == "vscode/1.136.0"
+        assert headers["Editor-Plugin-Version"] == "copilot-chat/0.64.0"
+        assert headers["User-Agent"] == "GitHubCopilotChat/0.64.0"
+        assert headers["X-GitHub-Api-Version"] == "2026-08-01"
 
     @pytest.mark.asyncio
     async def test_get_copilot_token_makes_single_attempt(self):

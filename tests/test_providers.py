@@ -226,11 +226,16 @@ class TestProviderBase:
 
         assert headers["Authorization"] == "Bearer token"
         assert headers["Copilot-Integration-Id"] == "vscode-chat"
-        assert headers["User-Agent"] == "GitHubCopilotChat/0.26.7"
+        assert headers["Editor-Version"] == "vscode/1.136.0"
+        assert headers["Editor-Plugin-Version"] == "copilot-chat/0.64.0"
+        assert headers["User-Agent"] == "GitHubCopilotChat/0.64.0"
         assert headers["OpenAI-Intent"] == "conversation-panel"
-        assert headers["X-GitHub-Api-Version"] == "2025-04-01"
+        assert headers["X-GitHub-Api-Version"] == "2026-08-01"
         assert headers["X-Vscode-User-Agent-Library-Version"] == "electron-fetch"
         assert "X-Request-Id" in headers
+
+        model_headers = provider._get_headers(intent="model-access")
+        assert model_headers["OpenAI-Intent"] == "model-access"
 
     @pytest.mark.parametrize(
         ("messages", "expected"),

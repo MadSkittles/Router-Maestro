@@ -4,6 +4,8 @@ from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from router_maestro.server.schemas.model_catalog import ContextWindowOption
+
 
 class ChatMessageFunction(BaseModel):
     """Function details in a tool call."""
@@ -172,6 +174,7 @@ class ModelObject(BaseModel):
     max_prompt_tokens: int | None = None
     max_output_tokens: int | None = None
     max_context_window_tokens: int | None = None
+    context_window_options: list[ContextWindowOption] = Field(default_factory=list)
     supports_thinking: bool | None = None
     supports_vision: bool | None = None
 

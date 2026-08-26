@@ -19,6 +19,39 @@ def _model_key(model: dict) -> str:
     return qualify_model_id(model["provider"], model["id"])
 
 
+def _format_token_count(tokens: int) -> str:
+    if tokens >= 1_000_000:
+        value = int(tokens / 100_000) / 10
+        return f"{value:g}M"
+    if tokens > 900_000:
+        return "1M"
+    if tokens >= 1_000:
+        return f"{round(tokens / 1_000)}K"
+    return str(tokens)
+
+
+def _context_windows_label(model: dict) -> str:
+    limits: list[int] = []
+    options = model.get("context_window_options")
+    if isinstance(options, list):
+        for option in options:
+            if not isinstance(option, dict):
+                continue
+            value = option.get("max_prompt_tokens")
+            if (
+                isinstance(value, int)
+                and not isinstance(value, bool)
+                and value > 0
+                and value not in limits
+            ):
+                limits.append(value)
+    if not limits:
+        fallback = model.get("max_context_window_tokens") or model.get("max_prompt_tokens")
+        if isinstance(fallback, int) and not isinstance(fallback, bool) and fallback > 0:
+            limits.append(fallback)
+    return " / ".join(_format_token_count(limit) for limit in limits) if limits else "unknown"
+
+
 def _handle_server_error(e: Exception) -> None:
     """Handle server connection errors."""
     if isinstance(e, ServerNotRunningError):
@@ -52,6 +85,7 @@ def list_models() -> None:
     table.add_column("Model Key", style="green")
     table.add_column("Display Name", style="white")
     table.add_column("Provider", style="magenta")
+    table.add_column("Contexts", style="cyan")
 
     for model in models:
         model_key = _model_key(model)
@@ -67,6 +101,7 @@ def list_models() -> None:
             model_key,
             model["name"],
             model["provider"],
+            _context_windows_label(model),
         )
 
     console.print(table)

@@ -1,13 +1,14 @@
 """Claude Code (`~/.claude/settings.json`) config generation.
 
-Claude Code is the only client that selects two models (main + small/fast),
-injects synthetic 1M-context variants, and offers the auto-compact-window
-prompt. All of that lives here.
+Claude Code receives the live Router-Maestro model catalog without synthetic
+variants. Each selected model is paired with a client-side context choice; a
+1M choice is encoded by appending ``[1m]`` after model-id resolution.
 """
 
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from pathlib import Path
 
 from rich.panel import Panel
@@ -15,8 +16,12 @@ from rich.prompt import Prompt
 
 from router_maestro.cli.client_configs.base import (
     ClientConfig,
+    ContextWindowChoice,
     GenerateContext,
+    IdStyle,
+    ModelSelection,
     _bare_upstream_model_id,
+    _format_token_count,
     _model_key,
     _model_operation_support,
     _select_model_dict,
@@ -28,76 +33,35 @@ from router_maestro.cli.client_configs.model_id import (
     detect_family,
     to_anthropic_official,
 )
+from router_maestro.cli.client_configs.prompts import select_dropdown, supports_dropdowns
 from router_maestro.routing.capabilities import Operation
-from router_maestro.routing.model_ref import qualify_model_id
 
-# Claude Code native model IDs for 1M context variants.
-# Copilot no longer ships dedicated `-1m` / `-1m-internal` Opus variants — the
-# base catalog entries for Opus 4.6/4.7/4.8, Sonnet 4.6, and Sonnet 5 already advertise
-# max_context_window_tokens=1000000, so every native key maps straight to the
-# base id. The `[1m]` suffix here only exists so Claude Code raises its
-# auto-compact threshold to ~1M instead of clamping at the default 200K.
-_OPUS_1M_NATIVE_KEY = "claude-opus-4-6[1m]"
-_OPUS_1M_SOURCE_MODEL = "github-copilot/claude-opus-4.6"
-_OPUS_47_1M_NATIVE_KEY = "claude-opus-4-7[1m]"
-_OPUS_47_1M_SOURCE_MODEL = "github-copilot/claude-opus-4.7"
-_OPUS_48_1M_NATIVE_KEY = "claude-opus-4-8[1m]"
-_OPUS_48_1M_SOURCE_MODEL = "github-copilot/claude-opus-4.8"
-_SONNET_46_1M_NATIVE_KEY = "claude-sonnet-4-6[1m]"
-_SONNET_46_1M_SOURCE_MODEL = "github-copilot/claude-sonnet-4.6"
-_SONNET_5_1M_NATIVE_KEY = "claude-sonnet-5[1m]"
-_SONNET_5_1M_SOURCE_MODEL = "github-copilot/claude-sonnet-5"
+_CONTEXT_1M_SUFFIX = "[1m]"
 
-_INJECTABLE_1M_VARIANTS: tuple[tuple[str, str, str, str], ...] = (
-    # (source_model, native_key, bare_id, display_name)
-    (
-        _OPUS_1M_SOURCE_MODEL,
-        _OPUS_1M_NATIVE_KEY,
-        "claude-opus-4.6",
-        "Opus 4.6 1M (Auto-activated)",
-    ),
-    (
-        _OPUS_47_1M_SOURCE_MODEL,
-        _OPUS_47_1M_NATIVE_KEY,
-        "claude-opus-4.7",
-        "Opus 4.7 1M (Auto-activated)",
-    ),
-    (
-        _OPUS_48_1M_SOURCE_MODEL,
-        _OPUS_48_1M_NATIVE_KEY,
-        "claude-opus-4.8",
-        "Opus 4.8 1M (Auto-activated)",
-    ),
-    (
-        _SONNET_46_1M_SOURCE_MODEL,
-        _SONNET_46_1M_NATIVE_KEY,
-        "claude-sonnet-4.6",
-        "Sonnet 4.6 1M (Auto-activated)",
-    ),
-    (
-        _SONNET_5_1M_SOURCE_MODEL,
-        _SONNET_5_1M_NATIVE_KEY,
-        "claude-sonnet-5",
-        "Sonnet 5 1M (Auto-activated)",
-    ),
+_ROLE_SLOTS: tuple[tuple[str, str, str], ...] = (
+    ("fable", "ANTHROPIC_DEFAULT_FABLE_MODEL", "Fable"),
+    ("opus", "ANTHROPIC_DEFAULT_OPUS_MODEL", "Opus"),
+    ("sonnet", "ANTHROPIC_DEFAULT_SONNET_MODEL", "Sonnet"),
+    ("haiku", "ANTHROPIC_DEFAULT_HAIKU_MODEL", "Haiku"),
+    ("subagent", "CLAUDE_CODE_SUBAGENT_MODEL", "Subagent"),
 )
+_ROLE_ENV_BY_SLOT = {slot: env_key for slot, env_key, _ in _ROLE_SLOTS}
+_ROLE_LABEL_BY_SLOT = {slot: label for slot, _, label in _ROLE_SLOTS}
 
-# Claude Code recognizes 1M context windows natively for these model keys (the
-# ones we inject via `_maybe_inject_opus_1m`) — the prompt offers a 1M default
-# for them instead of the upstream-value option.
-_CLAUDE_CODE_NATIVE_1M_KEYS: frozenset[str] = frozenset(
-    {
-        _OPUS_1M_NATIVE_KEY,
-        _OPUS_47_1M_NATIVE_KEY,
-        _OPUS_48_1M_NATIVE_KEY,
-        _SONNET_46_1M_NATIVE_KEY,
-        _SONNET_5_1M_NATIVE_KEY,
-    }
+_MANAGED_ENV_ORDER: tuple[str, ...] = (
+    "ANTHROPIC_AUTH_TOKEN",
+    "ANTHROPIC_BASE_URL",
+    "ANTHROPIC_MODEL",
+    "ANTHROPIC_DEFAULT_FABLE_MODEL",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+    "CLAUDE_CODE_SUBAGENT_MODEL",
+    "CLAUDE_CODE_AUTO_COMPACT_WINDOW",
+    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
+    "CLAUDE_CODE_ENABLE_LSP",
 )
-
-# Default CLAUDE_CODE_AUTO_COMPACT_WINDOW for non-Claude models. Matches
-# Claude Code's built-in window for Claude Opus / Sonnet (200K).
-_CLAUDE_CODE_DEFAULT_AUTO_COMPACT_WINDOW = 200_000
+_LEGACY_ENV_KEYS = frozenset({"ANTHROPIC_SMALL_FAST_MODEL"})
 
 
 def get_claude_code_paths() -> dict[str, Path]:
@@ -108,39 +72,10 @@ def get_claude_code_paths() -> dict[str, Path]:
     }
 
 
-def _maybe_inject_opus_1m(models: list[dict]) -> list[dict]:
-    """Prepend Claude Code-native 1M context options for any source models present.
-
-    Returns a new list (never mutates the input).
-    """
-    models_by_key = {_model_key(model): model for model in models}
-    injected: list[dict] = []
-    for source_model, native_key, bare_id, display_name in _INJECTABLE_1M_VARIANTS:
-        source = models_by_key.get(source_model)
-        if source is not None and (_upstream_context_window(source) or 0) >= 1_000_000:
-            injected.append(
-                {
-                    "provider": "github-copilot",
-                    "id": bare_id,
-                    "name": display_name,
-                    "display_key": native_key,
-                    "wire_key": qualify_model_id("github-copilot", native_key),
-                }
-            )
-    if not injected:
-        return models
-    return [*injected, *models]
-
-
 def _prompt_endpoint_mode(model: dict | None) -> bool:
-    """Prompt whether to use the beta native passthrough endpoint.
+    """Legacy endpoint-mode prompt retained for compatibility tests.
 
-    Offered when the selected GitHub Copilot model natively serves the Anthropic
-    Messages API. Eligibility tracks the server's live catalog
-    (``operation_capabilities['native_anthropic']``) so a newly-added Copilot
-    Claude model is recognized in real time; the ``claude-`` name heuristic is
-    only the fallback for servers that predate that field. Returns True to use
-    the beta endpoint, False for standard.
+    Stable config generation no longer calls this helper.
     """
     if model is None:
         return False
@@ -160,78 +95,196 @@ def _prompt_endpoint_mode(model: dict | None) -> bool:
     return choice == "2"
 
 
-def _prompt_auto_compact_window(model: dict | None) -> int | None:
-    """Prompt the user whether to set CLAUDE_CODE_AUTO_COMPACT_WINDOW.
+def _load_existing_config(path: Path) -> dict:
+    if not path.exists():
+        return {}
+    try:
+        with open(path, encoding="utf-8") as file:
+            value = json.load(file)
+    except (json.JSONDecodeError, OSError):
+        return {}
+    return value if isinstance(value, dict) else {}
 
-    Returns the chosen token count to write, or ``None`` to skip the env var.
 
-    In Claude Code 2.1.162+, auto-compact's threshold check is short-circuited
-    in interactive mode when the window source is "auto" — only ``env`` or
-    ``settings`` source actually arms the trigger. So setting this env var is
-    what turns the feature on at all; the exact value is secondary.
+def _existing_env(config: Mapping[str, object]) -> dict[str, object]:
+    value = config.get("env", {})
+    return dict(value) if isinstance(value, Mapping) else {}
 
-    For Claude Code-native 1M model keys (e.g. ``claude-opus-4-7[1m]``), the
-    default offered is 1M and the upstream-value option is dropped — Copilot's
-    real prompt cap on the 1M variant is below 1M but matching Claude Code's
-    own view of the window is the more useful default here.
 
-    For everything else, the prompt offers:
-      * ``y`` — use the upstream context window (``max_prompt_tokens`` +
-        ``max_output_tokens``, matching what Copilot's own model picker shows)
-      * ``n`` — skip; do not set the env var
-      * ``d`` — set the default 200K (matches Claude Opus/Sonnet's window)
-    """
-    if model is None:
+def _strip_context_suffix(value: str) -> str:
+    return value[: -len(_CONTEXT_1M_SUFFIX)] if value.endswith(_CONTEXT_1M_SUFFIX) else value
+
+
+def _context_from_existing_value(
+    value: object,
+    *,
+    auto_compact_window: object = None,
+) -> ContextWindowChoice:
+    if isinstance(value, str) and value.endswith(_CONTEXT_1M_SUFFIX):
+        return ContextWindowChoice.CONTEXT_1M
+    if str(auto_compact_window) == "1000000":
+        return ContextWindowChoice.CONTEXT_1M
+    if str(auto_compact_window) == "200000":
+        return ContextWindowChoice.CONTEXT_200K
+    return ContextWindowChoice.DEFAULT
+
+
+def _find_existing_model(
+    models: list[dict],
+    value: object,
+    *,
+    fallback: dict | None,
+) -> dict | None:
+    if not isinstance(value, str) or not value:
+        return fallback
+    configured = _strip_context_suffix(value).casefold()
+    if configured == "router-maestro":
         return None
-    model_key = _model_key(model)
-    native_key = model.get("display_key", model_key)
-    is_native_1m = native_key in _CLAUDE_CODE_NATIVE_1M_KEYS
 
+    for model in models:
+        bare_id = _bare_upstream_model_id(model)
+        candidates = {
+            _strip_context_suffix(_model_key(model)).casefold(),
+            _strip_context_suffix(bare_id).casefold(),
+            _strip_context_suffix(to_anthropic_official(bare_id)).casefold(),
+        }
+        display_key = model.get("display_key")
+        if isinstance(display_key, str):
+            candidates.add(_strip_context_suffix(display_key).casefold())
+        if configured in candidates:
+            return model
+    return fallback
+
+
+def _catalog_has_claude_model(models: list[dict]) -> bool:
+    return any(
+        detect_family(_bare_upstream_model_id(model)) is ModelFamily.ANTHROPIC for model in models
+    )
+
+
+def _one_million_label(model: dict) -> str:
     upstream = _upstream_context_window(model)
-    default_value = 1_000_000 if is_native_1m else _CLAUDE_CODE_DEFAULT_AUTO_COMPACT_WINDOW
+    if upstream is not None and upstream < 1_000_000:
+        return f"1M ([1m]; upstream advertises {_format_token_count(upstream)})"
+    return "1M ([1m])"
 
-    console.print()
-    if is_native_1m:
-        console.print(
-            "[bold]Set CLAUDE_CODE_AUTO_COMPACT_WINDOW?[/bold]\n"
-            f"  Selected: {model_key}\n"
-            f"  [dim]Claude Code's interactive auto-compact only arms when this env var\n"
-            f"  (or settings.autoCompactWindow) is set. Without it, the trigger is\n"
-            f"  short-circuited regardless of model. Default ({default_value}) matches\n"
-            f"  Claude Code's native 1M window for this model.[/dim]"
-        )
-        choices = ["n", "d"]
-        prompt_text = f"n = skip / d = default: {default_value}"
-    else:
-        upstream_line = (
-            f"  Upstream context window: {upstream}"
-            if upstream is not None
-            else "  Upstream context window: (unknown)"
-        )
-        console.print(
-            "[bold]Set CLAUDE_CODE_AUTO_COMPACT_WINDOW?[/bold]\n"
-            f"  Selected: {model_key}\n"
-            f"{upstream_line}\n"
-            f"  [dim]Claude Code's interactive auto-compact only arms when this env var\n"
-            f"  (or settings.autoCompactWindow) is set. Without it, the trigger is\n"
-            f"  short-circuited regardless of model. Default ({default_value}) matches\n"
-            f"  Claude Opus/Sonnet's 200K window.[/dim]"
-        )
-        can_use_upstream = upstream is not None
-        if can_use_upstream:
-            choices = ["y", "n", "d"]
-            prompt_text = f"y = upstream: {upstream} / n = skip / d = default: {default_value}"
-        else:
-            choices = ["n", "d"]
-            prompt_text = f"n = skip / d = default: {default_value}"
 
-    choice = Prompt.ask(prompt_text, choices=choices, default="d").lower()
-
-    if choice == "n":
+def _catalog_context_choices(
+    model: dict,
+) -> list[tuple[str, ContextWindowChoice]] | None:
+    """Map server context tiers to the context hints Claude Code can encode."""
+    raw_options = model.get("context_window_options")
+    if not isinstance(raw_options, list):
         return None
-    if choice == "y" and not is_native_1m and upstream is not None:
-        return int(upstream)
-    return default_value
+
+    options: list[tuple[int, bool]] = []
+    for option in raw_options:
+        if not isinstance(option, dict):
+            continue
+        limit = option.get("max_prompt_tokens")
+        if not isinstance(limit, int) or isinstance(limit, bool) or limit <= 0:
+            continue
+        options.append((limit, option.get("is_default") is True))
+    if not options:
+        return None
+
+    one_million_options = [option for option in options if _format_token_count(option[0]) == "1M"]
+    standard_options = [option for option in options if option not in one_million_options]
+    choices: list[tuple[str, ContextWindowChoice]] = []
+
+    if standard_options:
+        standard_limit, _ = next(
+            (option for option in standard_options if option[1]),
+            standard_options[0],
+        )
+        choices.append(
+            (
+                f"{_format_token_count(standard_limit)} (standard; no [1m])",
+                ContextWindowChoice.DEFAULT,
+            )
+        )
+    if one_million_options:
+        long_limit = max(limit for limit, _ in one_million_options)
+        choices.append(
+            (
+                f"{_format_token_count(long_limit)} ([1m])",
+                ContextWindowChoice.CONTEXT_1M,
+            )
+        )
+    return choices or None
+
+
+def _select_context_window(
+    model: dict | None,
+    *,
+    label: str,
+    main: bool,
+    default: ContextWindowChoice,
+) -> ContextWindowChoice:
+    if model is None:
+        return ContextWindowChoice.DEFAULT
+
+    choices = _catalog_context_choices(model)
+    if choices is not None and len(choices) == 1:
+        return choices[0][1]
+    if choices is None and main:
+        choices = [
+            ("Client default (do not set auto-compact)", ContextWindowChoice.DEFAULT),
+            ("200K", ContextWindowChoice.CONTEXT_200K),
+            (_one_million_label(model), ContextWindowChoice.CONTEXT_1M),
+        ]
+    elif choices is None:
+        choices = [
+            ("Standard context (no suffix)", ContextWindowChoice.DEFAULT),
+            (_one_million_label(model), ContextWindowChoice.CONTEXT_1M),
+        ]
+
+    if supports_dropdowns():
+        return select_dropdown(
+            f"{label} context window",
+            choices,
+            default=default,
+        )
+
+    allowed = [choice.value for _, choice in choices]
+    fallback = default.value if default.value in allowed else allowed[0]
+    answer = Prompt.ask(
+        f"{label} context window",
+        choices=allowed,
+        default=fallback,
+    )
+    return ContextWindowChoice(answer)
+
+
+def _select_model_with_context(
+    models: list[dict],
+    *,
+    slot: str,
+    label: str,
+    default_model: dict | None,
+    default_context: ContextWindowChoice,
+    allow_auto: bool,
+    main: bool,
+) -> ModelSelection:
+    model = _select_model_dict(
+        models,
+        f"Select {label} model",
+        default_model=default_model,
+        allow_auto=allow_auto,
+    )
+    context = _select_context_window(
+        model,
+        label=label,
+        main=main,
+        default=default_context,
+    )
+    return ModelSelection(slot=slot, model=model, context_window=context)
+
+
+def _with_context_suffix(model: str, context: ContextWindowChoice) -> str:
+    if context is not ContextWindowChoice.CONTEXT_1M or model.endswith(_CONTEXT_1M_SUFFIX):
+        return model
+    return f"{model}{_CONTEXT_1M_SUFFIX}"
 
 
 class ClaudeCodeConfig(ClientConfig):
@@ -256,91 +309,157 @@ class ClaudeCodeConfig(ClientConfig):
     def to_official_id(self, bare_id: str) -> str:
         return to_anthropic_official(bare_id)
 
-    def load_models(self) -> list[dict]:
-        # Import from base's module namespace so tests that patch
-        # ``base._fetch_models`` are observed here.
-        from router_maestro.cli.client_configs import base
+    def select_models(self, models: list[dict], *, level: str, path: Path) -> list[ModelSelection]:
+        existing_env = _existing_env(_load_existing_config(path))
+        main_value = existing_env.get("ANTHROPIC_MODEL")
+        main_default = _find_existing_model(models, main_value, fallback=None)
+        main_context = _context_from_existing_value(
+            main_value,
+            auto_compact_window=existing_env.get("CLAUDE_CODE_AUTO_COMPACT_WINDOW"),
+        )
 
-        models = base._fetch_models()
-        # If the 1M variant is available, offer the Claude Code-native model key
-        # as an extra option. Claude Code sends the extended-context beta header
-        # when this key is used, and the router resolves it automatically.
-        models = _maybe_inject_opus_1m(models)
-        base._display_models(models)
-        return models
+        console.print("\n[bold]Step 2: Select main model and context[/bold]")
+        main_selection = _select_model_with_context(
+            models,
+            slot="main",
+            label="main",
+            default_model=main_default,
+            default_context=main_context,
+            allow_auto=True,
+            main=True,
+        )
+        selections = [main_selection]
 
-    def select_models(self, models: list[dict]) -> list[dict | None]:
-        console.print("\n[bold]Step 3: Select main model[/bold]")
-        main_model_dict = _select_model_dict(models, "Enter number (or 0 for auto-routing)")
-        console.print("\n[bold]Step 4: Select small/fast model[/bold]")
-        fast_model_dict = _select_model_dict(models, "Enter number", default="1")
-        return [main_model_dict, fast_model_dict]
+        if _catalog_has_claude_model(models):
+            return selections
+        if level != "user":
+            console.print(
+                "\n[yellow]No Claude models are available. Default Claude model mappings "
+                "are user-level only; run this command again and choose User-level to "
+                "configure Fable, Opus, Sonnet, Haiku, and subagents.[/yellow]"
+            )
+            return selections
 
-    def prompt_extras(self, selected_dicts: list[dict | None]) -> dict:
-        main_model_dict = selected_dicts[0] if selected_dicts else None
-        return {"auto_compact_window": _prompt_auto_compact_window(main_model_dict)}
+        console.print(
+            "\n[bold]Step 3: Map Claude default model roles[/bold]\n"
+            "[dim]No Claude-family model was found in the live catalog.[/dim]"
+        )
+        for slot, env_key, label in _ROLE_SLOTS:
+            existing_value = existing_env.get(env_key)
+            role_default = _find_existing_model(
+                models,
+                existing_value,
+                fallback=main_selection.model or models[0],
+            )
+            role_context = _context_from_existing_value(existing_value)
+            if existing_value is None:
+                role_context = main_selection.context_window
+            selections.append(
+                _select_model_with_context(
+                    models,
+                    slot=slot,
+                    label=label,
+                    default_model=role_default,
+                    default_context=role_context,
+                    allow_auto=False,
+                    main=False,
+                )
+            )
+        return selections
+
+    def resolve_model_selection(self, selection: ModelSelection, id_style: IdStyle) -> str:
+        resolved = super().resolve_model_selection(selection, id_style)
+        return _with_context_suffix(resolved, selection.context_window)
 
     def _anthropic_url(self, ctx: GenerateContext) -> str:
         del ctx
         return f"{self._base_url()}/api/anthropic"
 
-    def write(self, *, level: str, path: Path, models: list[str], ctx: GenerateContext) -> None:
-        main_model, fast_model = models[0], models[1]
+    def write(
+        self, *, level: str, path: Path, models: dict[str, str], ctx: GenerateContext
+    ) -> None:
         auth_token = self._auth_token()
         anthropic_url = self._anthropic_url(ctx)
-        auto_compact_window = ctx.extras.get("auto_compact_window")
+        selection_by_slot = {selection.slot: selection for selection in ctx.selections}
 
-        env_config = {
-            "ANTHROPIC_BASE_URL": anthropic_url,
+        env_config: dict[str, object] = {
             "ANTHROPIC_AUTH_TOKEN": auth_token,
-            "ANTHROPIC_MODEL": main_model,
-            "ANTHROPIC_SMALL_FAST_MODEL": fast_model,
-            "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
-            "CLAUDE_CODE_ENABLE_LSP": "1",
+            "ANTHROPIC_BASE_URL": anthropic_url,
+            "ANTHROPIC_MODEL": models["main"],
         }
-        if auto_compact_window is not None:
-            env_config["CLAUDE_CODE_AUTO_COMPACT_WINDOW"] = str(auto_compact_window)
+        if level == "user":
+            for slot, env_key, _ in _ROLE_SLOTS:
+                if slot in models:
+                    env_config[env_key] = models[slot]
 
-        # Load existing settings to preserve other sections (e.g., MCP servers)
-        existing_config: dict = {}
-        if path.exists():
-            try:
-                with open(path, encoding="utf-8") as f:
-                    existing_config = json.load(f)
-            except (json.JSONDecodeError, OSError):
-                pass  # If file is corrupted, start fresh
+        main_context = selection_by_slot["main"].context_window
+        if main_context is ContextWindowChoice.CONTEXT_200K:
+            env_config["CLAUDE_CODE_AUTO_COMPACT_WINDOW"] = "200000"
+        elif main_context is ContextWindowChoice.CONTEXT_1M:
+            env_config["CLAUDE_CODE_AUTO_COMPACT_WINDOW"] = "1000000"
 
-        # Merge: update env variables while preserving existing ones
-        existing_env = existing_config.get("env", {})
-        if not isinstance(existing_env, dict):
-            existing_env = {}
-        existing_config["env"] = {**existing_env, **env_config}
+        env_config["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"] = "1"
+        env_config["CLAUDE_CODE_ENABLE_LSP"] = "1"
 
+        existing_config = _load_existing_config(path)
+        existing_env = _existing_env(existing_config)
+        selected_role_slots = _ROLE_ENV_BY_SLOT.keys() & models.keys()
+        preserve_existing_roles = level == "user" and not selected_role_slots
+
+        ordered_env: dict[str, object] = {}
+        role_env_keys = set(_ROLE_ENV_BY_SLOT.values())
+        for key in _MANAGED_ENV_ORDER:
+            if key in env_config:
+                ordered_env[key] = env_config[key]
+            elif preserve_existing_roles and key in role_env_keys and key in existing_env:
+                ordered_env[key] = existing_env[key]
+
+        for key, value in existing_env.items():
+            if key in _MANAGED_ENV_ORDER or key in _LEGACY_ENV_KEYS:
+                continue
+            ordered_env[key] = value
+
+        existing_config["env"] = ordered_env
         path.parent.mkdir(parents=True, exist_ok=True)
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(existing_config, f, indent=2)
+        with open(path, "w", encoding="utf-8") as file:
+            json.dump(existing_config, file, indent=2)
 
     def render_success(
-        self, *, level: str, path: Path, models: list[str], ctx: GenerateContext
+        self, *, level: str, path: Path, models: dict[str, str], ctx: GenerateContext
     ) -> None:
-        main_model, fast_model = models[0], models[1]
-        anthropic_url = self._anthropic_url(ctx)
-        auto_compact_window = ctx.extras.get("auto_compact_window")
-        auto_compact_line = (
-            f"Auto-compact window: {auto_compact_window} tokens\n\n"
-            if auto_compact_window is not None
-            else ""
+        del level
+        selection_by_slot = {selection.slot: selection for selection in ctx.selections}
+        lines = [f"[green]Created {path}[/green]", ""]
+        for slot, model in models.items():
+            label = "Main" if slot == "main" else _ROLE_LABEL_BY_SLOT[slot]
+            context = selection_by_slot[slot].context_window.value
+            lines.append(f"{label}: {model} ({context})")
+        lines.extend(
+            [
+                "",
+                f"Endpoint: {self._anthropic_url(ctx)}",
+                "",
+                "[dim]Start router-maestro server before using Claude Code:[/dim]",
+                "  router-maestro server start",
+            ]
         )
         console.print(
             Panel(
-                f"[green]Created {path}[/green]\n\n"
-                f"Main model: {main_model}\n"
-                f"Fast model: {fast_model}\n\n"
-                f"{auto_compact_line}"
-                f"Endpoint: {anthropic_url}\n\n"
-                "[dim]Start router-maestro server before using Claude Code:[/dim]\n"
-                "  router-maestro server start",
+                "\n".join(lines),
                 title="Success",
                 border_style="green",
             )
         )
+
+
+__all__ = [
+    "ClaudeCodeConfig",
+    "get_claude_code_paths",
+    "_catalog_has_claude_model",
+    "_context_from_existing_value",
+    "_find_existing_model",
+    "_prompt_endpoint_mode",
+    "_select_context_window",
+    "_select_model_with_context",
+    "_with_context_suffix",
+]

@@ -10,7 +10,13 @@ from rich.console import Console
 
 from router_maestro.cli import model as model_cli
 from router_maestro.config import PrioritiesConfig
-from router_maestro.providers import ChatRequest, ChatResponse, Message, ModelInfo
+from router_maestro.providers import (
+    ChatRequest,
+    ChatResponse,
+    ContextWindowOption,
+    Message,
+    ModelInfo,
+)
 from router_maestro.providers.base import BaseProvider
 from router_maestro.routing.capabilities import Operation
 from router_maestro.routing.router import CACHE_TTL_SECONDS, Router, RouterOwner
@@ -293,6 +299,44 @@ async def test_public_model_lists_do_not_double_prefix_qualified_catalog_ids():
     assert [model.id for model in admin_response.models] == ["github-copilot/claude-sonnet-4.6"]
 
 
+@pytest.mark.anyio
+async def test_public_model_lists_expose_supported_context_windows():
+    class _ContextRouter:
+        async def list_models(self):
+            return [
+                ModelInfo(
+                    id="gpt-5.6-sol",
+                    name="GPT-5.6 Sol",
+                    provider="github-copilot",
+                    max_prompt_tokens=922_000,
+                    max_output_tokens=128_000,
+                    max_context_window_tokens=1_050_000,
+                    context_window_options=(
+                        ContextWindowOption("default", 272_000, True),
+                        ContextWindowOption("long_context", 922_000, False),
+                    ),
+                )
+            ]
+
+    typed_router = cast(Router, _ContextRouter())
+    openai_response = await list_models(typed_router)
+    anthropic_response = await list_anthropic_models(model_router=typed_router)
+    admin_response = await list_admin_models(typed_router)
+
+    expected = [
+        {"tier": "default", "max_prompt_tokens": 272_000, "is_default": True},
+        {"tier": "long_context", "max_prompt_tokens": 922_000, "is_default": False},
+    ]
+    assert [option.model_dump() for option in openai_response.data[0].context_window_options] == (
+        expected
+    )
+    anthropic_options = anthropic_response.data[0].context_window_options
+    assert [option.model_dump() for option in anthropic_options] == expected
+    assert [option.model_dump() for option in admin_response.models[0].context_window_options] == (
+        expected
+    )
+
+
 class _RoundTripProvider(BaseProvider):
     def __init__(self, name: str) -> None:
         self.name = name
@@ -372,7 +416,17 @@ async def test_public_model_lists_round_trip_to_same_provider_with_bare_upstream
 def test_cli_model_list_does_not_double_qualify_public_id(monkeypatch):
     class _Client:
         async def list_models(self):
-            return [{"provider": "openai", "id": "openai/gpt-4o", "name": "GPT-4o"}]
+            return [
+                {
+                    "provider": "openai",
+                    "id": "openai/gpt-4o",
+                    "name": "GPT-4o",
+                    "context_window_options": [
+                        {"tier": "default", "max_prompt_tokens": 272_000},
+                        {"tier": "long_context", "max_prompt_tokens": 922_000},
+                    ],
+                }
+            ]
 
         async def get_priorities(self):
             return {"priorities": ["openai/gpt-4o"]}
@@ -386,3 +440,4 @@ def test_cli_model_list_does_not_double_qualify_public_id(monkeypatch):
     rendered = output.export_text()
     assert "openai/gpt-4o" in rendered
     assert "openai/openai/gpt-4o" not in rendered
+    assert "272K / 1M" in rendered

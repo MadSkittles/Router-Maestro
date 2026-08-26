@@ -385,6 +385,15 @@ class ChatStreamChunk:
     opaque_payload: str | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class ContextWindowOption:
+    """One client-selectable prompt budget advertised for a model."""
+
+    tier: str
+    max_prompt_tokens: int
+    is_default: bool = False
+
+
 @dataclass
 class ModelInfo:
     """Information about an available model."""
@@ -416,6 +425,31 @@ class ModelInfo:
     # Appended so existing positional construction remains compatible. Missing
     # keys mean unknown; explicit ``False`` means the catalog denied support.
     transport_capabilities: dict[str, bool] = field(default_factory=dict)
+    # Provider-normalized context choices. Empty means the provider advertised
+    # only scalar limits; model-list routes synthesize one default option from
+    # those limits when possible.
+    context_window_options: tuple[ContextWindowOption, ...] = ()
+
+    def effective_context_window_options(self) -> tuple[ContextWindowOption, ...]:
+        """Return explicit choices or one default choice derived from scalar limits."""
+        if self.context_window_options:
+            return self.context_window_options
+
+        max_prompt_tokens = self.max_prompt_tokens
+        if max_prompt_tokens is None and self.max_context_window_tokens is not None:
+            max_prompt_tokens = max(
+                1,
+                self.max_context_window_tokens - (self.max_output_tokens or 0),
+            )
+        if max_prompt_tokens is None:
+            return ()
+        return (
+            ContextWindowOption(
+                tier="default",
+                max_prompt_tokens=max_prompt_tokens,
+                is_default=True,
+            ),
+        )
 
     def with_overrides(
         self,
@@ -425,6 +459,14 @@ class ModelInfo:
         max_context_window_tokens: int | None = None,
     ) -> ModelInfo:
         """Return new ModelInfo with specified limits overridden (immutable)."""
+        token_limits_changed = any(
+            value is not None
+            for value in (
+                max_prompt_tokens,
+                max_output_tokens,
+                max_context_window_tokens,
+            )
+        )
         return ModelInfo(
             id=self.id,
             name=self.name,
@@ -448,6 +490,7 @@ class ModelInfo:
             feature_capabilities=self.feature_capabilities,
             id_is_qualified=self.id_is_qualified,
             transport_capabilities=self.transport_capabilities,
+            context_window_options=(() if token_limits_changed else self.context_window_options),
         )
 
 

@@ -85,23 +85,14 @@ from router_maestro.cli.client_configs.base import (  # noqa: E402
     _select_model_dict,
 )
 from router_maestro.cli.client_configs.claude_code import (  # noqa: E402
-    _OPUS_1M_NATIVE_KEY,
-    _OPUS_1M_SOURCE_MODEL,
-    _OPUS_47_1M_NATIVE_KEY,
-    _OPUS_48_1M_NATIVE_KEY,
-    _SONNET_46_1M_NATIVE_KEY,
-    _maybe_inject_opus_1m,
-    _prompt_auto_compact_window,
+    _catalog_has_claude_model,
+    _context_from_existing_value,
     _prompt_endpoint_mode,
+    _with_context_suffix,
 )
 from router_maestro.cli.client_configs.gemini import _parse_env_file  # noqa: E402
 
 __all__ = [
-    "_OPUS_1M_NATIVE_KEY",
-    "_OPUS_1M_SOURCE_MODEL",
-    "_OPUS_47_1M_NATIVE_KEY",
-    "_OPUS_48_1M_NATIVE_KEY",
-    "_SONNET_46_1M_NATIVE_KEY",
     "Confirm",
     "Path",
     "Prompt",
@@ -109,13 +100,14 @@ __all__ = [
     "_display_models",
     "_fetch_and_display_models",
     "_fetch_models",
-    "_maybe_inject_opus_1m",
+    "_catalog_has_claude_model",
+    "_context_from_existing_value",
     "_model_key",
     "_parse_env_file",
-    "_prompt_auto_compact_window",
     "_prompt_endpoint_mode",
     "_select_model",
     "_select_model_dict",
+    "_with_context_suffix",
     "app",
     "claude_code_config",
     "codex_config",

@@ -693,6 +693,7 @@ async def test_copilot_bindings_isolate_anthropic_beta_header(
                     "reasoning_tokens": 4,
                 },
                 "prompt_filter_results": [{"prompt_index": 0, "private": True}],
+                "copilot_info_messages": [{"message": "provider-only"}],
                 "copilot_usage": {"private": True},
                 "future": {"kept": True},
             },
@@ -887,7 +888,8 @@ async def test_copilot_chat_stream_strips_prompt_filter_preamble() -> None:
         b'"prompt_filter_results":[{"prompt_index":0,"private":true}]}\n\n'
         b'data: {"id":"chat_1","object":"chat.completion.chunk",'
         b'"created":10,"model":"gpt-5.4-2026-08-01","choices":'
-        b'[{"index":0,"delta":{"role":"assistant","content":"pong"}}]}\n\n'
+        b'[{"index":0,"delta":{"role":"assistant","content":"pong"}}],'
+        b'"copilot_info_messages":[{"message":"provider-only"}]}\n\n'
         b'data: {"id":"chat_1","object":"chat.completion.chunk",'
         b'"created":10,"model":"gpt-5.4-2026-08-01","choices":'
         b'[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\n'
@@ -931,6 +933,7 @@ async def test_copilot_chat_stream_strips_prompt_filter_preamble() -> None:
 
     assert len(frames) == 3
     assert all("prompt_filter_results" not in frame for frame in frames)
+    assert all("copilot_info_messages" not in frame for frame in frames)
     assert frames[0]["choices"][0]["delta"]["content"] == "pong"
     assert frames[-1]["usage"] == {
         "prompt_tokens": 22,

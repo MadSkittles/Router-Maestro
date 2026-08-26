@@ -59,6 +59,7 @@ from router_maestro.server.schemas.anthropic import (
     AnthropicTextBlock,
     AnthropicUsage,
 )
+from router_maestro.server.schemas.model_catalog import ContextWindowOption
 from router_maestro.server.streaming import sse_streaming_response
 from router_maestro.server.translation import translate_anthropic_to_openai
 from router_maestro.utils import count_anthropic_request_tokens, get_logger
@@ -922,6 +923,14 @@ async def list_models(
             max_prompt_tokens=model.max_prompt_tokens,
             max_output_tokens=model.max_output_tokens,
             max_context_window_tokens=model.max_context_window_tokens,
+            context_window_options=[
+                ContextWindowOption(
+                    tier=option.tier,
+                    max_prompt_tokens=option.max_prompt_tokens,
+                    is_default=option.is_default,
+                )
+                for option in model.effective_context_window_options()
+            ],
             supports_thinking=model.supports_thinking or None,
             supports_vision=model.supports_vision or None,
         )

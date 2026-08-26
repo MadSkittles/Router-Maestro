@@ -143,11 +143,13 @@ Reasoning effort stays on the selected base model. Router-Maestro does not
 rewrite model IDs to `-high`, `-xhigh`, or other reasoning suffixes. If the
 catalog does not advertise the requested tier, substitution is downward-only
 on `minimal < low < medium < high < xhigh < max`; no supported tier at or below
-the request means rejection. Likewise, Claude Code's synthetic `[1m]` selection
-is offered only for a Copilot base catalog entry that already advertises a
-one-million-token context window. The provider-qualified `[1m]` configuration
-maps to that base model and changes Claude Code's auto-compact threshold; it is
-not rewritten to a `-1m` upstream model variant.
+the request means rejection. Claude Code's `[1m]` suffix is a client-side
+context hint selected by the config wizard after choosing a model; it is not a
+synthetic catalog entry or a dedicated upstream model variant. The main model's
+context selection also controls `CLAUDE_CODE_AUTO_COMPACT_WINDOW`. Model-list
+responses expose provider-normalized `context_window_options`; Copilot derives
+these from its default and long-context billing tiers, matching VS Code's model
+picker rather than assuming every model has the same fixed context choices.
 
 ---
 

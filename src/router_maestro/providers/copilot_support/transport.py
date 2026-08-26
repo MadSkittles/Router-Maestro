@@ -12,6 +12,12 @@ from uuid import uuid4
 
 import httpx
 
+from router_maestro.auth.github_oauth import (
+    COPILOT_API_VERSION,
+    COPILOT_EDITOR_VERSION,
+    COPILOT_PLUGIN_VERSION,
+    COPILOT_USER_AGENT,
+)
 from router_maestro.pipeline.beta_strip import strip_beta_tokens
 from router_maestro.providers.base import (
     TIMEOUT_NON_STREAMING,
@@ -76,6 +82,7 @@ class CopilotTransport:
         *,
         messages: list[Message] | None = None,
         response_input: str | list[dict[str, Any]] | None = None,
+        intent: str = "conversation-panel",
     ) -> dict[str, str]:
         if not self.auth.cached_token:
             raise ProviderError(
@@ -87,12 +94,12 @@ class CopilotTransport:
         headers = {
             "Authorization": f"Bearer {self.auth.cached_token}",
             "Content-Type": "application/json",
-            "Editor-Version": "vscode/1.95.0",
-            "Editor-Plugin-Version": "copilot-chat/0.26.7",
+            "Editor-Version": COPILOT_EDITOR_VERSION,
+            "Editor-Plugin-Version": COPILOT_PLUGIN_VERSION,
             "Copilot-Integration-Id": "vscode-chat",
-            "User-Agent": "GitHubCopilotChat/0.26.7",
-            "OpenAI-Intent": "conversation-panel",
-            "X-GitHub-Api-Version": "2025-04-01",
+            "User-Agent": COPILOT_USER_AGENT,
+            "OpenAI-Intent": intent,
+            "X-GitHub-Api-Version": COPILOT_API_VERSION,
             "X-Request-Id": str(uuid4()),
             "X-Vscode-User-Agent-Library-Version": "electron-fetch",
         }

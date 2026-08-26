@@ -29,14 +29,12 @@ Router-Maestro acts as a proxy that gives you access to models from multiple pro
 
 ### Advanced
 
-- **1M context support**: Activate a catalog model whose base entry advertises a
-  1M context window by selecting its synthetic `[1m]` key during
-  `config claude-code` setup. The wizard displays Claude Code's native `[1m]`
-  key but writes it with the `github-copilot/` provider scope, so it maps to the
-  same base Copilot model even when another provider exposes the same upstream
-  ID. It also raises Claude Code's auto-compact threshold
-  (`CLAUDE_CODE_AUTO_COMPACT_WINDOW`) to 1M; Router-Maestro does not rewrite it
-  to a dedicated `-1m` model suffix.
+- **1M context support**: `config claude-code` shows the live model catalog in a
+  searchable selector, including every server-advertised context size, followed
+  by a context-window selector. Choosing an advertised 1M tier adds Claude
+  Code's client-side `[1m]` hint and raises `CLAUDE_CODE_AUTO_COMPACT_WINDOW`
+  for the main model. Router-Maestro does not inject synthetic catalog entries
+  or rewrite the selection to a dedicated upstream `-1m` model.
 - **Capability-aware reasoning tiers**: `reasoning_effort` and Anthropic
   thinking controls stay on the selected base model. The ordered effort ladder
   is `minimal < low < medium < high < xhigh < max`. An advertised exact tier is
@@ -159,6 +157,18 @@ router-maestro config claude-code   # Claude Code (Anthropic-compatible)
 router-maestro config codex         # OpenAI Codex (CLI / extension / app)
 router-maestro config gemini        # Gemini CLI
 ```
+
+Interactive terminals use a searchable model dropdown whose labels and table
+show the server's `context_window_options` (for example, `272K / 1M`). Claude
+Code then asks for one of the contexts it can encode; older servers without the
+new field retain the legacy context choices. If the live catalog contains no
+Claude-family model, the user-level wizard also maps Fable, Opus, Sonnet,
+Haiku, and subagent roles to the available models; the legacy
+`ANTHROPIC_SMALL_FAST_MODEL` setting is removed.
+
+For Copilot models, Router-Maestro derives these choices from CAPI's default and
+`long_context` billing tiers. Raw usable prompt limits such as `922000` are
+displayed as `1M`, matching VS Code's model picker.
 
 For Codex, also export the same key on the client because the generated config references `ROUTER_MAESTRO_API_KEY`:
 

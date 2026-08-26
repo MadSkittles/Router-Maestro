@@ -33,6 +33,22 @@ All notable changes to Router-Maestro are documented here.
 
 ### Changed
 
+- **Claude Code configuration now uses live searchable model choices.** The
+  wizard no longer injects hard-coded Opus/Sonnet `[1m]` catalog variants or
+  writes `ANTHROPIC_SMALL_FAST_MODEL`. Model and context are selected together;
+  choosing 1M appends the client-side `[1m]` hint after official/qualified ID
+  resolution. When no Claude-family model exists, user-level configuration maps
+  Fable, Opus, Sonnet, Haiku, and subagent roles in strength order.
+
+- **Model lists expose selectable context windows.** Copilot default and
+  long-context billing tiers are normalized into `context_window_options` on
+  Admin, OpenAI, and Anthropic model-list responses. CLI model tables and
+  searchable selectors show every advertised size, and Claude Code only offers
+  the 1M hint when the selected model advertises a matching long context. The
+  Copilot client identity now tracks the current catalog API, and an existing
+  token minted by an older client is refreshed once when CAPI returns its
+  billing-metadata upgrade warning.
+
 - **Anthropic tool failures retain their error semantics across OpenAI
   transports.** When an Anthropic `tool_result` with `is_error: true` crosses to
   OpenAI Responses or Chat, Router-Maestro now projects the flag and ordinary

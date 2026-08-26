@@ -73,8 +73,10 @@ class GeminiConfig(ClientConfig):
     def to_official_id(self, bare_id: str) -> str:
         return to_gemini_official(bare_id)
 
-    def write(self, *, level: str, path: Path, models: list[str], ctx: GenerateContext) -> None:
-        model_name = models[0]
+    def write(
+        self, *, level: str, path: Path, models: dict[str, str], ctx: GenerateContext
+    ) -> None:
+        model_name = models["main"]
         gemini_url = f"{self._base_url()}/api/gemini"
 
         # Load existing .env to preserve other variables
@@ -90,9 +92,9 @@ class GeminiConfig(ClientConfig):
         _write_env_file(path, existing_env)
 
     def render_success(
-        self, *, level: str, path: Path, models: list[str], ctx: GenerateContext
+        self, *, level: str, path: Path, models: dict[str, str], ctx: GenerateContext
     ) -> None:
-        model_name = models[0]
+        model_name = models["main"]
         gemini_url = f"{self._base_url()}/api/gemini"
         console.print(
             Panel(

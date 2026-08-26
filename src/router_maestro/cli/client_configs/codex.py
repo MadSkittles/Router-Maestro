@@ -13,6 +13,7 @@ from tomlkit.items import AbstractTable, Table
 from router_maestro.cli.client_configs.base import (
     ClientConfig,
     GenerateContext,
+    ModelSelection,
     _bare_upstream_model_id,
     _model_operation_support,
     console,
@@ -108,16 +109,18 @@ class CodexConfig(ClientConfig):
     def to_official_id(self, bare_id: str) -> str:
         return to_openai_official(bare_id)
 
-    def prompt_extras(self, selected_dicts: list[dict | None]) -> dict:
-        del selected_dicts
+    def prompt_extras(self, selections: list[ModelSelection]) -> dict:
+        del selections
         return {}
 
     def _openai_url(self, ctx: GenerateContext) -> str:
         del ctx
         return f"{self._base_url()}/api/openai/v1"
 
-    def write(self, *, level: str, path: Path, models: list[str], ctx: GenerateContext) -> None:
-        selected_model = models[0]
+    def write(
+        self, *, level: str, path: Path, models: dict[str, str], ctx: GenerateContext
+    ) -> None:
+        selected_model = models["main"]
         openai_url = self._openai_url(ctx)
 
         # Load existing config to preserve other sections
@@ -158,9 +161,9 @@ class CodexConfig(ClientConfig):
             f.write(tomlkit.dumps(existing_config))
 
     def render_success(
-        self, *, level: str, path: Path, models: list[str], ctx: GenerateContext
+        self, *, level: str, path: Path, models: dict[str, str], ctx: GenerateContext
     ) -> None:
-        selected_model = models[0]
+        selected_model = models["main"]
         openai_url = self._openai_url(ctx)
 
         if level == "user":
