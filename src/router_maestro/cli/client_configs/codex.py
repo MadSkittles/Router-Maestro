@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+import copy
+import json
+import subprocess
 import tomllib
 from pathlib import Path
+from typing import Any
 
 import tomlkit
 from rich.panel import Panel
@@ -15,7 +19,9 @@ from router_maestro.cli.client_configs.base import (
     GenerateContext,
     ModelSelection,
     _bare_upstream_model_id,
+    _model_key,
     _model_operation_support,
+    _upstream_context_window,
     console,
 )
 from router_maestro.cli.client_configs.model_id import (
@@ -23,8 +29,25 @@ from router_maestro.cli.client_configs.model_id import (
     detect_family,
     to_openai_official,
 )
+from router_maestro.config.settings import write_json_owner_only
 from router_maestro.providers.copilot_support.catalog import is_model_responses_eligible
 from router_maestro.routing.capabilities import Operation
+
+_CODEX_MODEL_CATALOG_FILENAME = "router-maestro-models.json"
+_CODEX_CATALOG_BASELINE_SLUG = "gpt-5.6-terra"
+_CODEX_MODEL_SPECIFIC_EXTENSION_FIELDS = frozenset(
+    {
+        "comp_hash",
+        "include_apps_usage_instructions",
+        "include_plugin_usage_instructions",
+        "include_skills_usage_instructions",
+        "multi_agent_version",
+        "node_repl_auto_review_required",
+        "node_repl_disabled",
+        "tool_mode",
+        "use_responses_lite",
+    }
+)
 
 
 def get_codex_paths() -> dict[str, Path]:
@@ -75,6 +98,155 @@ def _build_router_maestro_provider_table(openai_url: str) -> Table:
     return table
 
 
+def _load_bundled_codex_catalog() -> dict[str, Any] | None:
+    """Read the installed Codex catalog so generated metadata stays version-aligned."""
+    try:
+        result = subprocess.run(
+            ["codex", "debug", "models", "--bundled"],
+            capture_output=True,
+            check=False,
+            text=True,
+            timeout=15,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0:
+        return None
+    try:
+        catalog = json.loads(result.stdout)
+    except json.JSONDecodeError:
+        return None
+    models = catalog.get("models") if isinstance(catalog, dict) else None
+    if not isinstance(models, list) or not models:
+        return None
+    return catalog
+
+
+def _catalog_context_windows(model: dict[str, Any]) -> tuple[int | None, int | None]:
+    """Return the default and maximum total context windows for Codex metadata."""
+    max_output = model.get("max_output_tokens")
+    output_tokens = (
+        max_output
+        if isinstance(max_output, int) and not isinstance(max_output, bool) and max_output > 0
+        else 0
+    )
+    default_prompt = None
+    options = model.get("context_window_options")
+    if isinstance(options, list):
+        for option in options:
+            if not isinstance(option, dict) or option.get("is_default") is not True:
+                continue
+            value = option.get("max_prompt_tokens")
+            if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+                default_prompt = value
+                break
+
+    default_window = default_prompt + output_tokens if default_prompt is not None else None
+    maximum = model.get("max_context_window_tokens")
+    max_window = (
+        maximum
+        if isinstance(maximum, int) and not isinstance(maximum, bool) and maximum > 0
+        else _upstream_context_window(model)
+    )
+    if default_window is None:
+        default_window = max_window
+    if max_window is not None and default_window is not None:
+        default_window = min(default_window, max_window)
+    return default_window, max_window
+
+
+def _build_codex_model_catalog(models: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """Extend Codex's bundled catalog with exact Router-Maestro model slugs."""
+    catalog = _load_bundled_codex_catalog()
+    if catalog is None:
+        return None
+    bundled_models = catalog.get("models")
+    if not isinstance(bundled_models, list) or not bundled_models:
+        return None
+
+    baseline = next(
+        (
+            model
+            for model in bundled_models
+            if isinstance(model, dict) and model.get("slug") == _CODEX_CATALOG_BASELINE_SLUG
+        ),
+        next((model for model in bundled_models if isinstance(model, dict)), None),
+    )
+    if baseline is None:
+        return None
+
+    extended = copy.deepcopy(catalog)
+    extended_models = extended["models"]
+    known_slugs = {model.get("slug") for model in extended_models if isinstance(model, dict)}
+
+    for priority, model in enumerate(models, start=1_000):
+        slug = _model_key(model)
+        if slug in known_slugs:
+            continue
+        entry = copy.deepcopy(baseline)
+        for field in _CODEX_MODEL_SPECIFIC_EXTENSION_FIELDS:
+            entry.pop(field, None)
+        entry["slug"] = slug
+        entry["display_name"] = model.get("name") or slug
+        entry["description"] = f"{entry['display_name']} via Router-Maestro"
+        entry["priority"] = priority
+        entry["visibility"] = "list"
+        entry["supported_in_api"] = True
+        entry["additional_speed_tiers"] = []
+        entry["service_tiers"] = []
+        entry["availability_nux"] = None
+        entry["upgrade"] = None
+        entry["supports_search_tool"] = False
+        entry["shell_type"] = "default"
+        entry["model_messages"] = None
+        entry["supports_reasoning_summaries"] = False
+        entry["support_verbosity"] = False
+        entry["default_verbosity"] = None
+        entry["apply_patch_tool_type"] = None
+        entry["web_search_tool_type"] = "text"
+        entry["truncation_policy"] = {"mode": "bytes", "limit": 10_000}
+        entry["supports_parallel_tool_calls"] = False
+        entry["supports_image_detail_original"] = False
+        entry["experimental_supported_tools"] = []
+        default_window, max_window = _catalog_context_windows(model)
+        if default_window is not None:
+            entry["context_window"] = default_window
+            entry["auto_compact_token_limit"] = None
+        if max_window is not None:
+            entry["max_context_window"] = max_window
+        extended_models.append(entry)
+        known_slugs.add(slug)
+
+    if "router-maestro" not in known_slugs:
+        auto_entry = copy.deepcopy(baseline)
+        for field in _CODEX_MODEL_SPECIFIC_EXTENSION_FIELDS:
+            auto_entry.pop(field, None)
+        auto_entry["slug"] = "router-maestro"
+        auto_entry["display_name"] = "Router-Maestro Auto"
+        auto_entry["description"] = "Router-Maestro automatic model routing"
+        auto_entry["priority"] = 999
+        auto_entry["visibility"] = "list"
+        auto_entry["supported_in_api"] = True
+        auto_entry["additional_speed_tiers"] = []
+        auto_entry["service_tiers"] = []
+        auto_entry["availability_nux"] = None
+        auto_entry["upgrade"] = None
+        auto_entry["supports_search_tool"] = False
+        auto_entry["shell_type"] = "default"
+        auto_entry["model_messages"] = None
+        auto_entry["supports_reasoning_summaries"] = False
+        auto_entry["support_verbosity"] = False
+        auto_entry["default_verbosity"] = None
+        auto_entry["apply_patch_tool_type"] = None
+        auto_entry["web_search_tool_type"] = "text"
+        auto_entry["truncation_policy"] = {"mode": "bytes", "limit": 10_000}
+        auto_entry["supports_parallel_tool_calls"] = False
+        auto_entry["supports_image_detail_original"] = False
+        auto_entry["experimental_supported_tools"] = []
+        extended_models.append(auto_entry)
+    return extended
+
+
 def _user_codex_has_router_maestro_provider(user_config_path: Path) -> bool:
     """Return True iff the user-level Codex config sets `model_provider = "router-maestro"`."""
     if not user_config_path.exists():
@@ -96,6 +268,11 @@ class CodexConfig(ClientConfig):
 
     def paths(self) -> dict[str, Path]:
         return get_codex_paths()
+
+    def load_models(self) -> list[dict]:
+        models = super().load_models()
+        self._available_models = models
+        return models
 
     def level_menu(self) -> tuple[str, str]:
         return (
@@ -144,6 +321,21 @@ class CodexConfig(ClientConfig):
             if not isinstance(providers, AbstractTable):
                 raise TypeError("model_providers must be a TOML table")
             providers["router-maestro"] = _build_router_maestro_provider_table(openai_url)
+            available_models = getattr(
+                self,
+                "_available_models",
+                [model for model in ctx.selected_dicts if model is not None],
+            )
+            catalog = _build_codex_model_catalog(available_models)
+            if catalog is None:
+                console.print(
+                    "[yellow]Could not read the installed Codex model catalog; "
+                    "custom models may use fallback metadata.[/yellow]"
+                )
+            else:
+                catalog_path = path.with_name(_CODEX_MODEL_CATALOG_FILENAME)
+                write_json_owner_only(catalog_path, catalog)
+                existing_config["model_catalog_json"] = str(catalog_path.resolve())
         else:
             # Codex CLI 0.130+ rejects model_provider/model_providers at project scope.
             # Strip the keys this command wrote in older releases so the file stops

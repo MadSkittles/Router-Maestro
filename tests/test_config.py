@@ -719,6 +719,25 @@ class _StubAdminClient:
     endpoint = "http://localhost:8080"
 
 
+def _stub_bundled_codex_catalog() -> dict:
+    return {
+        "models": [
+            {
+                "slug": "gpt-5.6-terra",
+                "display_name": "GPT-5.6-Terra",
+                "description": "Bundled baseline",
+                "base_instructions": "version-aligned bundled instructions",
+                "context_window": 400_000,
+                "max_context_window": 1_050_000,
+                "supports_search_tool": True,
+                "shell_type": "shell_command",
+                "tool_mode": "code_mode_only",
+                "multi_agent_version": "v2",
+            }
+        ]
+    }
+
+
 def _setup_codex_env(
     monkeypatch,
     tmp_path: Path,
@@ -750,6 +769,11 @@ def _setup_codex_env(
     ]
     monkeypatch.setattr(cc_base, "_fetch_and_display_models", lambda: list(fake_models))
     monkeypatch.setattr(cc_base, "get_admin_client", lambda: _StubAdminClient())
+    monkeypatch.setattr(
+        cc_codex,
+        "_load_bundled_codex_catalog",
+        lambda: json.loads(json.dumps(_stub_bundled_codex_catalog())),
+    )
 
     answers = iter([level_choice, model_choice, endpoint_choice])
     monkeypatch.setattr(cli_config.Prompt, "ask", lambda *a, **kw: next(answers))
@@ -793,6 +817,16 @@ class TestCodexConfig:
             data = tomllib.load(f)
         assert data["model"] == "github-copilot/gpt-5.5"
         assert data["model_provider"] == "router-maestro"
+        catalog_path = home / ".codex" / "router-maestro-models.json"
+        assert data["model_catalog_json"] == str(catalog_path)
+        with open(catalog_path, encoding="utf-8") as f:
+            catalog = json.load(f)
+        assert {model["slug"] for model in catalog["models"]} == {
+            "gpt-5.6-terra",
+            "github-copilot/gpt-5.5",
+            "github-copilot/claude-opus-4.6",
+            "router-maestro",
+        }
         provider = data["model_providers"]["router-maestro"]
         assert provider == {
             "name": "Router Maestro",
@@ -800,6 +834,40 @@ class TestCodexConfig:
             "env_key": "ROUTER_MAESTRO_API_KEY",
             "wire_api": "responses",
         }
+
+    def test_generated_catalog_uses_server_context_metadata(self, monkeypatch):
+        monkeypatch.setattr(
+            cc_codex,
+            "_load_bundled_codex_catalog",
+            lambda: _stub_bundled_codex_catalog(),
+        )
+        model = {
+            "provider": "github-copilot",
+            "id": "github-copilot/grok-4.6",
+            "name": "Grok 4.6",
+            "max_output_tokens": 128_000,
+            "max_context_window_tokens": 500_000,
+            "context_window_options": [
+                {"tier": "default", "max_prompt_tokens": 200_000, "is_default": True},
+                {
+                    "tier": "long_context",
+                    "max_prompt_tokens": 372_000,
+                    "is_default": False,
+                },
+            ],
+        }
+
+        catalog = cc_codex._build_codex_model_catalog([model])
+
+        assert catalog is not None
+        entry = next(item for item in catalog["models"] if item["slug"].endswith("grok-4.6"))
+        assert entry["base_instructions"] == "version-aligned bundled instructions"
+        assert entry["context_window"] == 328_000
+        assert entry["max_context_window"] == 500_000
+        assert entry["supports_search_tool"] is False
+        assert entry["shell_type"] == "default"
+        assert "tool_mode" not in entry
+        assert "multi_agent_version" not in entry
 
     def test_old_beta_endpoint_choice_now_writes_stable_base_url(self, tmp_path, monkeypatch):
         """New configs use the stable dispatcher even if an old extra requests beta."""
