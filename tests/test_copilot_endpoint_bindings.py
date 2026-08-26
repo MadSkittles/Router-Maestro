@@ -175,6 +175,58 @@ async def test_grok_responses_binding_compacts_long_namespace_tool_names() -> No
 
 
 @pytest.mark.asyncio
+async def test_responses_binding_strips_unverifiable_codex_reasoning_blob() -> None:
+    provider = CopilotProvider()
+    binding = _binding(provider, WireProtocol.OPENAI_RESPONSES)
+    reasoning_item = {
+        "type": "reasoning",
+        "content": [],
+        "summary": [{"type": "summary_text", "text": "plan"}],
+        "encrypted_content": "opaque-without-upstream-id",
+    }
+    payload = {
+        "model": "github-copilot/grok-4.6",
+        "input": [reasoning_item, {"role": "user", "content": "continue"}],
+    }
+
+    attempt = await binding.prepare_attempt(
+        model=ModelRef(provider=provider.name, upstream_id="grok-4.6"),
+        payload=payload,
+        stream=True,
+    )
+
+    assert attempt.payload["input"][0] == {
+        "type": "reasoning",
+        "content": [],
+        "summary": [{"type": "summary_text", "text": "plan"}],
+    }
+    assert reasoning_item["encrypted_content"] == "opaque-without-upstream-id"
+
+
+@pytest.mark.asyncio
+async def test_responses_binding_preserves_verifiable_reasoning_pair() -> None:
+    provider = CopilotProvider()
+    binding = _binding(provider, WireProtocol.OPENAI_RESPONSES)
+    reasoning_item = {
+        "type": "reasoning",
+        "id": "rs_upstream",
+        "summary": [{"type": "summary_text", "text": "plan"}],
+        "encrypted_content": "opaque-with-upstream-id",
+    }
+
+    attempt = await binding.prepare_attempt(
+        model=ModelRef(provider=provider.name, upstream_id="gpt-5.4"),
+        payload={
+            "model": "github-copilot/gpt-5.4",
+            "input": [reasoning_item, {"role": "user", "content": "continue"}],
+        },
+        stream=False,
+    )
+
+    assert attempt.payload["input"][0] == reasoning_item
+
+
+@pytest.mark.asyncio
 async def test_cross_chat_attempt_preserves_copilot_reasoning_opaque_for_runtime() -> None:
     provider = CopilotProvider()
     binding = _binding(provider, WireProtocol.OPENAI_CHAT)

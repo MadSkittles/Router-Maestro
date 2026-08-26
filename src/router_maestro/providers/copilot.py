@@ -630,12 +630,30 @@ class CopilotOutboundContract(OutboundContract):
         operation: Operation,
         model: str | None = None,
     ) -> Any:
-        """Sanitize Codex additional_tools registries for Copilot Responses."""
+        """Sanitize Codex history and additional-tools registries for Responses."""
         if not isinstance(value, list):
             return value
         normalized_input = []
         for item in value:
-            if not isinstance(item, dict) or item.get("type") != "additional_tools":
+            if not isinstance(item, dict):
+                normalized_input.append(item)
+                continue
+
+            if (
+                item.get("type") == "reasoning"
+                and item.get("encrypted_content")
+                and not item.get("id")
+            ):
+                # Codex stores the upstream reasoning id but intentionally omits
+                # it when serializing the next request. Copilot signs the opaque
+                # blob against that id, so forwarding the orphaned blob always
+                # fails with "Could not decrypt the provided encrypted_content".
+                normalized_item = dict(item)
+                normalized_item.pop("encrypted_content", None)
+                normalized_input.append(normalized_item)
+                continue
+
+            if item.get("type") != "additional_tools":
                 normalized_input.append(item)
                 continue
             normalized_item = dict(item)
