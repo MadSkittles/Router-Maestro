@@ -33,6 +33,16 @@ All notable changes to Router-Maestro are documented here.
 
 ### Changed
 
+- **Claude Code and Codex can use non-OpenAI Copilot models through their
+  native client protocols.** Responses-to-Chat conversion now explicitly
+  accepts Codex client metadata, cache hints, reasoning-summary preferences,
+  and namespace tool registries. Namespace functions are projected through a
+  reversible Chat-safe name, while Copilot Grok Responses requests flatten the
+  same registries around an upstream limitation and restore namespaces on the
+  returned tool calls. Copilot Chat `reasoning_opaque` state is sealed into an
+  RM capsule for Anthropic replay, allowing multi-turn Claude Code tool flows
+  on Chat-only Gemini models without exposing provider-private state.
+
 - **Claude Code configuration now uses live searchable model choices.** The
   wizard no longer injects hard-coded Opus/Sonnet `[1m]` catalog variants or
   writes `ANTHROPIC_SMALL_FAST_MODEL`. Model and context are selected together;

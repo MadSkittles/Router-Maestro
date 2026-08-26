@@ -2084,6 +2084,40 @@ async def test_opaque_continuation_never_uses_openai_chat_transport() -> None:
 
 
 @pytest.mark.asyncio
+async def test_reasoning_capsule_can_pin_its_originating_chat_transport() -> None:
+    chat = _binding(WireProtocol.OPENAI_CHAT, "chat")
+    provider = _Provider("alpha", "one", (chat,))
+    router = _router((provider,), max_retries=0)
+    codec = ReasoningCapsuleCodec(bytes([8]) * 32)
+    capsule = _capsule(
+        codec,
+        provider="alpha",
+        model="one",
+        transport="chat",
+    )
+    ingress = _Runtime(
+        WireProtocol.ANTHROPIC_MESSAGES,
+        reasoning_capsules=(capsule,),
+        opaque_continuation=True,
+    )
+    chat_runtime = _Runtime(WireProtocol.OPENAI_CHAT)
+    envelope = RequestEnvelope(ingress, {"model": "alpha/one", "messages": []})
+    execution = _Execution(actions={("alpha", "chat"): "ok"})
+
+    result = await GenerationDispatcher(
+        {WireProtocol.OPENAI_CHAT: chat_runtime},
+        execution=execution,
+        reasoning_capsule_codec=codec,
+    ).dispatch(router, envelope)
+
+    assert result.value == "ok"
+    assert result.selection.plan.binding.id == "chat"
+    assert [(provider_name, binding) for provider_name, binding, _ in execution.calls] == [
+        ("alpha", "chat")
+    ]
+
+
+@pytest.mark.asyncio
 async def test_previous_response_id_requires_primary_responses_identity_transport() -> None:
     chat = _binding(WireProtocol.OPENAI_CHAT, "chat")
     responses = _binding(WireProtocol.OPENAI_RESPONSES, "responses")

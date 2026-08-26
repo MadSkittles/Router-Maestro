@@ -14,6 +14,7 @@ import pytest
 
 from router_maestro.config.priorities import PrioritiesConfig
 from router_maestro.protocols import (
+    ConversionMode,
     OpenAIChatRuntime,
     RequestEnvelope,
     RequestManifest,
@@ -40,6 +41,110 @@ from router_maestro.routing.model_ref import ModelRef
 
 def _binding(provider: CopilotProvider, protocol: WireProtocol):
     return next(binding for binding in provider.bindings() if binding.protocol is protocol)
+
+
+@pytest.mark.asyncio
+async def test_grok_responses_binding_flattens_and_restores_namespace_tools() -> None:
+    provider = CopilotProvider()
+    binding = _binding(provider, WireProtocol.OPENAI_RESPONSES)
+    attempt = await binding.prepare_attempt(
+        model=ModelRef(provider=provider.name, upstream_id="grok-4.6"),
+        payload={
+            "model": "github-copilot/grok-4.6",
+            "input": [
+                {
+                    "type": "function_call",
+                    "call_id": "call_1",
+                    "name": "status",
+                    "namespace": "mcp__qmd",
+                    "arguments": "{}",
+                }
+            ],
+            "tools": [
+                {
+                    "type": "namespace",
+                    "name": "mcp__qmd",
+                    "description": "QMD tools",
+                    "tools": [
+                        {
+                            "type": "function",
+                            "name": "status",
+                            "parameters": {
+                                "type": "object",
+                                "properties": {},
+                                "additionalProperties": False,
+                            },
+                        }
+                    ],
+                }
+            ],
+        },
+        stream=False,
+    )
+
+    flattened_tool = attempt.payload["tools"][0]
+    flattened_call = attempt.payload["input"][0]
+    encoded_name = flattened_tool["name"]
+    assert flattened_tool["type"] == "function"
+    assert encoded_name != "status"
+    assert flattened_call["name"] == encoded_name
+    assert "namespace" not in flattened_call
+
+    projected = CopilotHttpExecutor._project_response(
+        WireProtocol.OPENAI_RESPONSES,
+        {
+            "id": "resp_1",
+            "model": "grok-4.6",
+            "output": [
+                {
+                    "type": "function_call",
+                    "call_id": "call_1",
+                    "name": encoded_name,
+                    "arguments": "{}",
+                }
+            ],
+        },
+        model="grok-4.6",
+    )
+    assert projected["output"][0]["name"] == "status"
+    assert projected["output"][0]["namespace"] == "mcp__qmd"
+
+
+@pytest.mark.asyncio
+async def test_cross_chat_attempt_preserves_copilot_reasoning_opaque_for_runtime() -> None:
+    provider = CopilotProvider()
+    binding = _binding(provider, WireProtocol.OPENAI_CHAT)
+    attempt = await binding.prepare_attempt(
+        model=ModelRef(provider=provider.name, upstream_id="gemini-3.6-flash"),
+        payload={"model": "gemini-3.6-flash", "messages": [{"role": "user", "content": "hi"}]},
+        stream=True,
+        request_context=AttemptRequestContext(conversion_mode=ConversionMode.SEMANTIC_IR),
+    )
+    assert attempt.capture_reasoning_state is True
+
+    projected = CopilotHttpExecutor._project_response(
+        WireProtocol.OPENAI_CHAT,
+        {
+            "id": "chatcmpl_1",
+            "object": "chat.completion.chunk",
+            "model": "gemini-3.6-flash",
+            "choices": [
+                {
+                    "index": 0,
+                    "delta": {
+                        "reasoning_text": "plan",
+                        "reasoning_opaque": "provider-state",
+                    },
+                    "finish_reason": None,
+                }
+            ],
+        },
+        model="gemini-3.6-flash",
+        stream=True,
+        capture_reasoning_state=attempt.capture_reasoning_state,
+    )
+    delta = projected["choices"][0]["delta"]
+    assert delta["reasoning_opaque"] == "provider-state"
 
 
 class _IdentityRuntime:

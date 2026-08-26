@@ -13,7 +13,7 @@ from dataclasses import InitVar, dataclass, field
 from types import MappingProxyType
 from typing import Any, Protocol, runtime_checkable
 
-from router_maestro.protocols import WireProtocol
+from router_maestro.protocols import ConversionMode, WireProtocol
 from router_maestro.routing.capabilities import Operation, ProviderCapabilities
 from router_maestro.routing.model_ref import ModelRef
 
@@ -40,17 +40,21 @@ class AttemptRequestContext:
     path: str
     query: Mapping[str, str]
     headers: Mapping[str, str]
+    conversion_mode: ConversionMode | None
 
     def __init__(
         self,
         path: str = "",
         query: Mapping[str, str] | None = None,
         headers: Mapping[str, str] | None = None,
+        conversion_mode: ConversionMode | None = None,
         *,
         _mappings_owned: bool = False,
     ) -> None:
         if not isinstance(path, str):
             raise TypeError("attempt request path must be a string")
+        if conversion_mode is not None and not isinstance(conversion_mode, ConversionMode):
+            raise TypeError("attempt conversion mode must be a ConversionMode")
         query_snapshot = (
             query
             if _mappings_owned and isinstance(query, dict)
@@ -84,6 +88,7 @@ class AttemptRequestContext:
             "headers",
             MappingProxyType(header_snapshot) if header_snapshot else _EMPTY_STRING_MAPPING,
         )
+        object.__setattr__(self, "conversion_mode", conversion_mode)
 
     def header(self, name: str) -> str | None:
         """Return one case-insensitive ingress header value."""
@@ -108,6 +113,7 @@ class PreparedAttempt:
     headers: Mapping[str, str] = field(default_factory=dict)
     stream: bool = False
     method: str = "POST"
+    capture_reasoning_state: bool = False
     _payload_owned: InitVar[bool] = False
 
     def __post_init__(self, _payload_owned: bool) -> None:

@@ -564,7 +564,7 @@ class GenerationDispatcher:
                     value = await self._execution.execute(
                         transport,
                         payload,
-                        request_context=self._attempt_request_context(envelope),
+                        request_context=self._attempt_request_context(envelope, transport),
                     )
                     value = await self._validated_response(transport, value)
                 except ProtocolRepresentabilityError as error:
@@ -687,7 +687,7 @@ class GenerationDispatcher:
                     iterator = await self._execution.open_stream(
                         transport,
                         payload,
-                        request_context=self._attempt_request_context(envelope),
+                        request_context=self._attempt_request_context(envelope, transport),
                     )
                     first = await anext(iterator)
                     if isinstance(first, Mapping):
@@ -959,7 +959,11 @@ class GenerationDispatcher:
                 model=transport.model.upstream_id,
                 transport=transport.binding.id,
             )
-        if (manifest.opaque_continuation) and transport.target_protocol is WireProtocol.OPENAI_CHAT:
+        if (
+            manifest.opaque_continuation
+            and transport.target_protocol is WireProtocol.OPENAI_CHAT
+            and continuation_affinity is None
+        ):
             return False
         if continuation_affinity is None:
             return True
@@ -1133,12 +1137,16 @@ class GenerationDispatcher:
         return model
 
     @staticmethod
-    def _attempt_request_context(envelope: RequestEnvelope) -> AttemptRequestContext:
+    def _attempt_request_context(
+        envelope: RequestEnvelope,
+        transport: TransportPlan,
+    ) -> AttemptRequestContext:
         """Expose immutable ingress metadata without coupling dialects to FastAPI."""
         return AttemptRequestContext(
             path=envelope.path,
             query=envelope.query,
             headers=envelope.headers,
+            conversion_mode=transport.conversion_mode,
             _mappings_owned=True,
         )
 

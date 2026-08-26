@@ -195,6 +195,8 @@ class ToolDefinition:
     input_schema: Mapping[str, FrozenJsonValue]
     description: str | None = None
     strict: bool | None = None
+    namespace: str | None = None
+    namespace_description: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "input_schema", _freeze_mapping(self.input_schema))
@@ -263,6 +265,7 @@ SemanticItem: TypeAlias = SemanticMessage | MessageContent  # noqa: UP040 - Pyth
 class ToolChoice:
     mode: str
     name: str | None = None
+    namespace: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

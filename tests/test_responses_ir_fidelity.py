@@ -581,18 +581,38 @@ def _cross_protocol_request(name: str, result: ToolResult) -> SemanticRequest:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("runtime_name", "path_prefix"),
+    ("runtime_name", "path_prefix", "result", "field"),
     [
-        ("anthropic", "input[0].content[0]"),
-        ("chat", "input[0].content"),
-        ("gemini", "input[0].content[0]"),
-    ],
-)
-@pytest.mark.parametrize(
-    ("result", "field"),
-    [
-        (ToolResult(call_id="call_1", kind="custom"), "kind"),
-        (ToolResult(call_id="call_1", namespace="crm"), "namespace"),
+        (
+            "anthropic",
+            "input[0].content[0]",
+            ToolResult(call_id="call_1", kind="custom"),
+            "kind",
+        ),
+        (
+            "chat",
+            "input[0].content",
+            ToolResult(call_id="call_1", kind="custom"),
+            "kind",
+        ),
+        (
+            "gemini",
+            "input[0].content[0]",
+            ToolResult(call_id="call_1", kind="custom"),
+            "kind",
+        ),
+        (
+            "anthropic",
+            "input[0].content[0]",
+            ToolResult(call_id="call_1", namespace="crm"),
+            "namespace",
+        ),
+        (
+            "gemini",
+            "input[0].content[0]",
+            ToolResult(call_id="call_1", namespace="crm"),
+            "namespace",
+        ),
     ],
 )
 async def test_cross_protocol_tool_results_reject_kind_and_namespace_silent_drop(
@@ -607,6 +627,18 @@ async def test_cross_protocol_tool_results_reject_kind_and_namespace_silent_drop
         await runtime.encode_request(_cross_protocol_request(runtime_name, result))
 
     assert raised.value.path == f"{path_prefix}.{field}"
+
+
+@pytest.mark.asyncio
+async def test_chat_tool_result_namespace_is_preserved_by_call_id_linkage() -> None:
+    encoded = await OpenAIChatRuntime().encode_request(
+        _cross_protocol_request(
+            "chat",
+            ToolResult(call_id="call_1", namespace="crm", content=(TextContent("ok"),)),
+        )
+    )
+
+    assert encoded["messages"][0]["tool_call_id"] == "call_1"
 
 
 @pytest.mark.asyncio

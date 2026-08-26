@@ -7,8 +7,13 @@ import time
 from collections.abc import Mapping
 from contextvars import ContextVar
 from dataclasses import replace
+from hashlib import sha256
 from typing import Any, cast
 
+from router_maestro.protocols._tool_namespace import (
+    decode_namespaced_tool_name,
+    encode_namespaced_tool_name,
+)
 from router_maestro.protocols._tool_result_projection import (
     ToolResultProjectionError,
     project_tool_result_output,
@@ -126,10 +131,14 @@ class OpenAIChatRuntime:
         self,
         *,
         origin_provider: str | None = None,
+        origin_binding: str | None = None,
         default_model: str | None = None,
+        allow_reasoning_opaque: bool = False,
     ) -> None:
         self.origin_provider = origin_provider
+        self.origin_binding = origin_binding
         self.default_model = default_model
+        self.allow_reasoning_opaque = allow_reasoning_opaque
         self._stream_decoder: ContextVar[OpenAIChatStreamDecoder | None] = ContextVar(
             f"openai_chat_stream_decoder_{id(self)}",
             default=None,
@@ -156,10 +165,20 @@ class OpenAIChatRuntime:
         return _decode_request(payload)
 
     async def encode_request(self, request: SemanticRequest) -> Mapping[str, Any]:
-        return _encode_request(request)
+        return _encode_request(
+            request,
+            target_provider=self.origin_provider,
+            target_binding=self.origin_binding,
+            allow_reasoning_opaque=self.allow_reasoning_opaque,
+        )
 
     async def decode_response(self, payload: Mapping[str, Any]) -> SemanticResponse:
-        return _decode_response(payload)
+        return _decode_response(
+            payload,
+            origin_provider=self.origin_provider,
+            origin_binding=self.origin_binding,
+            allow_reasoning_opaque=self.allow_reasoning_opaque,
+        )
 
     async def encode_response(self, response: SemanticResponse) -> Mapping[str, Any]:
         return _encode_response(response)
@@ -167,8 +186,10 @@ class OpenAIChatRuntime:
     def new_stream_decoder(self, *, sequence_start: int = 0) -> OpenAIChatStreamDecoder:
         return OpenAIChatStreamDecoder(
             origin_provider=self.origin_provider,
+            origin_binding=self.origin_binding,
             default_model=self.default_model,
             sequence_start=sequence_start,
+            allow_reasoning_opaque=self.allow_reasoning_opaque,
         )
 
     def new_stream_encoder(
@@ -216,10 +237,14 @@ class OpenAIChatStreamDecoder:
         self,
         *,
         origin_provider: str | None = None,
+        origin_binding: str | None = None,
         default_model: str | None = None,
         sequence_start: int = 0,
+        allow_reasoning_opaque: bool = False,
     ) -> None:
         self.origin_provider = origin_provider
+        self.origin_binding = origin_binding
+        self.allow_reasoning_opaque = allow_reasoning_opaque
         self._sequence = sequence_start
         self._started = False
         self._terminal = False
@@ -441,6 +466,7 @@ class OpenAIChatStreamDecoder:
                     "tool_calls",
                     "thinking_id",
                     "thinking_signature",
+                    "reasoning_opaque",
                 }
             ),
             protocol=_PROTOCOL,
@@ -494,11 +520,32 @@ class OpenAIChatStreamDecoder:
             protocol=_PROTOCOL,
             parameter="stream.choices[0].delta.thinking_signature",
         )
+        reasoning_opaque = optional_string(
+            delta.get("reasoning_opaque"),
+            protocol=_PROTOCOL,
+            parameter="stream.choices[0].delta.reasoning_opaque",
+        )
+        if reasoning_opaque is not None:
+            if not self.allow_reasoning_opaque:
+                decode_reject(
+                    _PROTOCOL,
+                    "stream.choices[0].delta.reasoning_opaque",
+                    "provider-private reasoning is unavailable on this binding",
+                )
+            if signature is not None:
+                decode_reject(
+                    _PROTOCOL,
+                    "stream.choices[0].delta",
+                    "reasoning_opaque conflicts with thinking_signature",
+                )
+            signature = reasoning_opaque
         thinking_id = optional_string(
             delta.get("thinking_id"),
             protocol=_PROTOCOL,
             parameter="stream.choices[0].delta.thinking_id",
         )
+        if reasoning_opaque is not None:
+            thinking_id = _opaque_reasoning_item_id(reasoning_opaque)
         if signature is not None:
             if thinking_id is None or self._model is None or self.origin_provider is None:
                 decode_reject(
@@ -519,6 +566,7 @@ class OpenAIChatStreamDecoder:
                                 origin_model=self._model,
                                 item_id=thinking_id,
                                 blob=signature,
+                                origin_binding=self.origin_binding,
                             ),
                         ),
                         "metadata": {
@@ -582,10 +630,17 @@ class OpenAIChatStreamDecoder:
                     protocol=_PROTOCOL,
                     parameter=f"{path}.function.name",
                 )
+                namespace = None
+                if name is not None:
+                    namespaced = decode_namespaced_tool_name(name)
+                    if namespaced is not None:
+                        namespace, name = namespaced
                 if call_id is not None:
                     metadata["call_id"] = call_id
                 if name is not None:
                     metadata["name"] = name
+                if namespace is not None:
+                    metadata["namespace"] = namespace
                 specs.append(
                     (
                         SemanticEventType.TOOL_ARGUMENTS_DELTA,
@@ -863,6 +918,10 @@ class OpenAIChatStreamEncoder:
         return payload
 
 
+def _opaque_reasoning_item_id(value: str) -> str:
+    return f"chat_rs_{sha256(value.encode()).hexdigest()[:24]}"
+
+
 def _decode_request(payload: Mapping[str, Any]) -> SemanticRequest:
     body = require_mapping(payload, protocol=_PROTOCOL, parameter="request")
     reject_unknown_keys(body, _REQUEST_FIELDS, protocol=_PROTOCOL, parameter="")
@@ -990,7 +1049,15 @@ def _decode_reasoning(body: Mapping[str, Any]) -> ReasoningConfig | None:
     )
 
 
-def _decode_message(value: object, *, parameter: str) -> SemanticMessage:
+def _decode_message(
+    value: object,
+    *,
+    parameter: str,
+    origin_provider: str | None = None,
+    origin_binding: str | None = None,
+    origin_model: str | None = None,
+    allow_reasoning_opaque: bool = False,
+) -> SemanticMessage:
     message = require_mapping(value, protocol=_PROTOCOL, parameter=parameter)
     reject_unknown_keys(
         message,
@@ -1005,6 +1072,9 @@ def _decode_message(value: object, *, parameter: str) -> SemanticMessage:
                 "reasoning",
                 "reasoning_content",
                 "reasoning_text",
+                "thinking_id",
+                "thinking_signature",
+                "reasoning_opaque",
             }
         ),
         protocol=_PROTOCOL,
@@ -1062,16 +1132,79 @@ def _decode_message(value: object, *, parameter: str) -> SemanticMessage:
     if len(reasoning_fields) > 1:
         decode_reject(_PROTOCOL, parameter, "reasoning fields conflict")
     reasoning = next(iter(reasoning_fields.values()), None)
-    if reasoning is not None:
+    thinking_signature = optional_string(
+        message.get("thinking_signature"),
+        protocol=_PROTOCOL,
+        parameter=f"{parameter}.thinking_signature",
+    )
+    reasoning_opaque = optional_string(
+        message.get("reasoning_opaque"),
+        protocol=_PROTOCOL,
+        parameter=f"{parameter}.reasoning_opaque",
+    )
+    if reasoning_opaque is not None:
+        if not allow_reasoning_opaque:
+            decode_reject(
+                _PROTOCOL,
+                f"{parameter}.reasoning_opaque",
+                "provider-private reasoning is unavailable on this binding",
+            )
+        if thinking_signature is not None:
+            decode_reject(
+                _PROTOCOL,
+                parameter,
+                "reasoning_opaque conflicts with thinking_signature",
+            )
+        thinking_signature = reasoning_opaque
+    thinking_id = optional_string(
+        message.get("thinking_id"),
+        protocol=_PROTOCOL,
+        parameter=f"{parameter}.thinking_id",
+    )
+    if reasoning_opaque is not None:
+        thinking_id = _opaque_reasoning_item_id(reasoning_opaque)
+    opaque_state = None
+    if thinking_signature is not None:
+        if (
+            role is not MessageRole.ASSISTANT
+            or thinking_id is None
+            or origin_provider is None
+            or origin_model is None
+        ):
+            decode_reject(
+                _PROTOCOL,
+                f"{parameter}.thinking_signature",
+                "opaque reasoning requires assistant role and provider provenance",
+            )
+        opaque_state = OpaqueState(
+            origin_protocol=_PROTOCOL,
+            origin_provider=origin_provider,
+            origin_model=origin_model,
+            item_id=thinking_id,
+            blob=thinking_signature,
+            origin_binding=origin_binding,
+        )
+    elif thinking_id is not None:
+        decode_reject(
+            _PROTOCOL,
+            f"{parameter}.thinking_id",
+            "requires thinking_signature",
+        )
+    if reasoning is not None or opaque_state is not None:
         if role is not MessageRole.ASSISTANT:
             decode_reject(_PROTOCOL, f"{parameter}.reasoning_content", "requires assistant role")
         parts.append(
             ReasoningSummary(
-                require_string(
-                    reasoning,
-                    protocol=_PROTOCOL,
-                    parameter=f"{parameter}.reasoning_content",
-                )
+                (
+                    require_string(
+                        reasoning,
+                        protocol=_PROTOCOL,
+                        parameter=f"{parameter}.reasoning_content",
+                    )
+                    if reasoning is not None
+                    else ""
+                ),
+                opaque_state=opaque_state,
             )
         )
     tool_calls = message.get("tool_calls")
@@ -1169,6 +1302,14 @@ def _decode_tool_call(value: object, *, parameter: str) -> ToolCall:
         protocol=_PROTOCOL,
         parameter=f"{parameter}.function",
     )
+    raw_name = require_string(
+        function.get("name"),
+        protocol=_PROTOCOL,
+        parameter=f"{parameter}.function.name",
+        allow_empty=False,
+    )
+    namespaced = decode_namespaced_tool_name(raw_name)
+    namespace, name = namespaced if namespaced is not None else (None, raw_name)
     return ToolCall(
         call_id=require_string(
             call.get("id"),
@@ -1176,17 +1317,13 @@ def _decode_tool_call(value: object, *, parameter: str) -> ToolCall:
             parameter=f"{parameter}.id",
             allow_empty=False,
         ),
-        name=require_string(
-            function.get("name"),
-            protocol=_PROTOCOL,
-            parameter=f"{parameter}.function.name",
-            allow_empty=False,
-        ),
+        name=name,
         arguments=parse_arguments(
             function.get("arguments", "{}"),
             protocol=_PROTOCOL,
             parameter=f"{parameter}.function.arguments",
         ),
+        namespace=namespace,
     )
 
 
@@ -1220,14 +1357,17 @@ def _decode_tools(value: object) -> tuple[ToolDefinition, ...]:
         parameters = require_mapping(
             parameters, protocol=_PROTOCOL, parameter=f"{path}.function.parameters"
         )
+        raw_name = require_string(
+            function.get("name"),
+            protocol=_PROTOCOL,
+            parameter=f"{path}.function.name",
+            allow_empty=False,
+        )
+        namespaced = decode_namespaced_tool_name(raw_name)
+        namespace, name = namespaced if namespaced is not None else (None, raw_name)
         decoded.append(
             ToolDefinition(
-                name=require_string(
-                    function.get("name"),
-                    protocol=_PROTOCOL,
-                    parameter=f"{path}.function.name",
-                    allow_empty=False,
-                ),
+                name=name,
                 description=optional_string(
                     function.get("description"),
                     protocol=_PROTOCOL,
@@ -1239,17 +1379,32 @@ def _decode_tools(value: object) -> tuple[ToolDefinition, ...]:
                     protocol=_PROTOCOL,
                     parameter=f"{path}.function.strict",
                 ),
+                namespace=namespace,
             )
         )
     return tuple(decoded)
 
 
-def _encode_request(request: SemanticRequest) -> dict[str, Any]:
+def _encode_request(
+    request: SemanticRequest,
+    *,
+    target_provider: str | None = None,
+    target_binding: str | None = None,
+    allow_reasoning_opaque: bool = False,
+) -> dict[str, Any]:
     _reject_request_fields(request)
     payload: dict[str, Any] = {
         "model": request.model,
         "messages": [
-            _encode_message(item, index=index) for index, item in enumerate(request.input)
+            _encode_message(
+                item,
+                index=index,
+                model=request.model,
+                target_provider=target_provider,
+                target_binding=target_binding,
+                allow_reasoning_opaque=allow_reasoning_opaque,
+            )
+            for index, item in enumerate(request.input)
         ],
     }
     _put(payload, "stream", request.stream, request, source_name="stream", default=False)
@@ -1266,7 +1421,21 @@ def _encode_request(request: SemanticRequest) -> dict[str, Any]:
         payload["metadata"] = thaw_json(request.metadata)
     if request.tools:
         payload["tools"] = [_encode_tool(tool) for tool in request.tools]
-    tool_choice = encode_tool_choice(request.tool_choice, protocol=_PROTOCOL, nested_function=True)
+    tool_choice_value = request.tool_choice
+    if tool_choice_value is not None and tool_choice_value.namespace is not None:
+        try:
+            encoded_name = encode_namespaced_tool_name(
+                tool_choice_value.namespace,
+                tool_choice_value.name or "",
+            )
+        except ValueError as error:
+            reject(_PROTOCOL, "tool_choice.namespace", str(error))
+        tool_choice_value = replace(tool_choice_value, name=encoded_name, namespace=None)
+    tool_choice = encode_tool_choice(
+        tool_choice_value,
+        protocol=_PROTOCOL,
+        nested_function=True,
+    )
     if tool_choice is not None:
         payload["tool_choice"] = tool_choice
     if request.parallel_tool_calls is not None:
@@ -1316,7 +1485,15 @@ def _reject_request_fields(request: SemanticRequest) -> None:
         reject(_PROTOCOL, key, "provider extension is not portable")
 
 
-def _encode_message(item: object, *, index: int) -> dict[str, Any]:
+def _encode_message(
+    item: object,
+    *,
+    index: int,
+    model: str | None = None,
+    target_provider: str | None = None,
+    target_binding: str | None = None,
+    allow_reasoning_opaque: bool = False,
+) -> dict[str, Any]:
     path = f"input[{index}]"
     if isinstance(item, ToolCall):
         item = SemanticMessage(role=MessageRole.ASSISTANT, content=(item,))
@@ -1339,6 +1516,7 @@ def _encode_message(item: object, *, index: int) -> dict[str, Any]:
     tool_calls: list[dict[str, Any]] = []
     refusal = None
     reasoning = None
+    reasoning_opaque = None
     for part_index, part in enumerate(item.content):
         part_path = f"{path}.content[{part_index}]"
         if isinstance(part, TextContent):
@@ -1377,7 +1555,20 @@ def _encode_message(item: object, *, index: int) -> dict[str, Any]:
             if item.role is not MessageRole.ASSISTANT or reasoning is not None:
                 reject(_PROTOCOL, part_path, "reasoning requires one assistant content part")
             if part.opaque_state is not None:
-                reject(_PROTOCOL, part_path, "Chat cannot carry opaque reasoning state")
+                state = part.opaque_state
+                if (
+                    not allow_reasoning_opaque
+                    or target_provider is None
+                    or target_binding is None
+                    or model is None
+                    or state.origin_provider != target_provider
+                    or state.origin_binding != target_binding
+                    or state.origin_model != model
+                    or state.origin_protocol is not _PROTOCOL
+                    or not isinstance(state.blob, str)
+                ):
+                    reject(_PROTOCOL, part_path, "Chat cannot carry opaque reasoning state")
+                reasoning_opaque = state.blob
             reasoning = part.text
         elif isinstance(part, ToolCall):
             if item.role is not MessageRole.ASSISTANT:
@@ -1399,7 +1590,11 @@ def _encode_message(item: object, *, index: int) -> dict[str, Any]:
     if refusal is not None:
         payload["refusal"] = refusal
     if reasoning is not None:
-        payload["reasoning_content"] = reasoning
+        if reasoning_opaque is not None:
+            payload["reasoning_text"] = reasoning
+            payload["reasoning_opaque"] = reasoning_opaque
+        else:
+            payload["reasoning_content"] = reasoning
     if tool_calls:
         payload["tool_calls"] = tool_calls
     return payload
@@ -1414,12 +1609,6 @@ def _encode_tool_result_message(message: SemanticMessage, *, parameter: str) -> 
             _PROTOCOL,
             f"{parameter}.content.kind",
             f"unsupported tool result kind {result.kind!r}",
-        )
-    if result.namespace is not None:
-        reject(
-            _PROTOCOL,
-            f"{parameter}.content.namespace",
-            "Chat cannot carry tool result namespaces",
         )
     if result.item_id is not None:
         reject(_PROTOCOL, f"{parameter}.content.item_id", "Chat tool results lack item IDs")
@@ -1458,20 +1647,30 @@ def _encode_tool_call(call: ToolCall, *, parameter: str) -> dict[str, Any]:
         reject(_PROTOCOL, f"{parameter}.item_id", "Chat tool calls lack item IDs")
     if call.kind != "function":
         reject(_PROTOCOL, f"{parameter}.kind", f"unsupported tool call kind {call.kind!r}")
-    if call.namespace is not None:
-        reject(_PROTOCOL, f"{parameter}.namespace", "Chat cannot carry tool namespaces")
     if call.opaque_state is not None:
         reject(_PROTOCOL, f"{parameter}.opaque_state", "Chat cannot carry opaque tool state")
+    name = call.name
+    if call.namespace is not None:
+        try:
+            name = encode_namespaced_tool_name(call.namespace, call.name)
+        except ValueError as error:
+            reject(_PROTOCOL, f"{parameter}.namespace", str(error))
     return {
         "id": call.call_id,
         "type": "function",
-        "function": {"name": call.name, "arguments": encode_arguments(call.arguments)},
+        "function": {"name": name, "arguments": encode_arguments(call.arguments)},
     }
 
 
 def _encode_tool(tool: ToolDefinition) -> dict[str, Any]:
+    name = tool.name
+    if tool.namespace is not None:
+        try:
+            name = encode_namespaced_tool_name(tool.namespace, tool.name)
+        except ValueError as error:
+            reject(_PROTOCOL, f"tools.{tool.name}.namespace", str(error))
     function: dict[str, Any] = {
-        "name": tool.name,
+        "name": name,
         "parameters": thaw_json(tool.input_schema),
     }
     if tool.description is not None:
@@ -1481,7 +1680,13 @@ def _encode_tool(tool: ToolDefinition) -> dict[str, Any]:
     return {"type": "function", "function": function}
 
 
-def _decode_response(payload: Mapping[str, Any]) -> SemanticResponse:
+def _decode_response(
+    payload: Mapping[str, Any],
+    *,
+    origin_provider: str | None = None,
+    origin_binding: str | None = None,
+    allow_reasoning_opaque: bool = False,
+) -> SemanticResponse:
     body = require_mapping(payload, protocol=_PROTOCOL, parameter="response")
     reject_unknown_keys(
         body,
@@ -1512,7 +1717,20 @@ def _decode_response(payload: Mapping[str, Any]) -> SemanticResponse:
     )
     if choice.get("logprobs") is not None:
         decode_reject(_PROTOCOL, "response.choices[0].logprobs", "is not modeled")
-    message = _decode_message(choice.get("message"), parameter="response.choices[0].message")
+    model = require_string(
+        body.get("model"),
+        protocol=_PROTOCOL,
+        parameter="response.model",
+        allow_empty=False,
+    )
+    message = _decode_message(
+        choice.get("message"),
+        parameter="response.choices[0].message",
+        origin_provider=origin_provider,
+        origin_binding=origin_binding,
+        origin_model=model,
+        allow_reasoning_opaque=allow_reasoning_opaque,
+    )
     if message.role is not MessageRole.ASSISTANT:
         decode_reject(_PROTOCOL, "response.choices[0].message.role", "must be assistant")
     finish_reason = optional_string(
@@ -1534,12 +1752,7 @@ def _decode_response(payload: Mapping[str, Any]) -> SemanticResponse:
         id=require_string(
             body.get("id"), protocol=_PROTOCOL, parameter="response.id", allow_empty=False
         ),
-        model=require_string(
-            body.get("model"),
-            protocol=_PROTOCOL,
-            parameter="response.model",
-            allow_empty=False,
-        ),
+        model=model,
         output=(message,),
         usage=decode_usage(
             body.get("usage"),

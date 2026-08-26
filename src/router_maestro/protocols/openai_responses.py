@@ -90,6 +90,10 @@ _REQUEST_FIELDS = frozenset(
         "service_tier",
         "text",
         "previous_response_id",
+        "client_metadata",
+        "include",
+        "prompt_cache_key",
+        "store",
     }
 )
 _RESPONSE_CORE_FIELDS = frozenset(
@@ -1403,6 +1407,9 @@ class OpenAIResponsesStreamEncoder:
                     "arguments": "",
                     "status": "completed",
                 }
+                namespace = event.metadata.get("namespace")
+                if isinstance(namespace, str) and namespace:
+                    raw_item["namespace"] = namespace
                 self._output[output_index] = raw_item
                 frames.append(
                     {
@@ -1721,8 +1728,7 @@ def _decode_request(
             ),
         )
     reasoning = _decode_reasoning(body.get("reasoning"))
-    metadata = body.get("metadata") or {}
-    metadata = require_mapping(metadata, protocol=_PROTOCOL, parameter="metadata")
+    metadata = _decode_request_metadata(body)
     structured_output = body.get("text")
     if structured_output is not None:
         structured_output = require_mapping(structured_output, protocol=_PROTOCOL, parameter="text")
@@ -1783,16 +1789,80 @@ def _decode_reasoning(value: object) -> ReasoningConfig | None:
     reasoning = require_mapping(value, protocol=_PROTOCOL, parameter="reasoning")
     reject_unknown_keys(
         reasoning,
-        frozenset({"effort"}),
+        frozenset({"effort", "summary"}),
         protocol=_PROTOCOL,
         parameter="reasoning",
     )
+    summary = optional_string(
+        reasoning.get("summary"), protocol=_PROTOCOL, parameter="reasoning.summary"
+    )
+    if summary not in {None, "auto", "concise", "detailed", "none"}:
+        decode_reject(_PROTOCOL, "reasoning.summary", f"unsupported value {summary!r}")
     return ReasoningConfig(
         enabled=True,
         effort=optional_string(
             reasoning.get("effort"), protocol=_PROTOCOL, parameter="reasoning.effort"
         ),
     )
+
+
+def _decode_request_metadata(body: Mapping[str, Any]) -> Mapping[str, Any]:
+    metadata = dict(
+        require_mapping(body.get("metadata") or {}, protocol=_PROTOCOL, parameter="metadata")
+    )
+    client_metadata = body.get("client_metadata")
+    if client_metadata is not None:
+        client_metadata = require_mapping(
+            client_metadata,
+            protocol=_PROTOCOL,
+            parameter="client_metadata",
+        )
+        if "client_metadata" in metadata and metadata["client_metadata"] != client_metadata:
+            decode_reject(
+                _PROTOCOL,
+                "client_metadata",
+                "conflicts with metadata.client_metadata",
+            )
+        metadata["client_metadata"] = client_metadata
+
+    prompt_cache_key = optional_string(
+        body.get("prompt_cache_key"),
+        protocol=_PROTOCOL,
+        parameter="prompt_cache_key",
+    )
+    if prompt_cache_key is not None:
+        if "prompt_cache_key" in metadata and metadata["prompt_cache_key"] != prompt_cache_key:
+            decode_reject(
+                _PROTOCOL,
+                "prompt_cache_key",
+                "conflicts with metadata.prompt_cache_key",
+            )
+        metadata["prompt_cache_key"] = prompt_cache_key
+
+    include = body.get("include")
+    if include is not None:
+        values = require_list(include, protocol=_PROTOCOL, parameter="include")
+        for index, raw_value in enumerate(values):
+            value = require_string(
+                raw_value,
+                protocol=_PROTOCOL,
+                parameter=f"include[{index}]",
+            )
+            if value != "reasoning.encrypted_content":
+                decode_reject(
+                    _PROTOCOL,
+                    f"include[{index}]",
+                    f"unsupported value {value!r}",
+                )
+
+    store = optional_bool(body.get("store"), protocol=_PROTOCOL, parameter="store")
+    if store is True:
+        decode_reject(
+            _PROTOCOL,
+            "store",
+            "server-side storage is available only on an identity Responses path",
+        )
+    return metadata
 
 
 def _decode_input(
@@ -2254,42 +2324,96 @@ def _decode_tools(value: object) -> tuple[ToolDefinition, ...]:
     for index, raw_tool in enumerate(tools):
         path = f"tools[{index}]"
         tool = require_mapping(raw_tool, protocol=_PROTOCOL, parameter=path)
+        tool_type = require_string(tool.get("type"), protocol=_PROTOCOL, parameter=f"{path}.type")
+        if tool_type == "function":
+            decoded.append(_decode_function_tool(tool, parameter=path))
+            continue
+        if tool_type != "namespace":
+            decode_reject(
+                _PROTOCOL, f"{path}.type", "only function and namespace tools are modeled"
+            )
         reject_unknown_keys(
             tool,
-            frozenset({"type", "name", "description", "parameters", "strict"}),
+            frozenset({"type", "name", "description", "tools"}),
             protocol=_PROTOCOL,
             parameter=path,
         )
-        tool_type = require_string(tool.get("type"), protocol=_PROTOCOL, parameter=f"{path}.type")
-        if tool_type != "function":
-            decode_reject(_PROTOCOL, f"{path}.type", "only function tools are modeled")
-        parameters = require_mapping(
+        namespace = require_string(
+            tool.get("name"), protocol=_PROTOCOL, parameter=f"{path}.name", allow_empty=False
+        )
+        namespace_description = optional_string(
+            tool.get("description"), protocol=_PROTOCOL, parameter=f"{path}.description"
+        )
+        inner_tools = require_list(tool.get("tools"), protocol=_PROTOCOL, parameter=f"{path}.tools")
+        if not inner_tools:
+            decode_reject(_PROTOCOL, f"{path}.tools", "namespace must contain tools")
+        for inner_index, raw_inner in enumerate(inner_tools):
+            inner_path = f"{path}.tools[{inner_index}]"
+            inner = require_mapping(raw_inner, protocol=_PROTOCOL, parameter=inner_path)
+            if inner.get("defer_loading") is True:
+                decode_reject(
+                    _PROTOCOL,
+                    f"{inner_path}.defer_loading",
+                    "deferred tools are unavailable on cross-protocol transports",
+                )
+            decoded.append(
+                _decode_function_tool(
+                    inner,
+                    parameter=inner_path,
+                    namespace=namespace,
+                    namespace_description=namespace_description,
+                    allow_defer_loading=True,
+                )
+            )
+    return tuple(decoded)
+
+
+def _decode_function_tool(
+    tool: Mapping[str, Any],
+    *,
+    parameter: str,
+    namespace: str | None = None,
+    namespace_description: str | None = None,
+    allow_defer_loading: bool = False,
+) -> ToolDefinition:
+    allowed = {"type", "name", "description", "parameters", "strict"}
+    if allow_defer_loading:
+        allowed.add("defer_loading")
+    reject_unknown_keys(tool, frozenset(allowed), protocol=_PROTOCOL, parameter=parameter)
+    tool_type = require_string(tool.get("type"), protocol=_PROTOCOL, parameter=f"{parameter}.type")
+    if tool_type != "function":
+        decode_reject(_PROTOCOL, f"{parameter}.type", "namespace members must be functions")
+    if allow_defer_loading:
+        optional_bool(
+            tool.get("defer_loading"),
+            protocol=_PROTOCOL,
+            parameter=f"{parameter}.defer_loading",
+        )
+    return ToolDefinition(
+        name=require_string(
+            tool.get("name"),
+            protocol=_PROTOCOL,
+            parameter=f"{parameter}.name",
+            allow_empty=False,
+        ),
+        description=optional_string(
+            tool.get("description"),
+            protocol=_PROTOCOL,
+            parameter=f"{parameter}.description",
+        ),
+        input_schema=require_mapping(
             tool.get("parameters", {}),
             protocol=_PROTOCOL,
-            parameter=f"{path}.parameters",
-        )
-        decoded.append(
-            ToolDefinition(
-                name=require_string(
-                    tool.get("name"),
-                    protocol=_PROTOCOL,
-                    parameter=f"{path}.name",
-                    allow_empty=False,
-                ),
-                description=optional_string(
-                    tool.get("description"),
-                    protocol=_PROTOCOL,
-                    parameter=f"{path}.description",
-                ),
-                input_schema=parameters,
-                strict=optional_bool(
-                    tool.get("strict"),
-                    protocol=_PROTOCOL,
-                    parameter=f"{path}.strict",
-                ),
-            )
-        )
-    return tuple(decoded)
+            parameter=f"{parameter}.parameters",
+        ),
+        strict=optional_bool(
+            tool.get("strict"),
+            protocol=_PROTOCOL,
+            parameter=f"{parameter}.strict",
+        ),
+        namespace=namespace,
+        namespace_description=namespace_description,
+    )
 
 
 def _encode_request(
@@ -2316,7 +2440,7 @@ def _encode_request(
     if request.metadata:
         payload["metadata"] = thaw_json(request.metadata)
     if request.tools:
-        payload["tools"] = [_encode_tool(tool) for tool in request.tools]
+        payload["tools"] = _encode_tools(request.tools)
     choice = encode_tool_choice(request.tool_choice, protocol=_PROTOCOL, nested_function=False)
     if choice is not None:
         payload["tool_choice"] = choice
@@ -2364,6 +2488,33 @@ def _reject_request_fields(request: SemanticRequest) -> None:
     if request.provider_extensions:
         key = sorted(request.provider_extensions)[0]
         reject(_PROTOCOL, key, "provider extension is not portable")
+
+
+def _encode_tools(tools: tuple[ToolDefinition, ...]) -> list[dict[str, Any]]:
+    encoded: list[dict[str, Any]] = []
+    namespaces: dict[str, dict[str, Any]] = {}
+    for tool in tools:
+        if tool.namespace is None:
+            encoded.append(_encode_tool(tool))
+            continue
+        namespace = namespaces.get(tool.namespace)
+        if namespace is None:
+            namespace = {
+                "type": "namespace",
+                "name": tool.namespace,
+                "description": tool.namespace_description or "",
+                "tools": [],
+            }
+            namespaces[tool.namespace] = namespace
+            encoded.append(namespace)
+        elif namespace["description"] != (tool.namespace_description or ""):
+            reject(
+                _PROTOCOL,
+                f"tools.{tool.namespace}.description",
+                "namespace descriptions conflict",
+            )
+        namespace["tools"].append(_encode_tool(tool))
+    return encoded
 
 
 def _put(

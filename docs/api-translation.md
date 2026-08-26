@@ -51,8 +51,11 @@ Responses reasoning state that must cross an Anthropic or Gemini boundary is
 sealed as `rmr1.<key-id>.<payload>` with AES-256-GCM. Anthropic
 `thinking.signature`/`redacted_thinking.data` and Gemini `thoughtSignature`
 carry the capsule; returning through a compatible Responses binding restores
-the original reasoning item. Chat has no reliable opaque continuation slot, so
-such a request is not eligible for Chat fallback.
+the original reasoning item. Standard Chat has no reliable opaque continuation
+slot, so such a request is not eligible for generic Chat fallback. Copilot Chat
+is the narrow exception: its provider-private `reasoning_opaque` field is
+captured only on a cross-protocol attempt, sealed into a capsule, and replayed
+only to the exact Copilot provider/model/Chat binding that produced it.
 
 Capsules and `previous_response_id` establish provider/model/transport
 affinity. Unknown keys, tampering, version errors, or provenance mismatch fail
@@ -148,6 +151,12 @@ does not guess a future format or silently reinterpret it as either success or
 failure. A failed Responses tool result whose output requires multiple content
 blocks is also rejected before provider I/O, because wrapping the array as text
 would lose its multimodal wire semantics.
+
+Responses namespace tool definitions remain typed in semantic IR. A
+function-only Chat transport receives a reversible, length-checked function
+name and Router-Maestro restores the namespace on returned calls. Copilot Grok
+uses the same projection inside its Responses binding because that upstream
+currently rejects `type: "namespace"` even though ordinary function tools work.
 
 **Assistant messages** (`_handle_assistant_message`):
 - `text` blocks → concatenated into `content`
@@ -495,7 +504,7 @@ Some protocol information still has no lossless counterpart:
 |---|---|---|
 | OpenAI `refusal` → Anthropic | Mapped to text at the final protocol boundary | Anthropic has no equivalent refusal content-block type |
 | OpenAI `refusal` → Gemini | Rejected before provider I/O | Gemini has no equivalent refusal part, and text would lose the refusal distinction |
-| Assistant `thinking` blocks in Anthropic → legacy OpenAI history | Legacy facade omits visible reasoning; dispatcher capsules preserve compatible Responses continuation | Chat has no lossless opaque continuation slot |
+| Assistant `thinking` blocks in Anthropic → legacy OpenAI history | Legacy facade omits visible reasoning; dispatcher capsules preserve compatible Responses continuation and exact-binding Copilot Chat continuation | Standard Chat has no lossless opaque continuation slot; Copilot exposes a provider-private one |
 | Images/documents in `tool_result` | Preserved as a follow-up multimodal user message | OpenAI `tool` messages accept text only |
 | `tool_reference` blocks | User message translation | Logged and skipped |
 

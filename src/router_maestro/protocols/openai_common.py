@@ -181,7 +181,7 @@ def decode_tool_choice(
     choice = require_mapping(value, protocol=protocol, parameter=parameter)
     reject_unknown_keys(
         choice,
-        frozenset({"type", "function"} if nested_function else {"type", "name"}),
+        frozenset({"type", "function"} if nested_function else {"type", "name", "namespace"}),
         protocol=protocol,
         parameter=parameter,
     )
@@ -221,7 +221,16 @@ def decode_tool_choice(
             parameter=f"{parameter}.name",
             allow_empty=False,
         )
-    return ToolChoice(mode="function", name=name)
+    namespace = (
+        optional_string(
+            choice.get("namespace"),
+            protocol=protocol,
+            parameter=f"{parameter}.namespace",
+        )
+        if not nested_function
+        else None
+    )
+    return ToolChoice(mode="function", name=name, namespace=namespace)
 
 
 def encode_tool_choice(
@@ -233,14 +242,19 @@ def encode_tool_choice(
     if choice is None:
         return None
     if choice.mode in {"auto", "none", "required"}:
-        if choice.name is not None:
-            reject(protocol, "tool_choice.name", f"mode {choice.mode!r} cannot carry a name")
+        if choice.name is not None or choice.namespace is not None:
+            reject(protocol, "tool_choice.name", f"mode {choice.mode!r} cannot select a tool")
         return choice.mode
     if choice.mode != "function" or not choice.name:
         reject(protocol, "tool_choice.mode", f"unsupported mode {choice.mode!r}")
     if nested_function:
+        if choice.namespace is not None:
+            reject(protocol, "tool_choice.namespace", "nested function choice lacks namespace")
         return {"type": "function", "function": {"name": choice.name}}
-    return {"type": "function", "name": choice.name}
+    payload = {"type": "function", "name": choice.name}
+    if choice.namespace is not None:
+        payload["namespace"] = choice.namespace
+    return payload
 
 
 def decode_usage(

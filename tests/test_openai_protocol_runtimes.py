@@ -689,7 +689,7 @@ async def test_chat_response_message_projection_still_rejects_opaque_reasoning()
 
 
 @pytest.mark.asyncio
-async def test_chat_response_message_projection_still_rejects_tool_namespace() -> None:
+async def test_chat_response_message_projection_round_trips_tool_namespace() -> None:
     response = SemanticResponse(
         id="resp_1",
         model="gpt-example",
@@ -710,8 +710,117 @@ async def test_chat_response_message_projection_still_rejects_tool_namespace() -
         ),
     )
 
-    with pytest.raises(ProtocolRepresentabilityError, match="tool namespaces"):
-        await OpenAIChatRuntime().encode_response(response)
+    runtime = OpenAIChatRuntime()
+    encoded = await runtime.encode_response(response)
+    raw_name = encoded["choices"][0]["message"]["tool_calls"][0]["function"]["name"]
+
+    assert raw_name != "lookup"
+    decoded = await runtime.decode_response(encoded)
+    decoded_message = cast(SemanticMessage, decoded.output[0])
+    call = decoded_message.content[0]
+    assert isinstance(call, ToolCall)
+    assert (call.namespace, call.name) == ("mcp", "lookup")
+
+
+@pytest.mark.asyncio
+async def test_responses_codex_controls_and_namespace_encode_to_chat() -> None:
+    responses = OpenAIResponsesRuntime()
+    semantic = await responses.decode_request(
+        {
+            "model": "gemini-test",
+            "input": "hello",
+            "stream": True,
+            "reasoning": {"effort": "xhigh", "summary": "auto"},
+            "include": ["reasoning.encrypted_content"],
+            "store": False,
+            "prompt_cache_key": "cache-key",
+            "client_metadata": {"thread_id": "thread-1"},
+            "tools": [
+                {
+                    "type": "namespace",
+                    "name": "mcp__qmd",
+                    "description": "QMD tools",
+                    "tools": [
+                        {
+                            "type": "function",
+                            "name": "status",
+                            "description": "Get status",
+                            "parameters": {
+                                "type": "object",
+                                "properties": {},
+                                "additionalProperties": False,
+                            },
+                        }
+                    ],
+                }
+            ],
+        }
+    )
+
+    assert semantic.metadata["prompt_cache_key"] == "cache-key"
+    assert semantic.metadata["client_metadata"] == {"thread_id": "thread-1"}
+    assert semantic.tools[0].namespace == "mcp__qmd"
+
+    chat = await OpenAIChatRuntime().encode_request(semantic)
+    encoded_name = chat["tools"][0]["function"]["name"]
+    assert encoded_name != "status"
+
+    decoded_chat = await OpenAIChatRuntime().decode_request(chat)
+    assert (decoded_chat.tools[0].namespace, decoded_chat.tools[0].name) == (
+        "mcp__qmd",
+        "status",
+    )
+
+
+@pytest.mark.asyncio
+async def test_copilot_chat_reasoning_opaque_round_trips_for_bound_runtime() -> None:
+    runtime = OpenAIChatRuntime(
+        origin_provider="github-copilot",
+        origin_binding="copilot-openai-chat",
+        default_model="gemini-test",
+        allow_reasoning_opaque=True,
+    )
+    semantic = await runtime.decode_response(
+        {
+            "id": "chatcmpl_1",
+            "object": "chat.completion",
+            "created": 1,
+            "model": "gemini-test",
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {
+                        "role": "assistant",
+                        "content": "",
+                        "reasoning_text": "plan",
+                        "reasoning_opaque": "provider-state",
+                    },
+                    "finish_reason": "tool_calls",
+                }
+            ],
+            "usage": None,
+        }
+    )
+    response_message = cast(SemanticMessage, semantic.output[0])
+    reasoning = next(
+        part for part in response_message.content if isinstance(part, ReasoningSummary)
+    )
+    assert isinstance(reasoning, ReasoningSummary)
+    assert reasoning.opaque_state is not None
+    assert reasoning.opaque_state.origin_binding == "copilot-openai-chat"
+
+    request = SemanticRequest(
+        model="gemini-test",
+        input=(
+            SemanticMessage(
+                role=MessageRole.ASSISTANT,
+                content=(reasoning,),
+            ),
+        ),
+    )
+    replay = await runtime.encode_request(request)
+    assert replay["messages"][0]["reasoning_opaque"] == "provider-state"
+    assert replay["messages"][0]["reasoning_text"] == "plan"
 
 
 @pytest.mark.asyncio

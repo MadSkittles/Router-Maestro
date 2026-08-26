@@ -11,7 +11,11 @@ import httpx
 from router_maestro.auth.github_oauth import get_copilot_token
 from router_maestro.auth.storage import OAuthCredential
 from router_maestro.pipeline.beta_strip import strip_beta_tokens
-from router_maestro.protocols import WireProtocol
+from router_maestro.protocols import ConversionMode, WireProtocol
+from router_maestro.protocols._tool_namespace import (
+    decode_namespaced_tool_name,
+    encode_namespaced_tool_name,
+)
 from router_maestro.providers.anthropic_codec import (
     AnthropicCodecError,
     AnthropicStreamDecoder,
@@ -308,6 +312,123 @@ def _normalize_copilot_tool(tool: Any) -> Any:
     if isinstance(inner_tools, list):
         normalized["tools"] = [_normalize_copilot_tool(inner) for inner in inner_tools]
     return normalized
+
+
+def _requires_namespace_flattening(model: str) -> bool:
+    return model.split("/", 1)[-1].lower().startswith("grok-")
+
+
+def _flatten_namespace_tools(tools: list[Any], *, model: str) -> list[Any]:
+    flattened: list[Any] = []
+    for index, raw_tool in enumerate(tools):
+        if not isinstance(raw_tool, Mapping) or raw_tool.get("type") != "namespace":
+            flattened.append(raw_tool)
+            continue
+        namespace = raw_tool.get("name")
+        inner_tools = raw_tool.get("tools")
+        if not isinstance(namespace, str) or not namespace or not isinstance(inner_tools, list):
+            raise RequestOptionError(
+                "GitHub Copilot requires valid namespace tools",
+                provider="github-copilot",
+                model=model,
+                parameter=f"tools[{index}]",
+            )
+        for inner_index, raw_inner in enumerate(inner_tools):
+            if not isinstance(raw_inner, Mapping) or raw_inner.get("type") != "function":
+                raise RequestOptionError(
+                    "GitHub Copilot Grok namespace members must be functions",
+                    provider="github-copilot",
+                    model=model,
+                    parameter=f"tools[{index}].tools[{inner_index}]",
+                )
+            name = raw_inner.get("name")
+            if not isinstance(name, str) or not name:
+                raise RequestOptionError(
+                    "GitHub Copilot Grok namespace function name is required",
+                    provider="github-copilot",
+                    model=model,
+                    parameter=f"tools[{index}].tools[{inner_index}].name",
+                )
+            try:
+                encoded_name = encode_namespaced_tool_name(namespace, name)
+            except ValueError as error:
+                raise RequestOptionError(
+                    str(error),
+                    provider="github-copilot",
+                    model=model,
+                    parameter=f"tools[{index}].tools[{inner_index}].name",
+                    cause=error,
+                ) from error
+            inner = dict(raw_inner)
+            inner["name"] = encoded_name
+            inner.pop("defer_loading", None)
+            flattened.append(inner)
+    return flattened
+
+
+def _flatten_grok_namespace_body(body: dict[str, Any], *, model: str) -> None:
+    tools = body.get("tools")
+    if isinstance(tools, list):
+        body["tools"] = _flatten_namespace_tools(tools, model=model)
+
+    response_input = body.get("input")
+    if isinstance(response_input, list):
+        normalized_input = []
+        for raw_item in response_input:
+            if not isinstance(raw_item, Mapping):
+                normalized_input.append(raw_item)
+                continue
+            item = dict(raw_item)
+            if item.get("type") == "additional_tools" and isinstance(item.get("tools"), list):
+                item["tools"] = _flatten_namespace_tools(item["tools"], model=model)
+            if item.get("type") == "function_call":
+                namespace = item.get("namespace")
+                name = item.get("name")
+                if isinstance(namespace, str) and namespace and isinstance(name, str) and name:
+                    try:
+                        item["name"] = encode_namespaced_tool_name(namespace, name)
+                    except ValueError as error:
+                        raise RequestOptionError(
+                            str(error),
+                            provider="github-copilot",
+                            model=model,
+                            parameter="input.function_call.name",
+                            cause=error,
+                        ) from error
+                    item.pop("namespace", None)
+            normalized_input.append(item)
+        body["input"] = normalized_input
+
+    tool_choice = body.get("tool_choice")
+    if isinstance(tool_choice, Mapping) and tool_choice.get("type") == "function":
+        namespace = tool_choice.get("namespace")
+        name = tool_choice.get("name")
+        if isinstance(namespace, str) and namespace and isinstance(name, str) and name:
+            try:
+                encoded_name = encode_namespaced_tool_name(namespace, name)
+            except ValueError as error:
+                raise RequestOptionError(
+                    str(error),
+                    provider="github-copilot",
+                    model=model,
+                    parameter="tool_choice.name",
+                    cause=error,
+                ) from error
+            body["tool_choice"] = {**tool_choice, "name": encoded_name}
+            body["tool_choice"].pop("namespace", None)
+
+
+def _restore_namespaced_function_calls(value: Any) -> Any:
+    if isinstance(value, list):
+        return [_restore_namespaced_function_calls(item) for item in value]
+    if not isinstance(value, Mapping):
+        return value
+    restored = {key: _restore_namespaced_function_calls(item) for key, item in value.items()}
+    if restored.get("type") == "function_call" and isinstance(restored.get("name"), str):
+        namespaced = decode_namespaced_tool_name(restored["name"])
+        if namespaced is not None:
+            restored["namespace"], restored["name"] = namespaced
+    return restored
 
 
 class CopilotOutboundContract(OutboundContract):
@@ -2049,10 +2170,9 @@ _COPILOT_CHAT_INTERNAL_RESPONSE_FIELDS = frozenset(
     {"copilot_info_messages", "copilot_usage", "prompt_filter_results"}
 )
 _COPILOT_CHAT_CHOICE_INTERNAL_FIELDS = frozenset({"content_filter_results"})
-# ``reasoning_opaque`` is Copilot-private state without a stable Chat item ID.
-# It cannot be authenticated or replayed through the protocol-neutral IR, so it
-# must not escape the provider boundary. ``reasoning_text`` remains visible and
-# is decoded as a known Chat reasoning alias by the shared runtime.
+# ``reasoning_opaque`` is Copilot-private state. Identity Chat responses must
+# not expose it, while a cross-protocol attempt keeps it long enough for the
+# bound Chat runtime to assign a stable internal item ID and seal a capsule.
 _COPILOT_CHAT_MESSAGE_INTERNAL_FIELDS = frozenset({"padding", "reasoning_opaque"})
 _COPILOT_ANTHROPIC_INTERNAL_RESPONSE_FIELDS = frozenset({"copilot_usage", "stop_details"})
 _COPILOT_ANTHROPIC_MESSAGE_STOP_INTERNAL_FIELDS = frozenset(
@@ -2115,6 +2235,10 @@ class CopilotProviderDialect:
             payload=body,
             headers=headers,
             stream=stream,
+            capture_reasoning_state=(
+                protocol is WireProtocol.OPENAI_CHAT
+                and request_context.conversion_mode is ConversionMode.SEMANTIC_IR
+            ),
             _payload_owned=True,
         )
 
@@ -2276,6 +2400,8 @@ class CopilotProviderDialect:
             catalog_effort_values=self.provider._catalog_effort_values(model),
             preserve_unknown_fields=True,
         )
+        if _requires_namespace_flattening(model):
+            _flatten_grok_namespace_body(body, model=model)
         body["model"] = model
         body["stream"] = stream
         reasoning = body.get("reasoning")
@@ -2373,6 +2499,7 @@ class CopilotHttpExecutor(SharedHttpExecutor):
             payload,
             model=attempt.model.upstream_id,
             stream=stream,
+            capture_reasoning_state=attempt.capture_reasoning_state,
         )
 
     def _validate_attempt(self, attempt: PreparedAttempt, *, stream: bool) -> None:
@@ -2390,6 +2517,7 @@ class CopilotHttpExecutor(SharedHttpExecutor):
         *,
         model: str,
         stream: bool = False,
+        capture_reasoning_state: bool = False,
     ) -> dict[str, Any]:
         """Remove only documented Copilot-private response fields.
 
@@ -2407,6 +2535,8 @@ class CopilotHttpExecutor(SharedHttpExecutor):
                 CopilotHttpExecutor._strip_responses_internal_fields(nested)
                 if stream:
                     CopilotHttpExecutor._project_model(nested, model)
+            if _requires_namespace_flattening(model):
+                payload = _restore_namespaced_function_calls(payload)
             return payload
 
         if protocol is WireProtocol.OPENAI_CHAT:
@@ -2423,7 +2553,10 @@ class CopilotHttpExecutor(SharedHttpExecutor):
                         container = choice.get(container_name)
                         if not isinstance(container, dict):
                             continue
-                        for field in _COPILOT_CHAT_MESSAGE_INTERNAL_FIELDS:
+                        internal_fields = _COPILOT_CHAT_MESSAGE_INTERNAL_FIELDS
+                        if capture_reasoning_state:
+                            internal_fields = internal_fields - {"reasoning_opaque"}
+                        for field in internal_fields:
                             container.pop(field, None)
                         if container_name == "message":
                             tool_calls = container.get("tool_calls")

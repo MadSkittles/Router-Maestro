@@ -19,7 +19,10 @@ from router_maestro.protocols import (
 )
 from router_maestro.protocols.openai_chat import OpenAIChatRuntime
 from router_maestro.protocols.openai_responses import OpenAIResponsesRuntime
-from router_maestro.providers.bindings import COPILOT_OPENAI_RESPONSES_BINDING
+from router_maestro.providers.bindings import (
+    COPILOT_OPENAI_CHAT_BINDING,
+    COPILOT_OPENAI_RESPONSES_BINDING,
+)
 from router_maestro.runtime.reasoning_capsule import (
     ReasoningCapsuleCodec,
     ReasoningCapsuleError,
@@ -120,7 +123,11 @@ class ProtocolRuntimeFactory:
         if protocol is WireProtocol.OPENAI_CHAT:
             return OpenAIChatRuntime(
                 origin_provider=provider,
+                origin_binding=binding,
                 default_model=model,
+                allow_reasoning_opaque=(
+                    provider == "github-copilot" and binding == COPILOT_OPENAI_CHAT_BINDING
+                ),
             )
         if protocol is WireProtocol.OPENAI_RESPONSES:
             copilot_obfuscated_stream_ids = (
