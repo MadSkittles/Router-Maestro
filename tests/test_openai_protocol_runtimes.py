@@ -728,7 +728,10 @@ async def test_responses_codex_controls_and_namespace_encode_to_chat() -> None:
     semantic = await responses.decode_request(
         {
             "model": "gemini-test",
-            "input": "hello",
+            "input": [
+                {"role": "developer", "content": "Follow project instructions."},
+                {"role": "user", "content": "hello"},
+            ],
             "stream": True,
             "reasoning": {"effort": "xhigh", "summary": "auto"},
             "include": ["reasoning.encrypted_content"],
@@ -759,6 +762,7 @@ async def test_responses_codex_controls_and_namespace_encode_to_chat() -> None:
 
     assert semantic.metadata["prompt_cache_key"] == "cache-key"
     assert semantic.metadata["client_metadata"] == {"thread_id": "thread-1"}
+    assert cast(SemanticMessage, semantic.input[0]).role is MessageRole.SYSTEM
     assert semantic.tools[0].namespace == "mcp__qmd"
 
     chat = await OpenAIChatRuntime().encode_request(semantic)

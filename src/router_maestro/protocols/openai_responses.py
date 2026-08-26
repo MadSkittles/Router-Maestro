@@ -1937,6 +1937,8 @@ def _decode_message(value: Mapping[str, Any], *, parameter: str) -> SemanticMess
     role_value = require_string(
         value.get("role"), protocol=_PROTOCOL, parameter=f"{parameter}.role"
     )
+    if role_value == "developer":
+        role_value = MessageRole.SYSTEM.value
     try:
         role = MessageRole(role_value)
     except ValueError:
