@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping, Sequence
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 import typer
@@ -230,12 +231,18 @@ def test_builtin_auth_discovery_does_not_advertise_environment_credentials() -> 
 
 
 class _DiscoveryClient:
-    def __init__(self, result=None, error: Exception | None = None) -> None:
+    def __init__(
+        self,
+        result: Sequence[ProviderAuthDefinition | Mapping[str, Any]] = (),
+        error: Exception | None = None,
+    ) -> None:
         self.result = result
         self.error = error
         self.calls = 0
 
-    async def list_auth_providers(self):
+    async def list_auth_providers(
+        self,
+    ) -> Sequence[ProviderAuthDefinition | Mapping[str, Any]]:
         self.calls += 1
         if self.error is not None:
             raise self.error

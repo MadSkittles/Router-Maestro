@@ -5,6 +5,7 @@ from pydantic import BaseModel, Field
 from router_maestro.auth.discovery import ProviderAuthSource
 from router_maestro.auth.storage import AuthType
 from router_maestro.config.priorities import PrioritiesConfig
+from router_maestro.server.schemas.model_catalog import ContextWindowOption
 
 
 class AuthProviderInfo(BaseModel):
@@ -71,6 +72,10 @@ class ModelInfo(BaseModel):
     max_output_tokens: int | None = Field(default=None, description="Maximum output tokens")
     max_context_window_tokens: int | None = Field(
         default=None, description="Maximum total context window (input + output)"
+    )
+    context_window_options: list[ContextWindowOption] = Field(
+        default_factory=list,
+        description="Client-selectable prompt budgets supported by this model",
     )
     operation_capabilities: dict[str, bool] = Field(
         default_factory=dict,

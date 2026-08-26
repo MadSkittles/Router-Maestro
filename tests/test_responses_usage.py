@@ -5,7 +5,7 @@ import pytest
 from router_maestro.providers.base import ResponsesResponse as InternalResponsesResponse
 from router_maestro.server.routes import responses as responses_route
 from router_maestro.server.schemas import ResponsesUsage
-from router_maestro.server.schemas.responses import ResponsesRequest
+from router_maestro.server.schemas.responses import ResponsesRequest, ResponsesResponse
 
 
 def test_responses_usage_schema_preserves_detail_fields():
@@ -54,6 +54,7 @@ async def test_create_response_preserves_usage_detail_fields(monkeypatch):
         ResponsesRequest(model="github-copilot/gpt-5.5", input="hi")
     )
 
+    assert isinstance(response, ResponsesResponse)
     assert response.usage is not None
     assert response.usage.input_tokens == 100
     assert response.usage.output_tokens == 20

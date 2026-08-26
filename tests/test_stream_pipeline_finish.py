@@ -2,6 +2,7 @@
 
 import logging
 from collections.abc import AsyncIterator
+from typing import cast
 
 import pytest
 
@@ -16,6 +17,7 @@ from router_maestro.providers.base import (
     unexpected_eof_outcome,
 )
 from router_maestro.server.routes import anthropic, chat, gemini, responses
+from router_maestro.utils.audit import AuditTrace
 
 
 class _PipelineSpy:
@@ -238,7 +240,7 @@ def _real_pipeline(audit: _AuditSpy) -> RequestPipeline:
         request_id="req-test",
         guards=[],
         leak_guard=None,
-        audit=audit,
+        audit=cast(AuditTrace, audit),
         config=PrioritiesConfig.get_default(),
     )
 

@@ -1,11 +1,15 @@
 """Anthropic provider implementation."""
 
 import json
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
+from copy import deepcopy
+from typing import Any, NoReturn, cast
 
 import httpx
 
-from router_maestro.auth import AuthManager, AuthType
+from router_maestro.auth import ApiKeyCredential, AuthManager, AuthType
+from router_maestro.pipeline.beta_strip import strip_beta_tokens
+from router_maestro.protocols import WireProtocol
 from router_maestro.providers.anthropic_codec import (
     AnthropicCodecError,
     AnthropicStreamDecoder,
@@ -23,12 +27,22 @@ from router_maestro.providers.base import (
     ProviderFailureKind,
     RequestOptionError,
 )
+from router_maestro.providers.bindings import (
+    AttemptRequestContext,
+    EndpointBinding,
+    PreparedAttempt,
+)
+from router_maestro.providers.http_executor import ProviderHttpClientPool, SharedHttpExecutor
+from router_maestro.routing.capabilities import Operation, ProviderCapabilities
+from router_maestro.routing.model_ref import ModelRef
 from router_maestro.utils import get_logger
 from router_maestro.utils.context_window import normalize_thinking_budget
 
 logger = get_logger("providers.anthropic")
 
 ANTHROPIC_API_URL = "https://api.anthropic.com/v1"
+ANTHROPIC_MESSAGES_BINDING = "anthropic-messages"
+_ANTHROPIC_STREAM_KEEPALIVE_TYPES = frozenset({"ping"})
 
 
 def _request_audit():
@@ -43,9 +57,31 @@ class AnthropicProvider(BaseProvider):
 
     name = "anthropic"
 
+    def bindings(self) -> tuple[EndpointBinding, ...]:
+        """Expose Anthropic Messages as a protocol-native raw binding."""
+        bindings = getattr(self, "_generation_bindings", None)
+        if bindings is not None:
+            return bindings
+
+        binding = EndpointBinding(
+            id=ANTHROPIC_MESSAGES_BINDING,
+            protocol=WireProtocol.ANTHROPIC_MESSAGES,
+            capabilities=ProviderCapabilities(operations=frozenset({Operation.NATIVE_ANTHROPIC})),
+            dialect=AnthropicProviderDialect(self),
+            executor=AnthropicHttpExecutor(self),
+        )
+        bindings = (binding,)
+        self._generation_bindings = bindings
+        return bindings
+
     def __init__(self, base_url: str = ANTHROPIC_API_URL) -> None:
         self.base_url = base_url.rstrip("/")
         self.auth_manager = AuthManager()
+        self._http_client_pool = ProviderHttpClientPool(lambda: httpx.AsyncClient())
+
+    async def close(self) -> None:
+        """Close the provider-owned reusable HTTP client."""
+        await self._http_client_pool.close()
 
     def is_authenticated(self) -> bool:
         """Check if authenticated with Anthropic."""
@@ -63,7 +99,7 @@ class AnthropicProvider(BaseProvider):
                 kind=ProviderFailureKind.AUTHENTICATION,
                 provider=self.name,
             )
-        return cred.key
+        return cast(ApiKeyCredential, cred).key
 
     def _get_headers(self) -> dict[str, str]:
         """Get headers for Anthropic API requests."""
@@ -260,7 +296,7 @@ class AnthropicProvider(BaseProvider):
             audit.record_upstream("POST", url, headers, payload)
 
         logger.debug("Anthropic chat completion: model=%s", request.model)
-        async with httpx.AsyncClient() as client:
+        async with self._http_client_pool.lease() as client:
             try:
                 response = await client.post(
                     url,
@@ -313,7 +349,7 @@ class AnthropicProvider(BaseProvider):
         decoder = AnthropicStreamDecoder(
             include_reasoning=request.thinking_type in {"enabled", "adaptive"}
         )
-        async with httpx.AsyncClient() as client:
+        async with self._http_client_pool.lease() as client:
             try:
                 async with client.stream(
                     "POST",
@@ -379,6 +415,155 @@ class AnthropicProvider(BaseProvider):
                     model=request.model,
                 )
 
+    async def messages_completion(
+        self,
+        payload: Mapping[str, Any],
+        *,
+        model: str,
+    ) -> ChatResponse:
+        """Execute an already-encoded Anthropic Messages body without request IR."""
+        body = deepcopy(dict(payload))
+        body["model"] = model
+        body["stream"] = False
+        include_reasoning = isinstance(body.get("thinking"), dict) and body["thinking"].get(
+            "type"
+        ) in {"enabled", "adaptive"}
+        url = f"{self.base_url}/messages"
+        headers = self._get_headers()
+        audit = _request_audit()
+        if audit is not None:
+            audit.record_upstream("POST", url, headers, body)
+
+        async with self._http_client_pool.lease() as client:
+            try:
+                response = await client.post(
+                    url,
+                    json=body,
+                    headers=headers,
+                    timeout=TIMEOUT_NON_STREAMING,
+                )
+                if audit is not None:
+                    audit.record_upstream_response(
+                        response.status_code,
+                        dict(response.headers),
+                        response.content,
+                    )
+                response.raise_for_status()
+                try:
+                    return decode_message_response(
+                        response.json(),
+                        fallback_model=model,
+                        include_reasoning=include_reasoning,
+                    )
+                except (json.JSONDecodeError, AnthropicCodecError) as error:
+                    self._raise_protocol_error(self.name, model, error)
+            except httpx.HTTPStatusError as error:
+                self._raise_http_status_error(
+                    "Anthropic",
+                    error,
+                    logger,
+                    include_body=True,
+                    provider=self.name,
+                    model=model,
+                )
+            except httpx.TimeoutException as error:
+                self._raise_timeout_error(
+                    "Anthropic",
+                    error,
+                    logger,
+                    provider=self.name,
+                    model=model,
+                )
+            except httpx.HTTPError as error:
+                self._raise_http_error(
+                    "Anthropic",
+                    error,
+                    logger,
+                    provider=self.name,
+                    model=model,
+                )
+
+    async def messages_completion_stream(
+        self,
+        payload: Mapping[str, Any],
+        *,
+        model: str,
+    ) -> AsyncIterator[ChatStreamChunk]:
+        """Stream an already-encoded Anthropic Messages body without request IR."""
+        body = deepcopy(dict(payload))
+        body["model"] = model
+        body["stream"] = True
+        include_reasoning = isinstance(body.get("thinking"), dict) and body["thinking"].get(
+            "type"
+        ) in {"enabled", "adaptive"}
+        decoder = AnthropicStreamDecoder(include_reasoning=include_reasoning)
+        url = f"{self.base_url}/messages"
+        headers = self._get_headers()
+        audit = _request_audit()
+        if audit is not None:
+            audit.record_upstream("POST", url, headers, body)
+
+        async with self._http_client_pool.lease() as client:
+            try:
+                async with client.stream(
+                    "POST",
+                    url,
+                    json=body,
+                    headers=headers,
+                    timeout=TIMEOUT_STREAMING,
+                ) as response:
+                    if audit is not None:
+                        audit.record_upstream_response(
+                            response.status_code,
+                            dict(response.headers),
+                            stream_summary="stream opened",
+                        )
+                    response.raise_for_status()
+                    async for line in response.aiter_lines():
+                        if not line.startswith("data: "):
+                            continue
+                        raw_data = line[6:]
+                        if not raw_data:
+                            continue
+                        try:
+                            chunks = decoder.decode_event(json.loads(raw_data))
+                        except (json.JSONDecodeError, AnthropicCodecError) as error:
+                            self._raise_protocol_error(self.name, model, error)
+                        for chunk in chunks:
+                            yield chunk
+                    try:
+                        decoder.finalize()
+                    except AnthropicCodecError as error:
+                        self._raise_protocol_error(self.name, model, error)
+            except httpx.HTTPStatusError as error:
+                self._raise_http_status_error(
+                    "Anthropic",
+                    error,
+                    logger,
+                    stream=True,
+                    include_body=True,
+                    provider=self.name,
+                    model=model,
+                )
+            except httpx.TimeoutException as error:
+                self._raise_timeout_error(
+                    "Anthropic",
+                    error,
+                    logger,
+                    stream=True,
+                    provider=self.name,
+                    model=model,
+                )
+            except httpx.HTTPError as error:
+                self._raise_http_error(
+                    "Anthropic",
+                    error,
+                    logger,
+                    stream=True,
+                    provider=self.name,
+                    model=model,
+                )
+
     async def list_models(self) -> list[ModelInfo]:
         """List available Anthropic models."""
         # Anthropic doesn't have a models endpoint, return known models
@@ -414,3 +599,140 @@ class AnthropicProvider(BaseProvider):
                 max_output_tokens=4096,
             ),
         ]
+
+
+class AnthropicProviderDialect:
+    """Copy-on-write preparation for Anthropic's native Messages endpoint."""
+
+    id = "anthropic"
+
+    def __init__(self, provider: AnthropicProvider) -> None:
+        self.provider = provider
+
+    async def prepare_attempt(
+        self,
+        *,
+        binding_id: str,
+        protocol: WireProtocol,
+        model: ModelRef,
+        payload: Mapping[str, Any],
+        stream: bool,
+        request_context: AttemptRequestContext,
+    ) -> PreparedAttempt:
+        if binding_id != ANTHROPIC_MESSAGES_BINDING:
+            raise ValueError(f"Unknown Anthropic binding {binding_id!r}")
+        if protocol is not WireProtocol.ANTHROPIC_MESSAGES:
+            raise ValueError("Anthropic binding requires the Messages wire protocol")
+        if model.provider != self.provider.name:
+            raise ValueError("Anthropic attempt model belongs to another provider")
+
+        body = deepcopy(dict(payload))
+        body["model"] = model.upstream_id
+        body["stream"] = stream
+        headers = self.provider._get_headers()
+        anthropic_beta = request_context.header("anthropic-beta")
+        if anthropic_beta is not None:
+            from router_maestro.runtime import get_current_request_context
+
+            runtime_context = get_current_request_context()
+            stripped = strip_beta_tokens(
+                anthropic_beta,
+                runtime_context.config.beta_strip if runtime_context is not None else [],
+            )
+            if stripped is not None:
+                headers["anthropic-beta"] = stripped
+        return PreparedAttempt(
+            binding_id=binding_id,
+            protocol=protocol,
+            model=model,
+            url=f"{self.provider.base_url}/messages",
+            payload=body,
+            headers=headers,
+            stream=stream,
+            _payload_owned=True,
+        )
+
+
+class AnthropicHttpExecutor(SharedHttpExecutor):
+    """Raw JSON/SSE executor for Anthropic's native Messages binding."""
+
+    def __init__(self, provider: AnthropicProvider) -> None:
+        self.provider = provider
+        super().__init__(client_pool=provider._http_client_pool)
+
+    def _skip_sse_frame(
+        self,
+        frame: Mapping[str, Any],
+        attempt: PreparedAttempt,
+    ) -> bool:
+        del attempt
+        return frame.get("type") in _ANTHROPIC_STREAM_KEEPALIVE_TYPES
+
+    def _validate_attempt(self, attempt: PreparedAttempt, *, stream: bool) -> None:
+        if attempt.binding_id != ANTHROPIC_MESSAGES_BINDING:
+            raise ValueError("Anthropic executor received an unknown binding")
+        if attempt.protocol is not WireProtocol.ANTHROPIC_MESSAGES:
+            raise ValueError("Anthropic executor requires the Messages wire protocol")
+        if attempt.model.provider != self.provider.name:
+            raise ValueError("Anthropic attempt model belongs to another provider")
+        if attempt.method != "POST":
+            raise ValueError("Anthropic generation bindings require POST")
+        if attempt.stream is not stream:
+            mode = "streaming" if stream else "non-streaming"
+            raise ValueError(f"Anthropic executor received the wrong {mode} attempt mode")
+
+    def _raise_status(
+        self,
+        error: httpx.HTTPStatusError,
+        attempt: PreparedAttempt,
+        *,
+        stream: bool,
+    ) -> NoReturn:
+        self.provider._raise_http_status_error(
+            "Anthropic",
+            error,
+            logger,
+            stream=stream,
+            include_body=True,
+            provider=self.provider.name,
+            model=attempt.model.upstream_id,
+        )
+
+    def _raise_timeout(
+        self,
+        error: httpx.TimeoutException,
+        attempt: PreparedAttempt,
+        *,
+        stream: bool,
+    ) -> NoReturn:
+        self.provider._raise_timeout_error(
+            "Anthropic",
+            error,
+            logger,
+            stream=stream,
+            provider=self.provider.name,
+            model=attempt.model.upstream_id,
+        )
+
+    def _raise_http_error(
+        self,
+        error: httpx.HTTPError,
+        attempt: PreparedAttempt,
+        *,
+        stream: bool,
+    ) -> NoReturn:
+        self.provider._raise_http_error(
+            "Anthropic",
+            error,
+            logger,
+            stream=stream,
+            provider=self.provider.name,
+            model=attempt.model.upstream_id,
+        )
+
+    def _raise_protocol_error(self, error: Exception, attempt: PreparedAttempt) -> NoReturn:
+        self.provider._raise_protocol_error(
+            self.provider.name,
+            attempt.model.upstream_id,
+            error,
+        )

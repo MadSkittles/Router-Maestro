@@ -3,6 +3,10 @@
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
+    from router_maestro.routing.generation_plan import (
+        GenerationCandidate,
+        GenerationRoutePlan,
+    )
     from router_maestro.routing.router import Router
 
 
@@ -18,12 +22,36 @@ def reset_router() -> None:
     _reset_router()
 
 
+async def plan_generation_route(router: Any, model_id: str, manifest: Any | None = None) -> Any:
+    """Resolve a provider/model plan without freezing an upstream protocol."""
+    from router_maestro.routing.generation_plan import plan_generation_route as _plan
+
+    return await _plan(router, model_id, manifest)
+
+
 def __getattr__(name: str) -> Any:
     if name == "Router":
         from router_maestro.routing.router import Router
 
         return Router
+    if name in {"GenerationCandidate", "GenerationRoutePlan"}:
+        from router_maestro.routing.generation_plan import (
+            GenerationCandidate,
+            GenerationRoutePlan,
+        )
+
+        return {
+            "GenerationCandidate": GenerationCandidate,
+            "GenerationRoutePlan": GenerationRoutePlan,
+        }[name]
     raise AttributeError(name)
 
 
-__all__ = ["Router", "get_router", "reset_router"]
+__all__ = [
+    "GenerationCandidate",
+    "GenerationRoutePlan",
+    "Router",
+    "get_router",
+    "plan_generation_route",
+    "reset_router",
+]

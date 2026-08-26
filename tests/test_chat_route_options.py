@@ -6,15 +6,19 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from router_maestro.providers import ChatResponse, ChatStreamChunk, RequestOptionError
+from router_maestro.providers import ChatRequest, ChatResponse, ChatStreamChunk, RequestOptionError
 from router_maestro.server.routes.chat import chat_completions
 from router_maestro.server.routes.chat import router as chat_router
-from router_maestro.server.schemas import ChatCompletionRequest, ChatMessage
+from router_maestro.server.schemas import (
+    ChatCompletionRequest,
+    ChatCompletionResponse,
+    ChatMessage,
+)
 
 
 class _CapturingRouter:
     def __init__(self):
-        self.request = None
+        self.request: ChatRequest | None = None
 
     async def chat_completion(self, request):
         self.request = request
@@ -53,6 +57,7 @@ async def test_openai_chat_route_preserves_supported_typed_options(monkeypatch):
 
     response = await chat_completions(request)
 
+    assert isinstance(response, ChatCompletionResponse)
     assert response.choices[0].message.content == "ok"
     assert router.request is not None
     assert router.request.top_p == 0.25
@@ -80,7 +85,9 @@ async def test_openai_chat_route_preserves_assistant_refusal_history(monkeypatch
         )
     )
 
+    assert isinstance(response, ChatCompletionResponse)
     assert response.choices[0].message.content == "ok"
+    assert router.request is not None
     assert router.request.messages[0].content is None
     assert router.request.messages[0].refusal == "I cannot help"
 
@@ -139,6 +146,7 @@ def test_openai_chat_endpoint_preserves_temperature_presence(
     )
 
     assert response.status_code == 200
+    assert router.request is not None
     assert router.request.temperature == expected
 
 
@@ -342,6 +350,7 @@ async def test_openai_chat_nonstream_response_qualifies_model_once(
         )
     )
 
+    assert isinstance(response, ChatCompletionResponse)
     assert response.model == "first/shared-model"
 
 
@@ -365,6 +374,7 @@ async def test_openai_chat_nonstream_emits_refusal_field(monkeypatch):
         )
     )
 
+    assert isinstance(response, ChatCompletionResponse)
     assert response.choices[0].message.content is None
     assert response.choices[0].message.refusal == "I cannot help"
 

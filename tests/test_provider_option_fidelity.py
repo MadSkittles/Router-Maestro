@@ -102,7 +102,7 @@ def test_explicit_temperature_is_preserved_across_request_boundaries() -> None:
     translated = translate_gemini_to_openai(
         GeminiGenerateContentRequest(
             contents=[GeminiContent(role="user", parts=[GeminiPart(text="hello")])],
-            generation_config=GeminiGenerationConfig(temperature=1.0),
+            generationConfig=GeminiGenerationConfig(temperature=1.0),
         ),
         "model",
     )
@@ -618,7 +618,7 @@ def test_copilot_chat_rejects_non_chat_options(parameter) -> None:
 def test_copilot_responses_payload_forwards_supported_options() -> None:
     provider = CopilotProvider()
     request = ResponsesRequest(
-        model="gpt-5.4",
+        model="gpt-5.3-codex",
         input="hi",
         top_p=0.7,
         metadata={"trace": "abc"},
@@ -631,6 +631,17 @@ def test_copilot_responses_payload_forwards_supported_options() -> None:
     assert payload["top_p"] == 0.7
     assert payload["metadata"] == {"trace": "abc"}
     assert payload["service_tier"] == "flex"
+
+
+def test_copilot_gpt54_responses_rejects_explicit_top_p() -> None:
+    provider = CopilotProvider()
+
+    with pytest.raises(RequestOptionError) as caught:
+        provider._build_responses_payload(ResponsesRequest(model="gpt-5.4", input="hi", top_p=0.7))
+
+    assert caught.value.status_code == 400
+    assert caught.value.kind is ProviderFailureKind.CLIENT_REQUEST
+    assert caught.value.parameter == "top_p"
 
 
 def test_copilot_responses_rejects_explicit_temperature() -> None:

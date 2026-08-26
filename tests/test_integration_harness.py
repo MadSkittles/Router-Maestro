@@ -7,6 +7,7 @@ import os
 import subprocess
 import time
 from pathlib import Path
+from typing import cast
 from unittest.mock import AsyncMock, Mock, patch
 
 import httpx
@@ -16,8 +17,19 @@ from router_maestro.auth import AuthManager, AuthStorage, OAuthCredential
 from router_maestro.auth.github_oauth import CopilotTokenResponse
 from router_maestro.providers import CopilotProvider, ModelInfo
 from router_maestro.routing.capabilities import Operation
+from router_maestro.utils.reasoning import budget_to_effort
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_anthropic_reasoning_replay_seed_requests_medium_responses_effort() -> None:
+    conftest = importlib.import_module("integration_tests.conftest")
+
+    payload = conftest.anthropic_thinking_seed_payload("github-copilot/gpt-5.4-mini")
+
+    thinking = payload["thinking"]
+    assert thinking["type"] == "enabled"
+    assert budget_to_effort(thinking["budget_tokens"]) == "medium"
 
 
 class _LivePipe:
@@ -47,7 +59,7 @@ class _HungStartupProcess:
 
     def wait(self, timeout=None):
         if self.returncode is None:
-            raise subprocess.TimeoutExpired("router-maestro", timeout)
+            raise subprocess.TimeoutExpired("router-maestro", cast(float, timeout))
         return self.returncode
 
 
@@ -107,7 +119,7 @@ def test_controlled_server_routes_subprocess_output_to_nonblocking_file(tmp_path
         assert not captured["stdout"].closed
 
     assert captured["stdout"].closed
-    assert Path(process._router_maestro_output_path).parent == tmp_path
+    assert Path(getattr(process, "_router_maestro_output_path")).parent == tmp_path
 
 
 def test_controlled_xdg_environment_is_isolated_and_drops_provider_secrets(tmp_path):
@@ -286,6 +298,13 @@ def test_controlled_postcommit_protocol_failure_is_not_misclassified_as_eof(tmp_
     boundaries = importlib.import_module("integration_tests.test_controlled_boundaries")
 
     boundaries.test_stream_postcommit_failure_is_normalized_once_and_never_replays(tmp_path)
+
+
+def test_controlled_anthropic_responses_tool_stream_accepts_rotating_item_ids(tmp_path):
+    """Keep the real Copilot Responses-to-Anthropic tool stream in default CI."""
+    boundaries = importlib.import_module("integration_tests.test_controlled_boundaries")
+
+    boundaries.test_anthropic_responses_tool_stream_accepts_rotating_copilot_item_ids(tmp_path)
 
 
 def test_controlled_automatic_fallback_filters_required_features(tmp_path):
@@ -520,7 +539,7 @@ def _manager_with_copilot_credential(credential: OAuthCredential) -> AuthManager
     manager = AuthManager.__new__(AuthManager)
     manager.storage = AuthStorage()
     manager.storage.set("github-copilot", credential)
-    manager.save = Mock()  # type: ignore[method-assign]
+    setattr(manager, "save", Mock())
     return manager
 
 
@@ -566,7 +585,7 @@ def test_copilot_catalog_reuses_valid_cached_credential_without_mint(monkeypatch
     provider = CopilotProvider()
     provider.auth_manager = manager
     provider._send_with_auth_retry = AsyncMock(return_value=_catalog_response())
-    provider.close = AsyncMock()  # type: ignore[method-assign]
+    setattr(provider, "close", AsyncMock())
     mint = AsyncMock(
         return_value=CopilotTokenResponse(
             token="unexpected-new-token",
@@ -589,9 +608,11 @@ def test_copilot_catalog_reuses_valid_cached_credential_without_mint(monkeypatch
     assert conftest.model_supports_reasoning(catalog["github-copilot/catalog-model"])
     assert "none" not in conftest.OPENAI_REASONING_EFFORTS
     mint.assert_not_awaited()
-    manager.save.assert_not_called()
+    cast(Mock, manager.save).assert_not_called()
     assert provider._cached_token == "cached-copilot-token"
-    assert provider._token_expires == manager.get_credential("github-copilot").expires
+    credential = manager.get_credential("github-copilot")
+    assert isinstance(credential, OAuthCredential)
+    assert provider._token_expires == credential.expires
     assert provider._api_base == "https://copilot.example"
 
 
@@ -608,7 +629,7 @@ def test_copilot_catalog_allows_existing_refresh_for_expired_credential(monkeypa
     provider = CopilotProvider()
     provider.auth_manager = manager
     provider._send_with_auth_retry = AsyncMock(return_value=_catalog_response())
-    provider.close = AsyncMock()  # type: ignore[method-assign]
+    setattr(provider, "close", AsyncMock())
     mint = AsyncMock(
         return_value=CopilotTokenResponse(
             token="fresh-copilot-token",
@@ -626,10 +647,14 @@ def test_copilot_catalog_allows_existing_refresh_for_expired_credential(monkeypa
     assert list(catalog) == ["github-copilot/catalog-model"]
     mint.assert_awaited_once()
     assert provider._cached_token == "fresh-copilot-token"
-    manager.save.assert_not_called()
+    cast(Mock, manager.save).assert_not_called()
     assert provider.auth_manager is not manager
-    assert manager.get_credential("github-copilot").access == "expired-copilot-token"
-    assert provider.auth_manager.get_credential("github-copilot").access == "fresh-copilot-token"
+    old_credential = manager.get_credential("github-copilot")
+    assert isinstance(old_credential, OAuthCredential)
+    assert old_credential.access == "expired-copilot-token"
+    new_credential = provider.auth_manager.get_credential("github-copilot")
+    assert isinstance(new_credential, OAuthCredential)
+    assert new_credential.access == "fresh-copilot-token"
 
 
 @pytest.mark.parametrize(

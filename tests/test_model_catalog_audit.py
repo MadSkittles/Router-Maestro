@@ -1,5 +1,6 @@
 """Request-scoped audit coverage for provider model-catalog transports."""
 
+from typing import cast
 from unittest.mock import AsyncMock, patch
 
 import httpx
@@ -7,6 +8,7 @@ import pytest
 
 from router_maestro.providers.openai import OpenAIProvider
 from router_maestro.providers.openai_compat import OpenAICompatibleProvider
+from router_maestro.runtime import RequestContext
 from router_maestro.runtime import request_context as request_context_module
 
 
@@ -61,7 +63,7 @@ async def test_model_catalog_success_is_recorded_in_request_audit(kind: str) -> 
         client.__aexit__ = AsyncMock(return_value=False)
         client_cls.return_value = client
         token = request_context_module._current_request_context.set(  # type: ignore[attr-defined]
-            type("Context", (), {"audit": audit})()
+            cast(RequestContext, type("Context", (), {"audit": audit})())
         )
         try:
             await provider.list_models()
@@ -107,7 +109,7 @@ async def test_model_catalog_http_error_response_is_recorded(kind: str) -> None:
         client.__aexit__ = AsyncMock(return_value=False)
         client_cls.return_value = client
         token = request_context_module._current_request_context.set(  # type: ignore[attr-defined]
-            type("Context", (), {"audit": audit})()
+            cast(RequestContext, type("Context", (), {"audit": audit})())
         )
         try:
             models = await provider.list_models()

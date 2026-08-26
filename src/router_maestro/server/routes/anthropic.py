@@ -3,14 +3,16 @@
 import asyncio
 import json
 import uuid
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, AsyncIterator, Mapping
 from dataclasses import replace
 from datetime import UTC, datetime
+from typing import cast
 
 from fastapi import APIRouter, Depends
 from fastapi import Request as FastAPIRequest
 from fastapi.responses import JSONResponse
 
+from router_maestro.protocols import WireProtocol
 from router_maestro.providers import (
     AnthropicProvider,
     ChatRequest,
@@ -29,8 +31,17 @@ from router_maestro.providers import (
 from router_maestro.routing import Router, get_router
 from router_maestro.routing.capabilities import CapabilitySupport, Feature
 from router_maestro.routing.model_ref import catalog_model_public_id, qualify_model_id
-from router_maestro.routing.route_plan import RouteCandidate
-from router_maestro.server.dependencies import get_app_router
+from router_maestro.routing.route_plan import PreparedChatCompletion, RouteCandidate
+from router_maestro.runtime import ReasoningCapsuleCodec
+from router_maestro.server.dependencies import (
+    generation_dispatcher_is_configured,
+    get_app_router,
+    get_reasoning_capsule_codec,
+)
+from router_maestro.server.generation_pipeline import (
+    attempt_observer_for_request,
+    build_generation_pipeline,
+)
 from router_maestro.server.protocols import client_error_response
 from router_maestro.server.protocols.anthropic_reducer import (
     AnthropicReducer,
@@ -48,6 +59,7 @@ from router_maestro.server.schemas.anthropic import (
     AnthropicTextBlock,
     AnthropicUsage,
 )
+from router_maestro.server.schemas.model_catalog import ContextWindowOption
 from router_maestro.server.streaming import sse_streaming_response
 from router_maestro.server.translation import translate_anthropic_to_openai
 from router_maestro.utils import count_anthropic_request_tokens, get_logger
@@ -322,6 +334,58 @@ def _mid_conv_system_rejection_response() -> JSONResponse:
     )
 
 
+def _reasoning_capsule_codec(raw_request: FastAPIRequest) -> ReasoningCapsuleCodec:
+    """Return the startup-owned capsule state required by generation dispatch."""
+    return get_reasoning_capsule_codec(raw_request)
+
+
+async def _dispatch_anthropic_generation(
+    model_router: Router,
+    raw_request: FastAPIRequest,
+    payload: Mapping[str, object],
+    capsule_codec: ReasoningCapsuleCodec,
+):
+    """Run stable and beta Messages traffic through the shared dispatcher."""
+    pipeline = build_generation_pipeline(
+        model_router,
+        capsule_codec,
+        WireProtocol.ANTHROPIC_MESSAGES,
+        payload,
+        path=raw_request.url.path,
+        query=dict(raw_request.query_params),
+        headers=dict(raw_request.headers),
+        attempt_observer=attempt_observer_for_request(raw_request),
+    )
+    if pipeline.envelope.stream:
+        opened = await pipeline.dispatcher.dispatch_stream(model_router, pipeline.envelope)
+        frames = pipeline.responses.encode_stream(opened, pipeline.envelope.runtime)
+        return sse_streaming_response(
+            _anthropic_sse_frames(frames),
+            keepalive_frame=ANTHROPIC_PING_FRAME,
+        )
+
+    result = await pipeline.dispatcher.dispatch(model_router, pipeline.envelope)
+    encoded = await pipeline.responses.encode_result(result, pipeline.envelope.runtime)
+    return JSONResponse(content=dict(encoded))
+
+
+async def _anthropic_sse_frames(
+    frames: AsyncIterator[Mapping[str, object]],
+) -> AsyncGenerator[str]:
+    """Serialize dispatcher frames and normalize only post-commit failures."""
+    try:
+        async for frame in frames:
+            event_type = frame.get("type")
+            event = event_type if isinstance(event_type, str) else "message"
+            yield f"event: {event}\ndata: {json.dumps(dict(frame))}\n\n"
+    except asyncio.CancelledError:
+        raise
+    except Exception as error:
+        logger.error("Unexpected error encoding Anthropic dispatcher stream", exc_info=True)
+        data = postcommit_error_data(error, "anthropic")
+        yield f"event: error\ndata: {json.dumps(data)}\n\n"
+
+
 @router.post("/v1/messages")
 @router.post("/api/anthropic/v1/messages")
 async def messages(request: AnthropicMessagesRequest, raw_request: FastAPIRequest):
@@ -369,6 +433,22 @@ async def messages(request: AnthropicMessagesRequest, raw_request: FastAPIReques
 
     model_router = get_router()
 
+    # Every production Router generation uses the shared protocol dispatcher.
+    # Non-Router doubles retain the compatibility implementation below for
+    # direct route tests during the migration cycle.
+    if isinstance(model_router, Router) and generation_dispatcher_is_configured(raw_request):
+        capsule_codec = _reasoning_capsule_codec(raw_request)
+        try:
+            payload = await raw_request.json()
+            return await _dispatch_anthropic_generation(
+                model_router,
+                raw_request,
+                payload,
+                capsule_codec,
+            )
+        except ProviderError as error:
+            return protocol_error_response(error, "anthropic")
+
     # Translate Anthropic request to OpenAI format
     chat_request = translate_anthropic_to_openai(request)
 
@@ -412,7 +492,7 @@ async def messages(request: AnthropicMessagesRequest, raw_request: FastAPIReques
     try:
         response, provider_name = await model_router.chat_completion(
             chat_request,
-            prepared_plan=prepared_plan,
+            prepared_plan=cast(PreparedChatCompletion, prepared_plan),
         )
         response_model = (
             response.selected_model.qualified_id
@@ -724,9 +804,12 @@ async def stream_response(
                 return
 
         terminal_outcome = unexpected_eof_outcome()
+        terminal_error = terminal_outcome.error
+        if terminal_error is None:
+            raise RuntimeError("Unexpected EOF outcome is missing its terminal error")
         yield _sse_error_event(
             ProviderError(
-                terminal_outcome.error.code,
+                terminal_error.code,
                 status_code=502,
                 kind=ProviderFailureKind.UPSTREAM_PROTOCOL,
             )
@@ -734,7 +817,7 @@ async def stream_response(
         pipeline.finish(
             wire_status=200,
             outcome=terminal_outcome,
-            body_summary=terminal_outcome.error.message,
+            body_summary=terminal_error.message,
         )
 
     except ProviderError as e:
@@ -840,6 +923,14 @@ async def list_models(
             max_prompt_tokens=model.max_prompt_tokens,
             max_output_tokens=model.max_output_tokens,
             max_context_window_tokens=model.max_context_window_tokens,
+            context_window_options=[
+                ContextWindowOption(
+                    tier=option.tier,
+                    max_prompt_tokens=option.max_prompt_tokens,
+                    is_default=option.is_default,
+                )
+                for option in model.effective_context_window_options()
+            ],
             supports_thinking=model.supports_thinking or None,
             supports_vision=model.supports_vision or None,
         )

@@ -77,6 +77,63 @@ class TestAuditTrace:
         assert body["nested"]["refreshToken"] == "***"
         assert body["ordinary_text"] == "the word token is safe in normal content"
 
+    def test_reasoning_capsules_and_restored_provider_state_are_redacted(self, tmp_path):
+        trace = AuditTrace("req-reasoning-state", tmp_path)
+        payload = {
+            "input": [
+                {
+                    "type": "reasoning",
+                    "id": "rs_safe",
+                    "status": "completed",
+                    "summary": [
+                        {
+                            "type": "summary_text",
+                            "text": "public reasoning summary",
+                            "future_part": {"provider_private": "summary-part-leak"},
+                        }
+                    ],
+                    "encrypted_content": "restored-responses-provider-state",
+                    "opaque_state": "internal-provider-state",
+                    "future_sibling": {"provider_private": "reasoning-item-leak"},
+                },
+                {"type": "thinking", "signature": "rmr1.kid.anthropic-ciphertext"},
+                {"type": "redacted_thinking", "data": "rmr1.kid.redacted-ciphertext"},
+                {"thoughtSignature": "rmr1.kid.gemini-ciphertext"},
+                {"type": "text", "data": "ordinary application data"},
+                {
+                    "type": "application_record",
+                    "future_sibling": {"provider_private": "ordinary application field"},
+                },
+            ]
+        }
+        trace.record_upstream("POST", "https://example.invalid", {}, payload)
+        trace.flush()
+
+        body = json.loads((tmp_path / "req-reasoning-state" / "upstream.json").read_text())["body"]
+        serialized = json.dumps(body)
+        assert "restored-responses-provider-state" not in serialized
+        assert "internal-provider-state" not in serialized
+        assert "anthropic-ciphertext" not in serialized
+        assert "redacted-ciphertext" not in serialized
+        assert "gemini-ciphertext" not in serialized
+        assert "reasoning-item-leak" not in serialized
+        assert "summary-part-leak" not in serialized
+        reasoning = body["input"][0]
+        assert reasoning["id"] == "rs_safe"
+        assert reasoning["status"] == "completed"
+        assert reasoning["summary"] == [
+            {
+                "type": "summary_text",
+                "text": "public reasoning summary",
+                "future_part": "***",
+            }
+        ]
+        assert reasoning["future_sibling"] == "***"
+        assert body["input"][4]["data"] == "ordinary application data"
+        assert body["input"][5]["future_sibling"] == {
+            "provider_private": "ordinary application field"
+        }
+
     def test_no_records_no_write(self, tmp_path):
         trace = AuditTrace("req-empty", tmp_path)
         trace.flush()
@@ -108,6 +165,34 @@ class TestAuditTrace:
         )
         assert json.loads((trace_dir / "upstream_resp.json").read_text())["status"] == 503
         assert json.loads((trace_dir / "upstream_resp_2.json").read_text())["status"] == 200
+
+    def test_dispatch_attempt_records_safe_binding_and_conversion_metadata(self, tmp_path):
+        trace = AuditTrace("request-1", tmp_path)
+
+        trace.record_dispatch_attempt(
+            provider="github-copilot",
+            model="gpt-5.4",
+            binding="copilot-openai-responses",
+            entry_protocol="anthropic_messages",
+            upstream_transport="openai_responses",
+            conversion_mode="semantic_ir",
+            outcome="selected",
+            ir_materialized=True,
+        )
+
+        record = trace._records["attempt"]
+        assert record == {
+            "timestamp": record["timestamp"],
+            "request_id": "request-1",
+            "provider": "github-copilot",
+            "model": "gpt-5.4",
+            "binding": "copilot-openai-responses",
+            "entry_protocol": "anthropic_messages",
+            "upstream_transport": "openai_responses",
+            "conversion_mode": "semantic_ir",
+            "outcome": "selected",
+            "ir_materialized": True,
+        }
 
     def test_outbound_separates_wire_status_from_terminal_outcome(self, tmp_path):
         trace = AuditTrace("req-eof", tmp_path)

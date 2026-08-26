@@ -3,12 +3,15 @@
 import asyncio
 import json
 import time
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, AsyncIterator, Mapping
 from typing import Any
 
 from fastapi import APIRouter
+from fastapi import Request as FastAPIRequest
+from fastapi.responses import JSONResponse
 from pydantic import ValidationError
 
+from router_maestro.protocols import WireProtocol
 from router_maestro.providers import (
     ProviderError,
     ProviderFailureKind,
@@ -20,6 +23,15 @@ from router_maestro.providers import (
 from router_maestro.providers import ResponsesRequest as InternalResponsesRequest
 from router_maestro.routing import Router, get_router
 from router_maestro.routing.model_ref import qualify_model_id
+from router_maestro.runtime import ReasoningCapsuleCodec
+from router_maestro.server.dependencies import (
+    generation_dispatcher_is_configured,
+    get_reasoning_capsule_codec,
+)
+from router_maestro.server.generation_pipeline import (
+    attempt_observer_for_request,
+    build_generation_pipeline,
+)
 from router_maestro.server.protocols import (
     ResponsesReducer,
     build_nonstream_snapshot,
@@ -71,6 +83,72 @@ def sse_event(data: dict[str, Any]) -> str:
     """Format data as SSE event with event type field."""
     event_type = data.get("type", "")
     return f"event: {event_type}\ndata: {json.dumps(data)}\n\n"
+
+
+def _reasoning_capsule_codec(raw_request: FastAPIRequest) -> ReasoningCapsuleCodec:
+    """Return the startup-owned capsule state required by generation dispatch."""
+    return get_reasoning_capsule_codec(raw_request)
+
+
+def _validate_dispatch_reasoning(payload: Mapping[str, Any]) -> None:
+    """Apply the stable Responses reasoning gate before selecting a transport."""
+    reasoning = payload.get("reasoning")
+    if reasoning is None:
+        return
+    try:
+        ResponsesReasoningConfig.model_validate(reasoning)
+    except ValidationError as error:
+        raise _reasoning_validation_error(error) from error
+
+
+async def _dispatch_responses_generation(
+    model_router: Router,
+    raw_request: FastAPIRequest,
+    payload: Mapping[str, Any],
+    capsule_codec: ReasoningCapsuleCodec,
+):
+    """Run stable and beta Responses traffic through the shared dispatcher."""
+    _validate_dispatch_reasoning(payload)
+    pipeline = build_generation_pipeline(
+        model_router,
+        capsule_codec,
+        WireProtocol.OPENAI_RESPONSES,
+        payload,
+        path=raw_request.url.path,
+        query=dict(raw_request.query_params),
+        headers=dict(raw_request.headers),
+        attempt_observer=attempt_observer_for_request(raw_request),
+    )
+    if pipeline.envelope.stream:
+        opened = await pipeline.dispatcher.dispatch_stream(model_router, pipeline.envelope)
+        frames = pipeline.responses.encode_stream(opened, pipeline.envelope.runtime)
+        return sse_streaming_response(_responses_sse_frames(frames))
+
+    result = await pipeline.dispatcher.dispatch(model_router, pipeline.envelope)
+    encoded = await pipeline.responses.encode_result(result, pipeline.envelope.runtime)
+    return JSONResponse(content=dict(encoded))
+
+
+async def _responses_sse_frames(
+    frames: AsyncIterator[Mapping[str, Any]],
+) -> AsyncGenerator[str]:
+    """Serialize typed Responses frames and normalize only post-commit failures."""
+    try:
+        async for frame in frames:
+            event_type = frame.get("type")
+            if not isinstance(event_type, str) or not event_type:
+                raise ProviderError(
+                    "Upstream Responses stream frame is missing its event type",
+                    status_code=502,
+                    retryable=True,
+                    kind=ProviderFailureKind.UPSTREAM_PROTOCOL,
+                )
+            yield f"event: {event_type}\ndata: {json.dumps(dict(frame))}\n\n"
+    except asyncio.CancelledError:
+        raise
+    except Exception as error:
+        data = {"type": "error", **postcommit_error_data(error, "openai_responses")}
+        yield f"event: error\ndata: {json.dumps(data)}\n\n"
 
 
 def extract_text_from_content(content: str | list[Any]) -> str:
@@ -224,9 +302,8 @@ def convert_tool_choice_to_internal(
     return dict(tool_choice)
 
 
-@router.post("/api/openai/v1/responses")
 async def create_response(request: ResponsesRequest):
-    """Handle Responses API requests (for Codex models)."""
+    """Compatibility implementation for route-only callers and test doubles."""
     request_id = generate_id("req")
     start_time = time.time()
 
@@ -323,6 +400,26 @@ async def create_response(request: ResponsesRequest):
         if isinstance(e, RequestOptionError):
             return client_error_response(e, "openai")
         return protocol_error_response(e, "openai_responses")
+
+
+@router.post("/api/openai/v1/responses")
+async def responses_endpoint(request: ResponsesRequest, raw_request: FastAPIRequest):
+    """Handle stable Responses requests through the shared generation dispatcher."""
+    model_router = get_router()
+    if isinstance(model_router, Router) and generation_dispatcher_is_configured(raw_request):
+        capsule_codec = _reasoning_capsule_codec(raw_request)
+        try:
+            payload = await raw_request.json()
+            return await _dispatch_responses_generation(
+                model_router,
+                raw_request,
+                payload,
+                capsule_codec,
+            )
+        except ProviderError as error:
+            return protocol_error_response(error, "openai_responses")
+
+    return await create_response(request)
 
 
 async def stream_response(

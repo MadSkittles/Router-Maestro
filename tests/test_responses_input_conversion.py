@@ -102,12 +102,14 @@ def test_pydantic_input_model_preserves_namespace():
 def test_pydantic_input_model_preserves_unknown_extras():
     # extra="allow" lets future Copilot fields (tool_metadata, etc.) survive
     # without us having to ship a release for each one.
-    m = ResponsesFunctionCallInput(
-        type="function_call",
-        call_id="c1",
-        name="x",
-        arguments="{}",
-        tool_metadata={"key": "v"},
+    m = ResponsesFunctionCallInput.model_validate(
+        {
+            "type": "function_call",
+            "call_id": "c1",
+            "name": "x",
+            "arguments": "{}",
+            "tool_metadata": {"key": "v"},
+        }
     )
     dumped = m.model_dump(exclude_none=True)
     assert dumped["tool_metadata"] == {"key": "v"}
@@ -134,6 +136,7 @@ def test_responses_request_preserves_namespace_through_full_parse():
         ],
     )
     items = convert_input_to_internal(req.input)
+    assert isinstance(items, list)
     fc = items[0]
     assert fc["type"] == "function_call"
     assert fc["namespace"] == "mcp__kusto_mcp__"

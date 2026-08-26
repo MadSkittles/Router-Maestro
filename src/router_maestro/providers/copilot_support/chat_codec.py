@@ -30,7 +30,7 @@ class CopilotChatCodec:
     def sanitize_surrogates(text: str) -> str:
         return text.encode("utf-8", errors="replace").decode("utf-8")
 
-    def sanitize_content(self, content: str | list) -> str | list:
+    def sanitize_content(self, content: str | list | None) -> str | list | None:
         if isinstance(content, str):
             return self.sanitize_surrogates(content)
         if isinstance(content, list):

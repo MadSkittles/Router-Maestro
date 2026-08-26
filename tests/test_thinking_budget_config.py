@@ -1,13 +1,20 @@
 """Tests for configurable thinking budget (Feature 4)."""
 
 import json
+from typing import cast
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
+from starlette.responses import StreamingResponse
 
-from router_maestro.config.priorities import PrioritiesConfig, ThinkingBudgetConfig
+from router_maestro.config.priorities import (
+    FallbackConfig,
+    FallbackStrategy,
+    PrioritiesConfig,
+    ThinkingBudgetConfig,
+)
 from router_maestro.providers.base import (
     BaseProvider,
     ChatRequest,
@@ -25,7 +32,9 @@ from router_maestro.server.routes import anthropic as anthropic_route
 from router_maestro.server.routes.anthropic import _apply_thinking_budget
 from router_maestro.server.schemas.anthropic import (
     AnthropicMessagesRequest,
+    AnthropicMessagesResponse,
     AnthropicThinkingConfig,
+    AnthropicUserMessage,
 )
 from router_maestro.utils.cache import TTLCache
 from router_maestro.utils.context_window import resolve_thinking_budget
@@ -313,7 +322,7 @@ def _auto_thinking_fallback_router(
     router._priorities_cache = TTLCache(CACHE_TTL_SECONDS)
     priorities = PrioritiesConfig(
         priorities=["primary/shared", "fallback/shared"],
-        fallback={"strategy": "priority", "maxRetries": 1},
+        fallback=FallbackConfig(strategy=FallbackStrategy.PRIORITY, maxRetries=1),
         thinking=ThinkingBudgetConfig(default_budget=16000, auto_enable=auto_enable),
     )
     router._priorities_cache.set(priorities)
@@ -493,20 +502,11 @@ class TestAnthropicRouteThinkingBudget:
         router._models_cache_ttl = TTLCache(CACHE_TTL_SECONDS)
         router._models_cache_ttl.set(True)
         router._priorities_cache = TTLCache(CACHE_TTL_SECONDS)
-        priorities = type(
-            "Config",
-            (),
-            {
-                "priorities": ["first/shared", "second/shared"],
-                "fallback": type(
-                    "Fallback",
-                    (),
-                    {"strategy": "priority", "maxRetries": 2},
-                )(),
-                "thinking": ThinkingBudgetConfig(default_budget=16000, auto_enable=False),
-                "model_overrides": {},
-            },
-        )()
+        priorities = PrioritiesConfig(
+            priorities=["first/shared", "second/shared"],
+            fallback=FallbackConfig(strategy=FallbackStrategy.PRIORITY, maxRetries=2),
+            thinking=ThinkingBudgetConfig(default_budget=16000, auto_enable=False),
+        )
         router._priorities_cache.set(priorities)
         router._fuzzy_cache = {}
         router._providers_ttl = TTLCache(CACHE_TTL_SECONDS)
@@ -521,12 +521,13 @@ class TestAnthropicRouteThinkingBudget:
             AnthropicMessagesRequest(
                 model="shared",
                 max_tokens=32768,
-                messages=[{"role": "user", "content": "hi"}],
+                messages=[AnthropicUserMessage(role="user", content="hi")],
                 thinking=AnthropicThinkingConfig(type="enabled", budget_tokens=8192),
             ),
-            RawRequest(),
+            cast(Request, RawRequest()),
         )
 
+        assert isinstance(response, AnthropicMessagesResponse)
         assert response.model == "second/shared"
         assert first.request is None
         assert second.request is not None
@@ -593,7 +594,7 @@ class TestAnthropicRouteThinkingBudget:
         model_router._priorities_cache = TTLCache(CACHE_TTL_SECONDS)
         priorities = PrioritiesConfig(
             priorities=["github-copilot/shared", "anthropic/shared"],
-            fallback={"strategy": "priority", "maxRetries": 1},
+            fallback=FallbackConfig(strategy=FallbackStrategy.PRIORITY, maxRetries=1),
         )
         model_router._priorities_cache.set(priorities)
         model_router._fuzzy_cache = {}
@@ -721,7 +722,7 @@ class TestAnthropicRouteThinkingBudget:
         model_router._priorities_cache = TTLCache(CACHE_TTL_SECONDS)
         priorities = PrioritiesConfig(
             priorities=["github-copilot/shared", "anthropic/shared"],
-            fallback={"strategy": "priority", "maxRetries": 1},
+            fallback=FallbackConfig(strategy=FallbackStrategy.PRIORITY, maxRetries=1),
         )
         model_router._priorities_cache.set(priorities)
         model_router._fuzzy_cache = {}
@@ -849,7 +850,7 @@ class TestAnthropicRouteThinkingBudget:
         router._priorities_cache = TTLCache(CACHE_TTL_SECONDS)
         priorities = PrioritiesConfig(
             priorities=["primary/shared", "fallback/shared"],
-            fallback={"strategy": "priority", "maxRetries": 1},
+            fallback=FallbackConfig(strategy=FallbackStrategy.PRIORITY, maxRetries=1),
             thinking=ThinkingBudgetConfig(default_budget=16000, auto_enable=False),
         )
         router._priorities_cache.set(priorities)
@@ -866,12 +867,13 @@ class TestAnthropicRouteThinkingBudget:
             AnthropicMessagesRequest(
                 model="shared",
                 max_tokens=32768,
-                messages=[{"role": "user", "content": "hi"}],
+                messages=[AnthropicUserMessage(role="user", content="hi")],
                 thinking=AnthropicThinkingConfig(type="enabled", budget_tokens=8192),
             ),
-            RawRequest(),
+            cast(Request, RawRequest()),
         )
 
+        assert isinstance(response, AnthropicMessagesResponse)
         assert response.model == "fallback/shared"
         assert primary.requests[0].thinking_budget == 8192
         assert fallback.requests[0].thinking_type == "enabled"
@@ -947,7 +949,7 @@ class TestAnthropicRouteThinkingBudget:
         router._priorities_cache = TTLCache(CACHE_TTL_SECONDS)
         priorities = PrioritiesConfig(
             priorities=["primary/shared", "fallback/shared"],
-            fallback={"strategy": "priority", "maxRetries": 1},
+            fallback=FallbackConfig(strategy=FallbackStrategy.PRIORITY, maxRetries=1),
             thinking=ThinkingBudgetConfig(default_budget=16000, auto_enable=False),
         )
         router._priorities_cache.set(priorities)
@@ -975,11 +977,12 @@ class TestAnthropicRouteThinkingBudget:
                 model="shared",
                 stream=True,
                 max_tokens=32768,
-                messages=[{"role": "user", "content": "hi"}],
+                messages=[AnthropicUserMessage(role="user", content="hi")],
                 thinking=AnthropicThinkingConfig(type="enabled", budget_tokens=8192),
             ),
-            RawRequest(),
+            cast(Request, RawRequest()),
         )
+        assert isinstance(response, StreamingResponse)
         chunks = [
             chunk.encode() if isinstance(chunk, str) else chunk
             async for chunk in response.body_iterator
@@ -1013,11 +1016,12 @@ class TestAnthropicRouteThinkingBudget:
             AnthropicMessagesRequest(
                 model="shared",
                 max_tokens=32768,
-                messages=[{"role": "user", "content": "hi"}],
+                messages=[AnthropicUserMessage(role="user", content="hi")],
             ),
-            RawRequest(),
+            cast(Request, RawRequest()),
         )
 
+        assert isinstance(response, AnthropicMessagesResponse)
         assert response.model == "fallback/shared"
         assert primary.requests[0].thinking_type == "enabled"
         assert primary.requests[0].thinking_budget == 16000
@@ -1216,10 +1220,11 @@ class TestAnthropicRouteThinkingBudget:
                 model="shared",
                 stream=True,
                 max_tokens=32768,
-                messages=[{"role": "user", "content": "hi"}],
+                messages=[AnthropicUserMessage(role="user", content="hi")],
             ),
-            RawRequest(),
+            cast(Request, RawRequest()),
         )
+        assert isinstance(response, StreamingResponse)
         chunks = [
             chunk.encode() if isinstance(chunk, str) else chunk
             async for chunk in response.body_iterator
@@ -1451,13 +1456,13 @@ class TestAnthropicRouteThinkingBudget:
         request = AnthropicMessagesRequest(
             model="test",
             max_tokens=64000,
-            messages=[{"role": "user", "content": "hi"}],
+            messages=[AnthropicUserMessage(role="user", content="hi")],
             thinking=AnthropicThinkingConfig(type="enabled", budget_tokens=63999),
         )
         log = MagicMock()
         monkeypatch.setattr(anthropic_route, "logger", log)
 
-        await anthropic_route.messages(request, RawRequest())
+        await anthropic_route.messages(request, cast(Request, RawRequest()))
 
         log.info.assert_called_once()
         _message, model, stream, max_tokens, thinking, raw_thinking, effort = (

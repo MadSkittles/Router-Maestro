@@ -1,7 +1,7 @@
 """Tests for per-model token overrides (Feature 2)."""
 
 from router_maestro.config.priorities import ModelOverride, PrioritiesConfig
-from router_maestro.providers.base import ModelInfo
+from router_maestro.providers.base import ContextWindowOption, ModelInfo
 
 
 class TestModelInfoWithOverrides:
@@ -17,6 +17,11 @@ class TestModelInfoWithOverrides:
             max_context_window_tokens=200000,
             supports_thinking=True,
             supports_vision=True,
+            transport_capabilities={"openai_responses": True},
+            context_window_options=(
+                ContextWindowOption("default", 128000, True),
+                ContextWindowOption("long_context", 900000, False),
+            ),
         )
 
     def test_override_single_field(self):
@@ -27,6 +32,8 @@ class TestModelInfoWithOverrides:
         assert updated.max_output_tokens == 16384
         assert updated.max_context_window_tokens == 200000
         assert updated.supports_thinking is True
+        assert updated.context_window_options == ()
+        assert updated.effective_context_window_options()[0].max_prompt_tokens == 900000
 
     def test_override_multiple_fields(self):
         """Override all three token fields."""
@@ -47,6 +54,7 @@ class TestModelInfoWithOverrides:
         assert updated.max_prompt_tokens == info.max_prompt_tokens
         assert updated.max_output_tokens == info.max_output_tokens
         assert updated.max_context_window_tokens == info.max_context_window_tokens
+        assert updated.context_window_options == info.context_window_options
 
     def test_override_is_immutable(self):
         """Original ModelInfo is not mutated."""
@@ -65,6 +73,7 @@ class TestModelInfoWithOverrides:
         assert updated.provider == "github-copilot"
         assert updated.supports_thinking is True
         assert updated.supports_vision is True
+        assert updated.transport_capabilities == {"openai_responses": True}
 
 
 class TestModelOverrideConfig:

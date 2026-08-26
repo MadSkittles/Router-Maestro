@@ -6,15 +6,19 @@ deployments. The first observability layer is intentionally narrow:
 - a top-level Prometheus scrape endpoint at `/metrics`
 - HTTP request counters
 - HTTP request duration histograms
+- low-cardinality generation transport-attempt counters
 - request IDs propagated through `X-Request-ID`
 
-Provider, fallback, and terminal-outcome Prometheus metrics are not yet exposed.
-Provider-side attempts and streaming outcomes are available through opt-in audit
-traces, while the request ID connects client responses, audit directories, and
-server logs. Do not infer stream success from HTTP `200` alone: after a stream
-is committed, an upstream failure or unexpected EOF is encoded in-stream and
-recorded as a non-success terminal outcome. Streaming response duration is
-measured when the response body finishes, not when the stream object is created.
+Generation metrics identify entry protocol, selected upstream protocol,
+conversion mode, outcome, and whether semantic IR was materialized. Provider,
+model, and binding names are deliberately excluded from Prometheus to prevent
+unbounded labels; those identities and streaming outcomes are available through
+opt-in audit traces. The request ID connects client responses, audit
+directories, and server logs. Do not infer stream success from HTTP `200`
+alone: after a stream is committed, an upstream failure or unexpected EOF is
+encoded in-stream and recorded as a non-success terminal outcome. Streaming
+response duration is measured when the response body finishes, not when the
+stream object is created.
 
 ## Scraping `/metrics`
 
@@ -114,6 +118,27 @@ Buckets are tuned for LLM proxy traffic:
 0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10, 20, 60, 120 seconds
 ```
 
+### `router_maestro_generation_attempts_total`
+
+Counter for generation transport attempts that were selected or rejected by
+the shared dispatcher. One client request can increment it more than once when
+a pre-commit transport attempt is retryable or statically unavailable.
+
+Labels:
+
+| Label | Meaning |
+| --- | --- |
+| `entry_protocol` | Bounded ingress protocol: `anthropic_messages`, `openai_chat`, `openai_responses`, or `gemini`. |
+| `upstream_transport` | Provider binding protocol: `anthropic_messages`, `openai_chat`, or `openai_responses`. |
+| `conversion_mode` | `identity` for the copy-on-write fast path or `semantic_ir` for cross-protocol conversion. |
+| `outcome` | `selected`, `retryable_failure`, `unsupported`, `unrepresentable`, or `failed`. |
+| `ir_materialized` | `true` only when this attempt caused the request's lazy semantic IR to be materialized; cached reuse and pre-preparation rejections report `false`. |
+
+The metric must not gain `provider`, `model`, or `binding` labels. Use the
+matching audit `attempt*.json` records when those exact identities are required.
+An identity attempt reporting `ir_materialized="true"` is therefore a useful
+canary for a fast-path regression, even after an earlier cross-protocol attempt.
+
 ## Request IDs
 
 Router-Maestro accepts an inbound `X-Request-ID` header when it matches
@@ -157,6 +182,7 @@ Enable audit traces with `ROUTER_MAESTRO_TRACE=1` or
 | `inbound.json` | Redacted inbound request |
 | `upstream.json`, `upstream_2.json`, ... | Each upstream request attempt, in order |
 | `upstream_resp.json`, `upstream_resp_2.json`, ... | Upstream responses that were obtained, in order |
+| `attempt.json`, `attempt_2.json`, ... | Selected provider/model/binding plus entry protocol, upstream transport, conversion mode, outcome, and IR materialization state |
 | `outbound.json` | Wire status, duration, transport termination, response status, incomplete details, and safe terminal error |
 
 The set is dynamic. An early validation failure can have no upstream file; a
@@ -237,5 +263,7 @@ histogram_quantile(
 )
 ```
 
-This shows Router-Maestro HTTP-level latency. Provider and streaming-specific
-latency metrics are planned for the next observability layer.
+This shows Router-Maestro HTTP-level latency. Provider-specific latency and
+streaming-phase histograms are not currently exposed as Prometheus labels; use
+request-linked audit records when exact provider/model/binding diagnosis is
+required.

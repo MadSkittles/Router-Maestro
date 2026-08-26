@@ -1,5 +1,7 @@
 """Tests for the Router module."""
 
+from typing import Any, cast
+
 import pytest
 
 from router_maestro.providers import (
@@ -136,9 +138,9 @@ class TestRouterCacheInvalidation:
         """Create a minimal router for testing cache."""
         router = Router.__new__(Router)
         _init_router_caches(router)
-        router._models_cache = {"test": ("provider", None)}
+        router._models_cache = cast(Any, {"test": ("provider", None)})
         router._models_cache_ttl.set(True)
-        router._priorities_cache.set(object())
+        router._priorities_cache.set(cast(Any, object()))
         return router
 
     def test_invalidate_cache_clears_models(self, router):

@@ -70,11 +70,16 @@ def test_openai_tool_choice_required_forces_tool(client: httpx.Client, tool_mode
     assert data["choices"][0]["finish_reason"] == "tool_calls"
 
 
-def test_anthropic_thinking_replay_multiturn(client: httpx.Client, chat_model: str):
-    """A history containing a prior thinking block must not break the next turn."""
+def test_anthropic_thinking_replay_multiturn(
+    client: httpx.Client,
+    anthropic_responses_reasoning_turn: tuple[str, list[dict]],
+):
+    """A real Responses reasoning capsule survives a second Anthropic turn."""
+    model, assistant_content = anthropic_responses_reasoning_turn
     response = client.post(
         "/api/anthropic/v1/messages",
-        json=anthropic_thinking_replay_payload(chat_model),
+        json=anthropic_thinking_replay_payload(model, assistant_content),
+        timeout=180.0,
     )
     assert_http_success(response)
     data = response.json()

@@ -11,6 +11,14 @@ GITHUB_DEVICE_CODE_URL = "https://github.com/login/device/code"
 GITHUB_ACCESS_TOKEN_URL = "https://github.com/login/oauth/access_token"
 COPILOT_TOKEN_URL = "https://api.github.com/copilot_internal/v2/token"
 
+# Keep these aligned with the current VS Code Copilot client. CAPI uses the
+# client identity minted into the Copilot token to select the model-catalog
+# schema; stale versions omit billing tiers and return an upgrade warning.
+COPILOT_API_VERSION = "2026-08-01"
+COPILOT_EDITOR_VERSION = "vscode/1.136.0"
+COPILOT_PLUGIN_VERSION = "copilot-chat/0.64.0"
+COPILOT_USER_AGENT = "GitHubCopilotChat/0.64.0"
+
 DEFAULT_POLL_INTERVAL = 5  # seconds
 
 
@@ -154,10 +162,10 @@ async def get_copilot_token(
         "Authorization": f"token {github_token}",
         "Accept": "application/json",
         "Content-Type": "application/json",
-        "Editor-Version": "vscode/1.104.3",
-        "Editor-Plugin-Version": "copilot-chat/0.26.7",
-        "User-Agent": "GitHubCopilotChat/0.26.7",
-        "X-GitHub-Api-Version": "2025-04-01",
+        "Editor-Version": COPILOT_EDITOR_VERSION,
+        "Editor-Plugin-Version": COPILOT_PLUGIN_VERSION,
+        "User-Agent": COPILOT_USER_AGENT,
+        "X-GitHub-Api-Version": COPILOT_API_VERSION,
         "X-Vscode-User-Agent-Library-Version": "electron-fetch",
     }
 

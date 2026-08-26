@@ -2,7 +2,7 @@
 
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from prometheus_client import (
     CONTENT_TYPE_LATEST as PROMETHEUS_CONTENT_TYPE_LATEST,
@@ -14,6 +14,9 @@ from prometheus_client import (
 )
 from prometheus_client.exposition import generate_latest
 from starlette.routing import Match
+
+if TYPE_CHECKING:
+    from router_maestro.server.dispatcher import DispatchAttemptObservation
 
 METRIC_PREFIX = "router_maestro"
 CONTENT_TYPE_LATEST = PROMETHEUS_CONTENT_TYPE_LATEST
@@ -60,9 +63,17 @@ API_KINDS = (
 
 HTTP_REQUESTS_TOTAL = f"{METRIC_PREFIX}_http_requests_total"
 HTTP_REQUEST_DURATION_SECONDS = f"{METRIC_PREFIX}_http_request_duration_seconds"
+GENERATION_ATTEMPTS_TOTAL = f"{METRIC_PREFIX}_generation_attempts_total"
 
 HTTP_DURATION_BUCKETS = (0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10, 20, 60, 120)
 HTTP_LABELS = ("method", "path_template", "status")
+GENERATION_ATTEMPT_LABELS = (
+    "entry_protocol",
+    "upstream_transport",
+    "conversion_mode",
+    "outcome",
+    "ir_materialized",
+)
 
 
 def bool_label(value: bool) -> str:
@@ -113,6 +124,7 @@ class HttpMetrics:
     registry: CollectorRegistry
     requests_total: Counter
     request_duration: Histogram
+    generation_attempts: Counter
 
     def observe_request(
         self,
@@ -130,6 +142,16 @@ class HttpMetrics:
         }
         self.requests_total.labels(**labels).inc()
         self.request_duration.labels(**labels).observe(duration_seconds)
+
+    def observe_dispatch_attempt(self, observation: DispatchAttemptObservation) -> None:
+        """Record one closed generation attempt using bounded protocol labels only."""
+        self.generation_attempts.labels(
+            entry_protocol=observation.entry_protocol.value,
+            upstream_transport=observation.upstream_transport.value,
+            conversion_mode=observation.conversion_mode.value,
+            outcome=observation.outcome.value,
+            ir_materialized=bool_label(observation.ir_materialized),
+        ).inc()
 
 
 def create_registry() -> CollectorRegistry:
@@ -157,6 +179,12 @@ def create_http_metrics(registry: CollectorRegistry | None = None) -> HttpMetric
             "HTTP request duration in seconds.",
             HTTP_LABELS,
             buckets=HTTP_DURATION_BUCKETS,
+            registry=target_registry,
+        ),
+        generation_attempts=Counter(
+            GENERATION_ATTEMPTS_TOTAL,
+            "Generation transport attempts selected or rejected by Router-Maestro.",
+            GENERATION_ATTEMPT_LABELS,
             registry=target_registry,
         ),
     )

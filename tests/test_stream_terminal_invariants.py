@@ -5,9 +5,9 @@ from __future__ import annotations
 import asyncio
 import json
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterable, AsyncIterator
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -15,6 +15,7 @@ from router_maestro.providers import ChatRequest, ChatStreamChunk, Message
 from router_maestro.providers import ResponsesRequest as InternalResponsesRequest
 from router_maestro.providers import base as provider_base
 from router_maestro.providers.base import ProviderError, ResponsesStreamChunk
+from router_maestro.routing.router import Router
 from router_maestro.server.routes import anthropic, chat, gemini, responses
 from router_maestro.server.streaming import sse_streaming_response
 
@@ -161,7 +162,7 @@ def _make_stream(
                 )
             )
         return responses.stream_response(
-            _ResponsesRouter(chunks, error),
+            cast(Router, _ResponsesRouter(chunks, error)),
             _responses_request(),
             request_id="req-test",
             start_time=time.time(),
@@ -177,20 +178,29 @@ def _make_stream(
             )
         )
     router = _ChatRouter(chunks, error)
+    model_router = cast(Router, router)
     request = _chat_request()
     if protocol == "chat":
-        return chat.stream_response(router, request)
+        return chat.stream_response(model_router, request)
     if protocol == "anthropic":
-        return anthropic.stream_response(router, request, "claude-sonnet-4", 1)
+        return anthropic.stream_response(model_router, request, "claude-sonnet-4", 1)
     if protocol == "gemini":
-        return gemini._stream_response(router, request, "gemini-2.5-pro", 1)
+        return gemini._stream_response(model_router, request, "gemini-2.5-pro", 1)
     raise AssertionError(f"unknown protocol: {protocol}")
 
 
 async def _collect(protocol: str, **kwargs: Any) -> tuple[list[str], int]:
     response = sse_streaming_response(_make_stream(protocol, **kwargs))
-    events = [event async for event in response.body_iterator]
+    events = await _collect_text_events(response.body_iterator)
     return events, response.status_code
+
+
+async def _collect_text_events(iterator: AsyncIterable[Any]) -> list[str]:
+    events: list[str] = []
+    async for event in iterator:
+        assert isinstance(event, str)
+        events.append(event)
+    return events
 
 
 def _json_payloads(events: list[str]) -> list[dict[str, Any]]:
@@ -285,9 +295,9 @@ async def _collect_chat_sequence(
     error: BaseException | None = None,
 ) -> list[str]:
     response = sse_streaming_response(
-        chat.stream_response(_ChatRouter(chunks, error), _chat_request())
+        chat.stream_response(cast(Router, _ChatRouter(chunks, error)), _chat_request())
     )
-    return [event async for event in response.body_iterator]
+    return await _collect_text_events(response.body_iterator)
 
 
 @pytest.fixture(autouse=True)
@@ -325,9 +335,11 @@ async def test_anthropic_partial_tool_then_eof_does_not_flush_tool_or_success():
     ]
 
     response = sse_streaming_response(
-        anthropic.stream_response(_ChatRouter(chunks), _chat_request(), "claude-sonnet-4", 1)
+        anthropic.stream_response(
+            cast(Router, _ChatRouter(chunks)), _chat_request(), "claude-sonnet-4", 1
+        )
     )
-    events = [event async for event in response.body_iterator]
+    events = await _collect_text_events(response.body_iterator)
 
     payloads = _json_payloads(events)
     assert not any(
@@ -359,9 +371,11 @@ async def test_anthropic_malformed_tool_at_terminal_is_safe_protocol_error():
     ]
 
     response = sse_streaming_response(
-        anthropic.stream_response(_ChatRouter(chunks), _chat_request(), "claude-sonnet-4", 1)
+        anthropic.stream_response(
+            cast(Router, _ChatRouter(chunks)), _chat_request(), "claude-sonnet-4", 1
+        )
     )
-    events = [event async for event in response.body_iterator]
+    events = await _collect_text_events(response.body_iterator)
 
     payloads = _json_payloads(events)
     _assert_error_terminal("anthropic", events, "Invalid tool call from upstream")
@@ -586,6 +600,7 @@ async def test_client_cancellation_is_recorded_and_reraised(protocol: str):
 
     with pytest.raises(asyncio.CancelledError):
         async for event in response.body_iterator:
+            assert isinstance(event, str)
             events.append(event)
 
     _assert_no_success_terminal(protocol, events)
@@ -632,12 +647,15 @@ async def test_chat_late_exception_discards_pending_success(
 async def test_chat_late_cancellation_discards_pending_success_and_reraises():
     response = sse_streaming_response(
         chat.stream_response(
-            _ChatRouter(
-                [
-                    ChatStreamChunk(content="hi"),
-                    ChatStreamChunk(content="", finish_reason="stop"),
-                ],
-                asyncio.CancelledError(),
+            cast(
+                Router,
+                _ChatRouter(
+                    [
+                        ChatStreamChunk(content="hi"),
+                        ChatStreamChunk(content="", finish_reason="stop"),
+                    ],
+                    asyncio.CancelledError(),
+                ),
             ),
             _chat_request(),
         )
@@ -646,6 +664,7 @@ async def test_chat_late_cancellation_discards_pending_success_and_reraises():
 
     with pytest.raises(asyncio.CancelledError):
         async for event in response.body_iterator:
+            assert isinstance(event, str)
             events.append(event)
 
     _assert_no_success_terminal("chat", events)

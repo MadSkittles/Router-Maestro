@@ -42,19 +42,19 @@ async def _invoke(provider: CopilotProvider, operation: Operation) -> None:
         )
         return
     if operation == "chat-stream":
-        stream: AsyncIterator[ChatStreamChunk] = provider.chat_completion_stream(
+        chat_stream: AsyncIterator[ChatStreamChunk] = provider.chat_completion_stream(
             ChatRequest(model="gpt-4o", messages=[Message(role="user", content="hi")])
         )
-        async for _ in stream:
+        async for _ in chat_stream:
             pass
         return
     if operation == "responses":
         await provider.responses_completion(ResponsesRequest(model="gpt-5", input="hi"))
         return
-    stream = provider.responses_completion_stream(
+    responses_stream = provider.responses_completion_stream(
         ResponsesRequest(model="gpt-5", input="hi", stream=True)
     )
-    async for _ in stream:
+    async for _ in responses_stream:
         pass
 
 

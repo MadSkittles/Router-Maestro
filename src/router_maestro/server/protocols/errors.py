@@ -1,6 +1,6 @@
 """Safe protocol-native error normalization and encoding."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Literal
 
 from fastapi.exceptions import RequestValidationError
@@ -63,7 +63,9 @@ def normalize_protocol_error(error: Exception) -> NormalizedProtocolError:
         )
 
     if isinstance(error, ProviderError):
-        signal_value = _PROVIDER_SIGNAL_HEADERS.get(error.signal)
+        signal_value = (
+            _PROVIDER_SIGNAL_HEADERS.get(error.signal) if error.signal is not None else None
+        )
         return NormalizedProtocolError(
             status_code=error.downstream_status_code,
             message=error.safe_message,
@@ -106,6 +108,14 @@ def protocol_error_response(
     """Encode an exception as a native non-stream response for one public surface."""
     surface = _coerce_surface(protocol)
     normalized = normalize_protocol_error(error)
+    if surface == "anthropic" and isinstance(error, RequestValidationError):
+        # Anthropic exposes malformed request bodies as HTTP 400, not FastAPI's
+        # implementation-specific 422. Include only the schema location (never
+        # the rejected input) so clients can identify the bad field safely.
+        message = "Invalid request"
+        if normalized.parameter is not None:
+            message = f"{message}: {normalized.parameter}"
+        normalized = replace(normalized, status_code=400, message=message)
     if surface in {"openai_chat", "openai_responses"}:
         content = {"error": _openai_error(normalized)}
     elif surface == "anthropic":

@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import tempfile
+from collections.abc import Callable
 from contextlib import suppress
 from pathlib import Path
 from typing import Any
@@ -72,7 +73,7 @@ def write_json_owner_only(path: Path, data: Any) -> None:
         raise
 
 
-def load_config[T: BaseModel](path: Path, model: type[T], default_factory: callable) -> T:
+def load_config[T: BaseModel](path: Path, model: type[T], default_factory: Callable[[], T]) -> T:
     """Load configuration from JSON file.
 
     Args:

@@ -11,6 +11,7 @@ from router_maestro.server.schemas.admin import (
     PrioritiesResponse,
     PrioritiesUpdateRequest,
 )
+from router_maestro.server.schemas.model_catalog import ContextWindowOption
 from router_maestro.server.schemas.openai import (
     ChatCompletionChoice,
     ChatCompletionChunk,
@@ -73,6 +74,7 @@ __all__ = [
     "ErrorResponse",
     "ModelList",
     "ModelObject",
+    "ContextWindowOption",
     # Responses API schemas
     "ResponsesDeltaEvent",
     "ResponsesDoneEvent",

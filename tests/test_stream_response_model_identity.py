@@ -2,6 +2,7 @@
 
 import json
 from collections.abc import AsyncIterator
+from typing import cast
 
 import pytest
 
@@ -13,6 +14,7 @@ from router_maestro.providers import (
     ResponsesStreamChunk,
 )
 from router_maestro.routing.model_ref import ModelRef
+from router_maestro.routing.router import Router
 from router_maestro.server.routes.anthropic import stream_response as anthropic_stream_response
 from router_maestro.server.routes.chat import stream_response as chat_stream_response
 from router_maestro.server.routes.gemini import _stream_response as gemini_stream_response
@@ -93,7 +95,7 @@ async def test_openai_chat_stream_uses_selected_model_identity() -> None:
         protocol="chat",
     )
 
-    frames = [frame async for frame in chat_stream_response(router, _chat_request())]
+    frames = [frame async for frame in chat_stream_response(cast(Router, router), _chat_request())]
     events = _json_data(frames)
 
     assert {event["model"] for event in events if "model" in event} == {"second/shared-model"}
@@ -113,7 +115,7 @@ async def test_openai_responses_stream_uses_selected_model_identity() -> None:
     frames = [
         frame
         async for frame in responses_stream_response(
-            router,
+            cast(Router, router),
             request,
             request_id="req-identity",
             start_time=0.0,
@@ -140,7 +142,7 @@ async def test_anthropic_stream_uses_selected_model_identity() -> None:
     frames = [
         frame
         async for frame in anthropic_stream_response(
-            router,
+            cast(Router, router),
             _chat_request(),
             "router-maestro",
         )

@@ -23,6 +23,7 @@ dependencies = [
     # CLI
     "typer>=0.12.0",
     "rich>=13.7.0",
+    "questionary>=2.1.0",
 
     # API Server
     "fastapi>=0.109.0",
@@ -32,6 +33,9 @@ dependencies = [
 
     # Data validation
     "pydantic>=2.5.0",
+
+    # Authenticated provider state capsules
+    "cryptography>=44.0.0",
 
     # Token Counting
     "tiktoken>=0.5.0",
@@ -69,6 +73,11 @@ line-length = 100
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "N", "W", "UP"]
+
+[tool.basedpyright]
+include = ["src/router_maestro", "tests", "integration_tests", "scripts"]
+pythonVersion = "3.14"
+typeCheckingMode = "basic"
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

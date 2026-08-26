@@ -3,14 +3,14 @@
 The contract is the single home for *outbound* protection: Router-Maestro is
 lenient with what a client sends, but normalizes or rejects anything the
 upstream backend cannot accept before forwarding. ``reconcile_passthrough_body``
-is the entry point the OpenAI Responses beta passthrough route calls; it
+is the entry point the Copilot Responses binding dialect calls; it
 composes the per-concern hooks (``forwardable_fields`` field strip,
 ``filter_tools``, ``allows_temperature`` verdict, ``resolve_reasoning``
 downgrade) that each provider overrides.
 
-The beta native Anthropic route has a differently shaped body (Anthropic-format
+The native Anthropic binding has a differently shaped body (Anthropic-format
 tools, ``thinking`` budgets, ``output_config.effort``) and does not go through
-this orchestrator; it applies the Copilot-specific hooks directly
+this orchestrator; its Copilot dialect applies the provider-specific hooks directly
 (``CopilotOutboundContract.apply_native_anthropic_thinking`` and siblings) plus
 its own top-level field strip. Those hooks live on the contract so it stays the
 single source of the Copilot wire rules.
@@ -87,6 +87,15 @@ class OutboundContract(ABC):
         """Whether the upstream accepts explicit ``temperature``. Default: yes."""
         return True
 
+    def allows_top_p(
+        self,
+        operation: Operation,
+        *,
+        model: str | None = None,
+    ) -> bool:
+        """Whether the upstream accepts explicit ``top_p``. Default: yes."""
+        return True
+
     def allows_stop(
         self,
         operation: Operation,
@@ -103,6 +112,7 @@ class OutboundContract(ABC):
         operation: Operation,
         model: str,
         catalog_effort_values: list[str] | None,
+        preserve_unknown_fields: bool = False,
     ) -> None:
         """Reconcile a raw passthrough body in place against the wire contract.
 
@@ -115,8 +125,12 @@ class OutboundContract(ABC):
         call the provider's hooks directly instead of this orchestrator.
         """
         # 1. Top-level field strip (permissive default forwards everything).
+        # Protocol-native bindings opt out: their identity contract preserves
+        # future wire fields and lets the provider reject anything RM does not
+        # yet know about. Legacy passthrough callers retain the allowlist for
+        # one compatibility cycle.
         forwardable = self.forwardable_fields(operation)
-        if forwardable is not None:
+        if forwardable is not None and not preserve_unknown_fields:
             for key in set(body) - forwardable:
                 del body[key]
 
@@ -147,7 +161,22 @@ class OutboundContract(ABC):
                 parameter="temperature",
             )
 
-        # 5. Reasoning effort — only when the client sent an explicit effort.
+        # 5. Top-p verdict. Some providers expose the same model through
+        # multiple transports with different sampling-option support; reject
+        # here so the dispatcher can try another binding before provider I/O.
+        if body.get("top_p") is not None and not self.allows_top_p(
+            operation,
+            model=model,
+        ):
+            from router_maestro.providers.base import RequestOptionError  # lazy: base<-contract
+
+            raise RequestOptionError(
+                "upstream does not support request option 'top_p' on this operation",
+                model=model,
+                parameter="top_p",
+            )
+
+        # 6. Reasoning effort — only when the client sent an explicit effort.
         reasoning = body.get("reasoning")
         if isinstance(reasoning, dict) and isinstance(reasoning.get("effort"), str):
             resolution = self.resolve_reasoning(

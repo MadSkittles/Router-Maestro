@@ -8,6 +8,7 @@ from router_maestro.providers.base import (
     ChatRequest,
     ChatResponse,
     ChatStreamChunk,
+    ContextWindowOption,
     Message,
     ModelInfo,
     ProviderError,
@@ -29,7 +30,22 @@ from router_maestro.providers.base import (
     resolve_terminal_outcome,
     unexpected_eof_outcome,
 )
+from router_maestro.providers.bindings import (
+    COPILOT_ANTHROPIC_MESSAGES_BINDING,
+    COPILOT_OPENAI_CHAT_BINDING,
+    COPILOT_OPENAI_RESPONSES_BINDING,
+    LEGACY_ANTHROPIC_MESSAGES_BINDING,
+    LEGACY_OPENAI_CHAT_BINDING,
+    LEGACY_OPENAI_RESPONSES_BINDING,
+    OPENAI_COMPATIBLE_CHAT_BINDING,
+    AttemptRequestContext,
+    EndpointBinding,
+    HttpExecutor,
+    PreparedAttempt,
+    ProviderDialect,
+)
 from router_maestro.providers.copilot import CopilotProvider
+from router_maestro.providers.http_executor import ProviderHttpClientPool, SharedHttpExecutor
 from router_maestro.providers.openai import OpenAIProvider
 from router_maestro.providers.openai_base import OpenAIChatProvider
 from router_maestro.providers.openai_compat import OpenAICompatibleProvider
@@ -54,6 +70,7 @@ __all__ = [
     "ChatRequest",
     "ChatResponse",
     "ChatStreamChunk",
+    "ContextWindowOption",
     "classify_upstream_status",
     "client_cancelled_outcome",
     "exception_outcome",
@@ -64,6 +81,20 @@ __all__ = [
     "ResponsesStreamChunk",
     "ResponsesToolCall",
     "OpenAIChatProvider",
+    "AttemptRequestContext",
+    "EndpointBinding",
+    "HttpExecutor",
+    "PreparedAttempt",
+    "ProviderDialect",
+    "ProviderHttpClientPool",
+    "SharedHttpExecutor",
+    "LEGACY_OPENAI_CHAT_BINDING",
+    "LEGACY_OPENAI_RESPONSES_BINDING",
+    "LEGACY_ANTHROPIC_MESSAGES_BINDING",
+    "COPILOT_ANTHROPIC_MESSAGES_BINDING",
+    "COPILOT_OPENAI_CHAT_BINDING",
+    "COPILOT_OPENAI_RESPONSES_BINDING",
+    "OPENAI_COMPATIBLE_CHAT_BINDING",
     # Providers
     "CopilotProvider",
     "OpenAIProvider",

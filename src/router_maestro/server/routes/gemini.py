@@ -2,11 +2,15 @@
 
 import asyncio
 import json
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, AsyncIterator, Mapping
 from dataclasses import replace
+from typing import cast
 
 from fastapi import APIRouter
+from fastapi import Request as FastAPIRequest
+from fastapi.responses import JSONResponse
 
+from router_maestro.protocols import WireProtocol
 from router_maestro.providers import (
     ChatRequest,
     ProviderError,
@@ -20,8 +24,17 @@ from router_maestro.providers import (
     resolve_terminal_outcome,
     unexpected_eof_outcome,
 )
-from router_maestro.routing import get_router
+from router_maestro.routing import Router, get_router
 from router_maestro.routing.model_ref import qualify_model_id
+from router_maestro.runtime import ReasoningCapsuleCodec
+from router_maestro.server.dependencies import (
+    generation_dispatcher_is_configured,
+    get_reasoning_capsule_codec,
+)
+from router_maestro.server.generation_pipeline import (
+    attempt_observer_for_request,
+    build_generation_pipeline,
+)
 from router_maestro.server.protocols import client_error_response
 from router_maestro.server.protocols.errors import postcommit_error_data, protocol_error_response
 from router_maestro.server.routes._outcomes import record_chat_response_outcome
@@ -83,10 +96,65 @@ def _include_thoughts(request: GeminiGenerateContentRequest) -> bool:
     return bool(tc and tc.include_thoughts)
 
 
+def _reasoning_capsule_codec(
+    raw_request: FastAPIRequest | None,
+) -> ReasoningCapsuleCodec:
+    """Return the startup-owned capsule state required by generation dispatch."""
+    if raw_request is None:
+        raise RuntimeError("generation dispatch requires a FastAPI request")
+    return get_reasoning_capsule_codec(raw_request)
+
+
+async def _dispatch_gemini_generation(
+    model_router: Router,
+    raw_request: FastAPIRequest,
+    payload: Mapping[str, object],
+    capsule_codec: ReasoningCapsuleCodec,
+    *,
+    model: str,
+    stream: bool,
+):
+    """Run Gemini generation through the shared protocol dispatcher."""
+    pipeline = build_generation_pipeline(
+        model_router,
+        capsule_codec,
+        WireProtocol.GEMINI,
+        payload,
+        path=raw_request.url.path,
+        query=dict(raw_request.query_params),
+        headers=dict(raw_request.headers),
+        model=model,
+        stream=stream,
+        attempt_observer=attempt_observer_for_request(raw_request),
+    )
+    if stream:
+        opened = await pipeline.dispatcher.dispatch_stream(model_router, pipeline.envelope)
+        frames = pipeline.responses.encode_stream(opened, pipeline.envelope.runtime)
+        return sse_streaming_response(_gemini_sse_frames(frames))
+
+    result = await pipeline.dispatcher.dispatch(model_router, pipeline.envelope)
+    encoded = await pipeline.responses.encode_result(result, pipeline.envelope.runtime)
+    return JSONResponse(content=dict(encoded))
+
+
+async def _gemini_sse_frames(
+    frames: AsyncIterator[Mapping[str, object]],
+) -> AsyncGenerator[str]:
+    """Serialize dispatcher frames in Gemini's SSE wire format."""
+    try:
+        async for frame in frames:
+            yield f"data: {json.dumps(dict(frame))}\r\n\r\n"
+    except asyncio.CancelledError:
+        raise
+    except Exception as error:
+        yield _sse_error_data(error)
+
+
 @router.post("/api/gemini/v1beta/models/{model_method:path}:generateContent")
 async def generate_content(
     model_method: str,
     request: GeminiGenerateContentRequest,
+    raw_request: FastAPIRequest = cast(FastAPIRequest, None),
 ):
     """Handle Gemini generateContent (non-streaming) requests."""
     model = _extract_model_from_path(model_method)
@@ -97,6 +165,21 @@ async def generate_content(
         return _create_test_response(model).model_dump(by_alias=True, exclude_none=True)
 
     model_router = get_router()
+    if isinstance(model_router, Router) and generation_dispatcher_is_configured(raw_request):
+        capsule_codec = _reasoning_capsule_codec(raw_request)
+        try:
+            payload = await raw_request.json()
+            return await _dispatch_gemini_generation(
+                model_router,
+                raw_request,
+                payload,
+                capsule_codec,
+                model=model,
+                stream=False,
+            )
+        except ProviderError as error:
+            return protocol_error_response(error, "gemini")
+
     chat_request = translate_gemini_to_openai(request, model)
 
     try:
@@ -130,6 +213,7 @@ async def generate_content(
 async def stream_generate_content(
     model_method: str,
     request: GeminiGenerateContentRequest,
+    raw_request: FastAPIRequest = cast(FastAPIRequest, None),
 ):
     """Handle Gemini streamGenerateContent (streaming) requests."""
     model = _extract_model_from_path(model_method)
@@ -140,6 +224,21 @@ async def stream_generate_content(
         return sse_streaming_response(_stream_test_response(model))
 
     model_router = get_router()
+    if isinstance(model_router, Router) and generation_dispatcher_is_configured(raw_request):
+        capsule_codec = _reasoning_capsule_codec(raw_request)
+        try:
+            payload = await raw_request.json()
+            return await _dispatch_gemini_generation(
+                model_router,
+                raw_request,
+                payload,
+                capsule_codec,
+                model=model,
+                stream=True,
+            )
+        except ProviderError as error:
+            return protocol_error_response(error, "gemini")
+
     # logger.debug("Raw Gemini request: %s", request.model_dump_json(exclude_none=True))
     chat_request = translate_gemini_to_openai(request, model)
     # logger.debug(
@@ -215,16 +314,16 @@ def _create_test_response(model: str) -> GeminiGenerateContentResponse:
                     parts=[GeminiPart(text=TEST_RESPONSE_TEXT)],
                     role="model",
                 ),
-                finish_reason="STOP",
+                finishReason="STOP",
                 index=0,
             )
         ],
-        usage_metadata=GeminiUsageMetadata(
-            prompt_token_count=10,
-            candidates_token_count=10,
-            total_token_count=20,
+        usageMetadata=GeminiUsageMetadata(
+            promptTokenCount=10,
+            candidatesTokenCount=10,
+            totalTokenCount=20,
         ),
-        model_version=model,
+        modelVersion=model,
     )
 
 
@@ -250,16 +349,16 @@ async def _stream_test_response(
     final_chunk = GeminiGenerateContentResponse(
         candidates=[
             GeminiCandidate(
-                finish_reason="STOP",
+                finishReason="STOP",
                 index=0,
             )
         ],
-        usage_metadata=GeminiUsageMetadata(
-            prompt_token_count=10,
-            candidates_token_count=10,
-            total_token_count=20,
+        usageMetadata=GeminiUsageMetadata(
+            promptTokenCount=10,
+            candidatesTokenCount=10,
+            totalTokenCount=20,
         ),
-        model_version=model,
+        modelVersion=model,
     )
     yield (f"data: {final_chunk.model_dump_json(exclude_none=True, by_alias=True)}\r\n\r\n")
 
@@ -387,9 +486,12 @@ async def _stream_response(
                 return
 
         terminal_outcome = unexpected_eof_outcome()
+        terminal_error = terminal_outcome.error
+        if terminal_error is None:
+            raise RuntimeError("Unexpected EOF outcome is missing its terminal error")
         yield _sse_error_data(
             ProviderError(
-                terminal_outcome.error.code,
+                terminal_error.code,
                 status_code=502,
                 kind=ProviderFailureKind.UPSTREAM_PROTOCOL,
             )
@@ -397,7 +499,7 @@ async def _stream_response(
         pipeline.finish(
             wire_status=200,
             outcome=terminal_outcome,
-            body_summary=terminal_outcome.error.message,
+            body_summary=terminal_error.message,
         )
 
     except ProviderError as e:

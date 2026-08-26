@@ -34,7 +34,9 @@ def test_update_provider_reads_latest_before_patching(tmp_path) -> None:
     stale = first.read()
     second.update_provider("openai", ApiKeyCredential(key="openai-key"))
     stale.set("github-copilot", _oauth("copilot-new"))
-    first.update_provider("github-copilot", stale.get("github-copilot"))
+    updated = stale.get("github-copilot")
+    assert updated is not None
+    first.update_provider("github-copilot", updated)
 
     stored = first.read()
     assert stored.get("openai") == ApiKeyCredential(key="openai-key")

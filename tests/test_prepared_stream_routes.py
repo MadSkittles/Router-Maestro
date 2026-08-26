@@ -3,6 +3,7 @@
 import asyncio
 from collections.abc import AsyncIterator
 from copy import deepcopy
+from typing import cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -292,9 +293,11 @@ def _planning_router(*providers: _PreparedProvider) -> Router:
         priorities.append(f"{provider.name}/{model_id}")
     router._models_cache_ttl.set(True)
     router._priorities_cache.set(
-        PrioritiesConfig(
-            priorities=priorities,
-            fallback={"strategy": "priority", "maxRetries": 1},
+        PrioritiesConfig.model_validate(
+            {
+                "priorities": priorities,
+                "fallback": {"strategy": "priority", "maxRetries": 1},
+            }
         )
     )
     return router
@@ -1053,7 +1056,7 @@ async def test_prepared_stream_rejects_cross_protocol_reuse_before_provider_io(
         with pytest.raises(ProviderError) as exc_info:
             await router.responses_completion_stream(
                 ResponsesRequest(model="router-maestro", input="hi", stream=True),
-                prepared_plan=prepared,
+                prepared_plan=cast(PreparedResponsesStream, prepared),
             )
     else:
         responses_request = ResponsesRequest(model="router-maestro", input="hi", stream=True)
@@ -1063,7 +1066,7 @@ async def test_prepared_stream_rejects_cross_protocol_reuse_before_provider_io(
         with pytest.raises(ProviderError) as exc_info:
             await router.chat_completion_stream(
                 ChatRequest(model="router-maestro", messages=[], stream=True),
-                prepared_plan=prepared,
+                prepared_plan=cast(PreparedChatStream, prepared),
             )
 
     assert exc_info.value.status_code == 400

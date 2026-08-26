@@ -1,6 +1,7 @@
 """Protocol-native client-error envelopes for option rejection."""
 
 import json
+from typing import cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -27,6 +28,7 @@ from router_maestro.routing.router import CACHE_TTL_SECONDS, Router
 from router_maestro.server.app import create_app
 from router_maestro.server.middleware import REQUEST_ID_HEADER, verify_api_key
 from router_maestro.server.protocols import errors as protocol_errors
+from router_maestro.server.protocols.errors import ProtocolSurface
 from router_maestro.server.routes import chat as chat_routes
 from router_maestro.server.routes import gemini as gemini_routes
 from router_maestro.server.routes import responses as responses_routes
@@ -40,7 +42,7 @@ from router_maestro.server.schemas.openai import ChatCompletionRequest
 from router_maestro.server.schemas.responses import ResponsesRequest
 from router_maestro.utils.cache import TTLCache
 
-_PROTOCOL_SURFACES = (
+_PROTOCOL_SURFACES: tuple[ProtocolSurface, ...] = (
     "openai_chat",
     "openai_responses",
     "anthropic",
@@ -55,7 +57,7 @@ _PROTOCOL_SURFACES = (
 _SENTINEL_MESSAGE = "reached routing sentinel"
 
 
-def _native_error(response, surface: str) -> dict:
+def _native_error(response, surface: ProtocolSurface) -> dict:
     body = response.json() if hasattr(response, "json") else json.loads(response.body)
     if surface.startswith("openai"):
         return body["error"]
@@ -94,7 +96,7 @@ def _native_error(response, surface: str) -> dict:
 )
 @pytest.mark.parametrize("surface", _PROTOCOL_SURFACES)
 def test_typed_provider_error_uses_native_protocol_envelope(
-    surface: str,
+    surface: ProtocolSurface,
     status_code: int,
     kind: ProviderFailureKind,
     openai_type: str,
@@ -124,7 +126,7 @@ def test_typed_provider_error_uses_native_protocol_envelope(
 
 @pytest.mark.parametrize("surface", _PROTOCOL_SURFACES)
 def test_request_validation_error_is_native_and_does_not_echo_input(
-    surface: str,
+    surface: ProtocolSurface,
 ) -> None:
     private_marker = "private-validation-input"
     error = RequestValidationError(
@@ -140,10 +142,11 @@ def test_request_validation_error_is_native_and_does_not_echo_input(
 
     response = protocol_errors.protocol_error_response(error, surface)
 
-    assert response.status_code == 422
+    assert response.status_code == (400 if surface == "anthropic" else 422)
     native = _native_error(response, surface)
-    assert native["message"] == "Invalid request"
-    assert private_marker not in response.body.decode()
+    expected_message = "Invalid request: model" if surface == "anthropic" else "Invalid request"
+    assert native["message"] == expected_message
+    assert private_marker not in bytes(response.body).decode()
     if surface.startswith("openai"):
         assert native["param"] == "model"
     elif surface == "gemini":
@@ -151,7 +154,7 @@ def test_request_validation_error_is_native_and_does_not_echo_input(
 
 
 @pytest.mark.parametrize("surface", _PROTOCOL_SURFACES)
-def test_http_exception_is_native_and_preserves_safe_headers(surface: str) -> None:
+def test_http_exception_is_native_and_preserves_safe_headers(surface: ProtocolSurface) -> None:
     error = StarletteHTTPException(
         status_code=401,
         detail="Missing API key",
@@ -167,33 +170,33 @@ def test_http_exception_is_native_and_preserves_safe_headers(surface: str) -> No
 
 
 @pytest.mark.parametrize("surface", _PROTOCOL_SURFACES)
-def test_non_string_http_detail_is_not_reflected(surface: str) -> None:
+def test_non_string_http_detail_is_not_reflected(surface: ProtocolSurface) -> None:
     private_marker = "private-http-detail"
     error = StarletteHTTPException(
         status_code=400,
-        detail={"nested": {"secret": private_marker}},
+        detail=cast(str, {"nested": {"secret": private_marker}}),
     )
 
     response = protocol_errors.protocol_error_response(error, surface)
 
     assert response.status_code == 400
     assert _native_error(response, surface)["message"] == "Invalid request"
-    assert private_marker not in response.body.decode()
+    assert private_marker not in bytes(response.body).decode()
 
 
 @pytest.mark.parametrize("surface", _PROTOCOL_SURFACES)
-def test_unexpected_exception_is_generic_and_native(surface: str) -> None:
+def test_unexpected_exception_is_generic_and_native(surface: ProtocolSurface) -> None:
     private_marker = "private-unexpected-cause"
 
     response = protocol_errors.protocol_error_response(RuntimeError(private_marker), surface)
 
     assert response.status_code == 500
     assert _native_error(response, surface)["message"] == "Internal server error"
-    assert private_marker not in response.body.decode()
+    assert private_marker not in bytes(response.body).decode()
 
 
 @pytest.mark.parametrize("surface", _PROTOCOL_SURFACES)
-def test_provider_cause_is_not_exposed_by_native_encoder(surface: str) -> None:
+def test_provider_cause_is_not_exposed_by_native_encoder(surface: ProtocolSurface) -> None:
     private_marker = "private-provider-cause"
     error = ProviderError(
         "Safe upstream failure",
@@ -205,11 +208,11 @@ def test_provider_cause_is_not_exposed_by_native_encoder(surface: str) -> None:
     response = protocol_errors.protocol_error_response(error, surface)
 
     assert _native_error(response, surface)["message"] == "Safe upstream failure"
-    assert private_marker not in response.body.decode()
+    assert private_marker not in bytes(response.body).decode()
 
 
 @pytest.mark.parametrize("surface", _PROTOCOL_SURFACES)
-def test_provider_signal_maps_to_one_allowlisted_header(surface: str) -> None:
+def test_provider_signal_maps_to_one_allowlisted_header(surface: ProtocolSurface) -> None:
     from router_maestro.providers import ProviderFailureSignal
 
     error = ProviderError(
@@ -224,12 +227,12 @@ def test_provider_signal_maps_to_one_allowlisted_header(surface: str) -> None:
     response = protocol_errors.protocol_error_response(error, surface)
 
     assert response.headers["X-Router-Maestro-Error-Signal"] == "copilot_bare_bad_request"
-    assert "private-upstream-body" not in response.body.decode()
+    assert "private-upstream-body" not in bytes(response.body).decode()
     assert "private-upstream-body" not in str(dict(response.headers))
 
 
 @pytest.mark.parametrize("surface", _PROTOCOL_SURFACES)
-def test_provider_error_without_signal_emits_no_signal_header(surface: str) -> None:
+def test_provider_error_without_signal_emits_no_signal_header(surface: ProtocolSurface) -> None:
     error = ProviderError(
         "Ordinary provider failure",
         status_code=400,
@@ -279,7 +282,10 @@ def test_provider_error_without_signal_emits_no_signal_header(surface: str) -> N
         ),
     ],
 )
-def test_postcommit_error_data_is_protocol_native(surface: str, expected: dict) -> None:
+def test_postcommit_error_data_is_protocol_native(
+    surface: ProtocolSurface,
+    expected: dict,
+) -> None:
     error = ProviderError(
         "Safe late failure",
         status_code=429,
@@ -310,7 +316,7 @@ def test_openai_chat_postcommit_overload_preserves_error_code() -> None:
 
 
 @pytest.mark.parametrize("surface", _PROTOCOL_SURFACES)
-def test_postcommit_unexpected_error_is_generic(surface: str) -> None:
+def test_postcommit_unexpected_error_is_generic(surface: ProtocolSurface) -> None:
     marker = "private-postcommit-error"
 
     data = protocol_errors.postcommit_error_data(RuntimeError(marker), surface)
@@ -376,7 +382,7 @@ def app_client(monkeypatch) -> TestClient:
 @pytest.mark.parametrize(("surface", "path", "_payload"), _APP_PROTOCOL_CASES)
 def test_app_schema_validation_uses_native_envelope(
     app_client: TestClient,
-    surface: str,
+    surface: ProtocolSurface,
     path: str,
     _payload: dict,
 ) -> None:
@@ -393,9 +399,47 @@ def test_app_schema_validation_uses_native_envelope(
         headers={"Authorization": "Bearer server-secret"},
     )
 
-    assert response.status_code == 422
-    assert _native_error(response, surface)["message"] == "Invalid request"
+    assert response.status_code == (400 if surface == "anthropic" else 422)
+    native_message = _native_error(response, surface)["message"]
+    if surface == "anthropic":
+        assert native_message.startswith("Invalid request:")
+    else:
+        assert native_message == "Invalid request"
     assert private_marker not in response.text
+
+
+@pytest.mark.parametrize(
+    "path",
+    ("/api/anthropic/v1/messages", "/api/anthropic/beta/v1/messages"),
+)
+@pytest.mark.parametrize("stream", [False, True])
+def test_anthropic_aliases_reject_malformed_output_config_before_stream_commit(
+    app_client: TestClient,
+    path: str,
+    stream: bool,
+) -> None:
+    response = app_client.post(
+        path,
+        json={
+            "model": "m",
+            "max_tokens": 16,
+            "messages": [{"role": "user", "content": "hi"}],
+            "stream": stream,
+            "output_config": "low",
+        },
+        headers={"Authorization": "Bearer server-secret"},
+    )
+
+    assert response.status_code == 400
+    assert response.headers["content-type"].startswith("application/json")
+    assert response.json() == {
+        "type": "error",
+        "error": {
+            "type": "invalid_request_error",
+            "message": "Invalid request: output_config",
+        },
+    }
+    assert "event:" not in response.text
 
 
 @pytest.mark.parametrize(("surface", "path", "payload"), _APP_PROTOCOL_CASES)
@@ -406,7 +450,7 @@ def test_app_schema_validation_uses_native_envelope(
 )
 def test_app_auth_failure_uses_native_envelope_and_preserves_challenge(
     app_client: TestClient,
-    surface: str,
+    surface: ProtocolSurface,
     path: str,
     payload: dict,
     headers: dict[str, str],
@@ -429,7 +473,7 @@ def test_app_auth_failure_uses_native_envelope_and_preserves_challenge(
 )
 def test_app_namespace_404_uses_native_envelope(
     app_client: TestClient,
-    surface: str,
+    surface: ProtocolSurface,
     path: str,
 ) -> None:
     response = app_client.post(
@@ -446,7 +490,7 @@ def test_app_namespace_404_uses_native_envelope(
 @pytest.mark.parametrize(("surface", "path", "_payload"), _APP_PROTOCOL_CASES)
 def test_app_wrong_method_uses_native_envelope(
     app_client: TestClient,
-    surface: str,
+    surface: ProtocolSurface,
     path: str,
     _payload: dict,
 ) -> None:
@@ -471,7 +515,7 @@ def test_app_wrong_method_uses_native_envelope(
 )
 def test_app_unexpected_failure_is_native_with_one_request_id(
     monkeypatch,
-    surface: str,
+    surface: ProtocolSurface,
     path: str,
 ) -> None:
     monkeypatch.setenv("ROUTER_MAESTRO_API_KEY", "server-secret")
@@ -1172,7 +1216,7 @@ def _reaches_routing_router() -> MagicMock:
                     "format": {"type": "json_schema", "schema": {"type": "object"}},
                 }
             },
-            "router_maestro.server.routes.anthropic_beta.get_router",
+            "router_maestro.server.routes.anthropic.get_router",
         ),
     ],
 )
@@ -1259,7 +1303,7 @@ def _routing_error(
 )
 def test_nonstream_provider_error_uses_native_envelope(
     client: TestClient,
-    surface: str,
+    surface: ProtocolSurface,
     path: str,
     payload: dict,
     patch_target: str,
@@ -1327,7 +1371,7 @@ def test_nonstream_provider_error_uses_native_envelope(
 )
 def test_stream_provider_open_failure_is_native_json_before_sse(
     client: TestClient,
-    surface: str,
+    surface: ProtocolSurface,
     path: str,
     payload: dict,
     patch_target: str,
@@ -1445,10 +1489,12 @@ async def test_primed_stream_closes_once_if_response_handoff_fails(
             MagicMock(side_effect=handoff_error),
         )
         call = chat_routes.chat_completions(
-            ChatCompletionRequest(
-                model="m",
-                stream=True,
-                messages=[{"role": "user", "content": "hi"}],
+            ChatCompletionRequest.model_validate(
+                {
+                    "model": "m",
+                    "stream": True,
+                    "messages": [{"role": "user", "content": "hi"}],
+                }
             )
         )
     elif protocol == "responses":
@@ -1474,7 +1520,9 @@ async def test_primed_stream_closes_once_if_response_handoff_fails(
         )
         call = gemini_routes.stream_generate_content(
             "m",
-            GeminiGenerateContentRequest(contents=[{"role": "user", "parts": [{"text": "hi"}]}]),
+            GeminiGenerateContentRequest.model_validate(
+                {"contents": [{"role": "user", "parts": [{"text": "hi"}]}]}
+            ),
         )
 
     with pytest.raises(RuntimeError, match="response construction failed"):

@@ -3,10 +3,11 @@
 import asyncio
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, NoReturn, cast
 
 import httpx
 import pytest
+from fastapi import FastAPI
 
 from router_maestro.providers.base import (
     BaseProvider,
@@ -587,7 +588,7 @@ async def test_lifespan_startup_cancellation_releases_prewarm_lease() -> None:
         {"runtime_config_repository": repository, "router_owner": owner},
     )()
     app = type("App", (), {"state": state})()
-    manager = lifespan(app)
+    manager = lifespan(cast(FastAPI, app))
     startup = asyncio.create_task(manager.__aenter__())
     await prewarm_started.wait()
 
@@ -620,7 +621,7 @@ def _operations(_model: Any) -> dict[str, bool]:
     return {}
 
 
-def _protocol_error(*_args: Any, **_kwargs: Any) -> None:
+def _protocol_error(*_args: Any, **_kwargs: Any) -> NoReturn:
     raise AssertionError("valid catalog must not raise a protocol error")
 
 

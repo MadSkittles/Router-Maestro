@@ -9,6 +9,7 @@ This guide covers advanced deployment options for Router-Maestro, including HTTP
 - [HTTP Challenge (Alternative)](#http-challenge-alternative)
 - [Traefik Dashboard](#traefik-dashboard)
 - [Environment Variables Reference](#environment-variables-reference)
+- [Reasoning Capsule Keys](#reasoning-capsule-keys)
 
 ## HTTPS with Traefik
 
@@ -182,6 +183,8 @@ TRAEFIK_DASHBOARD_AUTH=admin:$$2y$$05$$your_hash_here
 | `DOMAIN` | Your domain (e.g., `api.example.com`) | Yes |
 | `ACME_EMAIL` | Email for Let's Encrypt notifications | Yes |
 | `ROUTER_MAESTRO_API_KEY` | Optional fixed Router-Maestro server API key. Leave blank, and do not set it in the shell running Docker Compose, to auto-generate on first start. | No |
+| `ROUTER_MAESTRO_REASONING_CAPSULE_KEY` | Current unpadded base64url-encoded 32-byte AES key used to seal reasoning continuation capsules. Required for multi-instance deployments. | Conditional |
+| `ROUTER_MAESTRO_REASONING_CAPSULE_PREVIOUS_KEYS` | Optional comma-separated decrypt-only old capsule keys used during rotation. Valid only when the current key is set. | No |
 | `CF_DNS_API_TOKEN` | Cloudflare API token (if using Cloudflare) | Conditional |
 | `TRAEFIK_DASHBOARD_AUTH` | Basic auth for Traefik dashboard | No |
 
@@ -203,6 +206,50 @@ key as both inference and configuration authority, expose admin routes only on
 trusted networks or behind an appropriate access-control layer, and rotate the
 single key consistently across all clients when required.
 
+### Reasoning Capsule Keys
+
+Cross-protocol reasoning replay seals provider-owned opaque state in an
+authenticated `rmr1` capsule. A capsule is bound to its provider, upstream
+model, transport binding, and reasoning item ID. Tampering, an unknown key,
+unsupported version, or provenance mismatch fails closed before upstream I/O;
+Router-Maestro does not log keys, capsule plaintext, or decrypted provider
+state.
+
+For a single instance with no capsule environment variables, Router-Maestro
+atomically generates and reuses:
+
+```text
+~/.local/share/router-maestro/reasoning-capsule-keys.json
+```
+
+The file must be owner-only (`0600` on POSIX). An invalid environment value or
+a corrupt, unreadable, or overly permissive key file causes startup to fail.
+The server never silently replaces an unusable key, because doing so would
+invalidate active conversations.
+
+The included production and development Compose files forward both capsule
+variables from the host only when they are set. They intentionally use bare
+environment-list entries rather than an empty-value default: injecting an
+empty current key is invalid and would prevent startup instead of selecting the
+single-instance XDG key file.
+
+Multi-instance deployments must provide the same
+`ROUTER_MAESTRO_REASONING_CAPSULE_KEY` to every instance through the deployment
+secret manager. The value is an unpadded URL-safe base64 encoding of exactly 32
+random bytes. Do not rely on separate container-local XDG files behind a load
+balancer: a later reasoning turn may reach another instance.
+
+Rotate without breaking existing capsules in this order:
+
+1. Deploy the new current key to every instance and include the former current
+   key in the comma-separated
+   `ROUTER_MAESTRO_REASONING_CAPSULE_PREVIOUS_KEYS` list.
+2. Confirm every instance has the identical current and previous-key set before
+   issuing new traffic.
+3. After the maximum conversation/replay lifetime, remove expired previous
+   keys. Previous keys are decrypt-only; new capsules always use the current
+   key.
+
 ### Complete .env Example
 
 ```bash
@@ -212,6 +259,9 @@ ACME_EMAIL=admin@example.com
 
 # Router-Maestro
 ROUTER_MAESTRO_API_KEY=
+# Required and shared when more than one Router-Maestro instance serves traffic
+# ROUTER_MAESTRO_REASONING_CAPSULE_KEY=<unpadded-base64url-32-byte-key>
+# ROUTER_MAESTRO_REASONING_CAPSULE_PREVIOUS_KEYS=<old-key-1>,<old-key-2>
 
 # Cloudflare (default DNS provider)
 CF_DNS_API_TOKEN=your_cloudflare_api_token

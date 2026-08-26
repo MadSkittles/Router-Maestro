@@ -12,6 +12,7 @@ from router_maestro.server.protocols.anthropic_reducer import (
 )
 from router_maestro.server.schemas.anthropic import (
     AnthropicAssistantMessage,
+    AnthropicDocumentBlock,
     AnthropicImageBlock,
     AnthropicImageSource,
     AnthropicStreamState,
@@ -194,6 +195,7 @@ class TestExtractToolCalls:
             {"type": "tool_use", "id": "tc-1", "name": "get_weather", "input": {"loc": "NYC"}}
         ]
         result = _extract_tool_calls(blocks)
+        assert result is not None
         assert len(result) == 1
         assert result[0]["id"] == "tc-1"
         assert result[0]["type"] == "function"
@@ -209,6 +211,7 @@ class TestExtractToolCalls:
             )
         ]
         result = _extract_tool_calls(blocks)
+        assert result is not None
         assert len(result) == 1
         assert result[0]["id"] == "tc-2"
         assert result[0]["function"]["name"] == "search"
@@ -561,8 +564,10 @@ class TestHandleUserMessage:
         assert len(req.messages) == 1
         blocks = req.messages[0].content
         assert isinstance(blocks, list)
-        assert blocks[1].type == "document"
-        assert blocks[1].source.media_type == "application/pdf"
+        document = blocks[1]
+        assert isinstance(document, AnthropicDocumentBlock)
+        assert document.type == "document"
+        assert document.source.media_type == "application/pdf"
 
 
 class TestHandleAssistantMessage:
@@ -612,6 +617,7 @@ class TestTranslateMessages:
         ]
         result = _translate_messages(messages, system)
         assert result[0].role == "system"
+        assert isinstance(result[0].content, str)
         assert "First part" in result[0].content
         assert "Second part" in result[0].content
 
@@ -633,7 +639,9 @@ class TestTranslateOpenAIToAnthropic:
         assert result.model == "claude-3"
         assert result.role == "assistant"
         assert len(result.content) == 1
-        assert result.content[0].text == "Hello world"
+        text_block = result.content[0]
+        assert isinstance(text_block, AnthropicTextBlock)
+        assert text_block.text == "Hello world"
         assert result.stop_reason == "end_turn"
 
     def test_translate_response_with_no_content(self):
@@ -670,7 +678,7 @@ class TestTranslateOpenAIToAnthropic:
         result = build_anthropic_response(response, model="claude-3", response_id="req-456")
 
         assert result.stop_reason == "tool_use"
-        tool_blocks = [b for b in result.content if b.type == "tool_use"]
+        tool_blocks = [b for b in result.content if isinstance(b, AnthropicToolUseBlock)]
         assert len(tool_blocks) == 1
         assert tool_blocks[0].id == "call_abc"
         assert tool_blocks[0].name == "exec"

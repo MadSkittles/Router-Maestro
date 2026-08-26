@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 import httpx
 import pytest
 
@@ -9,6 +11,9 @@ from integration_tests.conftest import (
     anthropic_compat_payload,
     anthropic_count_tokens_payload,
     anthropic_payload,
+    anthropic_reasoning_capsules,
+    anthropic_thinking_replay_payload,
+    anthropic_thinking_seed_payload,
     anthropic_tool_payload,
     assert_anthropic_has_tool_use,
     assert_anthropic_usage,
@@ -17,6 +22,42 @@ from integration_tests.conftest import (
     event_payloads,
     parse_sse_events,
 )
+
+
+def _assistant_content_from_anthropic_stream(
+    events: list[tuple[str | None, Any]],
+) -> list[dict[str, Any]]:
+    """Rebuild the assistant history exactly as Claude Code does from deltas."""
+    blocks: dict[int, dict[str, Any]] = {}
+    for _event_name, payload in events:
+        if not isinstance(payload, dict):
+            continue
+        frame_type = payload.get("type")
+        index = payload.get("index")
+        if not isinstance(index, int):
+            continue
+        if frame_type == "content_block_start":
+            block = payload.get("content_block")
+            if isinstance(block, dict):
+                blocks[index] = dict(block)
+            continue
+        if frame_type != "content_block_delta" or index not in blocks:
+            continue
+        delta = payload.get("delta")
+        if not isinstance(delta, dict):
+            continue
+        delta_type = delta.get("type")
+        if delta_type == "thinking_delta":
+            blocks[index]["thinking"] = blocks[index].get("thinking", "") + delta.get(
+                "thinking", ""
+            )
+        elif delta_type == "signature_delta":
+            blocks[index]["signature"] = blocks[index].get("signature", "") + delta.get(
+                "signature", ""
+            )
+        elif delta_type == "text_delta":
+            blocks[index]["text"] = blocks[index].get("text", "") + delta.get("text", "")
+    return [blocks[index] for index in sorted(blocks)]
 
 
 def test_anthropic_messages_non_streaming_api_prefix(
@@ -170,9 +211,258 @@ def test_anthropic_forced_tool_call(client: httpx.Client, tool_model: str):
     assert_http_success(response)
     data = response.json()
 
-    assert data["stop_reason"] == "tool_use"
+    assert data["stop_reason"] == "tool_use", data
     assert_anthropic_has_tool_use(data, "get_weather")
     assert_anthropic_usage(data["usage"])
+
+
+def test_anthropic_responses_only_gpt_text(
+    client: httpx.Client,
+    responses_only_reasoning_model: str,
+):
+    """Stable Messages endpoint reaches a GPT model exposed only via Responses."""
+    payload = anthropic_payload(responses_only_reasoning_model)
+    payload.pop("temperature")
+    payload["context_management"] = {"edits": [{"type": "clear_thinking_20251015", "keep": "all"}]}
+    # Responses reasoning tokens share the output budget.  A 16-token probe can
+    # legitimately finish after reasoning without producing visible text.
+    payload["max_tokens"] = 512
+    response = client.post(
+        "/api/anthropic/v1/messages",
+        json=payload,
+        timeout=180.0,
+    )
+    assert_http_success(response)
+    data = response.json()
+
+    assert data["model"] == responses_only_reasoning_model
+    text = "".join(
+        block.get("text", "") for block in data["content"] if block.get("type") == "text"
+    )
+    assert_text_response(text)
+    assert_anthropic_usage(data["usage"])
+
+
+def test_anthropic_responses_only_gpt_stream_with_noop_context_management(
+    client: httpx.Client,
+    responses_only_reasoning_model: str,
+):
+    """Claude Code's no-op context edit streams through Copilot Responses."""
+    payload = anthropic_payload(responses_only_reasoning_model, stream=True)
+    payload.pop("temperature")
+    payload["max_tokens"] = 512
+    payload["system"] = [
+        {
+            "type": "text",
+            "text": "Reply with a short plain-text answer.",
+            "cache_control": {"type": "ephemeral"},
+        }
+    ]
+    payload["messages"] = [
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "text",
+                    "text": "Reply with exactly: context management stream ok",
+                    "cache_control": {"type": "ephemeral"},
+                }
+            ],
+        }
+    ]
+    payload["context_management"] = {"edits": [{"type": "clear_thinking_20251015", "keep": "all"}]}
+
+    with client.stream(
+        "POST",
+        "/api/anthropic/v1/messages?beta=true",
+        json=payload,
+        timeout=180.0,
+    ) as response:
+        assert_http_success(response)
+        events = parse_sse_events(response)
+
+    event_names = [name for name, _payload in events]
+    assert "message_start" in event_names
+    assert "message_stop" in event_names
+    assert any(
+        payload.get("delta", {}).get("type") == "text_delta"
+        for payload in event_payloads(events)
+        if isinstance(payload, dict)
+    )
+
+
+def test_anthropic_responses_only_gpt_stream_reasoning_replays_next_turn(
+    client: httpx.Client,
+    responses_only_reasoning_model: str,
+):
+    """Claude Code can persist a streamed capsule and replay it on the next turn."""
+    seed = anthropic_thinking_seed_payload(responses_only_reasoning_model)
+    seed["stream"] = True
+    with client.stream(
+        "POST",
+        "/api/anthropic/v1/messages",
+        json=seed,
+        timeout=180.0,
+    ) as response:
+        assert_http_success(response)
+        events = parse_sse_events(response)
+
+    assistant_content = _assistant_content_from_anthropic_stream(events)
+    capsules = anthropic_reasoning_capsules(assistant_content)
+    assert len(capsules) == 1, assistant_content
+    assert not any(
+        block.get("type") == "thinking" and block.get("signature") == ""
+        for block in assistant_content
+    ), assistant_content
+    assert [name for name, _payload in events].count("message_stop") == 1
+
+    replay = client.post(
+        "/api/anthropic/v1/messages",
+        json=anthropic_thinking_replay_payload(
+            responses_only_reasoning_model,
+            assistant_content,
+        ),
+        timeout=180.0,
+    )
+    assert_http_success(replay)
+    data = replay.json()
+    text = "".join(
+        block.get("text", "") for block in data["content"] if block.get("type") == "text"
+    )
+    assert_text_response(text)
+    assert_anthropic_usage(data["usage"])
+
+
+def test_anthropic_responses_only_gpt_forced_tool(
+    client: httpx.Client,
+    responses_only_reasoning_model: str,
+):
+    """Claude Code-style Anthropic tools work through Copilot Responses."""
+    payload = anthropic_tool_payload(responses_only_reasoning_model)
+    payload.pop("temperature")
+    payload["max_tokens"] = 512
+    response = client.post(
+        "/api/anthropic/v1/messages",
+        json=payload,
+        timeout=180.0,
+    )
+    assert_http_success(response)
+    data = response.json()
+
+    assert data["model"] == responses_only_reasoning_model
+    assert data["stop_reason"] == "tool_use", data
+    assert_anthropic_has_tool_use(data, "get_weather")
+    assert_anthropic_usage(data["usage"])
+
+
+def test_anthropic_responses_only_gpt_replays_error_tool_result(
+    client: httpx.Client,
+    responses_only_tool_model: str,
+):
+    """Claude Code can replay a failed tool result through Copilot Responses."""
+    first_payload = anthropic_tool_payload(responses_only_tool_model)
+    first_payload.pop("temperature")
+    first_payload["max_tokens"] = 512
+    first_payload["context_management"] = {
+        "edits": [{"type": "clear_thinking_20251015", "keep": "all"}]
+    }
+
+    first_response = client.post(
+        "/api/anthropic/v1/messages?beta=true",
+        json=first_payload,
+        timeout=180.0,
+    )
+    assert_http_success(first_response)
+    first_data = first_response.json()
+    tool_uses = [block for block in first_data["content"] if block.get("type") == "tool_use"]
+    assert len(tool_uses) == 1, first_data
+    tool_use_id = tool_uses[0].get("id")
+    assert isinstance(tool_use_id, str) and tool_use_id, first_data
+
+    second_payload = {
+        "model": responses_only_tool_model,
+        "max_tokens": 512,
+        "context_management": {"edits": [{"type": "clear_thinking_20251015", "keep": "all"}]},
+        "tools": first_payload["tools"],
+        "messages": [
+            first_payload["messages"][0],
+            {"role": "assistant", "content": first_data["content"]},
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": tool_use_id,
+                        "content": "The weather service failed with exit status 1.",
+                        "is_error": True,
+                        "cache_control": {"type": "ephemeral"},
+                    },
+                    {
+                        "type": "text",
+                        "text": "Acknowledge the failed tool call briefly without retrying it.",
+                    },
+                ],
+            },
+        ],
+    }
+
+    second_response = client.post(
+        "/api/anthropic/v1/messages?beta=true",
+        json=second_payload,
+        timeout=180.0,
+    )
+    assert second_response.status_code != 400, second_response.text
+    assert_http_success(second_response)
+    second_data = second_response.json()
+
+    assert second_data["type"] == "message"
+    assert second_data["role"] == "assistant"
+    assert second_data["model"] == responses_only_tool_model
+    assert isinstance(second_data["content"], list)
+    assert second_data["content"], second_data
+    assert_anthropic_usage(second_data["usage"])
+
+
+def test_anthropic_responses_only_gpt_forced_tool_streaming(
+    client: httpx.Client,
+    responses_only_tool_model: str,
+):
+    """Responses-only Copilot tool streams survive per-event opaque item IDs."""
+    payload = anthropic_tool_payload(responses_only_tool_model, stream=True)
+    payload.pop("temperature")
+    payload["max_tokens"] = 512
+    payload["context_management"] = {"edits": [{"type": "clear_thinking_20251015", "keep": "all"}]}
+
+    with client.stream(
+        "POST",
+        "/api/anthropic/v1/messages?beta=true",
+        json=payload,
+        timeout=180.0,
+    ) as response:
+        assert_http_success(response)
+        events = parse_sse_events(response)
+
+    event_names = [name for name, _payload in events]
+    payloads = event_payloads(events)
+    assert "error" not in event_names, events
+    tool_starts = [
+        payload
+        for payload in payloads
+        if isinstance(payload, dict)
+        and payload.get("type") == "content_block_start"
+        and payload.get("content_block", {}).get("type") == "tool_use"
+    ]
+    assert len(tool_starts) == 1, payloads
+    assert tool_starts[0]["content_block"]["name"] == "get_weather"
+    assert any(
+        payload.get("delta", {}).get("type") == "input_json_delta"
+        for payload in payloads
+        if isinstance(payload, dict)
+    )
+    message_delta = next(payload for name, payload in events if name == "message_delta")
+    assert message_delta["delta"]["stop_reason"] == "tool_use"
+    assert_anthropic_usage(message_delta["usage"])
+    assert event_names.count("message_stop") == 1
 
 
 def test_anthropic_forced_tool_call_streaming(

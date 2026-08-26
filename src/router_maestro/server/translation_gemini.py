@@ -401,7 +401,7 @@ def translate_openai_to_gemini(
             call_id = tc.get("id") or f"call_{name}"
             parts.append(
                 GeminiPart(
-                    function_call=GeminiFunctionCall(
+                    functionCall=GeminiFunctionCall(
                         name=name,
                         args=args,
                         id=call_id,
@@ -427,16 +427,16 @@ def translate_openai_to_gemini(
         candidates=[
             GeminiCandidate(
                 content=GeminiContent(parts=parts, role="model"),
-                finish_reason=finish_reason,
+                finishReason=finish_reason,
                 index=0,
             )
         ],
-        usage_metadata=GeminiUsageMetadata(
-            prompt_token_count=prompt_tokens,
-            candidates_token_count=completion_tokens,
-            total_token_count=prompt_tokens + completion_tokens,
+        usageMetadata=GeminiUsageMetadata(
+            promptTokenCount=prompt_tokens,
+            candidatesTokenCount=completion_tokens,
+            totalTokenCount=prompt_tokens + completion_tokens,
         ),
-        model_version=model,
+        modelVersion=model,
     )
 
 
@@ -547,7 +547,7 @@ def translate_openai_chunk_to_gemini(
                 args = {}
             final_parts.append(
                 GeminiPart(
-                    function_call=GeminiFunctionCall(
+                    functionCall=GeminiFunctionCall(
                         name=tc_buf["name"],
                         args=args,
                         id=tc_buf["id"],
@@ -560,7 +560,7 @@ def translate_openai_chunk_to_gemini(
         completion_tokens = state.accumulated_completion_tokens
 
         candidate = GeminiCandidate(
-            finish_reason=gemini_finish,
+            finishReason=gemini_finish,
             index=0,
         )
         if final_parts:
@@ -568,12 +568,12 @@ def translate_openai_chunk_to_gemini(
 
         return GeminiGenerateContentResponse(
             candidates=[candidate],
-            usage_metadata=GeminiUsageMetadata(
-                prompt_token_count=prompt_tokens,
-                candidates_token_count=completion_tokens,
-                total_token_count=prompt_tokens + completion_tokens,
+            usageMetadata=GeminiUsageMetadata(
+                promptTokenCount=prompt_tokens,
+                candidatesTokenCount=completion_tokens,
+                totalTokenCount=prompt_tokens + completion_tokens,
             ),
-            model_version=model,
+            modelVersion=model,
         )
 
     return None

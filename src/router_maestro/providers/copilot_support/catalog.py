@@ -11,8 +11,10 @@ from typing import Any, NoReturn
 
 import httpx
 
+from router_maestro.protocols import WireProtocol
 from router_maestro.providers.base import (
     TIMEOUT_NON_STREAMING,
+    ContextWindowOption,
     ModelInfo,
     ProviderError,
     ProviderFailureKind,
@@ -20,6 +22,7 @@ from router_maestro.providers.base import (
 from router_maestro.routing.capabilities import Feature, Operation
 from router_maestro.utils import get_logger
 from router_maestro.utils.cache import TTLCache
+from router_maestro.utils.context_window import calculate_context_budget
 from router_maestro.utils.reasoning import VALID_EFFORTS
 
 logger = get_logger("providers.copilot.catalog")
@@ -29,6 +32,9 @@ MODELS_CACHE_TTL = 300
 _COPILOT_REASONING_EFFORT_SENTINELS = frozenset({"none"})
 _COPILOT_CATALOG_REASONING_EFFORT_VALUES = frozenset(VALID_EFFORTS).union(
     _COPILOT_REASONING_EFFORT_SENTINELS
+)
+_CLIENT_UPGRADE_BILLING_WARNING = (
+    "update your client to the latest version to see the new billing information"
 )
 
 # Cold-start fallback for Responses eligibility. The live catalog's
@@ -72,6 +78,22 @@ def normalize_supported_endpoints(model: Mapping[str, Any]) -> tuple[str, ...] |
     if not all(isinstance(endpoint, str) for endpoint in supported_endpoints):
         raise TypeError("Copilot model supported_endpoints entries must be strings")
     return tuple(supported_endpoints)
+
+
+def transport_capabilities(
+    supported_endpoints: tuple[str, ...] | None,
+) -> dict[str, bool]:
+    """Map an explicit Copilot endpoint contract to wire-protocol support."""
+    if supported_endpoints is None:
+        return {}
+    endpoints = set(supported_endpoints)
+    return {
+        WireProtocol.ANTHROPIC_MESSAGES: any(
+            endpoint.endswith("/messages") for endpoint in endpoints
+        ),
+        WireProtocol.OPENAI_CHAT: "/chat/completions" in endpoints,
+        WireProtocol.OPENAI_RESPONSES: "/responses" in endpoints,
+    }
 
 
 def normalize_catalog_boolean(supports: Mapping[str, Any], key: str) -> bool | None:
@@ -118,6 +140,175 @@ def normalize_catalog_limit(limits: Mapping[str, Any], key: str) -> int | None:
     return value
 
 
+def _normalize_context_tier_limit(
+    tier: Mapping[str, Any],
+    *,
+    tier_name: str,
+) -> int | None:
+    values: dict[str, int] = {}
+    for key in ("max_prompt_tokens", "context_max"):
+        if key not in tier:
+            continue
+        value = tier[key]
+        if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+            raise TypeError(f"Copilot model billing {tier_name}.{key} must be a positive integer")
+        values[key] = value
+    return values.get("max_prompt_tokens", values.get("context_max"))
+
+
+def _normalize_context_tier_price(
+    tier: Mapping[str, Any],
+    *keys: str,
+) -> int | float | None:
+    selected: int | float | None = None
+    for key in keys:
+        if key not in tier:
+            continue
+        value = tier[key]
+        if not isinstance(value, (int, float)) or isinstance(value, bool) or value < 0:
+            raise TypeError(f"Copilot model billing {key} must be a non-negative number")
+        if selected is None:
+            selected = value
+    return selected
+
+
+def _context_tier_price_signature(
+    tier: Mapping[str, Any],
+) -> tuple[int | float | None, ...]:
+    return (
+        _normalize_context_tier_price(tier, "input_price"),
+        _normalize_context_tier_price(tier, "output_price"),
+        _normalize_context_tier_price(tier, "cache_read_price", "cache_price"),
+        _normalize_context_tier_price(tier, "cache_write_price"),
+    )
+
+
+def _single_context_window_option(limit: int | None) -> tuple[ContextWindowOption, ...]:
+    if limit is None:
+        return ()
+    return (
+        ContextWindowOption(
+            tier="default",
+            max_prompt_tokens=limit,
+            is_default=True,
+        ),
+    )
+
+
+def normalize_context_window_options(
+    model: Mapping[str, Any],
+    limits: Mapping[str, Any],
+) -> tuple[ContextWindowOption, ...]:
+    """Normalize Copilot default and long-context pricing tiers for clients."""
+    max_prompt_tokens = normalize_catalog_limit(limits, "max_prompt_tokens")
+    max_output_tokens = normalize_catalog_limit(limits, "max_output_tokens")
+    max_context_window_tokens = normalize_catalog_limit(
+        limits,
+        "max_context_window_tokens",
+    )
+    fallback_limit = max_prompt_tokens
+    if fallback_limit is None and max_context_window_tokens is not None:
+        budget = calculate_context_budget(
+            max_context_window_tokens,
+            max_output_tokens,
+            max_context_window_tokens,
+        )
+        fallback_limit = budget.max_prompt_tokens if budget is not None else None
+
+    billing = model.get("billing")
+    if billing is None:
+        return _single_context_window_option(fallback_limit)
+    if not isinstance(billing, Mapping):
+        raise TypeError("Copilot model billing must be an object")
+    token_prices = billing.get("token_prices")
+    if token_prices is None:
+        return _single_context_window_option(fallback_limit)
+    if not isinstance(token_prices, Mapping):
+        raise TypeError("Copilot model billing token_prices must be an object")
+
+    default_tier = token_prices.get("default")
+    if default_tier is None:
+        return _single_context_window_option(fallback_limit)
+    if not isinstance(default_tier, Mapping):
+        raise TypeError("Copilot model billing default tier must be an object")
+    default_limit = _normalize_context_tier_limit(
+        default_tier,
+        tier_name="default",
+    )
+    if default_limit is None:
+        return _single_context_window_option(fallback_limit)
+
+    long_tier = token_prices.get("long_context")
+    if long_tier is not None and not isinstance(long_tier, Mapping):
+        raise TypeError("Copilot model billing long_context tier must be an object")
+    long_limit = (
+        _normalize_context_tier_limit(long_tier, tier_name="long_context")
+        if isinstance(long_tier, Mapping)
+        else None
+    )
+
+    full_limit_candidates = [default_limit]
+    if max_context_window_tokens is not None:
+        full_budget = calculate_context_budget(
+            max_context_window_tokens,
+            max_output_tokens,
+            max_context_window_tokens,
+        )
+        if full_budget is not None:
+            full_limit_candidates.append(full_budget.max_prompt_tokens)
+    else:
+        if max_prompt_tokens is not None:
+            full_limit_candidates.append(max_prompt_tokens)
+        if long_limit is not None:
+            full_limit_candidates.append(long_limit)
+    full_limit = max(full_limit_candidates)
+    if default_limit >= full_limit:
+        return _single_context_window_option(full_limit)
+
+    has_surcharge = False
+    if isinstance(long_tier, Mapping):
+        default_prices = _context_tier_price_signature(default_tier)
+        long_prices = _context_tier_price_signature(long_tier)
+        required_prices_known = all(
+            value is not None
+            for value in (
+                default_prices[0],
+                default_prices[1],
+                long_prices[0],
+                long_prices[1],
+            )
+        )
+        has_surcharge = not required_prices_known or default_prices != long_prices
+
+    return (
+        ContextWindowOption(
+            tier="default",
+            max_prompt_tokens=default_limit,
+            is_default=has_surcharge,
+        ),
+        ContextWindowOption(
+            tier="long_context",
+            max_prompt_tokens=full_limit,
+            is_default=not has_surcharge,
+        ),
+    )
+
+
+def _catalog_requires_current_client_token(data: object) -> bool:
+    if not isinstance(data, Mapping):
+        return False
+    models = data.get("data")
+    if not isinstance(models, list):
+        return False
+    for model in models:
+        if not isinstance(model, Mapping):
+            continue
+        warning = model.get("warning_message")
+        if isinstance(warning, str) and _CLIENT_UPGRADE_BILLING_WARNING in warning.lower():
+            return True
+    return False
+
+
 def operation_capabilities(
     model: Mapping[str, Any],
     *,
@@ -130,17 +321,15 @@ def operation_capabilities(
     bare_model_id = model_id.split("/", 1)[1] if "/" in model_id else model_id
     supported_endpoints = normalize_endpoints(model)
     if supported_endpoints is not None:
-        endpoints = set(supported_endpoints)
-        chat = "/chat/completions" in endpoints
-        responses = "/responses" in endpoints
+        transports = transport_capabilities(supported_endpoints)
+        chat = transports[WireProtocol.OPENAI_CHAT]
+        responses = transports[WireProtocol.OPENAI_RESPONSES]
         return {
             Operation.CHAT: chat,
             Operation.CHAT_STREAM: chat,
             Operation.RESPONSES: responses,
             Operation.RESPONSES_STREAM: responses,
-            Operation.NATIVE_ANTHROPIC: any(
-                endpoint.endswith("/messages") for endpoint in endpoints
-            ),
+            Operation.NATIVE_ANTHROPIC: transports[WireProtocol.ANTHROPIC_MESSAGES],
         }
 
     operations: dict[str, bool] = {
@@ -161,6 +350,7 @@ class CopilotCatalog:
         self.models_ttl_cache: TTLCache[list[ModelInfo]] = TTLCache(MODELS_CACHE_TTL)
         self._refresh_lock = asyncio.Lock()
         self._refresh_task: asyncio.Task[list[ModelInfo]] | None = None
+        self._client_upgrade_retry_done = False
         self._closed = False
 
     def effort_values(self, model: str) -> list[str] | None:
@@ -244,6 +434,7 @@ class CopilotCatalog:
                     max_context_window_tokens=normalize_catalog_limit(
                         limits, "max_context_window_tokens"
                     ),
+                    context_window_options=normalize_context_window_options(model, limits),
                     supports_thinking=(thinking_support is True or bool(reasoning_values)),
                     supports_vision=vision_support is True,
                     reasoning_effort_values=reasoning_values,
@@ -267,6 +458,7 @@ class CopilotCatalog:
                             else {}
                         ),
                     },
+                    transport_capabilities=transport_capabilities(supported_endpoints),
                 )
             )
         return models
@@ -276,7 +468,7 @@ class CopilotCatalog:
         force_refresh: bool = False,
         *,
         provider_name: str,
-        ensure_token: Callable[[], Awaitable[None]],
+        ensure_token: Callable[..., Awaitable[None]],
         send: Callable[..., Awaitable[httpx.Response]],
         normalize_endpoints: Callable[[Mapping[str, Any]], tuple[str, ...] | None],
         derive_operations: Callable[[Mapping[str, Any]], dict[str, bool]],
@@ -307,7 +499,7 @@ class CopilotCatalog:
         *,
         detached: bool,
         provider_name: str,
-        ensure_token: Callable[[], Awaitable[None]],
+        ensure_token: Callable[..., Awaitable[None]],
         send: Callable[..., Awaitable[httpx.Response]],
         normalize_endpoints: Callable[[Mapping[str, Any]], tuple[str, ...] | None],
         derive_operations: Callable[[Mapping[str, Any]], dict[str, bool]],
@@ -360,7 +552,7 @@ class CopilotCatalog:
         self,
         *,
         provider_name: str,
-        ensure_token: Callable[[], Awaitable[None]],
+        ensure_token: Callable[..., Awaitable[None]],
         send: Callable[..., Awaitable[httpx.Response]],
         normalize_endpoints: Callable[[Mapping[str, Any]], tuple[str, ...] | None],
         derive_operations: Callable[[Mapping[str, Any]], dict[str, bool]],
@@ -370,11 +562,30 @@ class CopilotCatalog:
         try:
             await ensure_token()
             async with httpx.AsyncClient(timeout=TIMEOUT_NON_STREAMING) as client:
-                response = await send("GET", COPILOT_MODELS_PATH, client=client, model=None)
-                response.raise_for_status()
+
+                async def fetch_catalog() -> object:
+                    response = await send(
+                        "GET",
+                        COPILOT_MODELS_PATH,
+                        client=client,
+                        headers_kwargs={"intent": "model-access"},
+                        model=None,
+                    )
+                    response.raise_for_status()
+                    return response.json()
+
                 try:
+                    data = await fetch_catalog()
+                    if (
+                        not self._client_upgrade_retry_done
+                        and _catalog_requires_current_client_token(data)
+                    ):
+                        self._client_upgrade_retry_done = True
+                        logger.info("Refreshing Copilot token minted by an older client identity")
+                        await ensure_token(force=True)
+                        data = await fetch_catalog()
                     models = self.parse_models(
-                        response.json(),
+                        data,
                         provider_name=provider_name,
                         normalize_endpoints=normalize_endpoints,
                         derive_operations=derive_operations,

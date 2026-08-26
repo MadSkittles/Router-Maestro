@@ -196,6 +196,15 @@ def test_copilot_allows_temperature_chat_but_not_responses():
     assert c.allows_temperature(Operation.RESPONSES) is False
 
 
+def test_copilot_gpt54_allows_top_p_only_on_chat_transport():
+    c = _copilot_contract()
+    assert c.allows_top_p(Operation.CHAT, model="gpt-5.4") is True
+    assert c.allows_top_p(Operation.RESPONSES, model="gpt-5.4") is False
+    assert c.allows_top_p(Operation.RESPONSES_STREAM, model="gpt-5.4-mini") is False
+    assert c.allows_top_p(Operation.NATIVE_ANTHROPIC, model="gpt-5.4") is False
+    assert c.allows_top_p(Operation.RESPONSES, model="gpt-5.3-codex") is True
+
+
 def test_permissive_defaults_for_tools_and_temperature():
     from router_maestro.providers.outbound_contract import PermissiveOutboundContract
 
@@ -203,6 +212,7 @@ def test_permissive_defaults_for_tools_and_temperature():
     tools = [{"type": "anything"}]
     assert c.filter_tools(tools, operation=Operation.CHAT, model="m") == tools
     assert c.allows_temperature(Operation.RESPONSES) is True
+    assert c.allows_top_p(Operation.RESPONSES, model="m") is True
 
 
 # --- reconcile_passthrough_body orchestrator (Responses shape) ---

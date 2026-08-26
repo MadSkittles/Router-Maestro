@@ -26,7 +26,7 @@ import httpx
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from router_maestro.auth.github_oauth import CopilotTokenResponse, get_copilot_token
-from router_maestro.auth.storage import AuthStorage, AuthType
+from router_maestro.auth.storage import AuthStorage, AuthType, OAuthCredential
 
 COPILOT_API = "https://api.githubcopilot.com"
 MESSAGES_PATH = "/v1/messages"
@@ -98,7 +98,7 @@ async def _get_token() -> str:
     """Get a fresh Copilot bearer token from local auth storage."""
     storage = AuthStorage.load()
     cred = storage.credentials.get("github-copilot")
-    if not cred or cred.type != AuthType.OAUTH:
+    if not isinstance(cred, OAuthCredential) or cred.type != AuthType.OAUTH:
         print("ERROR: No github-copilot OAuth credential found.")
         print("  Run: uv run router-maestro auth login copilot")
         sys.exit(1)

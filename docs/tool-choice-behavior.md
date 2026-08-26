@@ -61,6 +61,19 @@ provider 的原生格式透传或等价翻译；无法表达的显式选项会�
 还会拒绝其不支持的 tool type；因此本页的 `finish_reason` 表格只描述已经通过
 这些能力与选项校验、实际发往 Copilot Chat transport 的请求。
 
+现在入口协议和 provider transport 是两个独立选择。Anthropic Messages、
+OpenAI Chat、OpenAI Responses 与 Gemini 入口都先确定 provider/model，再由该
+provider 的 handler 为同一个 model 选择 Messages、Chat 或 Responses binding。
+同协议 binding 使用 identity fast path，不生成 semantic IR；跨协议时才惰性
+生成一次 IR，并保留 tool definition、choice、parallel 标志、call/result ID、
+namespace 与 `is_error`。同一 model 的 transport 切换不会消耗 model fallback
+次数，只有所有可用 transport 失败后才可能进入 route plan 的下一 model。
+
+第一条有效上游 stream frame 出现后，binding 与 model 均被锁定，不会为了
+修复后续 tool frame 或 terminal 错误而重放请求。当前没有 Gemini-native
+provider；Gemini 入口的工具语义会转换到 Messages、Chat 或 Responses，而
+`countTokens` 仍走独立的原生计数/估算链路。
+
 ## 客户端注意事项
 
 `finish_reason` 不应作为是否存在工具调用的判断依据：

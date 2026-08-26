@@ -36,21 +36,25 @@ def repositories(priorities_path):
 
 
 def _config(*priorities: str, max_retries: int = 2) -> PrioritiesConfig:
-    return PrioritiesConfig(
-        priorities=list(priorities),
-        fallback={"maxRetries": max_retries},
+    return PrioritiesConfig.model_validate(
+        {
+            "priorities": list(priorities),
+            "fallback": {"maxRetries": max_retries},
+        }
     )
 
 
 def test_revision_is_sha256_of_canonical_validated_json():
-    config = PrioritiesConfig(
-        priorities=["custom/模型"],
-        model_overrides={
-            "custom/模型": {
-                "max_prompt_tokens": None,
-                "max_output_tokens": 4096,
-            }
-        },
+    config = PrioritiesConfig.model_validate(
+        {
+            "priorities": ["custom/模型"],
+            "model_overrides": {
+                "custom/模型": {
+                    "max_prompt_tokens": None,
+                    "max_output_tokens": 4096,
+                }
+            },
+        }
     )
     validated = PrioritiesConfig.model_validate(config.model_dump(mode="json"))
     payload = validated.model_dump(

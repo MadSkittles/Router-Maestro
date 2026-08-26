@@ -1,11 +1,13 @@
 """Tests for provider-aware token counting configuration."""
 
 from dataclasses import FrozenInstanceError
+from typing import cast
 from unittest.mock import AsyncMock, patch
 
 import httpx
 import pytest
 
+from router_maestro.runtime import RequestContext
 from router_maestro.runtime import request_context as request_context_module
 from router_maestro.server.schemas.anthropic import (
     AnthropicTool,
@@ -321,7 +323,7 @@ class TestCountTokensViaAnthropicApi:
             mock_client.__aexit__ = AsyncMock(return_value=False)
             mock_client_cls.return_value = mock_client
             token = request_context_module._current_request_context.set(  # type: ignore[attr-defined]
-                type("Context", (), {"audit": audit})()
+                cast(RequestContext, type("Context", (), {"audit": audit})())
             )
             try:
                 result = await count_tokens_via_anthropic_api(
@@ -388,7 +390,7 @@ class TestCountTokensViaAnthropicApi:
             mock_client.__aexit__ = AsyncMock(return_value=False)
             mock_client_cls.return_value = mock_client
             token = request_context_module._current_request_context.set(  # type: ignore[attr-defined]
-                type("Context", (), {"audit": audit})()
+                cast(RequestContext, type("Context", (), {"audit": audit})())
             )
             try:
                 with pytest.raises(httpx.HTTPStatusError):

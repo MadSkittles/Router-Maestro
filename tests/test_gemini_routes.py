@@ -218,7 +218,7 @@ class TestTranslateGeminiToOpenAI:
                     parts=[GeminiPart(text="Hello")],
                 )
             ],
-            system_instruction=GeminiContent(parts=[GeminiPart(text="You are helpful")]),
+            systemInstruction=GeminiContent(parts=[GeminiPart(text="You are helpful")]),
         )
         result = translate_gemini_to_openai(request, "model")
         assert result.messages[0].role == "system"
@@ -242,9 +242,9 @@ class TestTranslateGeminiToOpenAI:
     def test_generation_config(self):
         request = GeminiGenerateContentRequest(
             contents=[GeminiContent(role="user", parts=[GeminiPart(text="Hi")])],
-            generation_config=GeminiGenerationConfig(
+            generationConfig=GeminiGenerationConfig(
                 temperature=0.7,
-                max_output_tokens=8192,
+                maxOutputTokens=8192,
             ),
         )
         result = translate_gemini_to_openai(request, "model")
@@ -254,12 +254,12 @@ class TestTranslateGeminiToOpenAI:
     def test_generation_config_preserves_typed_options(self):
         request = GeminiGenerateContentRequest(
             contents=[GeminiContent(role="user", parts=[GeminiPart(text="Hi")])],
-            generation_config=GeminiGenerationConfig(
-                top_p=0.8,
-                top_k=32,
-                stop_sequences=["END", "STOP"],
-                candidate_count=2,
-                response_mime_type="application/json",
+            generationConfig=GeminiGenerationConfig(
+                topP=0.8,
+                topK=32,
+                stopSequences=["END", "STOP"],
+                candidateCount=2,
+                responseMimeType="application/json",
             ),
         )
 
@@ -313,7 +313,7 @@ class TestTranslateGeminiToOpenAI:
     def test_no_thinking_config_leaves_reasoning_unset(self):
         request = GeminiGenerateContentRequest(
             contents=[GeminiContent(role="user", parts=[GeminiPart(text="Hi")])],
-            generation_config=GeminiGenerationConfig(temperature=0.5),
+            generationConfig=GeminiGenerationConfig(temperature=0.5),
         )
         result = translate_gemini_to_openai(request, "model")
         assert result.thinking_type is None
@@ -346,7 +346,7 @@ class TestTranslateGeminiToOpenAI:
                     role="model",
                     parts=[
                         GeminiPart(
-                            function_call=GeminiFunctionCall(
+                            functionCall=GeminiFunctionCall(
                                 name="get_weather",
                                 args={"location": "Tokyo"},
                                 id="call_123",
@@ -358,7 +358,7 @@ class TestTranslateGeminiToOpenAI:
                     role="user",
                     parts=[
                         GeminiPart(
-                            function_response=GeminiFunctionResponse(
+                            functionResponse=GeminiFunctionResponse(
                                 name="get_weather",
                                 id="call_123",
                                 response={"temp": "20C"},
@@ -382,7 +382,7 @@ class TestTranslateGeminiToOpenAI:
             contents=[GeminiContent(role="user", parts=[GeminiPart(text="Hi")])],
             tools=[
                 GeminiTool(
-                    function_declarations=[
+                    functionDeclarations=[
                         GeminiFunctionDeclaration(
                             name="get_weather",
                             description="Get weather",
@@ -410,8 +410,8 @@ class TestTranslateGeminiToOpenAI:
     def test_tool_config_auto(self):
         request = GeminiGenerateContentRequest(
             contents=[GeminiContent(role="user", parts=[GeminiPart(text="Hi")])],
-            tool_config=GeminiToolConfig(
-                function_calling_config=GeminiFunctionCallingConfig(mode="AUTO")
+            toolConfig=GeminiToolConfig(
+                functionCallingConfig=GeminiFunctionCallingConfig(mode="AUTO")
             ),
         )
         result = translate_gemini_to_openai(request, "model")
@@ -420,8 +420,8 @@ class TestTranslateGeminiToOpenAI:
     def test_tool_config_any(self):
         request = GeminiGenerateContentRequest(
             contents=[GeminiContent(role="user", parts=[GeminiPart(text="Hi")])],
-            tool_config=GeminiToolConfig(
-                function_calling_config=GeminiFunctionCallingConfig(mode="ANY")
+            toolConfig=GeminiToolConfig(
+                functionCallingConfig=GeminiFunctionCallingConfig(mode="ANY")
             ),
         )
         result = translate_gemini_to_openai(request, "model")
@@ -430,8 +430,8 @@ class TestTranslateGeminiToOpenAI:
     def test_tool_config_none(self):
         request = GeminiGenerateContentRequest(
             contents=[GeminiContent(role="user", parts=[GeminiPart(text="Hi")])],
-            tool_config=GeminiToolConfig(
-                function_calling_config=GeminiFunctionCallingConfig(mode="NONE")
+            toolConfig=GeminiToolConfig(
+                functionCallingConfig=GeminiFunctionCallingConfig(mode="NONE")
             ),
         )
         result = translate_gemini_to_openai(request, "model")
@@ -471,9 +471,12 @@ class TestTranslateOpenAIToGemini:
         )
         result = translate_openai_to_gemini(response, "gemini-2.5-pro")
         assert len(result.candidates) == 1
-        assert result.candidates[0].content.parts[0].text == "Hello!"
-        assert result.candidates[0].content.role == "model"
-        assert result.candidates[0].finish_reason == "STOP"
+        candidate = result.candidates[0]
+        assert candidate.content is not None
+        assert candidate.content.parts[0].text == "Hello!"
+        assert candidate.content.role == "model"
+        assert candidate.finish_reason == "STOP"
+        assert result.usage_metadata is not None
         assert result.usage_metadata.prompt_token_count == 10
         assert result.usage_metadata.candidates_token_count == 5
         assert result.model_version == "gemini-2.5-pro"
@@ -486,7 +489,9 @@ class TestTranslateOpenAIToGemini:
             thinking="let me think",
         )
         result = translate_openai_to_gemini(response, "gemini-3.5-flash", include_thoughts=True)
-        parts = result.candidates[0].content.parts
+        content = result.candidates[0].content
+        assert content is not None
+        parts = content.parts
         assert any(p.thought is True and p.text == "let me think" for p in parts)
         assert any(p.thought is not True and p.text == "42" for p in parts)
 
@@ -498,7 +503,9 @@ class TestTranslateOpenAIToGemini:
             thinking="hidden",
         )
         result = translate_openai_to_gemini(response, "gemini-3.5-flash", include_thoughts=False)
-        parts = result.candidates[0].content.parts
+        content = result.candidates[0].content
+        assert content is not None
+        parts = content.parts
         assert all(p.thought is not True for p in parts)
         assert all(p.text != "hidden" for p in parts)
 
@@ -507,7 +514,9 @@ class TestTranslateOpenAIToGemini:
         chunk = {"choices": [{"delta": {"thinking": "pondering"}, "finish_reason": None}]}
         event = translate_openai_chunk_to_gemini(chunk, state, "model", include_thoughts=True)
         assert event is not None
-        part = event.candidates[0].content.parts[0]
+        content = event.candidates[0].content
+        assert content is not None
+        part = content.parts[0]
         assert part.thought is True
         assert part.text == "pondering"
 
@@ -530,6 +539,7 @@ class TestTranslateOpenAIToGemini:
         """When response has no usage, input_tokens estimate is used."""
         response = ChatResponse(content="Hi", model="model", usage=None)
         result = translate_openai_to_gemini(response, "model", input_tokens=42)
+        assert result.usage_metadata is not None
         assert result.usage_metadata.prompt_token_count == 42
 
     def test_empty_content(self):
@@ -569,7 +579,9 @@ class TestTranslateOpenAIChunkToGemini:
         }
         result = translate_openai_chunk_to_gemini(chunk, state, "model")
         assert result is not None
-        assert result.candidates[0].content.parts[0].text == "Hello"
+        content = result.candidates[0].content
+        assert content is not None
+        assert content.parts[0].text == "Hello"
         assert state.accumulated_text == "Hello"
 
     def test_finish_chunk(self):
@@ -682,7 +694,10 @@ class TestTranslateOpenAIChunkToGemini:
         assert result is not None
         assert result.candidates[0].finish_reason == "STOP"
         # The final tool call should have parsed args
-        fc = result.candidates[0].content.parts[0].function_call
+        content = result.candidates[0].content
+        assert content is not None
+        fc = content.parts[0].function_call
+        assert fc is not None
         assert fc.name == "get_weather"
         assert fc.args == {"location": "Tokyo"}
 
@@ -1012,17 +1027,19 @@ class TestGeminiSchemas:
     def test_generate_content_request_full(self):
         req = GeminiGenerateContentRequest(
             contents=[GeminiContent(role="user", parts=[GeminiPart(text="Hi")])],
-            system_instruction=GeminiContent(parts=[GeminiPart(text="Be helpful")]),
-            generation_config=GeminiGenerationConfig(temperature=0.5),
+            systemInstruction=GeminiContent(parts=[GeminiPart(text="Be helpful")]),
+            generationConfig=GeminiGenerationConfig(temperature=0.5),
             tools=[
                 GeminiTool(
-                    function_declarations=[
+                    functionDeclarations=[
                         GeminiFunctionDeclaration(name="test", description="A test")
                     ]
                 )
             ],
         )
+        assert req.contents is not None
         assert len(req.contents) == 1
+        assert req.generation_config is not None
         assert req.generation_config.temperature == 0.5
 
     def test_generate_content_response(self):
@@ -1033,38 +1050,43 @@ class TestGeminiSchemas:
                         parts=[GeminiPart(text="Hello")],
                         role="model",
                     ),
-                    finish_reason="STOP",
+                    finishReason="STOP",
                 )
             ],
-            usage_metadata=GeminiUsageMetadata(
-                prompt_token_count=5,
-                candidates_token_count=3,
-                total_token_count=8,
+            usageMetadata=GeminiUsageMetadata(
+                promptTokenCount=5,
+                candidatesTokenCount=3,
+                totalTokenCount=8,
             ),
-            model_version="test",
+            modelVersion="test",
         )
-        assert resp.candidates[0].content.parts[0].text == "Hello"
+        content = resp.candidates[0].content
+        assert content is not None
+        assert content.parts[0].text == "Hello"
+        assert resp.usage_metadata is not None
         assert resp.usage_metadata.total_token_count == 8
 
     def test_function_call_part(self):
         part = GeminiPart(
-            function_call=GeminiFunctionCall(
+            functionCall=GeminiFunctionCall(
                 name="test_fn",
                 args={"key": "value"},
                 id="call_1",
             )
         )
+        assert part.function_call is not None
         assert part.function_call.name == "test_fn"
         assert part.function_call.args == {"key": "value"}
 
     def test_function_response_part(self):
         part = GeminiPart(
-            function_response=GeminiFunctionResponse(
+            functionResponse=GeminiFunctionResponse(
                 name="test_fn",
                 id="call_1",
                 response={"result": "ok"},
             )
         )
+        assert part.function_response is not None
         assert part.function_response.name == "test_fn"
 
     def test_stream_state_defaults(self):
@@ -1086,18 +1108,19 @@ class TestGeminiSchemas:
         }
         req = GeminiGenerateContentRequest.model_validate(data)
         assert req.system_instruction is not None
+        assert req.generation_config is not None
         assert req.generation_config.max_output_tokens == 1024
 
     def test_response_serializes_to_camel_case(self):
         """Verify responses serialize to camelCase JSON."""
         resp = GeminiGenerateContentResponse(
-            candidates=[GeminiCandidate(finish_reason="STOP", index=0)],
-            usage_metadata=GeminiUsageMetadata(
-                prompt_token_count=5,
-                candidates_token_count=3,
-                total_token_count=8,
+            candidates=[GeminiCandidate(finishReason="STOP", index=0)],
+            usageMetadata=GeminiUsageMetadata(
+                promptTokenCount=5,
+                candidatesTokenCount=3,
+                totalTokenCount=8,
             ),
-            model_version="test",
+            modelVersion="test",
         )
         data = json.loads(resp.model_dump_json(by_alias=True, exclude_none=True))
         assert "finishReason" in data["candidates"][0]
@@ -1135,7 +1158,7 @@ class TestToolParametersDefaults:
         """Tools with no parameters field should get a valid OpenAI schema."""
         tools = [
             GeminiTool(
-                function_declarations=[
+                functionDeclarations=[
                     GeminiFunctionDeclaration(
                         name="list_files",
                         description="List files in directory",
@@ -1159,7 +1182,7 @@ class TestToolParametersDefaults:
         """Tools with empty {} parameters should get a valid schema."""
         tools = [
             GeminiTool(
-                function_declarations=[
+                functionDeclarations=[
                     GeminiFunctionDeclaration(
                         name="get_time",
                         description="Get current time",
@@ -1173,6 +1196,7 @@ class TestToolParametersDefaults:
             tools=tools,
         )
         chat_request = translate_gemini_to_openai(request, "test-model")
+        assert chat_request.tools is not None
         params = chat_request.tools[0]["function"]["parameters"]
         assert params["type"] == "object"
 
@@ -1180,7 +1204,7 @@ class TestToolParametersDefaults:
         """Tools with valid parameters should keep them as-is."""
         tools = [
             GeminiTool(
-                function_declarations=[
+                functionDeclarations=[
                     GeminiFunctionDeclaration(
                         name="read_file",
                         description="Read a file",
@@ -1198,6 +1222,7 @@ class TestToolParametersDefaults:
             tools=tools,
         )
         chat_request = translate_gemini_to_openai(request, "test-model")
+        assert chat_request.tools is not None
         params = chat_request.tools[0]["function"]["parameters"]
         assert params["type"] == "object"  # normalized from OBJECT
         assert "path" in params["properties"]
@@ -1212,7 +1237,7 @@ class TestToolParametersDefaults:
             )
             for i in range(16)
         ]
-        tools = [GeminiTool(function_declarations=decls)]
+        tools = [GeminiTool(functionDeclarations=decls)]
         request = GeminiGenerateContentRequest(
             contents=[GeminiContent(parts=[GeminiPart(text="hello")], role="user")],
             tools=tools,

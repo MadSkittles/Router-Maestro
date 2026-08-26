@@ -4,6 +4,7 @@ import asyncio
 import threading
 from dataclasses import dataclass
 from types import SimpleNamespace
+from typing import cast
 
 import pytest
 from fastapi import BackgroundTasks
@@ -12,9 +13,14 @@ from starlette.responses import Response
 from router_maestro.auth.discovery import ProviderAuthSource
 from router_maestro.auth.repository import CredentialRepository
 from router_maestro.auth.storage import ApiKeyCredential, AuthType, Credential, OAuthCredential
-from router_maestro.config.providers import CustomProviderConfig, ProvidersConfig
+from router_maestro.config.providers import (
+    CustomProviderConfig,
+    CustomProviderOptions,
+    ProvidersConfig,
+)
 from router_maestro.config.repository import RuntimeConfigRepository
 from router_maestro.providers import ModelInfo as ProviderModelInfo
+from router_maestro.routing.router import Router
 from router_maestro.server.routes import admin
 from router_maestro.server.schemas.admin import LoginRequest, PrioritiesUpdateRequest
 
@@ -62,6 +68,11 @@ class _OAuthSessionsSpy:
         self.updates.append({"session_id": session_id, **kwargs})
 
 
+def _runtime_repository(snapshot: object) -> RuntimeConfigRepository:
+    repository = SimpleNamespace(read=lambda: snapshot)
+    return cast(RuntimeConfigRepository, repository)
+
+
 async def _fake_poll_access_token(client, device_code, interval, timeout):
     return _AccessToken("gh-access")
 
@@ -87,7 +98,7 @@ async def test_oauth_completion_preserves_copilot_api_endpoint(monkeypatch):
 
     owner = _Owner()
     runtime_snapshot = SimpleNamespace(revision="runtime-revision")
-    runtime_repository = SimpleNamespace(read=lambda: runtime_snapshot)
+    runtime_repository = _runtime_repository(runtime_snapshot)
 
     monkeypatch.setattr(admin, "oauth_sessions", sessions)
     monkeypatch.setattr(admin, "poll_access_token", _fake_poll_access_token)
@@ -98,11 +109,12 @@ async def test_oauth_completion_preserves_copilot_api_endpoint(monkeypatch):
         "device-code",
         1,
         owner,
-        repository,
+        cast(CredentialRepository, repository),
         runtime_repository,
     )
 
     credential = repository.saved["github-copilot"]
+    assert isinstance(credential, OAuthCredential)
     assert credential.api_endpoint == "https://api.enterprise.githubcopilot.com"
     assert owner.snapshots == [runtime_snapshot]
     assert sessions.updates[0]["status"] == "complete"
@@ -150,7 +162,7 @@ async def test_cancelled_oauth_completion_compensates_late_credential_write(
             1,
             owner,
             repository,
-            SimpleNamespace(read=lambda: SimpleNamespace(revision="runtime-revision")),
+            _runtime_repository(SimpleNamespace(revision="runtime-revision")),
         )
     )
     assert await asyncio.to_thread(update_started.wait, 1)
@@ -234,7 +246,7 @@ async def test_cancelled_oauth_compensation_ignores_repeated_cancellation_and_co
             1,
             owner,
             repository,
-            SimpleNamespace(read=lambda: SimpleNamespace(revision="runtime-revision")),
+            _runtime_repository(SimpleNamespace(revision="runtime-revision")),
         )
     )
     assert await asyncio.to_thread(update_started.wait, 1)
@@ -271,7 +283,7 @@ async def test_cancelled_oauth_compensation_ignores_repeated_cancellation_and_co
 @pytest.mark.asyncio
 async def test_oauth_login_background_task_receives_current_router_owner(monkeypatch):
     owner = object()
-    runtime_repository = object()
+    runtime_repository = cast(RuntimeConfigRepository, object())
     background_tasks = BackgroundTasks()
     device_code = SimpleNamespace(
         device_code="device-code",
@@ -315,7 +327,7 @@ async def test_api_key_login_and_logout_rebuild_router(monkeypatch):
     owner = _Owner()
     credential_repository = _CredentialRepositorySpy()
     runtime_snapshot = SimpleNamespace(revision="runtime-revision")
-    runtime_repository = SimpleNamespace(read=lambda: runtime_snapshot)
+    runtime_repository = _runtime_repository(runtime_snapshot)
     monkeypatch.setattr(admin, "CredentialRepository", lambda: credential_repository)
 
     login_result = await admin.login(
@@ -357,7 +369,7 @@ async def test_api_key_login_compensates_only_its_credential_when_rebuild_fails(
             LoginRequest(provider="openai", api_key="new-key"),
             BackgroundTasks(),
             _Owner(),
-            SimpleNamespace(read=lambda: runtime_snapshot),
+            _runtime_repository(runtime_snapshot),
         )
 
     assert repository.get_provider("openai") == ApiKeyCredential(key="old-key")
@@ -386,7 +398,7 @@ async def test_api_key_login_compensation_never_overwrites_concurrent_credential
             LoginRequest(provider="openai", api_key="new-key"),
             BackgroundTasks(),
             _Owner(),
-            SimpleNamespace(read=lambda: runtime_snapshot),
+            _runtime_repository(runtime_snapshot),
         )
 
     assert repository.get_provider("openai") == ApiKeyCredential(key="concurrent-key")
@@ -411,7 +423,7 @@ async def test_logout_restores_removed_credential_when_rebuild_fails(monkeypatch
         await admin.logout(
             "openai",
             _Owner(),
-            SimpleNamespace(read=lambda: runtime_snapshot),
+            _runtime_repository(runtime_snapshot),
         )
 
     assert repository.get_provider("openai") == original
@@ -436,7 +448,7 @@ async def test_logout_compensation_never_overwrites_concurrent_credential(monkey
         await admin.logout(
             "openai",
             _Owner(),
-            SimpleNamespace(read=lambda: runtime_snapshot),
+            _runtime_repository(runtime_snapshot),
         )
 
     assert repository.get_provider("openai") == ApiKeyCredential(key="concurrent-key")
@@ -467,7 +479,7 @@ async def test_oauth_completion_restores_previous_credential_when_rebuild_fails(
         1,
         _Owner(),
         repository,
-        SimpleNamespace(read=lambda: runtime_snapshot),
+        _runtime_repository(runtime_snapshot),
     )
 
     assert repository.get_provider("github-copilot") == original
@@ -504,7 +516,7 @@ async def test_oauth_compensation_never_overwrites_concurrent_credential(monkeyp
         1,
         _Owner(),
         repository,
-        SimpleNamespace(read=lambda: runtime_snapshot),
+        _runtime_repository(runtime_snapshot),
     )
 
     assert repository.get_provider("github-copilot") == concurrent
@@ -519,7 +531,7 @@ def test_auth_provider_discovery_uses_server_provider_configuration(monkeypatch)
             providers={
                 "ollama": CustomProviderConfig(
                     baseURL="http://localhost:11434/v1",
-                    options={"allow_unauthenticated": True},
+                    options=CustomProviderOptions(allow_unauthenticated=True),
                 )
             }
         ),
@@ -586,7 +598,7 @@ async def test_admin_models_returns_unique_provider_qualified_public_ids(monkeyp
 
     model_router = _ModelRouter()
 
-    response = await admin.list_models(model_router)
+    response = await admin.list_models(cast(Router, model_router))
 
     assert [model.id for model in response.models] == [
         "first/shared-model",
@@ -608,15 +620,17 @@ async def test_admin_models_exposes_operation_capabilities(monkeypatch):
                     name="GPT-5.5",
                     provider="github-copilot",
                     operation_capabilities={"responses": True, "native_anthropic": False},
+                    transport_capabilities={"openai_responses": True},
                 ),
             ]
 
-    response = await admin.list_models(_ModelRouter())
+    response = await admin.list_models(cast(Router, _ModelRouter()))
 
     assert response.models[0].operation_capabilities == {
         "responses": True,
         "native_anthropic": False,
     }
+    assert "transport_capabilities" not in response.models[0].model_dump()
 
 
 @pytest.mark.asyncio
@@ -651,7 +665,7 @@ async def test_admin_model_refresh_rebuilds_generation_and_releases_lease_after_
     runtime_snapshot = SimpleNamespace(revision="runtime-revision")
 
     with pytest.raises(Exception) as exc_info:
-        await admin.refresh_models(owner, SimpleNamespace(read=lambda: runtime_snapshot))
+        await admin.refresh_models(owner, _runtime_repository(runtime_snapshot))
 
     assert getattr(exc_info.value, "status_code", None) == 500
     assert events == ["rebuild", "acquire", "list"]
@@ -675,7 +689,7 @@ async def test_admin_model_refresh_does_not_acquire_when_rebuild_fails():
     runtime_snapshot = SimpleNamespace(revision="runtime-revision")
 
     with pytest.raises(Exception) as exc_info:
-        await admin.refresh_models(owner, SimpleNamespace(read=lambda: runtime_snapshot))
+        await admin.refresh_models(owner, _runtime_repository(runtime_snapshot))
 
     assert getattr(exc_info.value, "status_code", None) == 500
     assert owner.acquired is False

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Router-Maestro Live Validation"
+  short_description: "Smoke and multi-turn Claude/Codex validation"
+  default_prompt: "Use $router-maestro-live-validation to run the full Claude Code and Codex smoke and multi-turn suite against the test instance."

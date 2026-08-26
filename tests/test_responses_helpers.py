@@ -120,6 +120,7 @@ class TestConvertInputToInternal:
         """Test message input without explicit type."""
         input_data = [{"role": "user", "content": "Hello"}]
         result = convert_input_to_internal(input_data)
+        assert isinstance(result, list)
         assert result[0]["type"] == "message"
         assert result[0]["role"] == "user"
 
@@ -135,6 +136,7 @@ class TestConvertInputToInternal:
             }
         ]
         result = convert_input_to_internal(input_data)
+        assert isinstance(result, list)
         assert result[0]["type"] == "function_call"
         assert result[0]["name"] == "get_weather"
 
@@ -142,6 +144,7 @@ class TestConvertInputToInternal:
         """Test function_call_output input conversion."""
         input_data = [{"type": "function_call_output", "call_id": "call-456", "output": "Sunny"}]
         result = convert_input_to_internal(input_data)
+        assert isinstance(result, list)
         assert result[0]["type"] == "function_call_output"
         assert result[0]["output"] == "Sunny"
 
@@ -151,6 +154,7 @@ class TestConvertInputToInternal:
             {"type": "function_call_output", "call_id": "call-456", "output": {"temp": 72}}
         ]
         result = convert_input_to_internal(input_data)
+        assert isinstance(result, list)
         assert result[0]["output"] == '{"temp": 72}'
 
     def test_reasoning_item_preserved_with_encrypted_content(self):
@@ -184,6 +188,7 @@ class TestConvertInputToInternal:
             }
         ]
         result = convert_input_to_internal(input_data)
+        assert isinstance(result, list)
         assert "encrypted_content" not in result[0]
         assert result[0]["type"] == "reasoning"
         assert result[0]["id"] == "rs-abc"
@@ -193,6 +198,7 @@ class TestConvertInputToInternal:
         we must still produce a valid reasoning item."""
         input_data = [{"type": "reasoning", "id": "rs-xyz"}]
         result = convert_input_to_internal(input_data)
+        assert isinstance(result, list)
         assert result[0]["summary"] == []
 
 
@@ -262,6 +268,7 @@ class TestMakeUsage:
         """Test basic usage creation."""
         raw = {"input_tokens": 10, "output_tokens": 20}
         result = make_usage(raw)
+        assert result is not None
         assert result["input_tokens"] == 10
         assert result["output_tokens"] == 20
         assert result["total_tokens"] == 30
@@ -277,6 +284,7 @@ class TestMakeUsage:
             "output_tokens_details": {"reasoning_tokens": 13},
         }
         result = make_usage(raw)
+        assert result is not None
         assert result["input_tokens_details"] == {"cached_tokens": 7}
         assert result["output_tokens_details"] == {"reasoning_tokens": 13}
 

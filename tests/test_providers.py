@@ -1,6 +1,7 @@
 """Tests for providers module."""
 
 import json
+from typing import cast
 from unittest.mock import AsyncMock, Mock, patch
 
 import httpx
@@ -225,11 +226,16 @@ class TestProviderBase:
 
         assert headers["Authorization"] == "Bearer token"
         assert headers["Copilot-Integration-Id"] == "vscode-chat"
-        assert headers["User-Agent"] == "GitHubCopilotChat/0.26.7"
+        assert headers["Editor-Version"] == "vscode/1.136.0"
+        assert headers["Editor-Plugin-Version"] == "copilot-chat/0.64.0"
+        assert headers["User-Agent"] == "GitHubCopilotChat/0.64.0"
         assert headers["OpenAI-Intent"] == "conversation-panel"
-        assert headers["X-GitHub-Api-Version"] == "2025-04-01"
+        assert headers["X-GitHub-Api-Version"] == "2026-08-01"
         assert headers["X-Vscode-User-Agent-Library-Version"] == "electron-fetch"
         assert "X-Request-Id" in headers
+
+        model_headers = provider._get_headers(intent="model-access")
+        assert model_headers["OpenAI-Intent"] == "model-access"
 
     @pytest.mark.parametrize(
         ("messages", "expected"),
@@ -748,7 +754,9 @@ class TestCopilotTokenRefresh:
         assert calls["n"] == 2  # original + retry
         # ensure_token called once at entry, once forced after the 403.
         assert mock_ensure.await_count == 2
-        assert mock_ensure.await_args.kwargs.get("force") is True
+        await_args = mock_ensure.await_args
+        assert await_args is not None
+        assert await_args.kwargs.get("force") is True
         assert response.content == "hi"
 
     @pytest.mark.asyncio
@@ -853,8 +861,9 @@ class TestCopilotTokenRefresh:
         ):
             await provider.ensure_token()
 
-        assert provider.auth_manager.save.call_count == 1
+        assert cast(Mock, provider.auth_manager.save).call_count == 1
         stored = provider.auth_manager.storage.get("github-copilot")
+        assert isinstance(stored, OAuthCredential)
         assert stored.access == "new-copilot"
         assert provider._cached_token == "new-copilot"
 

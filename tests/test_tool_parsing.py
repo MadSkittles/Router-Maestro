@@ -75,6 +75,7 @@ class TestRecoverToolCallsFromContent:
         assert tool_calls[2]["function"]["name"] == "exec"
         assert json.loads(tool_calls[2]["function"]["arguments"]) == {"command": "df -h"}
         # Text preserved, tool_result stripped
+        assert content is not None
         assert "Let me check your system." in content
         assert "I'll report back soon." in content
         assert "<tool_result>" not in content
@@ -221,6 +222,7 @@ class TestRecoverToolCallsFromContent:
         )
         assert tool_calls is not None
         assert len(tool_calls) == 1
+        assert content is not None
         assert "<tool_result" not in content
         assert "Checking..." in content
         assert "Done." in content

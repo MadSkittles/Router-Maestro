@@ -1,5 +1,7 @@
 """Advanced tests for the Router module with async operations."""
 
+from typing import cast
+
 import pytest
 
 from router_maestro.config import PrioritiesConfig
@@ -564,6 +566,7 @@ class TestRouterModelResolutionAsync:
 
         result = await router.get_model_info("claude-opus-4-6")
 
+        assert result is not None
         assert result == opus
         assert result is not opus
         assert result.max_output_tokens == 64000
@@ -700,10 +703,10 @@ class TestRouterResponseOwnership:
 
         class SingletonProvider(MockProvider):
             async def chat_completion(self, request: ChatRequest) -> ChatResponse:
-                return provider_response
+                return cast(ChatResponse, provider_response)
 
             async def responses_completion(self, request: ResponsesRequest) -> ResponsesResponse:
-                return provider_response
+                return cast(ResponsesResponse, provider_response)
 
         model = ModelInfo(id="shared-model", name="Shared", provider="singleton")
         provider = SingletonProvider(name="singleton", models=[model])
@@ -770,9 +773,11 @@ class TestRouterFallback:
         _mark_providers_fresh(router)
         _set_priorities(
             router,
-            PrioritiesConfig(
-                priorities=["primary/model-1", "secondary/model-1"],
-                fallback={"strategy": "priority", "maxRetries": 3},
+            PrioritiesConfig.model_validate(
+                {
+                    "priorities": ["primary/model-1", "secondary/model-1"],
+                    "fallback": {"strategy": "priority", "maxRetries": 3},
+                }
             ),
         )
         return router, primary, secondary

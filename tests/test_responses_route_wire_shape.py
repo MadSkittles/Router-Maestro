@@ -12,9 +12,10 @@ These tests pin each shape down end-to-end through ``stream_response``.
 import asyncio
 import json
 from collections.abc import AsyncIterator
-from typing import Any
+from typing import Any, cast
 
 import pytest
+from starlette.responses import JSONResponse
 
 from router_maestro.providers import ResponsesRequest as InternalResponsesRequest
 from router_maestro.providers.base import (
@@ -30,6 +31,7 @@ from router_maestro.providers.base import (
 from router_maestro.providers.base import (
     ResponsesResponse as InternalResponsesResponse,
 )
+from router_maestro.routing.router import Router
 from router_maestro.server.protocols.responses_reducer import (
     ResponsesReducer,
     _IndexedOutputScheduler,
@@ -39,7 +41,12 @@ from router_maestro.server.routes.responses import (
     create_response,
     stream_response,
 )
-from router_maestro.server.schemas.responses import ResponsesRequest
+from router_maestro.server.schemas.responses import (
+    ResponsesRequest,
+)
+from router_maestro.server.schemas.responses import (
+    ResponsesResponse as WireResponsesResponse,
+)
 
 
 class _StubRouter:
@@ -77,9 +84,11 @@ class _NonStreamStubRouter:
 
 class _CapturingResponsesRouter:
     def __init__(self):
-        self.request = None
+        self.request: InternalResponsesRequest | None = None
 
-    async def responses_completion(self, request, fallback: bool = True):
+    async def responses_completion(
+        self, request: InternalResponsesRequest, fallback: bool = True
+    ) -> tuple[InternalResponsesResponse, str]:
         self.request = request
         return InternalResponsesResponse(content="ok", model=request.model), "test-provider"
 
@@ -124,10 +133,12 @@ async def _drive(chunks: list[ResponsesStreamChunk]) -> list[dict[str, Any]]:
     return await _drive_router(_StubRouter(chunks))
 
 
-async def _drive_router(router) -> list[dict[str, Any]]:
+async def _drive_router(router: object) -> list[dict[str, Any]]:
     req = InternalResponsesRequest(model="gpt-5.5", input="hi", stream=True)
     raw_events: list[str] = []
-    async for evt in stream_response(router, req, request_id="req-test", start_time=0.0):  # type: ignore[arg-type]
+    async for evt in stream_response(
+        cast(Router, router), req, request_id="req-test", start_time=0.0
+    ):
         raw_events.append(evt)
     return _parse_sse(raw_events)
 
@@ -287,11 +298,15 @@ class TestNonStreamingToolCallWireShape:
             )
         )
 
-        output = [
-            item.model_dump(exclude_none=True) if hasattr(item, "model_dump") else item
-            for item in response.output
-        ]
-        by_call_id = {item["call_id"]: item for item in output if "call_id" in item}
+        assert isinstance(response, WireResponsesResponse)
+        output: list[dict[str, object]] = []
+        for item in response.output:
+            output.append(item if isinstance(item, dict) else item.model_dump(exclude_none=True))
+        by_call_id: dict[str, dict[str, object]] = {}
+        for item in output:
+            call_id = item.get("call_id")
+            if isinstance(call_id, str):
+                by_call_id[call_id] = item
         assert by_call_id["call_fn"]["type"] == "function_call"
         assert by_call_id["call_fn"]["arguments"] == '{"location": "NYC"}'
         assert by_call_id["call_custom"] == {
@@ -328,6 +343,7 @@ class TestNonStreamingResponseModelIdentity:
             ResponsesRequest(model="shared-model", input="hi", stream=False)
         )
 
+        assert isinstance(response, WireResponsesResponse)
         assert response.model == "first/shared-model"
 
 
@@ -353,7 +369,9 @@ class TestResponsesTemperaturePresence:
 
         response = await create_response(ResponsesRequest(**request_kwargs))
 
+        assert isinstance(response, WireResponsesResponse)
         assert response.status == "completed"
+        assert capturing.request is not None
         assert capturing.request.temperature == expected
 
     @pytest.mark.asyncio
@@ -373,7 +391,9 @@ class TestResponsesTemperaturePresence:
             )
         )
 
+        assert isinstance(response, WireResponsesResponse)
         assert response.status == "completed"
+        assert capturing.request is not None
         assert capturing.request.reasoning_effort == "minimal"
 
     @pytest.mark.asyncio
@@ -398,9 +418,10 @@ class TestResponsesTemperaturePresence:
             )
         )
 
+        assert isinstance(response, JSONResponse)
         assert response.status_code == 400
         assert response.body
-        body = json.loads(response.body)
+        body = json.loads(bytes(response.body))
         assert body["error"]["param"] == "temperature"
         capturing.upstream.assert_not_awaited()
         assert capturing.nonstream_calls == (0 if stream else 1)
@@ -424,6 +445,7 @@ class TestNativeRefusalWireShape:
             ResponsesRequest(model="github-copilot/gpt-5", input="hi", stream=False)
         )
 
+        assert isinstance(response, WireResponsesResponse)
         item = response.output[0]
         assert isinstance(item, dict)
         assert item["content"] == [{"type": "refusal", "refusal": "I cannot help"}]
@@ -570,6 +592,7 @@ class TestNativeNonStreamingTerminalStatus:
             ResponsesRequest(model="github-copilot/gpt-5", input="hi", stream=False)
         )
 
+        assert isinstance(response, WireResponsesResponse)
         assert response.status == "failed"
         assert response.output == []
         assert response.error == {
@@ -595,6 +618,7 @@ class TestNativeNonStreamingTerminalStatus:
             ResponsesRequest(model="github-copilot/gpt-5", input="hi", stream=False)
         )
 
+        assert isinstance(response, WireResponsesResponse)
         assert response.status == "completed"
         assert response.output == [
             {
@@ -652,6 +676,7 @@ class TestNativeNonStreamingTerminalStatus:
             ResponsesRequest(model="github-copilot/gpt-5", input="hi", stream=False)
         )
 
+        assert isinstance(response, WireResponsesResponse)
         assert response.status == status.value
         assert response.incomplete_details == details
         assert response.error == (
@@ -702,6 +727,7 @@ class TestNativeNonStreamingTerminalStatus:
             ResponsesRequest(model="github-copilot/gpt-5", input="hi", stream=False)
         )
 
+        assert isinstance(response, WireResponsesResponse)
         assert response.status == "failed"
         assert response.incomplete_details is None
         assert response.error is not None
@@ -727,6 +753,7 @@ class TestNativeNonStreamingTerminalStatus:
             ResponsesRequest(model="github-copilot/gpt-5", input="hi", stream=False)
         )
 
+        assert isinstance(response, WireResponsesResponse)
         assert response.status == "failed"
         assert response.error == {"code": "quota_exhausted", "message": "safe failure"}
 
@@ -1266,7 +1293,7 @@ class TestResponsesStreamItemStateIsolation:
                 return chunks(), "github-copilot"
 
         request = InternalResponsesRequest(model="gpt-5.5", input="hi", stream=True)
-        response = stream_response(GatedRouter(), request, "req-gated", 0.0)  # type: ignore[arg-type]
+        response = stream_response(cast(Router, GatedRouter()), request, "req-gated", 0.0)
         try:
             while True:
                 raw_event = await asyncio.wait_for(response.__anext__(), 1.0)

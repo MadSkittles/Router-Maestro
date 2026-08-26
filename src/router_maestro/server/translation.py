@@ -204,16 +204,15 @@ def _translate_messages(
 
     # Handle conversation messages
     for msg in messages:
-        is_user = isinstance(msg, AnthropicUserMessage) or (
-            isinstance(msg, dict) and msg.get("role") == "user"
-        )
-        is_assistant = isinstance(msg, AnthropicAssistantMessage) or (
-            isinstance(msg, dict) and msg.get("role") == "assistant"
-        )
-        if is_user:
+        if isinstance(msg, AnthropicUserMessage):
             result.extend(_handle_user_message(msg))
-        elif is_assistant:
+        elif isinstance(msg, AnthropicAssistantMessage):
             result.extend(_handle_assistant_message(msg))
+        elif isinstance(msg, dict):
+            if msg.get("role") == "user":
+                result.extend(_handle_user_message(msg))
+            elif msg.get("role") == "assistant":
+                result.extend(_handle_assistant_message(msg))
 
     return result
 

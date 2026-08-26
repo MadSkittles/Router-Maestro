@@ -93,6 +93,11 @@ class TestGitHubOAuth:
 
         assert token.token == "copilot-token"
         assert token.api_endpoint == "https://api.enterprise.githubcopilot.com"
+        headers = client.get.await_args.kwargs["headers"]
+        assert headers["Editor-Version"] == "vscode/1.136.0"
+        assert headers["Editor-Plugin-Version"] == "copilot-chat/0.64.0"
+        assert headers["User-Agent"] == "GitHubCopilotChat/0.64.0"
+        assert headers["X-GitHub-Api-Version"] == "2026-08-01"
 
     @pytest.mark.asyncio
     async def test_get_copilot_token_makes_single_attempt(self):
@@ -208,7 +213,7 @@ class TestAuthStorage:
         storage.set("openai", cred)
 
         retrieved = storage.get("openai")
-        assert retrieved is not None
+        assert isinstance(retrieved, ApiKeyCredential)
         assert retrieved.key == "test-key"
 
     def test_get_nonexistent(self):
@@ -265,11 +270,11 @@ class TestAuthStorage:
             loaded = AuthStorage.load(path)
 
             openai_cred = loaded.get("openai")
-            assert openai_cred is not None
+            assert isinstance(openai_cred, ApiKeyCredential)
             assert openai_cred.type == AuthType.API_KEY
 
             copilot_cred = loaded.get("github-copilot")
-            assert copilot_cred is not None
+            assert isinstance(copilot_cred, OAuthCredential)
             assert copilot_cred.type == AuthType.OAUTH
             assert copilot_cred.api_endpoint == "https://api.enterprise.githubcopilot.com"
         finally:
