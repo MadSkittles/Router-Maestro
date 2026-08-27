@@ -1,16 +1,16 @@
-"""Tests for official-vs-qualified id resolution on ClientConfig.
+"""Tests for qualified, bare, and official ID resolution on ClientConfig.
 
 Covers ``resolve_model_string`` (per selected model) and ``resolve_id_style``
 (whether to prompt), including every edge the feature must honor: the
 auto-routing sentinel and explicit wire/custom keys are never converted;
-non-native families stay qualified even under OFFICIAL (with a warning); the
-interactive prompt is gated on there being something convertible.
+``BARE`` removes only the provider prefix, while legacy ``OFFICIAL`` keeps its
+native-family conversion semantics.
 """
 
 from rich.console import Console
 
 from router_maestro.cli.client_configs import base as cc_base
-from router_maestro.cli.client_configs.base import IdStyle
+from router_maestro.cli.client_configs.base import IdStyle, ModelSelection
 from router_maestro.cli.client_configs.claude_code import ClaudeCodeConfig
 from router_maestro.cli.client_configs.codex import CodexConfig
 from router_maestro.cli.client_configs.gemini import GeminiConfig
@@ -54,6 +54,9 @@ class TestResolveModelString:
     def test_official_native_gemini_keeps_dots(self):
         assert GeminiConfig().resolve_model_string(_GEMINI, IdStyle.OFFICIAL) == "gemini-2.5-pro"
 
+    def test_bare_non_native_drops_only_provider_prefix(self):
+        assert CodexConfig().resolve_model_string(_CLAUDE, IdStyle.BARE) == "claude-opus-4.6"
+
     def test_official_non_native_stays_qualified_and_warns(self, monkeypatch):
         rec = Console(record=True, width=120)
         monkeypatch.setattr(cc_base, "console", rec)
@@ -83,11 +86,12 @@ class TestResolveIdStyle:
 
         monkeypatch.setattr(cc_base.Prompt, "ask", boom)
         assert CodexConfig().resolve_id_style(IdStyle.OFFICIAL, [_GPT]) is IdStyle.OFFICIAL
+        assert CodexConfig().resolve_id_style(IdStyle.BARE, [_GPT]) is IdStyle.BARE
         assert CodexConfig().resolve_id_style(IdStyle.QUALIFIED, [_GPT]) is IdStyle.QUALIFIED
 
-    def test_prompts_when_convertible_and_none(self, monkeypatch):
-        monkeypatch.setattr(cc_base.Prompt, "ask", lambda *a, **kw: "official")
-        assert CodexConfig().resolve_id_style(None, [_GPT]) is IdStyle.OFFICIAL
+    def test_remove_prefix_choice_returns_bare(self, monkeypatch):
+        monkeypatch.setattr(cc_base.Prompt, "ask", lambda *a, **kw: "no")
+        assert CodexConfig().resolve_id_style(None, [_GPT]) is IdStyle.BARE
 
     def test_prompt_default_qualified(self, monkeypatch):
         # Simulate the user pressing enter → Prompt.ask returns the default it was given.
@@ -99,14 +103,46 @@ class TestResolveIdStyle:
             raise AssertionError("prompt must not be shown when nothing is convertible")
 
         monkeypatch.setattr(cc_base.Prompt, "ask", boom)
-        # Codex + a Claude model (non-native) → no option offered.
-        assert CodexConfig().resolve_id_style(None, [_CLAUDE]) is IdStyle.QUALIFIED
         # Only the auto-routing sentinel selected → nothing to convert.
         assert CodexConfig().resolve_id_style(None, [None]) is IdStyle.QUALIFIED
         # Wire-key entry is not convertible.
         assert ClaudeCodeConfig().resolve_id_style(None, [_WIRE_1M]) is IdStyle.QUALIFIED
 
-    def test_prompts_when_any_selected_is_convertible(self, monkeypatch):
-        # Claude Code picking a native main + non-native fast still offers the option.
-        monkeypatch.setattr(cc_base.Prompt, "ask", lambda *a, **kw: "official")
-        assert ClaudeCodeConfig().resolve_id_style(None, [_CLAUDE, _GPT]) is IdStyle.OFFICIAL
+    def test_prompts_for_non_native_prefixed_model(self, monkeypatch):
+        monkeypatch.setattr(cc_base.Prompt, "ask", lambda *a, **kw: "no")
+        assert CodexConfig().resolve_id_style(None, [_CLAUDE]) is IdStyle.BARE
+
+
+def test_provider_prefix_choice_is_the_last_interactive_hook(tmp_path, monkeypatch):
+    config = CodexConfig()
+    events: list[str] = []
+    selection = ModelSelection(slot="main", model=_GPT)
+
+    monkeypatch.setattr(
+        config,
+        "_select_level_and_path",
+        lambda: ("user", tmp_path / "config.toml"),
+    )
+    monkeypatch.setattr(cc_base, "_backup_if_exists", lambda path: None)
+    monkeypatch.setattr(config, "load_models", lambda: [_GPT])
+    monkeypatch.setattr(
+        config,
+        "select_models",
+        lambda models, **kwargs: events.append("models") or [selection],
+    )
+    monkeypatch.setattr(
+        config,
+        "prompt_extras",
+        lambda selections: events.append("extras") or {},
+    )
+    monkeypatch.setattr(
+        config,
+        "resolve_id_style",
+        lambda style, selected: events.append("prefix") or IdStyle.QUALIFIED,
+    )
+    monkeypatch.setattr(config, "write", lambda **kwargs: events.append("write"))
+    monkeypatch.setattr(config, "render_success", lambda **kwargs: events.append("success"))
+
+    config.generate()
+
+    assert events == ["models", "extras", "prefix", "write", "success"]

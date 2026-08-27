@@ -744,17 +744,16 @@ def _setup_codex_env(
     *,
     level_choice: str,
     model_choice: str = "1",
-    endpoint_choice: str = "1",
+    prefix_choice: str = "yes",
     backup_yes: bool = False,
 ):
     """Patch the world for an in-process call to ``cli_config.codex_config()``.
 
     ``level_choice`` is "1" (user) or "2" (project). ``model_choice`` is the
-    1-indexed table choice (or "0" for auto-routing). ``endpoint_choice`` is the
-    endpoint-mode answer ("1" standard, "2" beta passthrough), only consumed when
-    the selected model is a Responses-eligible GitHub Copilot model. ``backup_yes``
-    controls the response to the backup prompt that fires when the target file
-    exists.
+    1-indexed table choice (or "0" for auto-routing). ``prefix_choice`` is the
+    final interactive answer ("yes" keeps provider/model, "no" writes a bare ID).
+    ``backup_yes`` controls the response to the backup prompt that fires when the
+    target file exists.
     """
     home = tmp_path / "home"
     cwd = tmp_path / "project"
@@ -775,7 +774,7 @@ def _setup_codex_env(
         lambda: json.loads(json.dumps(_stub_bundled_codex_catalog())),
     )
 
-    answers = iter([level_choice, model_choice, endpoint_choice])
+    answers = iter([level_choice, model_choice, prefix_choice])
     monkeypatch.setattr(cli_config.Prompt, "ask", lambda *a, **kw: next(answers))
     monkeypatch.setattr(cli_config.Confirm, "ask", lambda *a, **kw: backup_yes)
 
@@ -871,7 +870,7 @@ class TestCodexConfig:
 
     def test_old_beta_endpoint_choice_now_writes_stable_base_url(self, tmp_path, monkeypatch):
         """New configs use the stable dispatcher even if an old extra requests beta."""
-        home, _ = _setup_codex_env(monkeypatch, tmp_path, level_choice="1", endpoint_choice="2")
+        home, _ = _setup_codex_env(monkeypatch, tmp_path, level_choice="1")
 
         cli_config.codex_config(id_style=IdStyle.QUALIFIED)
 
@@ -1133,7 +1132,20 @@ class TestOfficialIdStyleEndToEnd:
         assert data["env"]["ANTHROPIC_MODEL"] == "claude-opus-4-6"
         assert "ANTHROPIC_SMALL_FAST_MODEL" not in data["env"]
 
-    def test_claude_official_non_native_model_gets_context_suffix(self, tmp_path, monkeypatch):
+    @pytest.mark.parametrize(
+        ("id_style", "expected"),
+        [
+            (IdStyle.OFFICIAL, "github-copilot/gpt-5.6-sol[1m]"),
+            (IdStyle.BARE, "gpt-5.6-sol[1m]"),
+        ],
+    )
+    def test_claude_non_native_model_context_suffix_respects_id_style(
+        self,
+        tmp_path,
+        monkeypatch,
+        id_style,
+        expected,
+    ):
         home = tmp_path / "home"
         home.mkdir()
         monkeypatch.setattr(cli_config.Path, "home", classmethod(lambda cls: home))
@@ -1157,20 +1169,24 @@ class TestOfficialIdStyleEndToEnd:
         monkeypatch.setattr(cli_config.Prompt, "ask", lambda *a, **kw: next(answers))
         monkeypatch.setattr(cli_config.Confirm, "ask", lambda *a, **kw: False)
 
-        cli_config.claude_code_config(id_style=IdStyle.OFFICIAL)
+        cli_config.claude_code_config(id_style=id_style)
 
         data = json.loads((home / ".claude" / "settings.json").read_text(encoding="utf-8"))
-        assert data["env"]["ANTHROPIC_MODEL"] == "github-copilot/gpt-5.6-sol[1m]"
+        assert data["env"]["ANTHROPIC_MODEL"] == expected
 
-    def test_codex_no_id_style_prompt_when_non_native_selected(self, tmp_path, monkeypatch):
-        """Configuring Codex and picking a Claude model must NOT offer the option
-        (nothing convertible), so the answer iterator only needs level + model."""
-        home, _ = _setup_codex_env(monkeypatch, tmp_path, level_choice="1", model_choice="2")
+    def test_codex_interactive_bare_style_removes_non_native_provider_prefix(
+        self, tmp_path, monkeypatch
+    ):
+        home, _ = _setup_codex_env(
+            monkeypatch,
+            tmp_path,
+            level_choice="1",
+            model_choice="2",
+            prefix_choice="no",
+        )
 
-        # id_style=None → interactive resolution; with only a non-native model the
-        # prompt must be skipped. If it fired, the 2-item iterator would StopIteration.
         cli_config.codex_config(id_style=None)
 
         with open(home / ".codex" / "config.toml", "rb") as f:
             data = tomllib.load(f)
-        assert data["model"] == "github-copilot/claude-opus-4.6"
+        assert data["model"] == "claude-opus-4.6"

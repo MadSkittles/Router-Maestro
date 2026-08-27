@@ -332,13 +332,6 @@ class ClaudeCodeConfig(ClientConfig):
 
         if _catalog_has_claude_model(models):
             return selections
-        if level != "user":
-            console.print(
-                "\n[yellow]No Claude models are available. Default Claude model mappings "
-                "are user-level only; run this command again and choose User-level to "
-                "configure Fable, Opus, Sonnet, Haiku, and subagents.[/yellow]"
-            )
-            return selections
 
         console.print(
             "\n[bold]Step 3: Map Claude default model roles[/bold]\n"
@@ -387,10 +380,9 @@ class ClaudeCodeConfig(ClientConfig):
             "ANTHROPIC_BASE_URL": anthropic_url,
             "ANTHROPIC_MODEL": models["main"],
         }
-        if level == "user":
-            for slot, env_key, _ in _ROLE_SLOTS:
-                if slot in models:
-                    env_config[env_key] = models[slot]
+        for slot, env_key, _ in _ROLE_SLOTS:
+            if slot in models:
+                env_config[env_key] = models[slot]
 
         main_context = selection_by_slot["main"].context_window
         if main_context is ContextWindowChoice.CONTEXT_200K:
@@ -404,7 +396,7 @@ class ClaudeCodeConfig(ClientConfig):
         existing_config = _load_existing_config(path)
         existing_env = _existing_env(existing_config)
         selected_role_slots = _ROLE_ENV_BY_SLOT.keys() & models.keys()
-        preserve_existing_roles = level == "user" and not selected_role_slots
+        preserve_existing_roles = not selected_role_slots
 
         ordered_env: dict[str, object] = {}
         role_env_keys = set(_ROLE_ENV_BY_SLOT.values())

@@ -37,12 +37,13 @@ class IdStyle(StrEnum):
     """How a selected model is spelled in the generated config.
 
     ``QUALIFIED`` writes the internal ``provider/upstream-id`` (the default,
-    unambiguous across providers). ``OFFICIAL`` writes the vendor's native id
-    (recognized directly by the client/TUI). Official conversion is wired up in
-    Part B; Part A always resolves to ``QUALIFIED``.
+    unambiguous across providers). ``BARE`` removes only the provider prefix.
+    ``OFFICIAL`` retains the legacy vendor-native spelling behavior used by the
+    explicit ``--id-style official`` option.
     """
 
     QUALIFIED = "qualified"
+    BARE = "bare"
     OFFICIAL = "official"
 
 
@@ -369,45 +370,44 @@ class ClientConfig(ABC):
 
     # ---- id-style resolution (base-owned) ------------------------------
 
-    def _is_convertible(self, model: dict | None) -> bool:
-        """Whether ``model`` could be written as an official id.
+    def _has_removable_provider_prefix(self, model: dict | None) -> bool:
+        """Whether ``model`` has a provider prefix the wizard can remove.
 
         The auto-routing sentinel and entries carrying an explicit
-        ``wire_key``/``custom_key`` are never converted, so they never gate the
+        ``wire_key``/``custom_key`` are never rewritten, so they never gate the
         prompt on.
         """
         if model is None or "wire_key" in model or "custom_key" in model:
             return False
-        return self.is_native_family(_bare_upstream_model_id(model))
+        return _model_key(model) != _bare_upstream_model_id(model)
 
     def resolve_id_style(self, id_style: IdStyle | None, selected: list[dict | None]) -> IdStyle:
         """Resolve the effective id style, prompting only when it matters.
 
         An explicit ``id_style`` (from ``--id-style``) wins with no prompt.
-        Otherwise the interactive choice is offered only when at least one
-        selected model is convertible; if nothing is convertible the option is
-        meaningless, so we skip the prompt and stay ``QUALIFIED``.
+        Otherwise the final interactive choice asks whether to retain the
+        provider prefix. If no selected model has a removable prefix, the
+        option is meaningless and the default stays ``QUALIFIED``.
         """
         if id_style is not None:
             return id_style
-        if any(self._is_convertible(model) for model in selected):
+        if any(self._has_removable_provider_prefix(model) for model in selected):
             choice = Prompt.ask(
-                "Model ID style — 'official' uses the vendor's native id the client "
-                "recognizes and may optimize for; 'qualified' is provider/model",
-                choices=[IdStyle.OFFICIAL.value, IdStyle.QUALIFIED.value],
-                default=IdStyle.QUALIFIED.value,
+                "Keep the provider prefix in model IDs?",
+                choices=["yes", "no"],
+                default="yes",
             )
-            return IdStyle(choice)
+            return IdStyle.QUALIFIED if choice == "yes" else IdStyle.BARE
         return IdStyle.QUALIFIED
 
     def resolve_model_string(self, model: dict | None, id_style: IdStyle) -> str:
         """Resolve one selected model dict to the string written into config.
 
         ``None`` -> the auto-routing sentinel. An explicit ``wire_key``/
-        ``custom_key`` is returned unchanged regardless of style. Under
-        ``OFFICIAL``, native models are converted to the vendor's
-        spelling; non-native models stay provider-qualified (with a warning),
-        since dropping the prefix would be meaningless for another vendor.
+        ``custom_key`` is returned unchanged regardless of style. ``BARE``
+        removes only the provider prefix. Under ``OFFICIAL``, native models are
+        converted to the vendor's spelling; non-native models retain the
+        provider-qualified ID for backward compatibility.
         """
         if model is None:
             return "router-maestro"
@@ -417,6 +417,8 @@ class ClientConfig(ABC):
         if id_style is IdStyle.QUALIFIED:
             return qualified
         bare = _bare_upstream_model_id(model)
+        if id_style is IdStyle.BARE:
+            return bare
         if not self.is_native_family(bare):
             console.print(
                 f"[yellow]{qualified} is not a native {self.display_name} model; "
@@ -460,8 +462,8 @@ class ClientConfig(ABC):
         _backup_if_exists(path)
         models = self.load_models()
         selections = self.select_models(models, level=level, path=path)
-        id_style = self.resolve_id_style(id_style, [selection.model for selection in selections])
         extras = self.prompt_extras(selections)
+        id_style = self.resolve_id_style(id_style, [selection.model for selection in selections])
         model_strings = {
             selection.slot: self.resolve_model_selection(selection, id_style)
             for selection in selections

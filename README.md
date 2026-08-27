@@ -162,9 +162,12 @@ Interactive terminals use a searchable model dropdown whose labels and table
 show the server's `context_window_options` (for example, `272K / 1M`). Claude
 Code then asks for one of the contexts it can encode; older servers without the
 new field retain the legacy context choices. If the live catalog contains no
-Claude-family model, the user-level wizard also maps Fable, Opus, Sonnet,
-Haiku, and subagent roles to the available models; the legacy
-`ANTHROPIC_SMALL_FAST_MODEL` setting is removed.
+Claude-family model, both user- and project-level wizards map Fable, Opus,
+Sonnet, Haiku, and subagent roles to the available models; project mappings
+override the user defaults only inside that project. The legacy
+`ANTHROPIC_SMALL_FAST_MODEL` setting is removed. After all client-specific
+choices, the final prompt asks whether generated model IDs should retain the
+`provider/` prefix.
 
 For Copilot models, Router-Maestro derives these choices from CAPI's default and
 `long_context` billing tiers. Raw usable prompt limits such as `922000` are

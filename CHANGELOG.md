@@ -46,9 +46,12 @@ All notable changes to Router-Maestro are documented here.
 - **Claude Code configuration now uses live searchable model choices.** The
   wizard no longer injects hard-coded Opus/Sonnet `[1m]` catalog variants or
   writes `ANTHROPIC_SMALL_FAST_MODEL`. Model and context are selected together;
-  choosing 1M appends the client-side `[1m]` hint after official/qualified ID
-  resolution. When no Claude-family model exists, user-level configuration maps
-  Fable, Opus, Sonnet, Haiku, and subagent roles in strength order.
+  choosing 1M appends the client-side `[1m]` hint after model ID
+  resolution. When no Claude-family model exists, user- and project-level
+  configuration map Fable, Opus, Sonnet, Haiku, and subagent roles in strength
+  order. The final interactive step asks whether to retain the `provider/`
+  prefix; removing it writes bare upstream model IDs without changing their
+  spelling.
 
 - **Model lists expose selectable context windows.** Copilot default and
   long-context billing tiers are normalized into `context_window_options` on
