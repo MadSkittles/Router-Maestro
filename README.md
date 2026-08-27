@@ -7,7 +7,9 @@ Router-Maestro is a local or self-hosted proxy that lets OpenAI-, Anthropic-, an
 
 ## TL;DR
 
-**Use GitHub Copilot's models (Claude, GPT-4o, o3-mini) with Claude Code or any OpenAI/Anthropic-compatible client.**
+**Use every model in your GitHub Copilot catalog—including Claude, GPT,
+Gemini, Grok, and MAI—from Claude Code, OpenAI Codex, Gemini CLI, or any
+compatible client.**
 
 Router-Maestro acts as a proxy that gives you access to models from multiple providers through a unified API. Authenticate once with GitHub Copilot, and use its models anywhere that supports OpenAI or Anthropic APIs.
 
@@ -18,12 +20,18 @@ Router-Maestro acts as a proxy that gives you access to models from multiple pro
 - **Multi-provider support**: GitHub Copilot (OAuth), OpenAI, Anthropic, and custom OpenAI-compatible endpoints
 - **Four ingress protocols**: Anthropic Messages, OpenAI Chat Completions,
   OpenAI Responses, and Gemini generation all use the same dispatcher
+- **Full GitHub Copilot catalog across clients**: Claude Code, OpenAI Codex,
+  and Gemini CLI can select every model exposed by the live Copilot catalog;
+  Router-Maestro chooses the compatible Messages, Chat, or Responses transport
 - **Gemini API compatibility**: Gemini REST API format (`/api/gemini/v1beta/...`) for Gemini CLI/SDK
 - **Lazy cross-protocol translation**: Native protocol pairs use a copy-on-write
   identity path; only cross-protocol attempts materialize the shared semantic IR
 - **Intelligent routing**: Priority-based model selection with automatic fallback on failure
 - **Deterministic model matching**: Public model IDs are provider-qualified, while convenient bare aliases (for example, `opus-4-6`) are matched by score and routed according to the configured priorities
 - **CLI management**: Full command-line interface for configuration and server control
+- **Visual configuration**: A loopback-only BIOS-style web portal for contexts,
+  model catalogs, context windows, trusted projects, and Claude Code/Codex/Gemini
+  configuration with preview, backup, and one-click apply
 - **Docker ready**: Production-ready Docker images with Traefik integration
 - **Configuration hot-reload**: Auto-reload config files every 5 minutes without server restart
 
@@ -100,7 +108,24 @@ Get a local server running in 3 steps. The server (started locally or via Docker
 
 > **About the Router-Maestro API key.** Router-Maestro has **one server key** (format `sk-rm-...`) that clients must send on inference, administration, and remote-management requests. Public health/docs and the independently configured metrics endpoint are exceptions. It is **not** an OpenAI / Anthropic / Gemini / GitHub token — it only authenticates clients to *your* Router-Maestro server. The server auto-generates and persists this key on first start (in `~/.config/router-maestro/contexts.json` or its Docker-mounted equivalent), so you usually never type it by hand: the CLI reads it from the active context and the `config claude-code/codex/gemini` wizards write it into each tool's settings for you. The two times you do touch it explicitly are (1) `router-maestro server show-key` to copy it into a raw `curl` or environment variable like `ROUTER_MAESTRO_API_KEY`, and (2) `router-maestro context add ... --api-key sk-rm-...` when pointing a client machine at a **remote** server (see [Deployment](#deployment)). If an authenticated request returns `401`, it almost always means the key it sent doesn't match what the server expects — re-run `server show-key` and compare.
 
-<https://github.com/user-attachments/assets/8f60ec7a-4fbe-4342-9408-084073a4d48d>
+<https://github.com/user-attachments/assets/35f7c0f5-967a-4f93-aec8-c34b460a0032>
+
+### One Copilot Catalog, Every Client
+
+Router-Maestro loads the live GitHub Copilot model catalog instead of limiting
+each client to its native model family. The provider handler selects the
+compatible upstream transport, using an identity fast path for matching
+protocols and lazy semantic translation only when protocols differ.
+
+| Client | Ingress protocol | GitHub Copilot models |
+|--------|------------------|-----------------------|
+| Claude Code | Anthropic Messages | Full live catalog, including Responses-only GPT models |
+| OpenAI Codex | OpenAI Responses | Full live catalog, including Claude, Gemini, Grok, and MAI models |
+| Gemini CLI | Gemini generateContent | Full live catalog across Messages, Chat, and Responses transports |
+
+The CLI wizard and `router-maestro web` both show the selected server's live
+models and advertised context-window choices. Unsupported feature combinations
+fail explicitly before provider I/O rather than silently dropping fields.
 
 ### 1. Start the Server (Docker)
 
@@ -157,6 +182,22 @@ router-maestro config claude-code   # Claude Code (Anthropic-compatible)
 router-maestro config codex         # OpenAI Codex (CLI / extension / app)
 router-maestro config gemini        # Gemini CLI
 ```
+
+Or open the local configuration portal:
+
+```bash
+router-maestro web
+```
+
+The portal binds to `127.0.0.1:8765` and opens the system browser. It measures
+each selected context through the public `/health` endpoint, then loads that
+context's authenticated `/api/admin/models` catalog. Context API keys are never
+shown; **Copy Key** retrieves one only for the clipboard action. Project-level
+targets are discovered from Claude Code, Codex, and Gemini trusted-folder
+stores, plus paths explicitly added to Router-Maestro. Explicit additions do
+not modify any client's own trust policy. Codex project files can only set the
+model, so the portal requires their selected context to match the
+Router-Maestro provider already configured at user level.
 
 Interactive terminals use a searchable model dropdown whose labels and table
 show the server's `context_window_options` (for example, `272K / 1M`). Claude
@@ -436,6 +477,7 @@ router-maestro model list
 | `config claude-code` | Generate Claude Code settings |
 | `config codex`       | Generate Codex config (CLI/Extension/App) |
 | `config gemini`      | Generate Gemini CLI .env      |
+| `web` | Open the loopback-only local configuration portal |
 
 ## API Reference
 
@@ -533,6 +575,7 @@ Following XDG Base Directory specification:
 | | `providers.json` | Custom provider definitions |
 | | `priorities.json` | Model priorities and fallback |
 | | `contexts.json` | Deployment contexts |
+| | `projects.json` | Projects explicitly added through the local portal |
 | **Data** | `~/.local/share/router-maestro/` | |
 | | `auth.json` | Provider OAuth and API-key credentials |
 | | `server.json` | Legacy server state; current server API keys are stored in `contexts.json` |

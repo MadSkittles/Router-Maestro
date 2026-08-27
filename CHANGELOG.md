@@ -4,9 +4,17 @@ All notable changes to Router-Maestro are documented here.
 
 ---
 
-## Unreleased
+## v0.8.0 (2026-08-28)
 
 ### Added
+
+- **Loopback-only local configuration portal.** `router-maestro web` opens a
+  BIOS-style local UI that switches deployment contexts, measures `/health`
+  RTT, loads the selected context's authenticated model catalog, copies the
+  context API key without displaying it, and previews or writes Claude Code,
+  Codex, and Gemini configuration with automatic backups. Project targets are
+  merged from the clients' user-level trust stores and an owner-only explicit
+  Router-Maestro project registry.
 
 - **Protocol-neutral lazy generation dispatcher.** Anthropic Messages, OpenAI
   Chat, OpenAI Responses, and Gemini generation entry points now resolve the
@@ -30,6 +38,15 @@ All notable changes to Router-Maestro are documented here.
   `upstream_transport`, `conversion_mode`, `outcome`, and `ir_materialized`.
   Exact provider/model/binding identities are recorded only in opt-in audit
   attempt artifacts to avoid high-cardinality metric labels.
+
+### Fixes
+
+- **Copilot Responses usage survives intermittent zero public counters.** Under
+  sustained traffic, Copilot can return a valid response with an all-zero
+  standard usage snapshot while its private billing token details still contain
+  the actual counts. Router-Maestro now repairs only missing or zero standard
+  fields before stripping the private metadata. Existing positive values remain
+  authoritative, and malformed public usage still fails closed.
 
 ### Changed
 

@@ -291,8 +291,7 @@ class CodexConfig(ClientConfig):
         return {}
 
     def _openai_url(self, ctx: GenerateContext) -> str:
-        del ctx
-        return f"{self._base_url()}/api/openai/v1"
+        return f"{self._base_url_for(ctx)}/api/openai/v1"
 
     def write(
         self, *, level: str, path: Path, models: dict[str, str], ctx: GenerateContext
@@ -321,21 +320,26 @@ class CodexConfig(ClientConfig):
             if not isinstance(providers, AbstractTable):
                 raise TypeError("model_providers must be a TOML table")
             providers["router-maestro"] = _build_router_maestro_provider_table(openai_url)
-            available_models = getattr(
-                self,
-                "_available_models",
-                [model for model in ctx.selected_dicts if model is not None],
-            )
-            catalog = _build_codex_model_catalog(available_models)
-            if catalog is None:
-                console.print(
-                    "[yellow]Could not read the installed Codex model catalog; "
-                    "custom models may use fallback metadata.[/yellow]"
-                )
-            else:
-                catalog_path = path.with_name(_CODEX_MODEL_CATALOG_FILENAME)
-                write_json_owner_only(catalog_path, catalog)
+            if ctx.extras.get("preview_only") is True:
+                target_path = Path(str(ctx.extras.get("target_path", path)))
+                catalog_path = target_path.with_name(_CODEX_MODEL_CATALOG_FILENAME)
                 existing_config["model_catalog_json"] = str(catalog_path.resolve())
+            else:
+                available_models = getattr(
+                    self,
+                    "_available_models",
+                    [model for model in ctx.selected_dicts if model is not None],
+                )
+                catalog = _build_codex_model_catalog(available_models)
+                if catalog is None:
+                    console.print(
+                        "[yellow]Could not read the installed Codex model catalog; "
+                        "custom models may use fallback metadata.[/yellow]"
+                    )
+                else:
+                    catalog_path = path.with_name(_CODEX_MODEL_CATALOG_FILENAME)
+                    write_json_owner_only(catalog_path, catalog)
+                    existing_config["model_catalog_json"] = str(catalog_path.resolve())
         else:
             # Codex CLI 0.130+ rejects model_provider/model_providers at project scope.
             # Strip the keys this command wrote in older releases so the file stops

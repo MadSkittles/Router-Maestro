@@ -75,6 +75,8 @@ class GenerateContext:
     id_style: IdStyle
     selections: tuple[ModelSelection, ...]
     extras: dict = field(default_factory=dict)
+    endpoint: str | None = None
+    api_key: str | None = None
 
     @property
     def selected_dicts(self) -> list[dict | None]:
@@ -434,15 +436,25 @@ class ClientConfig(ABC):
     # ---- shared resolvers ----------------------------------------------
 
     def _base_url(self) -> str:
-        """Router-Maestro server base URL (from the admin client endpoint)."""
+        """Router-Maestro server base URL from the active CLI context."""
         client = get_admin_client()
         return (
             client.endpoint.rstrip("/") if hasattr(client, "endpoint") else "http://localhost:8080"
         )
 
     def _auth_token(self) -> str:
-        """API key for the active context, or the ``router-maestro`` fallback."""
+        """API key from the active CLI context, or the legacy fallback."""
         return get_current_context_api_key() or "router-maestro"
+
+    def _base_url_for(self, ctx: GenerateContext) -> str:
+        """Resolve an explicit request endpoint without changing the active context."""
+        return ctx.endpoint.rstrip("/") if ctx.endpoint is not None else self._base_url()
+
+    def _auth_token_for(self, ctx: GenerateContext) -> str:
+        """Resolve an explicit request key without changing the active context."""
+        if ctx.endpoint is not None:
+            return ctx.api_key or "router-maestro"
+        return self._auth_token()
 
     def _select_level_and_path(self) -> tuple[str, Path]:
         """Step 1: prompt user vs project level, return ``(level, path)``."""

@@ -365,13 +365,12 @@ class ClaudeCodeConfig(ClientConfig):
         return _with_context_suffix(resolved, selection.context_window)
 
     def _anthropic_url(self, ctx: GenerateContext) -> str:
-        del ctx
-        return f"{self._base_url()}/api/anthropic"
+        return f"{self._base_url_for(ctx)}/api/anthropic"
 
     def write(
         self, *, level: str, path: Path, models: dict[str, str], ctx: GenerateContext
     ) -> None:
-        auth_token = self._auth_token()
+        auth_token = self._auth_token_for(ctx)
         anthropic_url = self._anthropic_url(ctx)
         selection_by_slot = {selection.slot: selection for selection in ctx.selections}
 

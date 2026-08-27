@@ -1125,6 +1125,39 @@ def test_copilot_responses_stream_strips_private_usage_context_details() -> None
     }
 
 
+def test_copilot_responses_repairs_zero_public_usage_from_private_counters() -> None:
+    projected = CopilotHttpExecutor._project_response(
+        WireProtocol.OPENAI_RESPONSES,
+        {
+            "id": "resp_1",
+            "model": "gpt-5.4-2026-03-05",
+            "output": [],
+            "usage": {
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "total_tokens": 0,
+                "input_tokens_details": {"cached_tokens": 0, "cache_write_tokens": 4},
+            },
+            "copilot_usage": {
+                "token_details": [
+                    {"token_type": "input", "token_count": 9},
+                    {"token_type": "cache_read", "token_count": 3},
+                    {"token_type": "cache_write", "token_count": 4},
+                    {"token_type": "output", "token_count": 16},
+                ]
+            },
+        },
+        model="gpt-5.4",
+    )
+
+    assert projected["usage"] == {
+        "input_tokens": 16,
+        "output_tokens": 16,
+        "total_tokens": 32,
+        "input_tokens_details": {"cached_tokens": 3},
+    }
+
+
 @pytest.mark.parametrize("payload", [{"future": {"kept": True}}, {"model": 42}])
 def test_copilot_model_projection_preserves_missing_or_invalid_model(payload: dict) -> None:
     expected = deepcopy(payload)

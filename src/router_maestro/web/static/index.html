@@ -1,0 +1,1525 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Router-Maestro</title>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <style>
+    :root {
+      color-scheme: dark;
+      --rm-void: #020408;
+      --rm-panel: #070b12;
+      --rm-panel-deep: #03060b;
+      --rm-cyan: #25d9ff;
+      --rm-cyan-soft: #11657a;
+      --rm-amber: #ffd166;
+      --rm-text: #d8f8ff;
+      --rm-dim: #7e9ea8;
+      --rm-good: #60ffbd;
+      --rm-error: #8aa7af;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    [hidden] {
+      display: none !important;
+    }
+
+    body {
+      margin: 0;
+      min-width: 320px;
+      color: var(--rm-text);
+      background: var(--rm-void);
+      font-family: "SFMono-Regular", "Cascadia Mono", Consolas, monospace;
+    }
+
+    button,
+    input,
+    select {
+      font: inherit;
+    }
+
+    .rm-shell {
+      width: min(1440px, 100%);
+      margin: 0 auto;
+      padding: 18px;
+    }
+
+    .rm-machine {
+      position: relative;
+      overflow: hidden;
+      width: 100%;
+      min-height: 720px;
+      padding: 54px 20px 20px;
+      border: 1px solid var(--rm-cyan);
+      border-radius: 4px;
+      background:
+        radial-gradient(circle at 94% 8%, rgba(37, 217, 255, 0.13), transparent 25%),
+        radial-gradient(circle at 5% 92%, rgba(37, 217, 255, 0.1), transparent 28%),
+        linear-gradient(135deg, #020408 0%, #060911 45%, #020307 100%);
+      box-shadow:
+        0 0 0 1px rgba(37, 217, 255, 0.12),
+        inset 0 0 38px rgba(37, 217, 255, 0.06),
+        0 0 28px rgba(37, 217, 255, 0.11);
+      isolation: isolate;
+    }
+
+    .rm-machine::before,
+    .rm-machine::after {
+      content: "";
+      position: absolute;
+      inset: 0;
+      z-index: 10;
+      pointer-events: none;
+    }
+
+    .rm-machine::before {
+      opacity: 0.22;
+      background: repeating-linear-gradient(
+        to bottom,
+        rgba(255, 255, 255, 0.035) 0,
+        rgba(255, 255, 255, 0.035) 1px,
+        transparent 1px,
+        transparent 4px
+      );
+    }
+
+    .rm-machine::after {
+      opacity: 0.12;
+      background-image:
+        radial-gradient(circle, rgba(255, 255, 255, 0.8) 0.5px, transparent 0.8px),
+        radial-gradient(circle, rgba(37, 217, 255, 0.7) 0.5px, transparent 0.9px);
+      background-position: 0 0, 5px 7px;
+      background-size: 11px 13px, 17px 19px;
+      mix-blend-mode: screen;
+    }
+
+    .rm-logo {
+      position: absolute;
+      z-index: 12;
+      top: -1px;
+      left: 24px;
+      min-width: 330px;
+      padding: 7px 36px 8px;
+      overflow: hidden;
+      clip-path: polygon(7% 0, 93% 0, 100% 50%, 93% 100%, 7% 100%, 0 50%);
+      color: var(--rm-cyan);
+      background: #050911;
+      border: 1px solid var(--rm-cyan);
+      text-align: center;
+    }
+
+    .rm-logo-mark {
+      display: inline-block;
+      font-family: Impact, Haettenschweiler, "Arial Black", sans-serif;
+      font-size: 31px;
+      font-style: italic;
+      font-weight: 900;
+      letter-spacing: 3px;
+      line-height: 1;
+      transform: skewX(-7deg) scaleX(1.08);
+      transform-origin: center;
+      -webkit-text-stroke: 0.6px #d8f8ff;
+      text-shadow:
+        2px 0 0 rgba(17, 101, 122, 0.9),
+        0 0 6px rgba(37, 217, 255, 0.95),
+        0 0 16px rgba(37, 217, 255, 0.6);
+    }
+
+    .rm-topline {
+      position: absolute;
+      z-index: 11;
+      top: 14px;
+      right: 22px;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0;
+      color: var(--rm-dim);
+      font-size: 12px;
+      letter-spacing: 0.8px;
+      text-transform: uppercase;
+    }
+
+    .rm-topline span {
+      white-space: nowrap;
+    }
+
+    .rm-topline span:not(:last-child)::after {
+      content: "·";
+      display: inline-block;
+      margin: 0 9px;
+      color: var(--rm-cyan-soft);
+    }
+
+    .rm-grid {
+      position: relative;
+      z-index: 2;
+      display: grid;
+      grid-template-columns: minmax(0, 1.08fr) minmax(350px, 0.92fr);
+      gap: 16px;
+    }
+
+    .rm-left,
+    .rm-right {
+      min-width: 0;
+    }
+
+    .rm-left {
+      display: flex;
+      flex-direction: column;
+    }
+
+    .rm-context {
+      display: grid;
+      grid-template-columns: 170px minmax(0, 1fr);
+      align-items: center;
+      column-gap: 22px;
+      row-gap: 10px;
+      min-height: 58px;
+      margin-bottom: 14px;
+      padding: 9px 10px;
+      border: 1px solid var(--rm-cyan);
+      background: rgba(3, 9, 16, 0.86);
+      box-shadow: inset 0 0 14px rgba(37, 217, 255, 0.06);
+    }
+
+    .rm-label {
+      display: block;
+      margin-bottom: 5px;
+      color: var(--rm-dim);
+      font-size: 11px;
+      letter-spacing: 1px;
+      text-transform: uppercase;
+    }
+
+    select,
+    input {
+      width: 100%;
+      min-width: 0;
+      max-width: 100%;
+      min-height: 36px;
+      padding: 6px 9px;
+      color: var(--rm-text);
+      border: 1px solid var(--rm-cyan-soft);
+      border-radius: 0;
+      background: #03070d;
+    }
+
+    select:focus,
+    input:focus,
+    button:focus-visible {
+      outline: 2px solid var(--rm-amber);
+      outline-offset: 2px;
+    }
+
+    select:disabled,
+    input:disabled,
+    button:disabled {
+      opacity: 0.46;
+      cursor: not-allowed;
+    }
+
+    .rm-url {
+      overflow: hidden;
+      color: var(--rm-cyan);
+      font-size: 13px;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .rm-latency {
+      min-width: 72px;
+      color: var(--rm-good);
+      text-align: left;
+    }
+
+    .rm-latency.is-error {
+      color: var(--rm-error);
+    }
+
+    button {
+      min-height: 36px;
+      padding: 6px 11px;
+      color: var(--rm-text);
+      border: 1px solid currentColor;
+      border-radius: 0;
+      background: #050910;
+      letter-spacing: 0.4px;
+      cursor: pointer;
+    }
+
+    button:hover:not(:disabled) {
+      color: #ffffff;
+      background: rgba(37, 217, 255, 0.1);
+      box-shadow: 0 0 12px rgba(37, 217, 255, 0.18);
+    }
+
+    .rm-key {
+      justify-self: end;
+      color: var(--rm-cyan);
+      white-space: nowrap;
+    }
+
+    .rm-panel,
+    .rm-right {
+      border: 1px solid var(--rm-cyan);
+      background: rgba(3, 7, 13, 0.91);
+      box-shadow: inset 0 0 18px rgba(37, 217, 255, 0.05);
+    }
+
+    .rm-panel {
+      flex: 1;
+    }
+
+    .rm-panel-head,
+    .rm-section-title {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      min-height: 42px;
+      padding: 8px 12px;
+      color: var(--rm-cyan);
+      border-bottom: 1px solid var(--rm-cyan-soft);
+      letter-spacing: 1.1px;
+      text-transform: uppercase;
+    }
+
+    .rm-count {
+      color: var(--rm-dim);
+      font-size: 11px;
+      text-align: right;
+    }
+
+    .rm-model-table {
+      width: 100%;
+      border-collapse: collapse;
+      table-layout: fixed;
+    }
+
+    .rm-model-table th {
+      padding: 8px 10px;
+      color: var(--rm-dim);
+      border-bottom: 1px solid #16303a;
+      font-size: 11px;
+      font-weight: 400;
+      letter-spacing: 0.8px;
+      text-align: left;
+      text-transform: uppercase;
+    }
+
+    .rm-model-table td {
+      padding: 0;
+      border-bottom: 1px solid rgba(37, 217, 255, 0.11);
+    }
+
+    .rm-model-table th:nth-child(1) { width: 36%; }
+    .rm-model-table th:nth-child(2) { width: 22%; }
+    .rm-model-table th:nth-child(3) { width: 22%; }
+    .rm-model-table th:nth-child(4) { width: 20%; }
+
+    .rm-model-row {
+      display: grid;
+      grid-template-columns: 36% 22% 22% 20%;
+      width: 100%;
+      min-height: 54px;
+      padding: 0;
+      color: var(--rm-text);
+      border: 0;
+      background: transparent;
+      text-align: left;
+    }
+
+    .rm-model-row:hover {
+      background: rgba(37, 217, 255, 0.08);
+      box-shadow: none;
+    }
+
+    .rm-model-row[aria-pressed="true"] {
+      color: #ffffff;
+      background: linear-gradient(90deg, rgba(37, 217, 255, 0.18), rgba(37, 217, 255, 0.03));
+      box-shadow: inset 3px 0 0 var(--rm-cyan);
+    }
+
+    .rm-model-cell {
+      display: flex;
+      align-items: center;
+      min-width: 0;
+      padding: 9px 10px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .rm-model-identity {
+      align-items: flex-start;
+      flex-direction: column;
+      justify-content: center;
+      gap: 3px;
+    }
+
+    .rm-model-name {
+      overflow: hidden;
+      max-width: 100%;
+      color: var(--rm-cyan);
+      text-overflow: ellipsis;
+    }
+
+    .rm-model-provider-compact {
+      display: none;
+      color: var(--rm-dim);
+      font-size: 10px;
+      letter-spacing: 0.5px;
+      text-transform: uppercase;
+    }
+
+    .rm-provider-cell {
+      color: var(--rm-dim);
+      font-size: 11px;
+      text-transform: uppercase;
+    }
+
+    .rm-transport {
+      color: var(--rm-amber);
+      font-size: 11px;
+      text-transform: uppercase;
+    }
+
+    .rm-model-message {
+      padding: 24px 12px;
+      color: var(--rm-cyan);
+      letter-spacing: 1px;
+      text-align: center;
+      text-transform: uppercase;
+    }
+
+    .rm-model-message.is-error {
+      color: var(--rm-error);
+    }
+
+    .rm-model-foot {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 11px 12px;
+      color: var(--rm-dim);
+      border-top: 1px solid var(--rm-cyan-soft);
+      font-size: 11px;
+    }
+
+    .rm-model-foot span {
+      min-width: 0;
+    }
+
+    .rm-model-foot span:last-child {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .rm-tabs {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      border-bottom: 1px solid var(--rm-cyan);
+    }
+
+    .rm-tab {
+      min-height: 44px;
+      color: var(--rm-cyan-soft);
+      border: 0;
+      border-right: 1px solid var(--rm-cyan-soft);
+      background: transparent;
+      text-transform: uppercase;
+    }
+
+    .rm-tab:last-child {
+      border-right: 0;
+    }
+
+    .rm-tab[aria-selected="true"] {
+      color: #ffffff;
+      background: rgba(37, 217, 255, 0.14);
+      box-shadow: inset 0 -3px 0 var(--rm-cyan);
+      text-shadow: 0 0 10px rgba(37, 217, 255, 0.7);
+    }
+
+    .rm-target {
+      margin: 12px;
+      padding: 10px;
+      border: 1px solid var(--rm-cyan);
+      background: #030910;
+    }
+
+    .rm-target-row {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr);
+      gap: 8px;
+    }
+
+    .rm-target-row > *,
+    .rm-options > label,
+    .rm-role-grid > label {
+      min-width: 0;
+    }
+
+    .rm-project-control {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 8px;
+    }
+
+    .rm-project-control button {
+      color: var(--rm-cyan);
+      white-space: nowrap;
+    }
+
+    .rm-config,
+    .rm-preview {
+      margin: 12px;
+      border: 1px solid var(--rm-cyan);
+      background: rgba(3, 8, 14, 0.94);
+    }
+
+    .rm-section-title {
+      min-height: 38px;
+      padding: 7px 10px;
+      font-size: 12px;
+    }
+
+    .rm-options {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+      padding: 11px;
+    }
+
+    .rm-field-wide {
+      grid-column: 1 / -1;
+    }
+
+    .rm-choice-meta {
+      display: block;
+      margin-top: 4px;
+      overflow: hidden;
+      color: var(--rm-dim);
+      font-size: 10px;
+      letter-spacing: 0.35px;
+      text-overflow: ellipsis;
+      text-transform: uppercase;
+      white-space: nowrap;
+    }
+
+    .rm-role-grid {
+      display: grid;
+      grid-column: 1 / -1;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 9px;
+      padding-top: 8px;
+      border-top: 1px dashed var(--rm-cyan-soft);
+    }
+
+    .rm-prefix {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      grid-column: 1 / -1;
+      min-height: 42px;
+      padding: 8px 10px;
+      border: 1px solid var(--rm-cyan-soft);
+      background: rgba(37, 217, 255, 0.04);
+    }
+
+    .rm-prefix input {
+      width: 18px;
+      min-height: 18px;
+      accent-color: var(--rm-cyan);
+    }
+
+    .rm-prefix label {
+      display: flex;
+      align-items: center;
+      gap: 9px;
+      cursor: pointer;
+    }
+
+    .rm-preview pre {
+      min-height: 168px;
+      max-height: 390px;
+      margin: 0;
+      padding: 12px;
+      overflow: auto;
+      color: #b9f5ff;
+      background: #020408;
+      font: inherit;
+      font-size: 12px;
+      line-height: 1.48;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+
+    .rm-actions {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      margin: 12px;
+    }
+
+    .rm-status {
+      color: var(--rm-good);
+      font-size: 11px;
+      letter-spacing: 0.7px;
+      text-transform: uppercase;
+    }
+
+    .rm-status.is-error {
+      color: var(--rm-error);
+    }
+
+    .rm-apply {
+      min-width: 150px;
+      color: #ffffff;
+      border-color: var(--rm-cyan);
+      background: rgba(37, 217, 255, 0.18);
+      text-transform: uppercase;
+    }
+
+    .rm-apply:hover:not(:disabled) {
+      background: rgba(37, 217, 255, 0.28);
+      box-shadow: 0 0 14px rgba(37, 217, 255, 0.25);
+    }
+
+    @media (max-width: 900px) {
+      .rm-shell {
+        padding: 8px;
+      }
+
+      .rm-machine {
+        padding: 72px 12px 12px;
+      }
+
+      .rm-logo {
+        left: 12px;
+        min-width: 300px;
+      }
+
+      .rm-logo-mark {
+        font-size: 28px;
+        letter-spacing: 2.5px;
+      }
+
+      .rm-topline {
+        top: 48px;
+        left: 15px;
+        right: auto;
+      }
+
+      .rm-context {
+        grid-template-columns: 1fr auto;
+      }
+
+      .rm-context-picker,
+      .rm-context-url {
+        grid-column: 1 / -1;
+      }
+
+      .rm-project-control,
+      .rm-options,
+      .rm-role-grid {
+        grid-template-columns: 1fr;
+      }
+
+      .rm-model-table th:nth-child(2),
+      .rm-model-table th:nth-child(4),
+      .rm-model-cell:nth-child(2),
+      .rm-model-cell:nth-child(4) {
+        display: none;
+      }
+
+      .rm-model-table th:nth-child(1) { width: 62%; }
+      .rm-model-table th:nth-child(3) { width: 38%; }
+      .rm-model-row { grid-template-columns: 62% 38%; }
+      .rm-model-cell:nth-child(3) { grid-column: 2; }
+      .rm-model-provider-compact { display: block; }
+    }
+
+    @media (max-width: 680px) {
+      .rm-grid {
+        grid-template-columns: 1fr;
+      }
+
+      .rm-actions {
+        align-items: stretch;
+        flex-direction: column;
+      }
+    }
+
+    @media (max-width: 420px) {
+      .rm-machine {
+        padding-top: 88px;
+      }
+
+      .rm-logo {
+        left: 8px;
+        right: 8px;
+        min-width: 0;
+        padding-inline: 24px;
+      }
+
+      .rm-logo-mark {
+        font-size: 28px;
+        letter-spacing: 2.5px;
+        transform: skewX(-6deg) scaleX(1.02);
+      }
+    }
+  </style>
+</head>
+<body>
+  <main class="rm-shell">
+    <section class="rm-machine" aria-label="Router-Maestro local configuration portal">
+      <div class="rm-logo"><span class="rm-logo-mark">ROUTER-MAESTRO</span></div>
+      <div class="rm-topline">
+        <span>LOCAL CONTROL ROM</span>
+        <span>LOOPBACK ONLY</span>
+        <span id="rm-version">CLI --</span>
+        <span id="rm-clock">--:--:--</span>
+      </div>
+
+      <div class="rm-grid">
+        <div class="rm-left">
+          <section class="rm-context" aria-label="Deployment context">
+            <label class="rm-context-picker">
+              <span class="rm-label">Context</span>
+              <select id="rm-context-select" disabled>
+                <option>Loading contexts...</option>
+              </select>
+            </label>
+            <div class="rm-context-url">
+              <span class="rm-label">Endpoint</span>
+              <div class="rm-url" id="rm-context-url">--</div>
+            </div>
+            <div>
+              <span class="rm-label">Health RTT</span>
+              <div class="rm-latency" id="rm-latency">--</div>
+            </div>
+            <button class="rm-key" id="rm-key-button" type="button" disabled>COPY KEY</button>
+          </section>
+
+          <section class="rm-panel" aria-label="Available model list">
+            <div class="rm-panel-head">
+              <span>Model Catalog</span>
+              <span class="rm-count" id="rm-model-count">WAITING FOR CONTEXT</span>
+            </div>
+            <table class="rm-model-table">
+              <thead>
+                <tr>
+                  <th>Model</th>
+                  <th>Provider</th>
+                  <th>Context</th>
+                  <th>Transport</th>
+                </tr>
+              </thead>
+              <tbody id="rm-model-list">
+                <tr><td colspan="4"><div class="rm-model-message">Loading...</div></td></tr>
+              </tbody>
+            </table>
+            <div class="rm-model-foot">
+              <span>CLICK SELECT // CONTEXT SCOPED</span>
+              <span id="rm-selected-id">--</span>
+            </div>
+          </section>
+        </div>
+
+        <section class="rm-right" aria-label="Client configuration">
+          <div class="rm-tabs" role="tablist" aria-label="Configuration scope">
+            <button class="rm-tab" type="button" role="tab" data-scope="user" aria-selected="true">User</button>
+            <button class="rm-tab" type="button" role="tab" data-scope="project" aria-selected="false">Project</button>
+          </div>
+
+          <div class="rm-target">
+            <div class="rm-target-row">
+              <div id="rm-project-field" hidden>
+                <label class="rm-label" for="rm-project-select">Project // Trusted + Added</label>
+                <div class="rm-project-control">
+                  <select id="rm-project-select"></select>
+                  <button id="rm-add-project" type="button">ADD PATH</button>
+                </div>
+                <span class="rm-choice-meta" id="rm-project-meta">Trust stores not scanned</span>
+              </div>
+              <div>
+                <span class="rm-label">Target file</span>
+                <div class="rm-url" id="rm-target-path">--</div>
+              </div>
+            </div>
+          </div>
+
+          <section class="rm-config" aria-label="Configuration options">
+            <div class="rm-section-title">
+              <span>Configuration Matrix</span>
+              <span id="rm-mode-label">USER OVERRIDE</span>
+            </div>
+            <div class="rm-options">
+              <label>
+                <span class="rm-label">Client</span>
+                <select id="rm-client-select">
+                  <option value="claude-code">Claude Code</option>
+                  <option value="codex">OpenAI Codex</option>
+                  <option value="gemini">Gemini CLI</option>
+                </select>
+              </label>
+              <label>
+                <span class="rm-label">Context Window</span>
+                <select id="rm-window-select" disabled>
+                  <option value="default">Select a model first</option>
+                </select>
+              </label>
+              <label class="rm-field-wide">
+                <span class="rm-label">Main Model</span>
+                <select id="rm-main-model" disabled></select>
+                <span class="rm-choice-meta" id="rm-main-model-meta">--</span>
+              </label>
+
+              <div class="rm-role-grid" id="rm-role-grid" hidden>
+                <label><span class="rm-label">Fable</span><select data-role="fable"></select><span class="rm-choice-meta" data-role-meta="fable"></span></label>
+                <label><span class="rm-label">Opus</span><select data-role="opus"></select><span class="rm-choice-meta" data-role-meta="opus"></span></label>
+                <label><span class="rm-label">Sonnet</span><select data-role="sonnet"></select><span class="rm-choice-meta" data-role-meta="sonnet"></span></label>
+                <label><span class="rm-label">Haiku</span><select data-role="haiku"></select><span class="rm-choice-meta" data-role-meta="haiku"></span></label>
+                <label class="rm-field-wide"><span class="rm-label">Subagent</span><select data-role="subagent"></select><span class="rm-choice-meta" data-role-meta="subagent"></span></label>
+              </div>
+
+              <div class="rm-prefix">
+                <div>
+                  <span class="rm-label">Final Step</span>
+                  Retain provider prefix in generated model IDs
+                </div>
+                <label>
+                  <input id="rm-prefix-toggle" type="checkbox" checked>
+                  <span id="rm-prefix-state">YES</span>
+                </label>
+              </div>
+            </div>
+          </section>
+
+          <section class="rm-preview" aria-label="Configuration preview">
+            <div class="rm-section-title">
+              <span>Write Preview</span>
+              <span>BACKUP: ON</span>
+            </div>
+            <pre id="rm-preview-code" aria-live="polite">Select a context and model.</pre>
+          </section>
+
+          <div class="rm-actions">
+            <div class="rm-status" id="rm-status" aria-live="polite">INITIALIZING LOCAL PORTAL</div>
+            <button class="rm-apply" id="rm-apply-button" type="button" disabled>APPLY CONFIG</button>
+          </div>
+        </section>
+      </div>
+    </section>
+  </main>
+
+  <script>
+    (function () {
+      "use strict";
+
+      var state = {
+        contexts: [],
+        context: null,
+        models: [],
+        projects: [],
+        selectedModel: null,
+        requiresClaudeRoles: false,
+        scope: "user",
+        requestVersion: 0,
+        previewVersion: 0,
+        previewTimer: null,
+        contextController: null
+      };
+
+      var contextSelect = document.getElementById("rm-context-select");
+      var contextUrl = document.getElementById("rm-context-url");
+      var latency = document.getElementById("rm-latency");
+      var keyButton = document.getElementById("rm-key-button");
+      var modelList = document.getElementById("rm-model-list");
+      var modelCount = document.getElementById("rm-model-count");
+      var selectedId = document.getElementById("rm-selected-id");
+      var clientSelect = document.getElementById("rm-client-select");
+      var windowSelect = document.getElementById("rm-window-select");
+      var mainModel = document.getElementById("rm-main-model");
+      var mainModelMeta = document.getElementById("rm-main-model-meta");
+      var roleGrid = document.getElementById("rm-role-grid");
+      var prefixToggle = document.getElementById("rm-prefix-toggle");
+      var prefixState = document.getElementById("rm-prefix-state");
+      var projectField = document.getElementById("rm-project-field");
+      var projectSelect = document.getElementById("rm-project-select");
+      var projectMeta = document.getElementById("rm-project-meta");
+      var addProjectButton = document.getElementById("rm-add-project");
+      var targetPath = document.getElementById("rm-target-path");
+      var modeLabel = document.getElementById("rm-mode-label");
+      var preview = document.getElementById("rm-preview-code");
+      var status = document.getElementById("rm-status");
+      var applyButton = document.getElementById("rm-apply-button");
+
+      function setStatus(message, isError) {
+        status.textContent = message;
+        status.classList.toggle("is-error", Boolean(isError));
+      }
+
+      async function api(path, options) {
+        var response = await fetch(path, options || {});
+        var payload = null;
+        try {
+          payload = await response.json();
+        } catch (_error) {
+          payload = null;
+        }
+        if (!response.ok) {
+          var detail = payload && payload.detail ? payload.detail : "HTTP " + response.status;
+          throw new Error(detail);
+        }
+        return payload;
+      }
+
+      function clearElement(element) {
+        while (element.firstChild) {
+          element.removeChild(element.firstChild);
+        }
+      }
+
+      function modelByKey(key) {
+        return state.models.find(function (model) { return model.key === key; }) || null;
+      }
+
+      function providerGroups() {
+        var groups = new Map();
+        state.models.forEach(function (model) {
+          if (!groups.has(model.provider)) {
+            groups.set(model.provider, { label: model.provider_name, models: [] });
+          }
+          groups.get(model.provider).models.push(model);
+        });
+        return groups;
+      }
+
+      function fillModelSelect(select, selectedKey) {
+        clearElement(select);
+        providerGroups().forEach(function (group) {
+          var optgroup = document.createElement("optgroup");
+          optgroup.label = group.label;
+          group.models.forEach(function (model) {
+            var option = document.createElement("option");
+            option.value = model.key;
+            option.textContent = model.name;
+            option.selected = model.key === selectedKey;
+            optgroup.appendChild(option);
+          });
+          select.appendChild(optgroup);
+        });
+        if (!select.value && state.models.length) {
+          select.value = state.models[0].key;
+        }
+      }
+
+      function setChoiceMeta(select, target) {
+        var model = modelByKey(select.value);
+        target.textContent = model
+          ? model.provider_name + " // " + model.upstream_id
+          : "--";
+      }
+
+      function roleDefault(role) {
+        var hints = {
+          fable: "sol",
+          opus: "sol",
+          sonnet: "terra",
+          haiku: "luna",
+          subagent: "terra"
+        };
+        var hint = hints[role];
+        return state.models.find(function (model) {
+          return model.upstream_id.toLowerCase().includes(hint);
+        }) || state.selectedModel || state.models[0] || null;
+      }
+
+      function renderRoleChoices() {
+        document.querySelectorAll("[data-role]").forEach(function (select) {
+          var current = modelByKey(select.value);
+          var selected = current || roleDefault(select.dataset.role);
+          fillModelSelect(select, selected ? selected.key : "");
+          var meta = document.querySelector('[data-role-meta="' + select.dataset.role + '"]');
+          setChoiceMeta(select, meta);
+        });
+      }
+
+      function renderContextWindows() {
+        clearElement(windowSelect);
+        var client = clientSelect.value;
+        if (!state.selectedModel) {
+          var empty = document.createElement("option");
+          empty.value = "default";
+          empty.textContent = "Select a model first";
+          windowSelect.appendChild(empty);
+          windowSelect.disabled = true;
+          return;
+        }
+        if (client !== "claude-code") {
+          var managed = document.createElement("option");
+          managed.value = "default";
+          managed.textContent = "Managed by client catalog";
+          windowSelect.appendChild(managed);
+          windowSelect.disabled = true;
+          return;
+        }
+        var windows = state.selectedModel.context_windows || [];
+        if (!windows.length) {
+          var fallback = document.createElement("option");
+          fallback.value = "default";
+          fallback.textContent = "Client default";
+          windowSelect.appendChild(fallback);
+        } else {
+          windows.forEach(function (windowOption) {
+            var option = document.createElement("option");
+            option.value = windowOption.tier;
+            option.dataset.tokens = String(windowOption.max_prompt_tokens);
+            option.textContent = windowOption.label +
+              (windowOption.max_prompt_tokens > 900000 ? " [1m]" : " standard");
+            option.selected = Boolean(windowOption.is_default);
+            windowSelect.appendChild(option);
+          });
+        }
+        windowSelect.disabled = false;
+      }
+
+      function requestedContextWindow() {
+        var option = windowSelect.options[windowSelect.selectedIndex];
+        if (!option || clientSelect.value !== "claude-code") {
+          return "default";
+        }
+        var tokens = Number(option.dataset.tokens || 0);
+        return tokens > 900000 ? "1m" : "default";
+      }
+
+      function renderModels() {
+        clearElement(modelList);
+        var providers = new Set();
+        state.models.forEach(function (model) {
+          providers.add(model.provider);
+          var row = document.createElement("tr");
+          var cell = document.createElement("td");
+          cell.colSpan = 4;
+          var button = document.createElement("button");
+          button.type = "button";
+          button.className = "rm-model-row";
+          button.setAttribute(
+            "aria-label",
+            "Select " + model.name + " from " + model.provider_name
+          );
+          button.setAttribute(
+            "aria-pressed",
+            String(Boolean(state.selectedModel && model.key === state.selectedModel.key))
+          );
+
+          var identity = document.createElement("span");
+          identity.className = "rm-model-cell rm-model-identity";
+          var name = document.createElement("span");
+          name.className = "rm-model-name";
+          name.textContent = model.name;
+          var compactProvider = document.createElement("span");
+          compactProvider.className = "rm-model-provider-compact";
+          compactProvider.textContent = model.provider_name;
+          identity.appendChild(name);
+          identity.appendChild(compactProvider);
+
+          var provider = document.createElement("span");
+          provider.className = "rm-model-cell rm-provider-cell";
+          provider.textContent = model.provider_name;
+          var context = document.createElement("span");
+          context.className = "rm-model-cell";
+          context.textContent = model.context_label;
+          var transport = document.createElement("span");
+          transport.className = "rm-model-cell rm-transport";
+          transport.textContent = model.transports.length > 1
+            ? model.transports[0] + " +" + (model.transports.length - 1)
+            : (model.transports[0] || "AUTO");
+          transport.setAttribute(
+            "aria-label",
+            model.transports.length ? model.transports.join(", ") : "Automatic transport"
+          );
+
+          button.appendChild(identity);
+          button.appendChild(provider);
+          button.appendChild(context);
+          button.appendChild(transport);
+          button.addEventListener("click", function () {
+            state.selectedModel = model;
+            mainModel.value = model.key;
+            selectedId.textContent = model.key;
+            setChoiceMeta(mainModel, mainModelMeta);
+            renderContextWindows();
+            renderModels();
+            schedulePreview();
+          });
+          cell.appendChild(button);
+          row.appendChild(cell);
+          modelList.appendChild(row);
+        });
+        modelCount.textContent = state.models.length + " MODELS // " + providers.size + " PROVIDERS";
+        selectedId.textContent = state.selectedModel ? state.selectedModel.key : "--";
+      }
+
+      function showModelMessage(message, isError) {
+        clearElement(modelList);
+        var row = document.createElement("tr");
+        var cell = document.createElement("td");
+        cell.colSpan = 4;
+        var content = document.createElement("div");
+        content.className = "rm-model-message" + (isError ? " is-error" : "");
+        content.textContent = message;
+        cell.appendChild(content);
+        row.appendChild(cell);
+        modelList.appendChild(row);
+      }
+
+      function setCatalogControlsDisabled(disabled) {
+        mainModel.disabled = disabled;
+        document.querySelectorAll("[data-role]").forEach(function (select) {
+          select.disabled = disabled;
+        });
+        if (disabled) {
+          windowSelect.disabled = true;
+        }
+        applyButton.disabled = disabled;
+      }
+
+      function configureModels(catalog) {
+        state.models = catalog.models || [];
+        state.requiresClaudeRoles = Boolean(catalog.requires_claude_role_mappings);
+        if (!state.models.length) {
+          state.selectedModel = null;
+          modelCount.textContent = "NO MODELS";
+          showModelMessage("No models available", true);
+          setCatalogControlsDisabled(true);
+          return;
+        }
+        var existing = state.selectedModel && modelByKey(state.selectedModel.key);
+        state.selectedModel = existing || state.models[0];
+        fillModelSelect(mainModel, state.selectedModel.key);
+        setChoiceMeta(mainModel, mainModelMeta);
+        renderRoleChoices();
+        renderContextWindows();
+        updateClientFields();
+        renderModels();
+        setCatalogControlsDisabled(false);
+        schedulePreview();
+      }
+
+      async function loadContext(name) {
+        var context = state.contexts.find(function (item) { return item.name === name; });
+        if (!context) {
+          return;
+        }
+        state.context = context;
+        state.requestVersion += 1;
+        state.previewVersion += 1;
+        if (state.previewTimer) {
+          window.clearTimeout(state.previewTimer);
+          state.previewTimer = null;
+        }
+        var version = state.requestVersion;
+        if (state.contextController) {
+          state.contextController.abort();
+        }
+        state.contextController = new AbortController();
+        contextUrl.textContent = context.endpoint;
+        latency.textContent = "PING...";
+        latency.classList.remove("is-error");
+        keyButton.disabled = !context.has_api_key;
+        modelCount.textContent = "LOADING CATALOG...";
+        showModelMessage("Loading selected context...", false);
+        setCatalogControlsDisabled(true);
+        preview.textContent = "Waiting for the selected context model catalog.";
+        setStatus("LOADING " + name.toUpperCase() + " CONTEXT", false);
+
+        var signal = state.contextController.signal;
+        api("/api/contexts/" + encodeURIComponent(name) + "/health", { signal: signal })
+          .then(function (health) {
+            if (version !== state.requestVersion) {
+              return;
+            }
+            latency.textContent = health.healthy ? health.latency_ms + " ms" : "OFFLINE";
+            latency.classList.toggle("is-error", !health.healthy);
+          })
+          .catch(function () {
+            if (version === state.requestVersion) {
+              latency.textContent = "OFFLINE";
+              latency.classList.add("is-error");
+            }
+          });
+
+        try {
+          var catalog = await api(
+            "/api/contexts/" + encodeURIComponent(name) + "/models",
+            { signal: signal }
+          );
+          if (version !== state.requestVersion) {
+            return;
+          }
+          configureModels(catalog);
+          setStatus(name.toUpperCase() + " CATALOG READY // " + state.models.length + " MODELS", false);
+        } catch (error) {
+          if (error.name === "AbortError" || version !== state.requestVersion) {
+            return;
+          }
+          state.models = [];
+          state.selectedModel = null;
+          modelCount.textContent = "CATALOG ERROR";
+          showModelMessage(error.message, true);
+          setCatalogControlsDisabled(true);
+          setStatus("MODEL CATALOG ERROR // " + error.message, true);
+        }
+      }
+
+      async function loadContexts() {
+        state.contexts = await api("/api/contexts");
+        clearElement(contextSelect);
+        if (!state.contexts.length) {
+          var option = document.createElement("option");
+          option.textContent = "No contexts configured";
+          contextSelect.appendChild(option);
+          setStatus("NO ROUTER-MAESTRO CONTEXTS CONFIGURED", true);
+          return;
+        }
+        state.contexts.forEach(function (context) {
+          var option = document.createElement("option");
+          option.value = context.name;
+          option.textContent = context.name;
+          option.selected = Boolean(context.current);
+          contextSelect.appendChild(option);
+        });
+        contextSelect.disabled = false;
+        await loadContext(contextSelect.value || state.contexts[0].name);
+      }
+
+      function projectOptionText(project) {
+        return project.name + " — " + project.sources.join(" + ");
+      }
+
+      function renderProjects(selectedPath) {
+        clearElement(projectSelect);
+        state.projects.forEach(function (project) {
+          var option = document.createElement("option");
+          option.value = project.path;
+          option.textContent = projectOptionText(project);
+          option.dataset.sources = project.sources.join(" + ");
+          option.selected = project.path === selectedPath;
+          projectSelect.appendChild(option);
+        });
+        if (!state.projects.length) {
+          var empty = document.createElement("option");
+          empty.value = "";
+          empty.textContent = "No trusted projects found";
+          projectSelect.appendChild(empty);
+          projectSelect.disabled = true;
+        } else {
+          projectSelect.disabled = false;
+        }
+        updateProjectMeta();
+      }
+
+      function updateProjectMeta() {
+        var option = projectSelect.options[projectSelect.selectedIndex];
+        projectMeta.textContent = option && option.value
+          ? (option.dataset.sources || "Added") + " // " + option.value
+          : "Use ADD PATH to register a project";
+      }
+
+      async function loadProjects(selectedPath) {
+        state.projects = await api("/api/projects");
+        renderProjects(selectedPath);
+      }
+
+      function userTargetFor(client) {
+        var targets = {
+          "claude-code": "~/.claude/settings.json",
+          codex: "~/.codex/config.toml",
+          gemini: "~/.gemini/.env"
+        };
+        return targets[client];
+      }
+
+      function projectTargetFor(client) {
+        var targets = {
+          "claude-code": ".claude/settings.json",
+          codex: ".codex/config.toml",
+          gemini: ".gemini/.env"
+        };
+        return targets[client];
+      }
+
+      function updateTargetPlaceholder() {
+        projectField.hidden = state.scope !== "project";
+        modeLabel.textContent = state.scope === "user" ? "USER OVERRIDE" : "PROJECT OVERRIDE";
+        if (state.scope === "user") {
+          targetPath.textContent = userTargetFor(clientSelect.value);
+        } else if (projectSelect.value) {
+          targetPath.textContent = projectSelect.value + "/" + projectTargetFor(clientSelect.value);
+        } else {
+          targetPath.textContent = "Select or add a project";
+        }
+      }
+
+      function updateClientFields() {
+        var isClaude = clientSelect.value === "claude-code";
+        roleGrid.hidden = !(isClaude && state.requiresClaudeRoles);
+        renderContextWindows();
+        updateTargetPlaceholder();
+      }
+
+      function buildConfigRequest() {
+        var roles = {};
+        if (!roleGrid.hidden) {
+          document.querySelectorAll("[data-role]").forEach(function (select) {
+            roles[select.dataset.role] = select.value;
+          });
+        }
+        return {
+          context: state.context.name,
+          client: clientSelect.value,
+          level: state.scope,
+          project_path: state.scope === "project" ? projectSelect.value : null,
+          main_model: state.selectedModel.key,
+          context_window: requestedContextWindow(),
+          role_models: roles,
+          keep_provider_prefix: prefixToggle.checked
+        };
+      }
+
+      function canPreview() {
+        return Boolean(
+          state.context &&
+          state.selectedModel &&
+          (state.scope === "user" || projectSelect.value)
+        );
+      }
+
+      async function updatePreview() {
+        if (!canPreview()) {
+          preview.textContent = state.scope === "project"
+            ? "Select or add a project."
+            : "Select a context and model.";
+          applyButton.disabled = true;
+          updateTargetPlaceholder();
+          return;
+        }
+        state.previewVersion += 1;
+        var version = state.previewVersion;
+        preview.textContent = "GENERATING PREVIEW...";
+        applyButton.disabled = true;
+        try {
+          var result = await api("/api/config/preview", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(buildConfigRequest())
+          });
+          if (version !== state.previewVersion) {
+            return;
+          }
+          targetPath.textContent = result.target_path;
+          preview.textContent = result.content;
+          applyButton.disabled = false;
+          setStatus("READY // NO FILES MODIFIED", false);
+        } catch (error) {
+          if (version !== state.previewVersion) {
+            return;
+          }
+          preview.textContent = error.message;
+          setStatus("PREVIEW ERROR // " + error.message, true);
+          applyButton.disabled = true;
+        }
+      }
+
+      function schedulePreview() {
+        prefixState.textContent = prefixToggle.checked ? "YES" : "NO";
+        updateTargetPlaceholder();
+        applyButton.disabled = true;
+        if (state.previewTimer) {
+          window.clearTimeout(state.previewTimer);
+        }
+        state.previewTimer = window.setTimeout(updatePreview, 180);
+      }
+
+      async function copyKey() {
+        if (!state.context) {
+          return;
+        }
+        keyButton.disabled = true;
+        try {
+          var result = await api(
+            "/api/contexts/" + encodeURIComponent(state.context.name) + "/key"
+          );
+          var copied = false;
+          if (navigator.clipboard && window.isSecureContext) {
+            try {
+              await navigator.clipboard.writeText(result.api_key);
+              copied = true;
+            } catch (_clipboardError) {
+              copied = false;
+            }
+          }
+          if (!copied) {
+            var fallback = document.createElement("textarea");
+            fallback.value = result.api_key;
+            fallback.setAttribute("readonly", "");
+            fallback.style.position = "absolute";
+            fallback.style.left = "-9999px";
+            document.body.appendChild(fallback);
+            fallback.select();
+            copied = document.execCommand("copy");
+            fallback.remove();
+          }
+          keyButton.textContent = copied ? "COPIED" : "COPY FAILED";
+          setStatus(
+            copied ? "API KEY COPIED // CLIPBOARD READY" : "CLIPBOARD COPY FAILED",
+            !copied
+          );
+        } catch (error) {
+          keyButton.textContent = "COPY FAILED";
+          setStatus("COPY ERROR // " + error.message, true);
+        } finally {
+          window.setTimeout(function () {
+            keyButton.textContent = "COPY KEY";
+            keyButton.disabled = !state.context || !state.context.has_api_key;
+          }, 1400);
+        }
+      }
+
+      async function addProject() {
+        var path = window.prompt("Absolute project path");
+        if (!path) {
+          return;
+        }
+        addProjectButton.disabled = true;
+        try {
+          var project = await api("/api/projects", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ path: path })
+          });
+          await loadProjects(project.path);
+          projectSelect.value = project.path;
+          updateProjectMeta();
+          schedulePreview();
+          setStatus("PROJECT ADDED // LOCAL REGISTRY UPDATED", false);
+        } catch (error) {
+          setStatus("PROJECT ERROR // " + error.message, true);
+        } finally {
+          addProjectButton.disabled = false;
+        }
+      }
+
+      async function applyConfig() {
+        if (!canPreview()) {
+          return;
+        }
+        applyButton.disabled = true;
+        setStatus("WRITING CONFIG // BACKUP ENABLED", false);
+        try {
+          var result = await api("/api/config/apply", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(buildConfigRequest())
+          });
+          targetPath.textContent = result.target_path;
+          preview.textContent = result.content;
+          setStatus(
+            result.backup_path
+              ? "CONFIG WRITTEN // BACKUP CREATED"
+              : "CONFIG WRITTEN // NEW FILE",
+            false
+          );
+        } catch (error) {
+          setStatus("WRITE ERROR // " + error.message, true);
+        } finally {
+          applyButton.disabled = false;
+        }
+      }
+
+      contextSelect.addEventListener("change", function () {
+        loadContext(contextSelect.value);
+      });
+
+      mainModel.addEventListener("change", function () {
+        state.selectedModel = modelByKey(mainModel.value);
+        setChoiceMeta(mainModel, mainModelMeta);
+        renderContextWindows();
+        renderModels();
+        schedulePreview();
+      });
+
+      clientSelect.addEventListener("change", function () {
+        updateClientFields();
+        schedulePreview();
+      });
+
+      windowSelect.addEventListener("change", schedulePreview);
+      prefixToggle.addEventListener("change", schedulePreview);
+      projectSelect.addEventListener("change", function () {
+        updateProjectMeta();
+        schedulePreview();
+      });
+      keyButton.addEventListener("click", copyKey);
+      addProjectButton.addEventListener("click", addProject);
+      applyButton.addEventListener("click", applyConfig);
+
+      document.querySelectorAll("[data-role]").forEach(function (select) {
+        select.addEventListener("change", function () {
+          var meta = document.querySelector('[data-role-meta="' + select.dataset.role + '"]');
+          setChoiceMeta(select, meta);
+          schedulePreview();
+        });
+      });
+
+      document.querySelectorAll(".rm-tab").forEach(function (tab) {
+        tab.addEventListener("click", function () {
+          state.scope = tab.dataset.scope;
+          document.querySelectorAll(".rm-tab").forEach(function (item) {
+            item.setAttribute("aria-selected", String(item === tab));
+          });
+          updateTargetPlaceholder();
+          schedulePreview();
+        });
+      });
+
+      function updateClock() {
+        document.getElementById("rm-clock").textContent =
+          new Date().toLocaleTimeString([], { hour12: false });
+      }
+
+      async function loadMeta() {
+        try {
+          var meta = await api("/api/meta");
+          document.getElementById("rm-version").textContent = "CLI v" + meta.version;
+        } catch (_error) {
+          document.getElementById("rm-version").textContent = "CLI UNKNOWN";
+        }
+      }
+
+      async function initialize() {
+        updateClock();
+        window.setInterval(updateClock, 1000);
+        try {
+          await Promise.all([loadMeta(), loadProjects(), loadContexts()]);
+        } catch (error) {
+          setStatus("PORTAL INITIALIZATION ERROR // " + error.message, true);
+          preview.textContent = error.message;
+        }
+      }
+
+      initialize();
+    }());
+  </script>
+</body>
+</html>
