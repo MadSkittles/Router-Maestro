@@ -46,5 +46,5 @@ class TestCliEntry:
         """All expected subcommands should be registered."""
         result = runner.invoke(app, ["--help"])
         assert result.exit_code == 0
-        for cmd in ["server", "auth", "model", "context", "config"]:
+        for cmd in ["server", "auth", "model", "context", "config", "web"]:
             assert cmd in result.stdout

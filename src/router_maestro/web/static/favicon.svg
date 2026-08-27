@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-labelledby="title">
+  <title id="title">Router-Maestro Route-M</title>
+  <path
+    d="M10 2H54L62 10V54L54 62H10L2 54V10Z"
+    fill="#03070d"
+    stroke="#25d9ff"
+    stroke-width="2.5"
+  />
+  <path
+    d="M10 32H18L24 18L32 45L40 18L46 32H54"
+    fill="none"
+    stroke="#25d9ff"
+    stroke-width="5"
+    stroke-linecap="square"
+    stroke-linejoin="miter"
+  />
+  <rect x="7" y="28.5" width="6" height="7" fill="#d8f8ff" />
+  <rect x="51" y="28.5" width="6" height="7" fill="#d8f8ff" />
+</svg>

@@ -2680,6 +2680,7 @@ class CopilotHttpExecutor(SharedHttpExecutor):
 
     @staticmethod
     def _strip_responses_internal_fields(payload: dict[str, Any]) -> None:
+        CopilotHttpExecutor._repair_responses_usage_from_copilot(payload)
         for field in _COPILOT_RESPONSES_INTERNAL_RESPONSE_FIELDS:
             payload.pop(field, None)
         usage = payload.get("usage")
@@ -2692,6 +2693,91 @@ class CopilotHttpExecutor(SharedHttpExecutor):
             return
         for field in _COPILOT_RESPONSES_INTERNAL_INPUT_DETAIL_FIELDS:
             input_details.pop(field, None)
+
+    @staticmethod
+    def _repair_responses_usage_from_copilot(payload: dict[str, Any]) -> None:
+        """Recover zero public usage from Copilot's private billing counters.
+
+        Under sustained traffic, Copilot can return a valid Responses body whose
+        standard usage snapshot is all zero while ``copilot_usage.token_details``
+        still contains the actual counts. Repair only absent or zero standard
+        fields; malformed or already-positive public values retain their normal
+        strict-decoder behavior.
+        """
+        private_usage = payload.get("copilot_usage")
+        if not isinstance(private_usage, dict):
+            return
+        token_details = private_usage.get("token_details")
+        if not isinstance(token_details, list):
+            return
+
+        counts = {"input": 0, "cache_read": 0, "cache_write": 0, "output": 0}
+        saw_count = False
+        for detail in token_details:
+            if not isinstance(detail, dict):
+                continue
+            token_type = detail.get("token_type")
+            token_count = detail.get("token_count")
+            if (
+                not isinstance(token_type, str)
+                or token_type not in counts
+                or not isinstance(token_count, int)
+                or isinstance(token_count, bool)
+                or token_count < 0
+            ):
+                continue
+            counts[token_type] += token_count
+            saw_count = True
+        if not saw_count:
+            return
+
+        usage = payload.get("usage")
+        if usage is None:
+            usage = {}
+            payload["usage"] = usage
+        if not isinstance(usage, dict):
+            return
+
+        input_tokens = counts["input"] + counts["cache_read"] + counts["cache_write"]
+        output_tokens = counts["output"]
+        CopilotHttpExecutor._replace_empty_token_count(usage, "input_tokens", input_tokens)
+        CopilotHttpExecutor._replace_empty_token_count(usage, "output_tokens", output_tokens)
+
+        public_input = usage.get("input_tokens")
+        public_output = usage.get("output_tokens")
+        if (
+            isinstance(public_input, int)
+            and not isinstance(public_input, bool)
+            and isinstance(public_output, int)
+            and not isinstance(public_output, bool)
+        ):
+            CopilotHttpExecutor._replace_empty_token_count(
+                usage,
+                "total_tokens",
+                public_input + public_output,
+            )
+
+        if counts["cache_read"] <= 0:
+            return
+        input_details = usage.get("input_tokens_details")
+        if input_details is None:
+            input_details = {}
+            usage["input_tokens_details"] = input_details
+        if isinstance(input_details, dict):
+            CopilotHttpExecutor._replace_empty_token_count(
+                input_details,
+                "cached_tokens",
+                counts["cache_read"],
+            )
+
+    @staticmethod
+    def _replace_empty_token_count(target: dict[str, Any], field: str, value: int) -> None:
+        current = target.get(field)
+        if value > 0 and (
+            current is None
+            or (isinstance(current, int) and not isinstance(current, bool) and current == 0)
+        ):
+            target[field] = value
 
     def _path(self, attempt: PreparedAttempt) -> str:
         protocol, path = CopilotProviderDialect._binding_spec(attempt.binding_id)

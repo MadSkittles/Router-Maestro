@@ -77,7 +77,7 @@ class GeminiConfig(ClientConfig):
         self, *, level: str, path: Path, models: dict[str, str], ctx: GenerateContext
     ) -> None:
         model_name = models["main"]
-        gemini_url = f"{self._base_url()}/api/gemini"
+        gemini_url = f"{self._base_url_for(ctx)}/api/gemini"
 
         # Load existing .env to preserve other variables
         existing_env = _parse_env_file(path)
@@ -85,7 +85,7 @@ class GeminiConfig(ClientConfig):
         # Router-Maestro's Gemini path converter accepts the provider-qualified public
         # ID, preserving an unambiguous selection when providers share an upstream ID.
         existing_env["GOOGLE_GEMINI_BASE_URL"] = gemini_url
-        existing_env["GEMINI_API_KEY"] = self._auth_token()
+        existing_env["GEMINI_API_KEY"] = self._auth_token_for(ctx)
         existing_env["GEMINI_MODEL"] = model_name
         existing_env["GEMINI_TELEMETRY_ENABLED"] = "false"
 
@@ -95,7 +95,7 @@ class GeminiConfig(ClientConfig):
         self, *, level: str, path: Path, models: dict[str, str], ctx: GenerateContext
     ) -> None:
         model_name = models["main"]
-        gemini_url = f"{self._base_url()}/api/gemini"
+        gemini_url = f"{self._base_url_for(ctx)}/api/gemini"
         console.print(
             Panel(
                 f"[green]Created {path}[/green]\n\n"
