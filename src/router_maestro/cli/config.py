@@ -19,11 +19,10 @@ app = typer.Typer(invoke_without_command=True)
 _ID_STYLE_OPT = typer.Option(
     "--id-style",
     help=(
-        "Model id spelling: 'official' writes the vendor's native id (e.g. gpt-4.1, "
-        "claude-opus-4-6) that the client recognizes and may optimize for — only "
-        "applied to models of this client's native vendor, and it drops the "
-        "provider/ prefix (ambiguous if several providers share the id). "
-        "'qualified' (default) writes provider/model. Omit for an interactive prompt."
+        "Model id spelling: 'qualified' writes provider/model; 'bare' removes only "
+        "the provider/ prefix; 'official' keeps the legacy native-vendor spelling "
+        "conversion. Omit this option to choose whether to retain the provider prefix "
+        "as the final interactive step. Bare IDs are ambiguous when providers share an ID."
     ),
 )
 

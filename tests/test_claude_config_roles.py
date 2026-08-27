@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from router_maestro.cli.client_configs import claude_code as cc_claude
 from router_maestro.cli.client_configs.base import (
     ClientConfig,
@@ -96,7 +98,8 @@ def test_single_server_context_skips_context_prompt(monkeypatch):
     assert selected is ContextWindowChoice.DEFAULT
 
 
-def test_no_claude_catalog_prompts_roles_in_strength_order(tmp_path, monkeypatch):
+@pytest.mark.parametrize("level", ["user", "project"])
+def test_no_claude_catalog_prompts_roles_in_strength_order(tmp_path, monkeypatch, level):
     models = _gpt_models()
     calls: list[tuple[str, str, bool, bool]] = []
 
@@ -108,7 +111,7 @@ def test_no_claude_catalog_prompts_roles_in_strength_order(tmp_path, monkeypatch
 
     selections = ClaudeCodeConfig().select_models(
         models,
-        level="user",
+        level=level,
         path=tmp_path / "settings.json",
     )
 
@@ -150,7 +153,8 @@ def test_any_claude_catalog_model_skips_role_mapping(tmp_path, monkeypatch):
     assert [selection.slot for selection in selections] == ["main"]
 
 
-def test_user_write_maps_roles_cleans_legacy_and_orders_managed_keys(tmp_path, monkeypatch):
+@pytest.mark.parametrize("level", ["user", "project"])
+def test_write_maps_roles_cleans_legacy_and_orders_managed_keys(tmp_path, monkeypatch, level):
     path = tmp_path / "settings.json"
     path.write_text(
         json.dumps(
@@ -186,7 +190,7 @@ def test_user_write_maps_roles_cleans_legacy_and_orders_managed_keys(tmp_path, m
     monkeypatch.setattr(config, "_base_url", lambda: "https://rm.example")
 
     config.write(
-        level="user",
+        level=level,
         path=path,
         models=models,
         ctx=GenerateContext(id_style=IdStyle.QUALIFIED, selections=selections),
@@ -213,9 +217,11 @@ def test_user_write_maps_roles_cleans_legacy_and_orders_managed_keys(tmp_path, m
     assert data["permissions"] == {"allow": []}
 
 
-def test_native_catalog_run_preserves_user_role_overrides_but_clears_stale_context(
+@pytest.mark.parametrize("level", ["user", "project"])
+def test_native_catalog_run_preserves_role_overrides_but_clears_stale_context(
     tmp_path,
     monkeypatch,
+    level,
 ):
     path = tmp_path / "settings.json"
     path.write_text(
@@ -237,7 +243,7 @@ def test_native_catalog_run_preserves_user_role_overrides_but_clears_stale_conte
     monkeypatch.setattr(config, "_base_url", lambda: "https://rm.example")
 
     config.write(
-        level="user",
+        level=level,
         path=path,
         models={"main": "github-copilot/claude-sonnet-5"},
         ctx=GenerateContext(id_style=IdStyle.QUALIFIED, selections=(selection,)),
@@ -248,34 +254,3 @@ def test_native_catalog_run_preserves_user_role_overrides_but_clears_stale_conte
     assert env["ANTHROPIC_DEFAULT_OPUS_MODEL"] == "existing-opus"
     assert "ANTHROPIC_SMALL_FAST_MODEL" not in env
     assert "CLAUDE_CODE_AUTO_COMPACT_WINDOW" not in env
-
-
-def test_project_write_does_not_emit_user_default_role_mappings(tmp_path, monkeypatch):
-    path = tmp_path / "settings.json"
-    path.write_text(
-        json.dumps(
-            {
-                "env": {
-                    "ANTHROPIC_DEFAULT_FABLE_MODEL": "wrong-scope",
-                    "CLAUDE_CODE_SUBAGENT_MODEL": "wrong-scope",
-                }
-            }
-        ),
-        encoding="utf-8",
-    )
-    selection = ModelSelection("main", {}, ContextWindowChoice.CONTEXT_200K)
-    config = ClaudeCodeConfig()
-    monkeypatch.setattr(config, "_auth_token", lambda: "test-key")
-    monkeypatch.setattr(config, "_base_url", lambda: "https://rm.example")
-
-    config.write(
-        level="project",
-        path=path,
-        models={"main": "github-copilot/gpt-5.6-sol"},
-        ctx=GenerateContext(id_style=IdStyle.QUALIFIED, selections=(selection,)),
-    )
-
-    env = json.loads(path.read_text(encoding="utf-8"))["env"]
-    assert "ANTHROPIC_DEFAULT_FABLE_MODEL" not in env
-    assert "CLAUDE_CODE_SUBAGENT_MODEL" not in env
-    assert env["CLAUDE_CODE_AUTO_COMPACT_WINDOW"] == "200000"
