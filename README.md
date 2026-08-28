@@ -196,8 +196,15 @@ shown; **Copy Key** retrieves one only for the clipboard action. Project-level
 targets are discovered from Claude Code, Codex, and Gemini trusted-folder
 stores, plus paths explicitly added to Router-Maestro. Explicit additions do
 not modify any client's own trust policy. Codex project files can only set the
-model, so the portal requires their selected context to match the
-Router-Maestro provider already configured at user level.
+model and model-catalog path, so the portal requires their selected context to
+match the Router-Maestro provider already configured at user level.
+
+Every Codex configuration run asks whether to refresh
+`~/.codex/router-maestro-models.json` from the selected Router-Maestro context;
+the default is **Yes**. This applies to both user- and project-level config. The
+web portal exposes the same option and bypasses its model-list cache on Apply,
+while Preview remains side-effect free. Codex reads `model_catalog_json` at
+startup, so start a new Codex session after refreshing it.
 
 Interactive terminals use a searchable model dropdown whose labels and table
 show the server's `context_window_options` (for example, `272K / 1M`). Claude

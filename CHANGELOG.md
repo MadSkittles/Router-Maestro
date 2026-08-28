@@ -6,6 +6,14 @@ All notable changes to Router-Maestro are documented here.
 
 ## Unreleased
 
+### Added
+
+- **Codex configuration can refresh its model catalog on every run.** CLI and web configuration
+  now offer a default-on choice to rebuild `~/.codex/router-maestro-models.json` from the selected
+  live Router-Maestro context. User- and project-level configurations both support the refresh;
+  project configs point to the shared user catalog, web Apply bypasses the portal model cache, and
+  Preview remains side-effect free.
+
 ### Fixed
 
 - **Live Claude validation preserves the server-default 1M context.** The reusable model runner

@@ -11,7 +11,7 @@ from typing import Any
 
 import tomlkit
 from rich.panel import Panel
-from rich.prompt import Prompt
+from rich.prompt import Confirm, Prompt
 from tomlkit.items import AbstractTable, Table
 
 from router_maestro.cli.client_configs.base import (
@@ -96,6 +96,34 @@ def _build_router_maestro_provider_table(openai_url: str) -> Table:
     table["env_key"] = "ROUTER_MAESTRO_API_KEY"
     table["wire_api"] = "responses"
     return table
+
+
+def _catalog_path_for(
+    *,
+    level: str,
+    config_path: Path,
+    ctx: GenerateContext,
+) -> Path:
+    """Resolve the user-level catalog refreshed by this configuration run."""
+    explicit_path = ctx.extras.get("model_catalog_path")
+    if isinstance(explicit_path, str) and explicit_path:
+        return Path(explicit_path).expanduser().resolve()
+    if level == "user":
+        return config_path.with_name(_CODEX_MODEL_CATALOG_FILENAME).resolve()
+    return get_codex_paths()["user"].with_name(_CODEX_MODEL_CATALOG_FILENAME).resolve()
+
+
+def _catalog_result_line(ctx: GenerateContext) -> str:
+    """Render the catalog outcome without claiming a skipped or failed update succeeded."""
+    if ctx.extras.get("update_model_catalog", True) is not True:
+        return "[dim]Model catalog: not updated (skipped)[/dim]"
+    path = ctx.extras.get("model_catalog_path")
+    if ctx.extras.get("model_catalog_updated") is True:
+        return f"Model catalog: {path}"
+    error = ctx.extras.get("model_catalog_error")
+    if isinstance(error, str) and error:
+        return f"[yellow]Model catalog: update failed ({error})[/yellow]"
+    return f"[dim]Model catalog: {path}[/dim]"
 
 
 def _load_bundled_codex_catalog() -> dict[str, Any] | None:
@@ -288,7 +316,12 @@ class CodexConfig(ClientConfig):
 
     def prompt_extras(self, selections: list[ModelSelection]) -> dict:
         del selections
-        return {}
+        console.print("\n[bold]Update Codex model catalog[/bold]")
+        update_model_catalog = Confirm.ask(
+            "Refresh router-maestro-models.json from the current Router-Maestro context?",
+            default=True,
+        )
+        return {"update_model_catalog": update_model_catalog}
 
     def _openai_url(self, ctx: GenerateContext) -> str:
         return f"{self._base_url_for(ctx)}/api/openai/v1"
@@ -311,6 +344,13 @@ class CodexConfig(ClientConfig):
         # Update configuration
         existing_config["model"] = selected_model
 
+        update_model_catalog = ctx.extras.get("update_model_catalog", True) is True
+        preview_only = ctx.extras.get("preview_only") is True
+        catalog_path = _catalog_path_for(level=level, config_path=path, ctx=ctx)
+        ctx.extras["model_catalog_path"] = str(catalog_path)
+        ctx.extras["model_catalog_updated"] = False
+        ctx.extras.pop("model_catalog_error", None)
+
         if level == "user":
             existing_config["model_provider"] = "router-maestro"
             providers = existing_config.get("model_providers")
@@ -320,26 +360,8 @@ class CodexConfig(ClientConfig):
             if not isinstance(providers, AbstractTable):
                 raise TypeError("model_providers must be a TOML table")
             providers["router-maestro"] = _build_router_maestro_provider_table(openai_url)
-            if ctx.extras.get("preview_only") is True:
-                target_path = Path(str(ctx.extras.get("target_path", path)))
-                catalog_path = target_path.with_name(_CODEX_MODEL_CATALOG_FILENAME)
+            if update_model_catalog and preview_only:
                 existing_config["model_catalog_json"] = str(catalog_path.resolve())
-            else:
-                available_models = getattr(
-                    self,
-                    "_available_models",
-                    [model for model in ctx.selected_dicts if model is not None],
-                )
-                catalog = _build_codex_model_catalog(available_models)
-                if catalog is None:
-                    console.print(
-                        "[yellow]Could not read the installed Codex model catalog; "
-                        "custom models may use fallback metadata.[/yellow]"
-                    )
-                else:
-                    catalog_path = path.with_name(_CODEX_MODEL_CATALOG_FILENAME)
-                    write_json_owner_only(catalog_path, catalog)
-                    existing_config["model_catalog_json"] = str(catalog_path.resolve())
         else:
             # Codex CLI 0.130+ rejects model_provider/model_providers at project scope.
             # Strip the keys this command wrote in older releases so the file stops
@@ -350,6 +372,27 @@ class CodexConfig(ClientConfig):
                 providers.pop("router-maestro", None)
                 if len(providers) == 0:
                     existing_config.pop("model_providers", None)
+            if update_model_catalog and preview_only:
+                existing_config["model_catalog_json"] = str(catalog_path.resolve())
+
+        if update_model_catalog and not preview_only:
+            available_models = getattr(
+                self,
+                "_available_models",
+                [model for model in ctx.selected_dicts if model is not None],
+            )
+            catalog = _build_codex_model_catalog(available_models)
+            if catalog is None:
+                message = (
+                    "Could not read the installed Codex model catalog; "
+                    "router-maestro-models.json was not updated."
+                )
+                ctx.extras["model_catalog_error"] = message
+                console.print(f"[yellow]{message}[/yellow]")
+            else:
+                write_json_owner_only(catalog_path, catalog)
+                ctx.extras["model_catalog_updated"] = True
+                existing_config["model_catalog_json"] = str(catalog_path.resolve())
 
         # Write config
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -363,10 +406,12 @@ class CodexConfig(ClientConfig):
         openai_url = self._openai_url(ctx)
 
         if level == "user":
+            catalog_line = _catalog_result_line(ctx)
             body = (
                 f"[green]Created {path}[/green]\n\n"
                 f"Model: {selected_model}\n\n"
                 f"Endpoint: {openai_url}\n\n"
+                f"{catalog_line}\n\n"
                 "[dim]Start router-maestro server before using Codex:[/dim]\n"
                 "  router-maestro server start\n\n"
                 "[dim]Set API key environment variable (optional):[/dim]\n"
@@ -381,7 +426,12 @@ class CodexConfig(ClientConfig):
                     "Run [bold]router-maestro config codex[/bold] and pick option 1 first,\n"
                     "otherwise Codex won't know how to reach the server."
                 )
-            body = f"[green]Created {path}[/green]\n\nModel: {selected_model}\n\n{inheritance_line}"
+            body = (
+                f"[green]Created {path}[/green]\n\n"
+                f"Model: {selected_model}\n\n"
+                f"{_catalog_result_line(ctx)}\n\n"
+                f"{inheritance_line}"
+            )
 
         console.print(
             Panel(

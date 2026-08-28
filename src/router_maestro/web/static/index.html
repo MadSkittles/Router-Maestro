@@ -801,6 +801,17 @@
                   <span id="rm-prefix-state">YES</span>
                 </label>
               </div>
+
+              <div class="rm-prefix" id="rm-catalog-update" hidden>
+                <div>
+                  <span class="rm-label">Codex Catalog</span>
+                  Refresh ~/.codex/router-maestro-models.json from this context on Apply
+                </div>
+                <label>
+                  <input id="rm-catalog-toggle" type="checkbox" checked>
+                  <span id="rm-catalog-state">YES</span>
+                </label>
+              </div>
             </div>
           </section>
 
@@ -853,6 +864,9 @@
       var roleGrid = document.getElementById("rm-role-grid");
       var prefixToggle = document.getElementById("rm-prefix-toggle");
       var prefixState = document.getElementById("rm-prefix-state");
+      var catalogUpdate = document.getElementById("rm-catalog-update");
+      var catalogToggle = document.getElementById("rm-catalog-toggle");
+      var catalogState = document.getElementById("rm-catalog-state");
       var projectField = document.getElementById("rm-project-field");
       var projectSelect = document.getElementById("rm-project-select");
       var projectMeta = document.getElementById("rm-project-meta");
@@ -1273,7 +1287,9 @@
 
       function updateClientFields() {
         var isClaude = clientSelect.value === "claude-code";
+        var isCodex = clientSelect.value === "codex";
         roleGrid.hidden = !(isClaude && state.requiresClaudeRoles);
+        catalogUpdate.hidden = !isCodex;
         renderContextWindows();
         updateTargetPlaceholder();
       }
@@ -1293,7 +1309,8 @@
           main_model: state.selectedModel.key,
           context_window: requestedContextWindow(),
           role_models: roles,
-          keep_provider_prefix: prefixToggle.checked
+          keep_provider_prefix: prefixToggle.checked,
+          update_model_catalog: catalogToggle.checked
         };
       }
 
@@ -1343,6 +1360,7 @@
 
       function schedulePreview() {
         prefixState.textContent = prefixToggle.checked ? "YES" : "NO";
+        catalogState.textContent = catalogToggle.checked ? "YES" : "NO";
         updateTargetPlaceholder();
         applyButton.disabled = true;
         if (state.previewTimer) {
@@ -1435,10 +1453,14 @@
           targetPath.textContent = result.target_path;
           preview.textContent = result.content;
           setStatus(
-            result.backup_path
-              ? "CONFIG WRITTEN // BACKUP CREATED"
-              : "CONFIG WRITTEN // NEW FILE",
-            false
+            result.model_catalog_error
+              ? "CONFIG WRITTEN // MODEL CATALOG UPDATE FAILED"
+              : (result.model_catalog_updated
+              ? "CONFIG WRITTEN // MODEL CATALOG UPDATED"
+              : (result.backup_path
+                ? "CONFIG WRITTEN // BACKUP CREATED"
+                : "CONFIG WRITTEN // NEW FILE")),
+            Boolean(result.model_catalog_error)
           );
         } catch (error) {
           setStatus("WRITE ERROR // " + error.message, true);
@@ -1466,6 +1488,7 @@
 
       windowSelect.addEventListener("change", schedulePreview);
       prefixToggle.addEventListener("change", schedulePreview);
+      catalogToggle.addEventListener("change", schedulePreview);
       projectSelect.addEventListener("change", function () {
         updateProjectMeta();
         schedulePreview();
