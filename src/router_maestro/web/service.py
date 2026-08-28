@@ -127,6 +127,7 @@ class PortalConfigRequest(BaseModel):
     context_window: ContextWindowChoice = ContextWindowChoice.DEFAULT
     role_models: dict[str, str] = Field(default_factory=dict)
     keep_provider_prefix: bool = True
+    update_model_catalog: bool = True
 
 
 class PortalConfigResult(BaseModel):
@@ -135,6 +136,9 @@ class PortalConfigResult(BaseModel):
     target_path: str
     content: str
     backup_path: str | None = None
+    model_catalog_path: str | None = None
+    model_catalog_updated: bool = False
+    model_catalog_error: str | None = None
 
 
 class PortalService:
@@ -700,6 +704,8 @@ class PortalService:
             extras={
                 "preview_only": preview_only,
                 "target_path": str(target_path),
+                "update_model_catalog": request.update_model_catalog,
+                "model_catalog_path": str(self.home / ".codex" / "router-maestro-models.json"),
             },
             endpoint=context.endpoint,
             api_key=context.api_key,
@@ -751,6 +757,11 @@ class PortalService:
         return PortalConfigResult(
             target_path=str(target_path),
             content=self._redact_preview(request.client, content),
+            model_catalog_path=(
+                str(self.home / ".codex" / "router-maestro-models.json")
+                if request.client == "codex" and request.update_model_catalog
+                else None
+            ),
         )
 
     @staticmethod
@@ -768,7 +779,6 @@ class PortalService:
         raw_models: list[dict],
         target_path: Path,
     ) -> PortalConfigResult:
-        preview = self._preview_sync(request, raw_models, target_path)
         client, models, generation = self._prepare_writer(
             request,
             raw_models,
@@ -777,10 +787,22 @@ class PortalService:
         )
         backup = self._backup(target_path)
         client.write(level=request.level, path=target_path, models=models, ctx=generation)
+        content = target_path.read_text(encoding="utf-8")
         return PortalConfigResult(
             target_path=str(target_path),
-            content=preview.content,
+            content=self._redact_preview(request.client, content),
             backup_path=str(backup) if backup is not None else None,
+            model_catalog_path=(
+                str(generation.extras.get("model_catalog_path"))
+                if request.client == "codex" and request.update_model_catalog
+                else None
+            ),
+            model_catalog_updated=generation.extras.get("model_catalog_updated") is True,
+            model_catalog_error=(
+                str(generation.extras["model_catalog_error"])
+                if "model_catalog_error" in generation.extras
+                else None
+            ),
         )
 
     async def preview_config(self, request: PortalConfigRequest) -> PortalConfigResult:
@@ -792,5 +814,8 @@ class PortalService:
     async def apply_config(self, request: PortalConfigRequest) -> PortalConfigResult:
         """Back up and write one selected client configuration."""
         target = self._target_path(request)
-        raw_models = await self._load_raw_models(request.context)
+        raw_models = await self._load_raw_models(
+            request.context,
+            force_refresh=request.client == "codex" and request.update_model_catalog,
+        )
         return await asyncio.to_thread(self._apply_sync, request, raw_models, target)

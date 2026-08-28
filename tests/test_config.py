@@ -746,6 +746,7 @@ def _setup_codex_env(
     model_choice: str = "1",
     prefix_choice: str = "yes",
     backup_yes: bool = False,
+    update_catalog: bool = True,
 ):
     """Patch the world for an in-process call to ``cli_config.codex_config()``.
 
@@ -776,7 +777,14 @@ def _setup_codex_env(
 
     answers = iter([level_choice, model_choice, prefix_choice])
     monkeypatch.setattr(cli_config.Prompt, "ask", lambda *a, **kw: next(answers))
-    monkeypatch.setattr(cli_config.Confirm, "ask", lambda *a, **kw: backup_yes)
+
+    def confirm(prompt, *args, **kwargs):
+        del args, kwargs
+        if "Refresh router-maestro-models.json" in str(prompt):
+            return update_catalog
+        return backup_yes
+
+    monkeypatch.setattr(cli_config.Confirm, "ask", confirm)
 
     return home, cwd
 
@@ -868,6 +876,53 @@ class TestCodexConfig:
         assert "tool_mode" not in entry
         assert "multi_agent_version" not in entry
 
+    def test_user_level_can_skip_model_catalog_update(self, tmp_path, monkeypatch):
+        home, _ = _setup_codex_env(
+            monkeypatch,
+            tmp_path,
+            level_choice="1",
+            update_catalog=False,
+        )
+        catalog_path = home / ".codex" / "router-maestro-models.json"
+        catalog_path.parent.mkdir(parents=True, exist_ok=True)
+        catalog_path.write_text('{"sentinel": true}\n', encoding="utf-8")
+
+        cli_config.codex_config(id_style=IdStyle.QUALIFIED)
+
+        assert json.loads(catalog_path.read_text(encoding="utf-8")) == {"sentinel": True}
+        with open(home / ".codex" / "config.toml", "rb") as file:
+            config = tomllib.load(file)
+        assert "model_catalog_json" not in config
+
+    def test_failed_project_catalog_update_does_not_write_broken_pointer(
+        self, tmp_path, monkeypatch
+    ):
+        home, cwd = _setup_codex_env(monkeypatch, tmp_path, level_choice="2")
+        monkeypatch.setattr(cc_codex, "_load_bundled_codex_catalog", lambda: None)
+
+        cli_config.codex_config(id_style=IdStyle.QUALIFIED)
+
+        assert not (home / ".codex" / "router-maestro-models.json").exists()
+        with open(cwd / ".codex" / "config.toml", "rb") as file:
+            project_config = tomllib.load(file)
+        assert project_config == {"model": "github-copilot/gpt-5.5"}
+
+    def test_project_level_can_refresh_user_model_catalog(self, tmp_path, monkeypatch):
+        home, cwd = _setup_codex_env(monkeypatch, tmp_path, level_choice="2")
+
+        cli_config.codex_config(id_style=IdStyle.QUALIFIED)
+
+        catalog_path = home / ".codex" / "router-maestro-models.json"
+        assert catalog_path.exists()
+        catalog = json.loads(catalog_path.read_text(encoding="utf-8"))
+        assert "github-copilot/gpt-5.5" in {model["slug"] for model in catalog["models"]}
+        with open(cwd / ".codex" / "config.toml", "rb") as file:
+            project_config = tomllib.load(file)
+        assert project_config == {
+            "model": "github-copilot/gpt-5.5",
+            "model_catalog_json": str(home / ".codex" / "router-maestro-models.json"),
+        }
+
     def test_old_beta_endpoint_choice_now_writes_stable_base_url(self, tmp_path, monkeypatch):
         """New configs use the stable dispatcher even if an old extra requests beta."""
         home, _ = _setup_codex_env(monkeypatch, tmp_path, level_choice="1")
@@ -895,7 +950,7 @@ class TestCodexConfig:
 
     def test_project_level_writes_only_model(self, tmp_path, monkeypatch):
         """Project-level scope must NOT write ``model_provider``/``model_providers``."""
-        _, cwd = _setup_codex_env(monkeypatch, tmp_path, level_choice="2")
+        home, cwd = _setup_codex_env(monkeypatch, tmp_path, level_choice="2")
 
         cli_config.codex_config(id_style=IdStyle.QUALIFIED)
 
@@ -903,7 +958,10 @@ class TestCodexConfig:
         assert project_path.exists()
         with open(project_path, "rb") as f:
             data = tomllib.load(f)
-        assert data == {"model": "github-copilot/gpt-5.5"}
+        assert data == {
+            "model": "github-copilot/gpt-5.5",
+            "model_catalog_json": str(home / ".codex" / "router-maestro-models.json"),
+        }
 
     def test_project_level_self_heals_stale_keys(self, tmp_path, monkeypatch):
         """Re-running at project level strips the unsupported keys older versions wrote."""
@@ -937,6 +995,7 @@ class TestCodexConfig:
         assert "model_provider" not in data
         assert "model_providers" not in data
         assert data["model_context_window"] == 400000
+        assert data["model_catalog_json"].endswith("/.codex/router-maestro-models.json")
 
     def test_project_level_preserves_other_model_providers(self, tmp_path, monkeypatch):
         """Project-level cleanup removes only ``router-maestro``, not user-added providers."""
@@ -967,6 +1026,7 @@ class TestCodexConfig:
         assert "model_provider" not in data
         assert "router-maestro" not in data["model_providers"]
         assert data["model_providers"]["other"]["name"] == "User Custom"
+        assert data["model_catalog_json"].endswith("/.codex/router-maestro-models.json")
 
 
 def test_claude_config_qualified_models_write_single_prefix_and_stable_url(

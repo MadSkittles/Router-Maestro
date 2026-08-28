@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import tomllib
 from pathlib import Path
 from typing import Literal
 
@@ -65,6 +66,20 @@ def _catalog() -> dict:
                 ],
                 "operation_capabilities": {"responses": True},
             },
+        ]
+    }
+
+
+def _stub_bundled_codex_catalog() -> dict:
+    return {
+        "models": [
+            {
+                "slug": "gpt-5.6-terra",
+                "display_name": "GPT-5.6 Terra",
+                "description": "Bundled baseline",
+                "context_window": 400_000,
+                "max_context_window": 1_050_000,
+            }
         ]
     }
 
@@ -288,6 +303,133 @@ async def test_codex_preview_does_not_require_running_codex_binary(
     assert 'model = "openai/gpt-5.6-sol"' in result.content
     assert 'base_url = "https://router.example/api/openai/v1"' in result.content
     assert str(service.home / ".codex" / "router-maestro-models.json") in result.content
+    assert result.model_catalog_path == str(service.home / ".codex" / "router-maestro-models.json")
+    assert result.model_catalog_updated is False
+    assert not (service.home / ".codex" / "router-maestro-models.json").exists()
+
+
+@pytest.mark.asyncio
+async def test_codex_apply_refreshes_user_model_catalog(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "router_maestro.cli.client_configs.codex._load_bundled_codex_catalog",
+        lambda: _stub_bundled_codex_catalog(),
+    )
+    service = _service(tmp_path)
+    service._model_cache["hk"] = (
+        service._clock(),
+        [{"provider": "stale", "id": "stale/model", "name": "Stale Model"}],
+    )
+    request = PortalConfigRequest(
+        context="hk",
+        client="codex",
+        main_model="openai/gpt-5.6-sol",
+    )
+
+    result = await service.apply_config(request)
+
+    catalog_path = service.home / ".codex" / "router-maestro-models.json"
+    assert result.model_catalog_path == str(catalog_path)
+    assert result.model_catalog_updated is True
+    assert catalog_path.exists()
+    catalog = json.loads(catalog_path.read_text(encoding="utf-8"))
+    assert "openai/gpt-5.6-sol" in {model["slug"] for model in catalog["models"]}
+
+
+@pytest.mark.asyncio
+async def test_codex_apply_can_skip_existing_model_catalog(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail_if_called():
+        raise AssertionError("skipped update must not inspect the Codex catalog")
+
+    monkeypatch.setattr(
+        "router_maestro.cli.client_configs.codex._load_bundled_codex_catalog",
+        fail_if_called,
+    )
+    service = _service(tmp_path)
+    catalog_path = service.home / ".codex" / "router-maestro-models.json"
+    catalog_path.parent.mkdir(parents=True)
+    catalog_path.write_text('{"sentinel": true}\n', encoding="utf-8")
+    request = PortalConfigRequest(
+        context="hk",
+        client="codex",
+        main_model="openai/gpt-5.6-sol",
+        update_model_catalog=False,
+    )
+
+    result = await service.apply_config(request)
+
+    assert result.model_catalog_path is None
+    assert result.model_catalog_updated is False
+    assert json.loads(catalog_path.read_text(encoding="utf-8")) == {"sentinel": True}
+
+
+@pytest.mark.asyncio
+async def test_codex_apply_reports_catalog_generation_failure_without_broken_pointer(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "router_maestro.cli.client_configs.codex._load_bundled_codex_catalog",
+        lambda: None,
+    )
+    service = _service(tmp_path)
+    request = PortalConfigRequest(
+        context="hk",
+        client="codex",
+        main_model="openai/gpt-5.6-sol",
+    )
+
+    result = await service.apply_config(request)
+
+    assert result.model_catalog_updated is False
+    assert result.model_catalog_error is not None
+    assert "model_catalog_json" not in result.content
+    assert not (service.home / ".codex" / "router-maestro-models.json").exists()
+
+
+@pytest.mark.asyncio
+async def test_codex_project_apply_refreshes_and_points_to_shared_user_catalog(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "router_maestro.cli.client_configs.codex._load_bundled_codex_catalog",
+        lambda: _stub_bundled_codex_catalog(),
+    )
+    service = _service(tmp_path)
+    project = tmp_path / "project"
+    project.mkdir()
+    service.add_project(str(project))
+    user_config = service.home / ".codex" / "config.toml"
+    user_config.parent.mkdir(parents=True)
+    user_config.write_text(
+        'model_provider = "router-maestro-hk"\n\n'
+        "[model_providers.router-maestro-hk]\n"
+        'base_url = "https://router.example/api/openai/v1"\n',
+        encoding="utf-8",
+    )
+    request = PortalConfigRequest(
+        context="hk",
+        client="codex",
+        level="project",
+        project_path=str(project),
+        main_model="openai/gpt-5.6-sol",
+    )
+
+    result = await service.apply_config(request)
+
+    catalog_path = service.home / ".codex" / "router-maestro-models.json"
+    assert result.model_catalog_updated is True
+    assert result.model_catalog_path == str(catalog_path)
+    assert catalog_path.exists()
+    with open(project / ".codex" / "config.toml", "rb") as file:
+        project_config = tomllib.load(file)
+    assert project_config["model_catalog_json"] == str(catalog_path)
 
 
 @pytest.mark.asyncio
@@ -318,7 +460,11 @@ async def test_codex_project_requires_matching_user_level_context(tmp_path: Path
 
     result = await service.preview_config(request)
     assert result.target_path == str(project / ".codex" / "config.toml")
-    assert result.content.strip() == 'model = "openai/gpt-5.6-sol"'
+    assert 'model = "openai/gpt-5.6-sol"' in result.content
+    assert (
+        f'model_catalog_json = "{service.home / ".codex" / "router-maestro-models.json"}"'
+        in result.content
+    )
 
 
 @pytest.mark.asyncio
@@ -369,6 +515,8 @@ def test_portal_app_serves_ui_and_sensitive_key_only_on_explicit_route(tmp_path:
 
     assert page.status_code == 200
     assert "ROUTER-MAESTRO" in page.text
+    assert "Codex Catalog" in page.text
+    assert "rm-catalog-toggle" in page.text
     assert '<link rel="icon" href="/favicon.svg" type="image/svg+xml">' in page.text
     assert favicon.status_code == 200
     assert favicon.headers["content-type"].startswith("image/svg+xml")
