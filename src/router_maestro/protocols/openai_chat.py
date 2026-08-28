@@ -1506,7 +1506,7 @@ def _encode_message(
         item = SemanticMessage(role=MessageRole.TOOL, content=(item,))
     elif isinstance(item, TextContent | ImageContent):
         item = SemanticMessage(role=MessageRole.USER, content=(item,))
-    elif isinstance(item, RefusalContent):
+    elif isinstance(item, RefusalContent | ReasoningSummary):
         item = SemanticMessage(role=MessageRole.ASSISTANT, content=(item,))
     if not isinstance(item, SemanticMessage):
         reject(_PROTOCOL, path, f"{type(item).__name__} cannot be encoded as a chat message")

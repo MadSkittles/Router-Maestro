@@ -348,6 +348,50 @@ def test_stable_responses_route_crosses_to_chat_for_text_and_tools() -> None:
     ]
 
 
+def test_responses_summary_only_reasoning_history_crosses_to_chat() -> None:
+    provider = _ChatOnlyProvider()
+    model_router = _router(provider, "chat-model")
+    payload = _payload()
+    payload["input"] = [
+        {
+            "type": "message",
+            "role": "user",
+            "content": [{"type": "input_text", "text": "Remember cobalt."}],
+        },
+        {
+            "type": "reasoning",
+            "id": "rs_summary",
+            "summary": [{"type": "summary_text", "text": "I should remember cobalt."}],
+        },
+        {
+            "type": "message",
+            "id": "msg_ack",
+            "role": "assistant",
+            "content": [{"type": "output_text", "text": "ACK"}],
+        },
+        {
+            "type": "message",
+            "role": "user",
+            "content": [{"type": "input_text", "text": "What should you remember?"}],
+        },
+    ]
+
+    with patch(
+        "router_maestro.server.routes.responses.get_router",
+        return_value=model_router,
+    ):
+        response = _client().post("/api/openai/v1/responses", json=payload)
+
+    assert response.status_code == 200, response.text
+    assert len(provider.requests) == 1
+    assert [message.role for message in provider.requests[0].messages] == [
+        "user",
+        "assistant",
+        "assistant",
+        "user",
+    ]
+
+
 def test_stable_responses_route_streams_cross_protocol_text_and_tool_events() -> None:
     provider = _ChatOnlyProvider()
     model_router = _router(provider, "chat-model")

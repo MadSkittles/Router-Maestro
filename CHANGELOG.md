@@ -4,6 +4,18 @@ All notable changes to Router-Maestro are documented here.
 
 ---
 
+## Unreleased
+
+### Fixed
+
+- **Codex can resume summary-only reasoning on Chat-only models.** Responses
+  reasoning items without non-empty encrypted continuation state are now
+  projected as ordinary Chat reasoning history instead of being misclassified
+  as opaque state and rejected before provider I/O. Non-empty encrypted state
+  remains affinity-bound and fails closed on incompatible transports.
+
+---
+
 ## v0.8.0 (2026-08-28)
 
 ### Added

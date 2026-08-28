@@ -785,6 +785,85 @@ async def test_responses_codex_controls_and_namespace_encode_to_chat() -> None:
 
 
 @pytest.mark.asyncio
+async def test_responses_summary_only_reasoning_history_encodes_to_chat() -> None:
+    responses = OpenAIResponsesRuntime(
+        provider_name="github-copilot",
+        binding_id="copilot-openai-responses",
+    )
+    payload = {
+        "model": "gemini-test",
+        "instructions": "Follow project instructions.",
+        "input": [
+            {
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": "Remember cobalt."}],
+            },
+            {
+                "type": "reasoning",
+                "id": "rs_summary",
+                "summary": [{"type": "summary_text", "text": "I should remember cobalt."}],
+            },
+            {
+                "type": "message",
+                "id": "msg_ack",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "ACK"}],
+            },
+            {
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": "What should you remember?"}],
+            },
+        ],
+    }
+
+    assert responses.inspect_request(payload).opaque_continuation is False
+    semantic = await responses.decode_request(payload)
+    reasoning = semantic.input[2]
+    assert isinstance(reasoning, ReasoningSummary)
+    assert reasoning.opaque_state is None
+
+    chat = await OpenAIChatRuntime().encode_request(semantic)
+
+    assert chat["messages"] == [
+        {"role": "system", "content": "Follow project instructions."},
+        {"role": "user", "content": "Remember cobalt."},
+        {
+            "role": "assistant",
+            "content": None,
+            "reasoning_content": "I should remember cobalt.",
+        },
+        {"role": "assistant", "content": "ACK"},
+        {"role": "user", "content": "What should you remember?"},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_responses_opaque_reasoning_history_still_rejects_chat() -> None:
+    responses = OpenAIResponsesRuntime(
+        provider_name="github-copilot",
+        binding_id="copilot-openai-responses",
+    )
+    semantic = await responses.decode_request(
+        {
+            "model": "gemini-test",
+            "input": [
+                {
+                    "type": "reasoning",
+                    "id": "rs_opaque",
+                    "summary": [{"type": "summary_text", "text": "private plan"}],
+                    "encrypted_content": "provider-state",
+                }
+            ],
+        }
+    )
+
+    with pytest.raises(ProtocolRepresentabilityError, match="opaque reasoning state"):
+        await OpenAIChatRuntime().encode_request(semantic)
+
+
+@pytest.mark.asyncio
 async def test_copilot_chat_reasoning_opaque_round_trips_for_bound_runtime() -> None:
     runtime = OpenAIChatRuntime(
         origin_provider="github-copilot",
