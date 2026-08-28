@@ -195,6 +195,31 @@ class _TopPContractCopilotProvider(CopilotProvider):
         return None
 
 
+class _ChatHistoryCopilotProvider(CopilotProvider):
+    def __init__(self, executor: _RecordingCopilotExecutor) -> None:
+        super().__init__()
+        self._generation_bindings = tuple(
+            replace(binding, executor=executor) for binding in super().bindings()
+        )
+
+    async def list_models(self, force_refresh: bool = False) -> list[ModelInfo]:
+        del force_refresh
+        return [
+            ModelInfo(
+                id="gemini-history",
+                name="gemini-history",
+                provider=self.name,
+                supported_endpoints=("/chat/completions",),
+            )
+        ]
+
+    def is_authenticated(self) -> bool:
+        return True
+
+    async def ensure_token(self) -> None:
+        return None
+
+
 class _ChatOnlyCopilotProvider(CopilotProvider):
     async def list_models(self, force_refresh: bool = False) -> list[ModelInfo]:
         del force_refresh
@@ -235,6 +260,45 @@ def test_stable_anthropic_gpt54_top_p_skips_responses_before_io() -> None:
     assert response.json()["content"] == [{"type": "text", "text": "pong"}]
     assert [attempt.protocol for attempt in executor.attempts] == [WireProtocol.OPENAI_CHAT]
     assert executor.attempts[0].payload["top_p"] == 1
+
+
+def test_claude_code_replay_history_crosses_to_chat_without_recovery_400() -> None:
+    executor = _RecordingCopilotExecutor()
+    provider = _ChatHistoryCopilotProvider(executor)
+    client, model_router = _client(provider, model="gemini-history")
+    payload = {
+        "model": "github-copilot/gemini-history",
+        "max_tokens": 64,
+        "messages": [
+            {"role": "user", "content": "Remember cobalt."},
+            {"role": "system", "content": "Late client context."},
+            {
+                "role": "assistant",
+                "content": [
+                    {"type": "thinking", "thinking": "first ", "signature": ""},
+                    {"type": "thinking", "thinking": "second", "signature": ""},
+                    {"type": "text", "text": "ACK"},
+                ],
+            },
+            {"role": "user", "content": "What should you remember?"},
+        ],
+    }
+
+    with patch(
+        "router_maestro.server.routes.anthropic.get_router",
+        return_value=model_router,
+    ):
+        response = client.post("/api/anthropic/v1/messages", json=payload)
+
+    assert response.status_code == 200, response.text
+    assert len(executor.attempts) == 1
+    assert executor.attempts[0].protocol is WireProtocol.OPENAI_CHAT
+    assert executor.attempts[0].payload["messages"] == [
+        {"role": "user", "content": "Remember cobalt."},
+        {"role": "system", "content": "Late client context."},
+        {"role": "assistant", "content": "ACK", "reasoning_content": "first second"},
+        {"role": "user", "content": "What should you remember?"},
+    ]
 
 
 def test_stable_anthropic_tool_choice_any_decodes_copilot_chat_tool_call() -> None:

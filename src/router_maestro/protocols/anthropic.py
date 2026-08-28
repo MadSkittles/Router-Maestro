@@ -1600,9 +1600,9 @@ def _decode_message(
     role_value = require_string(
         message.get("role"), protocol=_PROTOCOL, parameter=f"{parameter}.role"
     )
-    if role_value not in {"user", "assistant"}:
-        decode_reject(_PROTOCOL, f"{parameter}.role", "must be user or assistant")
-    role = MessageRole.USER if role_value == "user" else MessageRole.ASSISTANT
+    if role_value not in {"user", "assistant", "system"}:
+        decode_reject(_PROTOCOL, f"{parameter}.role", "must be user, assistant, or system")
+    role = MessageRole(role_value)
     raw_content = message.get("content")
     if isinstance(raw_content, str):
         return (SemanticMessage(role=role, content=(TextContent(raw_content),)),)
@@ -1647,16 +1647,16 @@ def _decode_message(
         elif block_type in {"thinking", "redacted_thinking"}:
             if role is not MessageRole.ASSISTANT:
                 decode_reject(_PROTOCOL, path, "thinking blocks require assistant role")
-            pending.append(
-                _decode_reasoning_block(
-                    block,
-                    parameter=path,
-                    model=model,
-                    item_id=f"anthropic-thinking-{message_index}-{block_index}",
-                    origin_provider=origin_provider,
-                    decode_opaque_state=decode_opaque_state,
-                )
+            reasoning = _decode_reasoning_block(
+                block,
+                parameter=path,
+                model=model,
+                item_id=f"anthropic-thinking-{message_index}-{block_index}",
+                origin_provider=origin_provider,
+                decode_opaque_state=decode_opaque_state,
             )
+            if reasoning.text or reasoning.opaque_state is not None:
+                pending.append(reasoning)
         else:
             decode_reject(_PROTOCOL, f"{path}.type", f"unsupported block {block_type!r}")
     flush()
@@ -1878,16 +1878,14 @@ def _decode_reasoning_block(
             parameter=f"{parameter}.signature",
         )
         if signature == "":
-            decode_reject(
-                _PROTOCOL,
-                f"{parameter}.signature",
-                "Invalid signature in thinking block",
-            )
+            signature = None
     elif block_type == "redacted_thinking":
         text = ""
         signature = require_string(
             block.get("data"), protocol=_PROTOCOL, parameter=f"{parameter}.data"
         )
+        if signature == "":
+            signature = None
     else:  # pragma: no cover - guarded by the caller
         decode_reject(_PROTOCOL, f"{parameter}.type", "unsupported reasoning block")
     opaque = None

@@ -2039,8 +2039,9 @@ def _inspect_reasoning_continuation(value: object) -> tuple[tuple[str, ...], boo
             continue
         encrypted = item.get("encrypted_content")
         if isinstance(encrypted, str):
-            carriers.append(encrypted)
-            opaque = True
+            if encrypted:
+                carriers.append(encrypted)
+                opaque = True
         elif encrypted is not None:
             opaque = True
     return tuple(carriers), opaque
@@ -2568,17 +2569,24 @@ def _decode_reasoning_item(
             texts.append(
                 require_string(part.get("text"), protocol=_PROTOCOL, parameter=f"{path}.text")
             )
-    return ReasoningSummary(
-        text="".join(texts),
-        opaque_state=OpaqueState(
+    encrypted_content = value.get("encrypted_content")
+    if encrypted_content is not None and not isinstance(encrypted_content, str):
+        decode_reject(
+            _PROTOCOL,
+            f"{parameter}.encrypted_content",
+            "must be a string or null",
+        )
+    opaque_state = None
+    if encrypted_content:
+        opaque_state = OpaqueState(
             origin_protocol=_PROTOCOL,
             origin_provider=provider_name,
             origin_model=model,
             item_id=item_id,
             blob=value,
             origin_binding=binding_id,
-        ),
-    )
+        )
+    return ReasoningSummary(text="".join(texts), opaque_state=opaque_state)
 
 
 def _decode_tools(value: object) -> tuple[ToolDefinition, ...]:

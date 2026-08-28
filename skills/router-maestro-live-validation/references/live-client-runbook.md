@@ -92,6 +92,13 @@ Pass only if the exact token survives both tool-result round trips and the tempo
 deleted. Split adjacent assistant text blocks may be joined when they visibly form the exact
 requested phrase; missing or reordered content is a failure.
 
+For automated multi-turn checks, prefer `--output-format stream-json
+--include-partial-messages --verbose` and concatenate every
+`stream_event.event.delta.text` whose event is `content_block_delta` and delta type is
+`text_delta`. Claude Code's aggregate JSON `result` can contain only the final assistant text
+block when a cross-protocol response is split across several blocks; treating that field alone
+as the complete answer creates false missing-prefix failures.
+
 ## Phase 3: Codex multi-turn session
 
 Use a Responses-capable model to exercise the identity path. Disable hosted web search when the
@@ -135,6 +142,12 @@ unexpected model/transport switch occurred. Correlate by request ID and selected
 launch auxiliary title, memory, or summarization requests with a different model while the tested
 turn is running. Record those separately instead of attributing them to the requested path.
 
+Claude Code may perform one deliberate `mid-conversation-system-2026-04-07` beta negotiation at
+the start of a session. Router-Maestro returns a recognizable pre-attempt 400, after which Claude
+removes that beta and retries with `<system-reminder>` blocks. Classify it as expected negotiation
+only when the response names that exact beta, no provider attempt occurred, the retry succeeds, and
+it does not repeat on later turns. Other 400s remain failures to investigate.
+
 ## Failure investigation
 
 1. Keep the client session open until the request ID and failure phase are known.
@@ -160,6 +173,9 @@ Known regression signatures worth checking:
   blob may have been replayed without its upstream reasoning ID.
 - `No provider transport is available for anthropic_messages` only on turn 2: empty Anthropic
   reasoning carriers may have been mistaken for opaque continuation state.
+- apparently truncated Claude exact-match output while raw text deltas contain the full value:
+  aggregate JSON `result` retained only the final assistant text block; validate the joined text
+  deltas before diagnosing an RM stream-loss bug.
 - bare Copilot Chat 400 after MCP initialization: inspect the full tool registry for Gemini schema
   incompatibilities, especially nullable type arrays and scalar enums attached to array schemas.
 

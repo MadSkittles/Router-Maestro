@@ -4,6 +4,24 @@ All notable changes to Router-Maestro are documented here.
 
 ---
 
+## Unreleased
+
+### Fixed
+
+- **Codex can resume summary-only reasoning on Chat-only models.** Responses
+  reasoning items without non-empty encrypted continuation state are now
+  projected as ordinary Chat reasoning history instead of being misclassified
+  as opaque state and rejected before provider I/O. Non-empty encrypted state
+  remains affinity-bound and fails closed on incompatible transports.
+
+- **Claude Code no longer needs hidden recovery retries on Chat-only models.**
+  Message-level system context is accepted at the Anthropic ingress, empty
+  thinking signatures are treated as absent continuation state, and ordered
+  reasoning fragments surrounding one valid provider capsule are merged for
+  Chat replay. Multiple opaque states still fail closed.
+
+---
+
 ## v0.8.0 (2026-08-28)
 
 ### Added
