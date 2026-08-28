@@ -344,3 +344,170 @@ def test_reject_unpreservable_native_options_flags_temp_plus_top_p():
             {"temperature": 0.5, "top_p": 0.9}
         )
     assert excinfo.value.parameter == "top_p"
+
+
+def test_drop_unsigned_thinking_removes_empty_signature_blocks():
+    from router_maestro.providers.copilot import CopilotOutboundContract
+
+    signed = {"type": "thinking", "thinking": "kept", "signature": "a" * 40}
+    unsigned_empty = {"type": "thinking", "thinking": "poison", "signature": ""}
+    unsigned_missing = {"type": "thinking", "thinking": "poison"}
+    redacted_empty = {"type": "redacted_thinking", "data": ""}
+    text = {"type": "text", "text": "visible"}
+    tool_use = {"type": "tool_use", "id": "toolu_1", "name": "f", "input": {}}
+    body = {
+        "messages": [
+            {
+                "role": "assistant",
+                "content": [
+                    signed,
+                    unsigned_empty,
+                    unsigned_missing,
+                    redacted_empty,
+                    text,
+                    tool_use,
+                ],
+            }
+        ]
+    }
+
+    CopilotOutboundContract.drop_unsigned_thinking(body)
+
+    # Only the signed thinking block survives; text/tool_use are untouched.
+    assert body["messages"][0]["content"] == [signed, text, tool_use]
+
+
+def test_drop_unsigned_thinking_is_copy_on_write_when_all_signed():
+    from router_maestro.providers.copilot import CopilotOutboundContract
+
+    original_messages = [
+        {
+            "role": "assistant",
+            "content": [
+                {"type": "thinking", "thinking": "t", "signature": "s" * 40},
+                {"type": "text", "text": "hi"},
+            ],
+        }
+    ]
+    body = {"messages": original_messages}
+
+    CopilotOutboundContract.drop_unsigned_thinking(body)
+
+    # Nothing to drop -> the shared ingress list is left in place unchanged.
+    assert body["messages"] is original_messages
+
+
+def test_drop_unsigned_thinking_does_not_mutate_shared_ingress():
+    from router_maestro.providers.copilot import CopilotOutboundContract
+
+    turn_content = [
+        {"type": "thinking", "thinking": "poison", "signature": ""},
+        {"type": "text", "text": "hi"},
+    ]
+    ingress_messages = [{"role": "assistant", "content": turn_content}]
+    # ``_build_native_messages_payload`` only shallow-copies the top-level body,
+    # so the sanitizer must rebuild rather than mutate the caller's structures.
+    body = {"messages": ingress_messages}
+
+    CopilotOutboundContract.drop_unsigned_thinking(body)
+
+    # The rebuilt body drops the unsigned block...
+    assert body["messages"][0]["content"] == [{"type": "text", "text": "hi"}]
+    # ...while the shared ingress message list and content stay intact.
+    assert ingress_messages[0]["content"] is turn_content
+    assert len(turn_content) == 2
+
+
+def test_drop_unsigned_thinking_ignores_non_list_content():
+    from router_maestro.providers.copilot import CopilotOutboundContract
+
+    # String content (system turns) and missing messages must not raise.
+    body = {"messages": [{"role": "user", "content": "plain string"}]}
+    CopilotOutboundContract.drop_unsigned_thinking(body)
+    assert body["messages"][0]["content"] == "plain string"
+
+    CopilotOutboundContract.drop_unsigned_thinking({})  # no messages key
+
+
+def test_is_signature_error_detects_thinking_signature_400():
+    from router_maestro.providers.copilot import _is_signature_error
+
+    real = (
+        b'{"type":"error","error":{"type":"invalid_request_error","message":'
+        b'"messages.3.content.3: Invalid `signature` in `thinking` block"}}'
+    )
+    assert _is_signature_error(real) is True
+    assert _is_signature_error(real.decode()) is True
+    # Needs BOTH tokens; unrelated 400s must not trigger the strip-and-retry.
+    assert _is_signature_error(b'{"error":{"message":"missing signature"}}') is False
+    assert _is_signature_error("thinking budget too large") is False
+    assert _is_signature_error(b"") is False
+
+
+def test_is_signature_error_requires_invalid_request_error_type():
+    from router_maestro.providers.copilot import _is_signature_error
+
+    # A structured error of a DIFFERENT type that merely mentions both tokens
+    # must NOT misfire (would otherwise discard history and mask the real cause).
+    other_type = (
+        b'{"type":"error","error":{"type":"rate_limit_error","message":'
+        b'"thinking signature service is overloaded"}}'
+    )
+    assert _is_signature_error(other_type) is False
+    # A capability rejection that references both words is not a signature 400.
+    unsupported = (
+        b'{"error":{"type":"invalid_request_error","code":"unsupported_api_for_model",'
+        b'"message":"this model does not support thinking or signatures"}}'
+    )
+    # Same error type + both tokens -> treated as a signature error (bounded,
+    # documented tradeoff): the strip-and-retry is a safe no-op if wrong.
+    assert _is_signature_error(unsupported) is True
+    # Non-JSON body still recovers via the two-token fallback.
+    assert _is_signature_error(b"Invalid signature in thinking block") is True
+
+
+def test_strip_history_thinking_blocks_removes_all_reasoning_copy_on_write():
+    from router_maestro.providers.copilot import _strip_history_thinking_blocks
+
+    text = {"type": "text", "text": "answer"}
+    tool_use = {"type": "tool_use", "id": "toolu_1", "name": "f", "input": {}}
+    assistant_content = [
+        {"type": "thinking", "thinking": "t", "signature": "s" * 40},
+        {"type": "redacted_thinking", "data": "d" * 40},
+        text,
+        tool_use,
+    ]
+    # Reasoning blocks are assistant-only in the wire schema, so the strip is
+    # role-agnostic (matching drop_unsigned_thinking) — a stray thinking block on
+    # any turn is removed rather than special-cased by role.
+    plain_user = [{"type": "text", "text": "q"}]
+    messages = [
+        {"role": "assistant", "content": assistant_content},
+        {"role": "user", "content": plain_user},
+    ]
+    body = {"messages": messages}
+
+    _strip_history_thinking_blocks(body)
+
+    # All assistant thinking/redacted_thinking gone; text + tool_use kept.
+    assert body["messages"][0]["content"] == [text, tool_use]
+    # The reasoning-free user turn is left in place (copy-on-write).
+    assert body["messages"][1]["content"] is plain_user
+    # The shared ingress content list for the mutated turn is not mutated.
+    assert assistant_content == [
+        {"type": "thinking", "thinking": "t", "signature": "s" * 40},
+        {"type": "redacted_thinking", "data": "d" * 40},
+        text,
+        tool_use,
+    ]
+
+
+def test_strip_history_thinking_blocks_is_noop_without_reasoning():
+    from router_maestro.providers.copilot import _strip_history_thinking_blocks
+
+    original = [{"role": "assistant", "content": [{"type": "text", "text": "hi"}]}]
+    body = {"messages": original}
+    _strip_history_thinking_blocks(body)
+    # Nothing removed -> shared list left in place.
+    assert body["messages"] is original
+    _strip_history_thinking_blocks({})  # no messages key must not raise
