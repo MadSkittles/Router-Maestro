@@ -140,7 +140,8 @@ def thaw_json(value: FrozenJsonValue | object) -> Any:
 
 def has_typed_block(value: object, block_types: set[str]) -> bool:
     if isinstance(value, Mapping):
-        if value.get("type") in block_types:
+        block_type = value.get("type")
+        if isinstance(block_type, str) and block_type in block_types:
             return True
         return any(has_typed_block(item, block_types) for item in value.values())
     if isinstance(value, Sequence) and not isinstance(value, str | bytes | bytearray):
