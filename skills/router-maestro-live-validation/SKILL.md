@@ -14,7 +14,8 @@ Before running, read [references/live-client-runbook.md](references/live-client-
 
 Use the bundled runner for repeatable one-shot and cross-request recall coverage. It reads the
 selected Router-Maestro context, fetches the live model catalog, creates an isolated Codex home and
-version-matched model catalog, and leaves persistent Claude/Codex configuration untouched:
+version-matched model catalog, applies Claude Code's `[1m]` hint when the server marks that context
+tier as the default, and leaves persistent Claude/Codex configuration untouched:
 
 ```bash
 uv run python skills/router-maestro-live-validation/scripts/live_model_matrix.py \

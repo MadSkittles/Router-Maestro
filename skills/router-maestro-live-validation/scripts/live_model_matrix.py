@@ -442,6 +442,26 @@ def build_claude_command(
     return command
 
 
+def claude_model_argument(model: CatalogModel) -> str:
+    """Apply Claude Code's 1M hint when the server marks that tier as default."""
+    if model.wire_id.endswith("[1m]"):
+        return model.wire_id
+    options = model.raw.get("context_window_options")
+    if not isinstance(options, list):
+        return model.wire_id
+    for option in options:
+        if not isinstance(option, dict) or option.get("is_default") is not True:
+            continue
+        prompt_tokens = option.get("max_prompt_tokens")
+        if (
+            isinstance(prompt_tokens, int)
+            and not isinstance(prompt_tokens, bool)
+            and prompt_tokens > 900_000
+        ):
+            return f"{model.wire_id}[1m]"
+    return model.wire_id
+
+
 def build_codex_command(
     runtime: Runtime,
     model: str,
@@ -607,13 +627,14 @@ def has_codex_fallback_warning(processes: Iterable[ProcessResult]) -> bool:
 
 def run_claude_case(runtime: Runtime, model: CatalogModel, phase: str) -> CaseAttempt:
     environment = client_environment(runtime, "claude")
+    command_model = claude_model_argument(model)
     token = f"RMCLAUDE{phase.upper()}{secrets.token_hex(8).upper()}"
     processes: list[ProcessResult] = []
 
     if phase == "smoke":
         prompt = f"Reply with exactly this token and nothing else: {token}"
         process = run_process(
-            build_claude_command(model.wire_id, prompt),
+            build_claude_command(command_model, prompt),
             environment=environment,
             cwd=runtime.project,
             timeout_seconds=runtime.timeout_seconds,
@@ -632,7 +653,7 @@ def run_claude_case(runtime: Runtime, model: CatalogModel, phase: str) -> CaseAt
         f"Reply with exactly {acknowledgement} and nothing else."
     )
     first = run_process(
-        build_claude_command(model.wire_id, first_prompt, session_id=session_id),
+        build_claude_command(command_model, first_prompt, session_id=session_id),
         environment=environment,
         cwd=runtime.project,
         timeout_seconds=runtime.timeout_seconds,
@@ -647,7 +668,7 @@ def run_claude_case(runtime: Runtime, model: CatalogModel, phase: str) -> CaseAt
         "Reply with only the token and no punctuation."
     )
     second = run_process(
-        build_claude_command(model.wire_id, second_prompt, session_id=session_id, resume=True),
+        build_claude_command(command_model, second_prompt, session_id=session_id, resume=True),
         environment=environment,
         cwd=runtime.project,
         timeout_seconds=runtime.timeout_seconds,

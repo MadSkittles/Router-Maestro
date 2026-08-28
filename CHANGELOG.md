@@ -4,6 +4,15 @@ All notable changes to Router-Maestro are documented here.
 
 ---
 
+## Unreleased
+
+### Fixed
+
+- **Live Claude validation preserves the server-default 1M context.** The reusable model runner
+  and TUI runbook now retain Claude Code's `[1m]` hint when the selected catalog model defaults to
+  the 1M tier, preventing qualified custom IDs from falling back to an early compact window during
+  file/MCP multi-turn checks.
+
 ## v0.8.1 (2026-08-28)
 
 ### Added
