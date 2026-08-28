@@ -10,6 +10,22 @@ command is a smoke test; it does not count as multi-turn validation.
 
 Before running, read [references/live-client-runbook.md](references/live-client-runbook.md).
 
+## Automated model matrix
+
+Use the bundled runner for repeatable one-shot and cross-request recall coverage. It reads the
+selected Router-Maestro context, fetches the live model catalog, creates an isolated Codex home and
+version-matched model catalog, and leaves persistent Claude/Codex configuration untouched:
+
+```bash
+uv run python skills/router-maestro-live-validation/scripts/live_model_matrix.py \
+  --context remote-vm-hk --client all --phase all
+```
+
+Use `--provider`, repeatable `--model`, or repeatable shell-glob `--model-pattern` filters for a
+bounded investigation. Add `--keep-logs` only when sanitized per-attempt diagnostics and JSON/TSV
+summaries need to be retained. The `recall` phase is a real two-request session-resume check, but it
+does not replace the interactive file and MCP rounds required by the full completion gate.
+
 ## Required invariants
 
 - Confirm the exact test image/commit and `/health` before sending model traffic.

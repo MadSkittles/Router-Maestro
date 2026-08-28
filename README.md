@@ -1040,6 +1040,22 @@ RM_INTEGRATION_MAX_REASONING_MODELS=3 make integration-test
 RM_INTEGRATION_MAX_REASONING_MODELS=0 make integration-test  # full reasoning sweep
 ```
 
+### Deployed Claude/Codex Validation
+
+The repository also includes a repeatable live-client runner for an already deployed test
+context. It fetches the context's current model list, runs Claude Code and Codex one-shot smoke
+cases, then verifies a fresh two-request recall session for every selected model. Codex receives a
+temporary version-matched model catalog; persistent client configuration is not changed.
+
+```bash
+make live-validation RM_LIVE_ARGS='--context remote-vm-hk --client all --phase all'
+```
+
+Use `--provider`, repeatable `--model`, `--model-pattern`, or `--max-models` to bound a canary.
+Sanitized JSON/TSV and per-attempt logs are temporary unless `--keep-logs` or `--output-dir` is
+specified. The automated recall check complements rather than replaces the interactive file/MCP
+rounds in `skills/router-maestro-live-validation/`.
+
 ### Request Preparation Benchmark
 
 ```bash

@@ -22,6 +22,20 @@ Obtain the current model list from Router-Maestro instead of relying on a stale 
 Select the user-requested models; for a representative Copilot sweep, cover available Gemini,
 Grok, and MAI families.
 
+Prefer the bundled runner for the repeatable matrix:
+
+```bash
+uv run python skills/router-maestro-live-validation/scripts/live_model_matrix.py \
+  --context remote-vm-hk --client all --phase all
+```
+
+`--phase all` first runs one-shot smoke cases and then starts a fresh persisted session per
+`(client, model)` for a two-request recall check. It dynamically obtains
+`/api/openai/v1/models`, gives Codex an isolated version-matched `model_catalog_json`, retries only
+an explicit 500/502/503/504 once, and treats any Codex fallback-metadata warning as a failure.
+Temporary state and sanitized logs are deleted by default; use `--keep-logs` or `--output-dir` when
+diagnostics must survive. The commands below remain useful for narrowing down an individual case.
+
 Claude example:
 
 ```bash
@@ -185,8 +199,10 @@ Run:
 
 ```bash
 uv run pytest tests/ -q
-uv run ruff check src/ tests/
-uv run ruff format --check src/ tests/
+uv run ruff check src/ tests/ integration_tests/ \
+  skills/router-maestro-live-validation/scripts/
+uv run ruff format --check src/ tests/ integration_tests/ \
+  skills/router-maestro-live-validation/scripts/
 npx -y basedpyright@1.39.10
 ```
 

@@ -75,7 +75,13 @@ line-length = 100
 select = ["E", "F", "I", "N", "W", "UP"]
 
 [tool.basedpyright]
-include = ["src/router_maestro", "tests", "integration_tests", "scripts"]
+include = [
+    "src/router_maestro",
+    "tests",
+    "integration_tests",
+    "scripts",
+    "skills/router-maestro-live-validation/scripts",
+]
 pythonVersion = "3.14"
 typeCheckingMode = "basic"
 
