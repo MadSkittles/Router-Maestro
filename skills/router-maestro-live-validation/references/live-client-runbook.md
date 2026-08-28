@@ -86,8 +86,12 @@ Gemini model is the default representative for Anthropic-to-Chat semantic conver
 Start a real interactive session. Use the user's authorized permission mode; `bypassPermissions`
 is appropriate only when the user has explicitly authorized it.
 
+Use the model string produced by Router-Maestro configuration. If the selected server-advertised
+context is 1M, retain the `[1m]` suffix; Claude Code uses that client-side hint to avoid applying
+fallback context metadata to qualified custom model IDs.
+
 ```bash
-claude --model "github-copilot/gemini-3.6-flash" \
+claude --model "github-copilot/gemini-3.6-flash[1m]" \
   --permission-mode bypassPermissions
 ```
 
@@ -190,6 +194,10 @@ Known regression signatures worth checking:
 - apparently truncated Claude exact-match output while raw text deltas contain the full value:
   aggregate JSON `result` retained only the final assistant text block; validate the joined text
   deltas before diagnosing an RM stream-loss bug.
+- Claude Code compacts a qualified model near 200K even though the live catalog defaults to 1M:
+  the explicit model argument lost its `[1m]` client hint. Re-run with the configured model string;
+  do not diagnose the resulting compact-summary recall error as an RM transport failure when audit
+  shows selected HTTP 200 attempts with explicit terminals.
 - bare Copilot Chat 400 after MCP initialization: inspect the full tool registry for Gemini schema
   incompatibilities, especially nullable type arrays and scalar enums attached to array schemas.
 

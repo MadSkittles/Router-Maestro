@@ -195,6 +195,26 @@ def test_claude_command_uses_stream_deltas_and_safe_mode() -> None:
     assert "--no-session-persistence" in command
 
 
+def test_claude_model_argument_applies_server_default_1m_context() -> None:
+    model = _model("github-copilot/gemini-3.6-flash")
+    model.raw["context_window_options"] = [
+        {"tier": "default", "max_prompt_tokens": 200_000, "is_default": False},
+        {"tier": "long_context", "max_prompt_tokens": 936_000, "is_default": True},
+    ]
+
+    assert runner.claude_model_argument(model) == "github-copilot/gemini-3.6-flash[1m]"
+
+
+def test_claude_model_argument_keeps_nondefault_1m_tier_unsuffixed() -> None:
+    model = _model("github-copilot/gpt-5.6-terra")
+    model.raw["context_window_options"] = [
+        {"tier": "default", "max_prompt_tokens": 200_000, "is_default": True},
+        {"tier": "long_context", "max_prompt_tokens": 936_000, "is_default": False},
+    ]
+
+    assert runner.claude_model_argument(model) == "github-copilot/gpt-5.6-terra"
+
+
 def test_claude_environment_isolates_session_state(tmp_path: Path) -> None:
     runtime = runner.Runtime(
         target=runner.TargetContext("hk", "https://rm.example", "secret"),
