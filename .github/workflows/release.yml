@@ -64,7 +64,9 @@ jobs:
         run: uv sync --extra dev
 
       - name: Run ruff check
-        run: uv run ruff check src/ tests/
+        run: |
+          uv run ruff check src/ tests/ integration_tests/ \
+            skills/router-maestro-live-validation/scripts/
 
       - name: Run tests
         run: uv run pytest tests/ -v

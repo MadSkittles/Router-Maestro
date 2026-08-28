@@ -1,4 +1,4 @@
-.PHONY: help install dev test integration-test lint format clean build push run stop logs shell docker-up docker-down docker-logs buildx-setup build-multiarch dist publish publish-test dev-up dev-down dev-logs dev-build
+.PHONY: help install dev test integration-test live-validation lint format clean build push run stop logs shell docker-up docker-down docker-logs buildx-setup build-multiarch dist publish publish-test dev-up dev-down dev-logs dev-build
 
 # Variables
 VERSION := $(shell grep '^version' pyproject.toml | head -1 | cut -d'"' -f2)
@@ -15,6 +15,7 @@ help:
 	@echo "  make dev         Install with dev dependencies"
 	@echo "  make test        Run tests"
 	@echo "  make integration-test  Run local live-backend integration tests"
+	@echo "  make live-validation  Run deployed Claude/Codex validation (set RM_LIVE_ARGS)"
 	@echo "  make lint        Run linter (ruff check)"
 	@echo "  make format      Format code (ruff format)"
 	@echo "  make clean       Clean build artifacts"
@@ -62,12 +63,15 @@ test:
 integration-test:
 	uv run pytest integration_tests/ -v
 
+live-validation:
+	uv run python skills/router-maestro-live-validation/scripts/live_model_matrix.py $(RM_LIVE_ARGS)
+
 lint:
-	uv run ruff check src/ tests/
+	uv run ruff check src/ tests/ integration_tests/ skills/router-maestro-live-validation/scripts/
 
 format:
-	uv run ruff format src/ tests/
-	uv run ruff check --fix src/ tests/
+	uv run ruff format src/ tests/ integration_tests/ skills/router-maestro-live-validation/scripts/
+	uv run ruff check --fix src/ tests/ integration_tests/ skills/router-maestro-live-validation/scripts/
 
 clean:
 	rm -rf build/ dist/ *.egg-info .pytest_cache .ruff_cache src/*.egg-info

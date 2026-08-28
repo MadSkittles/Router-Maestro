@@ -27,10 +27,14 @@ jobs:
         run: uv sync --extra dev
 
       - name: Run ruff check
-        run: uv run ruff check src/ tests/ integration_tests/
+        run: |
+          uv run ruff check src/ tests/ integration_tests/ \
+            skills/router-maestro-live-validation/scripts/
 
       - name: Run ruff format check
-        run: uv run ruff format --check src/ tests/ integration_tests/
+        run: |
+          uv run ruff format --check src/ tests/ integration_tests/ \
+            skills/router-maestro-live-validation/scripts/
 
   test:
     name: Test (Python ${{ matrix.python-version }})

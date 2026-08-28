@@ -6,6 +6,14 @@ All notable changes to Router-Maestro are documented here.
 
 ## Unreleased
 
+### Added
+
+- **Repeatable deployed Claude/Codex validation.** The live-validation Skill now includes a
+  context-aware runner that fetches the current server model list, executes one-shot smoke and
+  two-request recall cases through both clients, generates isolated version-matched Codex model
+  metadata, retries only explicit transient 5xx failures, and emits optional sanitized JSON/TSV
+  diagnostics without changing persistent client configuration.
+
 ### Fixed
 
 - **Codex can resume summary-only reasoning on Chat-only models.** Responses
