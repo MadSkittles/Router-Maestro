@@ -864,6 +864,84 @@ async def test_responses_opaque_reasoning_history_still_rejects_chat() -> None:
 
 
 @pytest.mark.asyncio
+async def test_chat_request_merges_plain_reasoning_around_one_matching_opaque_state() -> None:
+    state = OpaqueState(
+        origin_protocol=WireProtocol.OPENAI_CHAT,
+        origin_provider="github-copilot",
+        origin_model="gemini-test",
+        origin_binding="copilot-openai-chat",
+        item_id="reasoning_1",
+        blob="provider-state",
+    )
+    request = SemanticRequest(
+        model="gemini-test",
+        input=(
+            SemanticMessage(
+                role=MessageRole.ASSISTANT,
+                content=(
+                    ReasoningSummary("", opaque_state=state),
+                    ReasoningSummary("first "),
+                    ReasoningSummary("second"),
+                    TextContent("ACK"),
+                ),
+            ),
+        ),
+    )
+    runtime = OpenAIChatRuntime(
+        origin_provider="github-copilot",
+        origin_binding="copilot-openai-chat",
+        default_model="gemini-test",
+        allow_reasoning_opaque=True,
+    )
+
+    payload = await runtime.encode_request(request)
+
+    assert payload["messages"] == [
+        {
+            "role": "assistant",
+            "content": "ACK",
+            "reasoning_text": "first second",
+            "reasoning_opaque": "provider-state",
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_chat_request_rejects_multiple_opaque_reasoning_states() -> None:
+    def state(item_id: str, blob: str) -> OpaqueState:
+        return OpaqueState(
+            origin_protocol=WireProtocol.OPENAI_CHAT,
+            origin_provider="github-copilot",
+            origin_model="gemini-test",
+            origin_binding="copilot-openai-chat",
+            item_id=item_id,
+            blob=blob,
+        )
+
+    request = SemanticRequest(
+        model="gemini-test",
+        input=(
+            SemanticMessage(
+                role=MessageRole.ASSISTANT,
+                content=(
+                    ReasoningSummary("first", opaque_state=state("reasoning_1", "state-1")),
+                    ReasoningSummary("second", opaque_state=state("reasoning_2", "state-2")),
+                ),
+            ),
+        ),
+    )
+    runtime = OpenAIChatRuntime(
+        origin_provider="github-copilot",
+        origin_binding="copilot-openai-chat",
+        default_model="gemini-test",
+        allow_reasoning_opaque=True,
+    )
+
+    with pytest.raises(ProtocolRepresentabilityError, match="only one opaque reasoning state"):
+        await runtime.encode_request(request)
+
+
+@pytest.mark.asyncio
 async def test_copilot_chat_reasoning_opaque_round_trips_for_bound_runtime() -> None:
     runtime = OpenAIChatRuntime(
         origin_provider="github-copilot",

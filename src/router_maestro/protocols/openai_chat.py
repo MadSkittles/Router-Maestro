@@ -1519,7 +1519,8 @@ def _encode_message(
     text_blocks: list[dict[str, Any]] = []
     tool_calls: list[dict[str, Any]] = []
     refusal = None
-    reasoning = None
+    reasoning_parts: list[str] = []
+    reasoning_seen = False
     reasoning_opaque = None
     for part_index, part in enumerate(item.content):
         part_path = f"{path}.content[{part_index}]"
@@ -1556,9 +1557,12 @@ def _encode_message(
                 reject(_PROTOCOL, part_path, "refusal requires one assistant content part")
             refusal = part.refusal
         elif isinstance(part, ReasoningSummary):
-            if item.role is not MessageRole.ASSISTANT or reasoning is not None:
-                reject(_PROTOCOL, part_path, "reasoning requires one assistant content part")
+            if item.role is not MessageRole.ASSISTANT:
+                reject(_PROTOCOL, part_path, "reasoning requires assistant role")
+            reasoning_seen = True
             if part.opaque_state is not None:
+                if reasoning_opaque is not None:
+                    reject(_PROTOCOL, part_path, "Chat can carry only one opaque reasoning state")
                 state = part.opaque_state
                 if (
                     not allow_reasoning_opaque
@@ -1573,7 +1577,7 @@ def _encode_message(
                 ):
                     reject(_PROTOCOL, part_path, "Chat cannot carry opaque reasoning state")
                 reasoning_opaque = state.blob
-            reasoning = part.text
+            reasoning_parts.append(part.text)
         elif isinstance(part, ToolCall):
             if item.role is not MessageRole.ASSISTANT:
                 reject(_PROTOCOL, part_path, "tool calls require assistant role")
@@ -1593,7 +1597,8 @@ def _encode_message(
         payload["content"] = None
     if refusal is not None:
         payload["refusal"] = refusal
-    if reasoning is not None:
+    if reasoning_seen:
+        reasoning = "".join(reasoning_parts)
         if reasoning_opaque is not None:
             payload["reasoning_text"] = reasoning
             payload["reasoning_opaque"] = reasoning_opaque

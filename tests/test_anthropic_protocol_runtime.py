@@ -746,18 +746,43 @@ async def test_invalid_capsule_error_is_sanitized() -> None:
 
 
 @pytest.mark.asyncio
-async def test_empty_thinking_signature_triggers_claude_code_recovery_error() -> None:
+async def test_empty_thinking_signature_is_plain_summary_for_claude_code_replay() -> None:
     runtime = AnthropicMessagesRuntime()
 
-    with pytest.raises(ProtocolDecodeError) as raised:
-        await runtime.decode_request(
-            _request(
-                _assistant_reasoning({"type": "thinking", "thinking": "summary", "signature": ""})
-            )
-        )
+    semantic = await runtime.decode_request(
+        _request(_assistant_reasoning({"type": "thinking", "thinking": "summary", "signature": ""}))
+    )
 
-    assert raised.value.path == "messages[0].content[0].signature"
-    assert raised.value.reason == "Invalid signature in thinking block"
+    message = semantic.input[0]
+    assert isinstance(message, SemanticMessage)
+    assert message.content == (ReasoningSummary("summary"),)
+
+
+@pytest.mark.asyncio
+async def test_empty_redacted_thinking_block_is_semantically_ignored() -> None:
+    runtime = AnthropicMessagesRuntime()
+
+    semantic = await runtime.decode_request(
+        _request(_assistant_reasoning({"type": "redacted_thinking", "data": ""}))
+    )
+
+    message = semantic.input[0]
+    assert isinstance(message, SemanticMessage)
+    assert message.content == ()
+
+
+@pytest.mark.asyncio
+async def test_claude_code_message_level_system_role_decodes_for_cross_protocol_use() -> None:
+    runtime = AnthropicMessagesRuntime()
+    payload = _request({"role": "user", "content": "hello"})
+    payload["messages"].append({"role": "system", "content": "late client context"})
+
+    semantic = await runtime.decode_request(payload)
+
+    assert [item.role for item in semantic.input if isinstance(item, SemanticMessage)] == [
+        MessageRole.USER,
+        MessageRole.SYSTEM,
+    ]
 
 
 @pytest.mark.asyncio

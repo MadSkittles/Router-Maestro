@@ -14,6 +14,12 @@ All notable changes to Router-Maestro are documented here.
   as opaque state and rejected before provider I/O. Non-empty encrypted state
   remains affinity-bound and fails closed on incompatible transports.
 
+- **Claude Code no longer needs hidden recovery retries on Chat-only models.**
+  Message-level system context is accepted at the Anthropic ingress, empty
+  thinking signatures are treated as absent continuation state, and ordered
+  reasoning fragments surrounding one valid provider capsule are merged for
+  Chat replay. Multiple opaque states still fail closed.
+
 ---
 
 ## v0.8.0 (2026-08-28)
