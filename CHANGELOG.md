@@ -4,7 +4,7 @@ All notable changes to Router-Maestro are documented here.
 
 ---
 
-## Unreleased
+## v0.8.2 (2026-08-28)
 
 ### Added
 
@@ -15,6 +15,12 @@ All notable changes to Router-Maestro are documented here.
   Preview remains side-effect free.
 
 ### Fixed
+
+- **Codex App can use bare models with code-mode tool history.** Shallow OpenAI request
+  inspection now treats only string-valued `type` fields as content-block discriminators, so
+  nested object and array `type` values in Codex Desktop `additional_tools` JSON Schemas no
+  longer raise an internal error before provider I/O. Chat and Responses share the same guarded
+  scanner, while real image and file blocks remain detectable.
 
 - **Live Claude validation preserves the server-default 1M context.** The reusable model runner
   and TUI runbook now retain Claude Code's `[1m]` hint when the selected catalog model defaults to
