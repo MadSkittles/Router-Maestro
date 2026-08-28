@@ -15,7 +15,7 @@ from router_maestro.protocols._tool_result_projection import (
     project_tool_result_output,
     unproject_tool_result_output,
 )
-from router_maestro.protocols._wire import is_reasoning_capsule_carrier
+from router_maestro.protocols._wire import has_typed_block, is_reasoning_capsule_carrier
 from router_maestro.protocols.models import (
     ContentBlock,
     FileContent,
@@ -49,7 +49,6 @@ from router_maestro.protocols.openai_common import (
     encode_stream_usage,
     encode_tool_choice,
     encode_usage,
-    has_typed_block,
     optional_bool,
     optional_int,
     optional_number,

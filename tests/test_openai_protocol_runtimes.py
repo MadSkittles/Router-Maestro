@@ -161,6 +161,55 @@ def test_responses_manifest_shallowly_finds_continuation_without_decoding() -> N
     assert manifest.opaque_continuation is True
 
 
+def test_responses_manifest_tolerates_codex_additional_tools_schema_type_objects() -> None:
+    runtime = OpenAIResponsesRuntime()
+    payload = {
+        "model": "gpt-example",
+        "input": [
+            {
+                "type": "additional_tools",
+                "tools": [
+                    {
+                        "type": "function",
+                        "name": "open_target",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "target": {
+                                    "anyOf": [
+                                        {
+                                            "type": "object",
+                                            "properties": {
+                                                "type": {"const": "project"},
+                                                "environment": {"type": ["object", "null"]},
+                                            },
+                                        }
+                                    ]
+                                }
+                            },
+                        },
+                    }
+                ],
+            },
+            {
+                "type": "message",
+                "role": "user",
+                "content": [
+                    {
+                        "type": "input_image",
+                        "image_url": "https://example.test/image.png",
+                    }
+                ],
+            },
+        ],
+    }
+
+    manifest = runtime.inspect_request(payload)
+
+    assert manifest.images is True
+    assert manifest.files is False
+
+
 def test_chat_manifest_shallowly_finds_explicit_parallel_tools() -> None:
     runtime = OpenAIChatRuntime()
 

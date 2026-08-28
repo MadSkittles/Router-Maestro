@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from typing import Any, Never
 
 from router_maestro.protocols.models import (
@@ -398,16 +398,6 @@ def encode_usage(
     if usage.reasoning_tokens is not None:
         payload[output_details_field] = {"reasoning_tokens": usage.reasoning_tokens}
     return payload
-
-
-def has_typed_block(value: object, block_types: set[str]) -> bool:
-    if isinstance(value, Mapping):
-        if value.get("type") in block_types:
-            return True
-        return any(has_typed_block(item, block_types) for item in value.values())
-    if isinstance(value, Sequence) and not isinstance(value, str | bytes | bytearray):
-        return any(has_typed_block(item, block_types) for item in value)
-    return False
 
 
 def terminal_event_values(
