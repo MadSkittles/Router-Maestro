@@ -93,6 +93,127 @@ _MAX_COPILOT_ERROR_BODY_BYTES = 64 * 1024
 _EXACT_COPILOT_BARE_BAD_REQUEST = b"Bad Request\n"
 
 
+def _parse_copilot_error_envelope(body: bytes | str) -> dict[str, Any] | None:
+    """Parse Copilot's ``{"error": {...}}`` 400 envelope, or ``None``.
+
+    Bounded by ``_MAX_COPILOT_ERROR_BODY_BYTES`` so a pathologically large error
+    body is never fully decoded/parsed on the failure path. Shared by every
+    Copilot 400 classifier (unsupported-operation, signature) so their structural
+    assumptions cannot drift. Returns the inner ``error`` mapping on success.
+    """
+    if isinstance(body, bytes):
+        if len(body) > _MAX_COPILOT_ERROR_BODY_BYTES:
+            return None
+        raw: bytes | str = body
+    else:
+        if len(body.encode("utf-8", errors="replace")) > _MAX_COPILOT_ERROR_BODY_BYTES:
+            return None
+        raw = body
+    try:
+        payload = json.loads(raw)
+    except (json.JSONDecodeError, UnicodeDecodeError, ValueError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    error = payload.get("error")
+    return error if isinstance(error, dict) else None
+
+
+def _is_signature_error(body: bytes | str) -> bool:
+    """Whether a Copilot 400 body is a thinking-signature validation error.
+
+    Copilot's upstream (Anthropic) rejects a replayed ``thinking`` block whose
+    signature it did not produce — or that carries no signature at all — with a
+    payload like ``{"type":"error","error":{"type":"invalid_request_error",
+    "message":"messages.3.content.3: Invalid `signature` in `thinking` block"}}``.
+
+    Match on structure (an ``invalid_request_error`` whose message mentions both
+    a signature and a thinking block) rather than an exact string, so a wording
+    change upstream does not silently disable the strip-and-retry recovery while
+    an unrelated 400 that merely happens to contain both words does not misfire.
+    Falls back to a bounded two-token scan only when the body is not the expected
+    JSON envelope, so a non-JSON signature rejection still recovers.
+    """
+
+    def _mentions_signature_and_thinking(value: str) -> bool:
+        lowered = value.lower()
+        return "signature" in lowered and "thinking" in lowered
+
+    error = _parse_copilot_error_envelope(body)
+    if error is None:
+        # Not the expected JSON envelope (non-JSON, oversized, or malformed):
+        # fall back to a size-bounded two-token scan of the raw text.
+        if isinstance(body, bytes):
+            if len(body) > _MAX_COPILOT_ERROR_BODY_BYTES:
+                return False
+            text = body.decode("utf-8", errors="replace")
+        else:
+            if len(body.encode("utf-8", errors="replace")) > _MAX_COPILOT_ERROR_BODY_BYTES:
+                return False
+            text = body
+        return _mentions_signature_and_thinking(text)
+    if error.get("type") != "invalid_request_error":
+        return False
+    message = error.get("message")
+    if not isinstance(message, str):
+        return False
+    return _mentions_signature_and_thinking(message)
+
+
+def _rewrite_message_content(body: dict, keep_block: Callable[[Mapping[str, Any]], bool]) -> None:
+    """Copy-on-write filter of ``content`` blocks across all history messages.
+
+    Rebuilds ``messages`` (and each affected ``content`` list) only when
+    ``keep_block`` rejects at least one mapping block, so a shared ingress body
+    stays untouched when nothing is removed. Non-mapping blocks are always kept;
+    ``keep_block`` is consulted only for mapping blocks. Role is not inspected:
+    ``thinking``/``redacted_thinking`` are assistant-only in the wire schema, so
+    a role guard would only add a divergent special case.
+    """
+    messages = body.get("messages")
+    if not isinstance(messages, list):
+        return
+    new_messages: list[Any] | None = None
+    for index, message in enumerate(messages):
+        content = message.get("content") if isinstance(message, Mapping) else None
+        if not isinstance(content, list):
+            continue
+        kept = [block for block in content if not isinstance(block, Mapping) or keep_block(block)]
+        if len(kept) == len(content):
+            continue
+        if new_messages is None:
+            new_messages = list(messages)
+        new_messages[index] = {**message, "content": kept}
+    if new_messages is not None:
+        body["messages"] = new_messages
+
+
+def _is_reasoning_block(block: Mapping[str, Any]) -> bool:
+    return block.get("type") in {"thinking", "redacted_thinking"}
+
+
+def _reasoning_block_is_signed(block: Mapping[str, Any]) -> bool:
+    """Whether a reasoning block carries a non-empty signature carrier."""
+    block_type = block.get("type")
+    if block_type == "thinking":
+        carrier = block.get("signature")
+    elif block_type == "redacted_thinking":
+        carrier = block.get("data")
+    else:
+        return True
+    return isinstance(carrier, str) and carrier != ""
+
+
+def _strip_history_thinking_blocks(body: dict) -> None:
+    """Remove every ``thinking``/``redacted_thinking`` block from history.
+
+    Reactive fallback after a signature 400: a rejection does not say *which*
+    blob upstream refused, so drop them all. Stripping is safe — the model does
+    not need prior private reasoning to produce the next turn.
+    """
+    _rewrite_message_content(body, lambda block: not _is_reasoning_block(block))
+
+
 def _responses_terminal_outcome(response: Any) -> TerminalOutcome:
     """Preserve one native Responses terminal payload without chat mapping."""
     return CopilotResponsesCodec.terminal_outcome(response)
@@ -871,6 +992,28 @@ class CopilotOutboundContract(OutboundContract):
             )
 
     @staticmethod
+    def drop_unsigned_thinking(body: dict) -> None:
+        """Drop replayed ``thinking`` blocks that carry no valid signature.
+
+        Anthropic (and Copilot's upstream) validate every historical
+        ``thinking``/``redacted_thinking`` block's signature on replay: a block
+        whose ``signature`` (or ``redacted_thinking`` ``data``) is missing or
+        empty is rejected with ``Invalid signature in thinking block``. Once such
+        a block lands in an assistant turn, the client re-sends the whole history
+        every turn, so the request 400s permanently until the session is cleared.
+
+        Clients can persist an unsigned thinking block when a streamed turn split
+        reasoning across blocks and a trailing ``signature_delta`` never arrived.
+        These blocks are auxiliary — an assistant turn is valid with only its
+        text and tool_use — so drop just the unsigned reasoning and leave every
+        other block in place.
+        """
+        _rewrite_message_content(
+            body,
+            lambda block: not _is_reasoning_block(block) or _reasoning_block_is_signed(block),
+        )
+
+    @staticmethod
     def apply_native_anthropic_thinking(
         body: dict,
         actual_model: str,
@@ -1239,18 +1382,10 @@ class CopilotProvider(BaseProvider):
         cause: BaseException | None = None,
     ) -> None:
         """Classify Copilot's exact, bounded unsupported-API error payload."""
-        if status_code != 400 or len(body) > _MAX_COPILOT_ERROR_BODY_BYTES:
+        if status_code != 400:
             return
-        try:
-            payload = json.loads(body)
-        except (json.JSONDecodeError, UnicodeDecodeError):
-            return
-        if not isinstance(payload, dict):
-            return
-        error = payload.get("error")
-        if not isinstance(error, dict):
-            return
-        if error.get("code") != _COPILOT_UNSUPPORTED_OPERATION_CODE:
+        error = _parse_copilot_error_envelope(body)
+        if error is None or error.get("code") != _COPILOT_UNSUPPORTED_OPERATION_CODE:
             return
         raise ProviderError(
             "Copilot does not support this API operation for the requested model",
@@ -1537,6 +1672,7 @@ class CopilotProvider(BaseProvider):
                 model=model,
             )
         self.outbound_contract.reject_unpreservable_native_options(body)
+        self.outbound_contract.drop_unsigned_thinking(body)
         self.outbound_contract.apply_native_anthropic_thinking(
             body,
             model,
@@ -1623,7 +1759,7 @@ class CopilotProvider(BaseProvider):
         """Stream Copilot's native Anthropic Messages transport.
 
         Authentication retries happen before any response frame is consumed.
-        Thinking signatures are never stripped or replayed on failure.
+        Thinking signatures are never stripped or replayed here.
         """
         await self.ensure_token()
         body = self._build_native_messages_payload(payload, model=model, stream=True)
@@ -2548,10 +2684,23 @@ class CopilotHttpExecutor(SharedHttpExecutor):
     async def _send(self, attempt: PreparedAttempt, *, timeout: Any) -> httpx.Response:
         path = self._path(attempt)
         await self.provider.ensure_token()
-        return await self.provider._send_with_auth_retry(
+        response = await self.provider._send_with_auth_retry(
             attempt.method,
             path,
             json=dict(attempt.payload),
+            timeout=timeout,
+            model=attempt.model.upstream_id,
+            prepared_headers=attempt.headers,
+            strip_anthropic_beta=(attempt.protocol is not WireProtocol.ANTHROPIC_MESSAGES),
+        )
+        retry_body = self._signature_retry_body(attempt, response.status_code, response.content)
+        if retry_body is None:
+            return response
+        self._record_signature_retry_body(response.status_code, response.content)
+        return await self.provider._send_with_auth_retry(
+            attempt.method,
+            path,
+            json=retry_body,
             timeout=timeout,
             model=attempt.model.upstream_id,
             prepared_headers=attempt.headers,
@@ -2568,15 +2717,84 @@ class CopilotHttpExecutor(SharedHttpExecutor):
         del timeout
         path = self._path(attempt)
         await self.provider.ensure_token()
-        async with self.provider._stream_with_auth_retry(
-            path,
-            json=dict(attempt.payload),
-            headers_kwargs={},
-            model=attempt.model.upstream_id,
-            prepared_headers=attempt.headers,
-            strip_anthropic_beta=(attempt.protocol is not WireProtocol.ANTHROPIC_MESSAGES),
-        ) as response:
-            yield response
+
+        def _open(body: Mapping[str, Any]):
+            return self.provider._stream_with_auth_retry(
+                path,
+                json=dict(body),
+                headers_kwargs={},
+                model=attempt.model.upstream_id,
+                prepared_headers=attempt.headers,
+                strip_anthropic_beta=(attempt.protocol is not WireProtocol.ANTHROPIC_MESSAGES),
+            )
+
+        async with _open(attempt.payload) as response:
+            if response.status_code < 400:
+                yield response
+                return
+            # Read the error body before the stream context closes so the
+            # signature classifier and any retry both see it.
+            error_body = await response.aread()
+            retry_body = self._signature_retry_body(attempt, response.status_code, error_body)
+            if retry_body is None:
+                yield response
+                return
+            # The streaming transport only audits ``stream opened`` (no body), so
+            # record the rejected-signature 400 body here — otherwise the retry
+            # that this recovery performs would be invisible in traces.
+            self._record_signature_retry_body(response.status_code, error_body)
+
+        # The first attempt's response is closed; re-open once with history
+        # thinking stripped. The 400 was seen before any frame was yielded, so
+        # this retry stays invisible to the client.
+        async with _open(retry_body) as retried:
+            yield retried
+
+    def _signature_retry_body(
+        self,
+        attempt: PreparedAttempt,
+        status_code: int,
+        body: bytes,
+    ) -> dict[str, Any] | None:
+        """Return a thinking-stripped payload to retry, or ``None`` to not retry.
+
+        A rejected thinking signature poisons every later turn: the client
+        replays the same history and 400s forever. Only the native Anthropic
+        wire carries thinking blocks, and the proactive ``drop_unsigned_thinking``
+        in payload preparation already removed unsigned blocks — so a surviving
+        signature 400 is a validly-signed-but-unaccepted blob (e.g. a route
+        transition). Strip all history thinking once and retry so the session
+        self-heals.
+        """
+        if attempt.protocol is not WireProtocol.ANTHROPIC_MESSAGES:
+            return None
+        if status_code != 400 or not _is_signature_error(body):
+            return None
+        retry_body = dict(attempt.payload)
+        _strip_history_thinking_blocks(retry_body)
+        logger.info(
+            "Copilot rejected a thinking signature; stripping history thinking "
+            "and retrying once (model=%s)",
+            attempt.model.upstream_id,
+        )
+        return retry_body
+
+    @staticmethod
+    def _record_signature_retry_body(status_code: int, body: bytes) -> None:
+        """Persist the rejected-signature 400 body to the audit trace.
+
+        The streaming transport only records ``stream opened`` (no body), so the
+        signature 400 that drives a strip-and-retry would otherwise be invisible
+        in traces. Recording it here keeps the recovery debuggable and symmetric
+        with the non-streaming path. A no-op when tracing is disabled.
+        """
+        from router_maestro.runtime import get_current_request_context
+
+        context = get_current_request_context()
+        audit = context.audit if context is not None else None
+        if audit is None:
+            return
+        audit.record_upstream_response(status_code, {}, body)
 
     def _skip_raw_sse_data(self, data: str, attempt: PreparedAttempt) -> bool:
         del attempt
