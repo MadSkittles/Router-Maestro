@@ -71,6 +71,19 @@ def _catalog() -> dict:
                 ],
                 "operation_capabilities": {"responses": True},
             },
+            {
+                "provider": "github-copilot",
+                "id": "github-copilot/gpt-5.6-sol-fast",
+                "name": "GPT-5.6 Sol Fast (internal only)",
+                "context_window_options": [
+                    {
+                        "tier": "default",
+                        "max_prompt_tokens": 272_000,
+                        "is_default": True,
+                    }
+                ],
+                "operation_capabilities": {"responses": True},
+            },
         ]
     }
 
@@ -157,6 +170,13 @@ def test_model_display_names_use_consistent_product_casing() -> None:
     assert PortalService._model_name({"name": "gpt-5.6-sol", "id": "gpt-5.6-sol"}) == (
         "GPT-5.6 Sol"
     )
+    internal = {
+        "name": "GPT-5.6 Sol Fast (internal only)",
+        "id": "gpt-5.6-sol-fast",
+    }
+    assert PortalService._model_name(internal) == "GPT-5.6 Sol Fast"
+    assert PortalService._is_internal_model(internal) is True
+    assert PortalService._is_internal_model({"name": "Internal Affairs"}) is False
 
 
 def test_virtual_auto_model_uses_aggregate_transport_capability_summary() -> None:
@@ -196,10 +216,13 @@ async def test_health_and_models_are_context_scoped(tmp_path: Path) -> None:
     assert [model.key for model in catalog.models] == [
         "github-copilot/gpt-5.6-sol",
         "openai/gpt-5.6-sol",
+        "github-copilot/gpt-5.6-sol-fast",
     ]
     assert catalog.models[0].provider_name == "GitHub Copilot"
     assert catalog.models[0].context_label == "272K / 1M"
     assert catalog.models[0].transports == ["Responses", "Chat"]
+    assert catalog.models[2].name == "GPT-5.6 Sol Fast"
+    assert catalog.models[2].internal is True
 
 
 @pytest.mark.asyncio
@@ -605,8 +628,25 @@ def test_portal_app_serves_ui_and_sensitive_key_only_on_explicit_route(tmp_path:
     assert "option.textContent = model.name;" in page.text
     assert 'model.virtual ? " rm-model-row--auto" : ""' in page.text
     assert 'model.virtual ? " rm-model-name--auto" : ""' in page.text
+    assert 'internalBadge.textContent = "INTERNAL"' in page.text
+    assert 'internalBadge.className = "rm-model-badge--internal"' in page.text
     assert "@keyframes rm-auto-name-flow" in page.text
     assert "@keyframes rm-auto-row-flow" in page.text
+    assert "grid-template-rows 760ms" in page.text
+    assert "transition-duration: 520ms" in page.text
+    assert "@keyframes rm-auto-editor-pulse" in page.text
+    assert "@keyframes rm-auto-editor-flare" in page.text
+    assert 'autoRouting.classList.add("is-open", "is-revealing")' in page.text
+    assert 'autoRouting.classList.add("is-collapsing")' in page.text
+    assert 'autoRouting.addEventListener("transitionend"' in page.text
+    assert 'event.propertyName !== "grid-template-rows"' in page.text
+    assert "function setAutoRoutingVisible(visible)" in page.text
+    assert "function syncAutoRouting()" in page.text
+    assert 'autoRouting.addEventListener("animationend"' in page.text
+    assert 'window.matchMedia("(prefers-reduced-motion: reduce)")' in page.text
+    assert "targetPath.textContent = result.target_path" not in page.text
+    assert 'windowOption.max_prompt_tokens > 900000 ? " extended" : " standard"' in page.text
+    assert 'windowOption.max_prompt_tokens > 900000 ? " [1m]" : " standard"' not in page.text
     assert "@media (prefers-reduced-motion: reduce)" in page.text
     assert "rm-catalog-toggle" in page.text
     assert '<link rel="icon" href="/favicon.svg" type="image/svg+xml">' in page.text

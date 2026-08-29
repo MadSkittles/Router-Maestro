@@ -21,6 +21,12 @@ All notable changes to Router-Maestro are documented here.
 
 ### Changed
 
+- **Documentation is organized around product value and task-oriented guides.** The README now
+  leads with cross-client Copilot catalog access, protocol-independent routing, Auto, and the
+  shortest local setup. Detailed client/provider configuration and deployment/upgrade/rollback
+  procedures live in dedicated guides with copy-ready AI-agent prompts, while the new contributor
+  guide documents architecture boundaries, offline/live validation, and safe revision-aware audit
+  tracing.
 - **Auto capability filtering is request-aware.** Smart Auto filters explicit tool, vision,
   reasoning, parallel-tool, file, structured-output, and output-limit requirements before asking
   the router model. It uses the actual request's estimated input size and a 70% prompt-window
@@ -32,6 +38,15 @@ All notable changes to Router-Maestro are documented here.
   `model_max_prompt_tokens_exceeded` response can move a Smart Auto request to a larger configured
   task model, or another model tied for the largest context, before the first response frame.
   Ordinary 400, 429, and 5xx failures do not trigger this context-only fallback.
+
+### Fixed
+
+- **The Web Portal keeps user target paths stable and reveals Auto configuration smoothly.**
+  Preview and Apply no longer replace friendly paths such as `~/.claude/settings.json` with a
+  momentary absolute home path, and selecting Router-Maestro Auto now expands its routing profile
+  with a slower reduced-motion-aware transition, brighter border/scan flare, and a matching
+  collapse animation when leaving Auto. Claude Code's long-context choice is labeled `1M
+  extended` while retaining the same underlying `[1m]` client hint.
 
 ## v0.8.2 (2026-08-28)
 

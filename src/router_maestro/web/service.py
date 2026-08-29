@@ -50,6 +50,7 @@ _PROJECT_MARKERS = (
     "Cargo.toml",
     "go.mod",
 )
+_INTERNAL_MODEL_SUFFIX = re.compile(r"\s*\(\s*internal[\s_-]+only\s*\)\s*$", re.IGNORECASE)
 
 
 class PortalServiceError(RuntimeError):
@@ -100,6 +101,7 @@ class PortalModel(BaseModel):
     context_windows: list[PortalContextWindow] = Field(default_factory=list)
     transports: list[str] = Field(default_factory=list)
     virtual: bool = False
+    internal: bool = False
 
 
 class PortalModels(BaseModel):
@@ -354,6 +356,7 @@ class PortalService:
     @staticmethod
     def _model_name(model: dict) -> str:
         raw_name = str(model.get("name") or _bare_upstream_model_id(model))
+        raw_name = _INTERNAL_MODEL_SUFFIX.sub("", raw_name)
         words = [word for word in re.split(r"[-_\s]+", raw_name) if word]
         acronyms = {"ai": "AI", "gpt": "GPT", "mai": "MAI"}
         rendered: list[str] = []
@@ -372,6 +375,11 @@ class PortalService:
         if len(rendered) >= 2 and rendered[0] == "GPT" and rendered[1][0].isdigit():
             rendered[0:2] = [f"{rendered[0]}-{rendered[1]}"]
         return " ".join(rendered)
+
+    @staticmethod
+    def _is_internal_model(model: dict) -> bool:
+        raw_name = str(model.get("name") or "")
+        return _INTERNAL_MODEL_SUFFIX.search(raw_name) is not None
 
     @staticmethod
     def _transport_names(model: dict) -> list[str]:
@@ -432,6 +440,7 @@ class PortalService:
                 context_windows=self._context_windows(model),
                 transports=self._transport_names(model),
                 virtual=model.get("virtual") is True,
+                internal=self._is_internal_model(model),
             )
             for model in raw_models
             if isinstance(model.get("id"), str) and isinstance(model.get("provider"), str)

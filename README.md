@@ -2,1103 +2,249 @@
 
 [![CI](https://github.com/MadSkittles/Router-Maestro/actions/workflows/ci.yml/badge.svg)](https://github.com/MadSkittles/Router-Maestro/actions/workflows/ci.yml)
 [![Release](https://github.com/MadSkittles/Router-Maestro/actions/workflows/release.yml/badge.svg)](https://github.com/MadSkittles/Router-Maestro/actions/workflows/release.yml)
+[![PyPI](https://img.shields.io/pypi/v/router-maestro)](https://pypi.org/project/router-maestro/)
 
-Router-Maestro is a local or self-hosted proxy that lets OpenAI-, Anthropic-, and Gemini-compatible clients use models from GitHub Copilot, OpenAI, Anthropic, and custom providers — with priority-based selection and automatic fallback.
+**Use the full GitHub Copilot model catalog from Claude Code, OpenAI Codex,
+Gemini CLI, and any OpenAI-, Anthropic-, or Gemini-compatible client.**
 
-## TL;DR
-
-**Use every model in your GitHub Copilot catalog—including Claude, GPT,
-Gemini, Grok, and MAI—from Claude Code, OpenAI Codex, Gemini CLI, or any
-compatible client.**
-
-Router-Maestro acts as a proxy that gives you access to models from multiple providers through a unified API. Authenticate once with GitHub Copilot, and use its models anywhere that supports OpenAI or Anthropic APIs.
-
-## Features
-
-### Core
-
-- **Multi-provider support**: GitHub Copilot (OAuth), OpenAI, Anthropic, and custom OpenAI-compatible endpoints
-- **Four ingress protocols**: Anthropic Messages, OpenAI Chat Completions,
-  OpenAI Responses, and Gemini generation all use the same dispatcher
-- **Full GitHub Copilot catalog across clients**: Claude Code, OpenAI Codex,
-  and Gemini CLI can select every model exposed by the live Copilot catalog;
-  Router-Maestro chooses the compatible Messages, Chat, or Responses transport
-- **Gemini API compatibility**: Gemini REST API format (`/api/gemini/v1beta/...`) for Gemini CLI/SDK
-- **Lazy cross-protocol translation**: Native protocol pairs use a copy-on-write
-  identity path; only cross-protocol attempts materialize the shared semantic IR
-- **Intelligent routing**: Priority-based model selection with automatic fallback on failure
-- **Deterministic model matching**: Public model IDs are provider-qualified, while convenient bare aliases (for example, `opus-4-6`) are matched by score and routed according to the configured priorities
-- **CLI management**: Full command-line interface for configuration and server control
-- **Visual configuration**: A loopback-only BIOS-style web portal for contexts,
-  model catalogs, context windows, trusted projects, and Claude Code/Codex/Gemini
-  configuration with preview, backup, and one-click apply
-- **Docker ready**: Production-ready Docker images with Traefik integration
-- **Configuration hot-reload**: Auto-reload config files every 5 minutes without server restart
-
-### Advanced
-
-- **1M context support**: `config claude-code` shows the live model catalog in a
-  searchable selector, including every server-advertised context size, followed
-  by a context-window selector. Choosing an advertised 1M tier adds Claude
-  Code's client-side `[1m]` hint and raises `CLAUDE_CODE_AUTO_COMPACT_WINDOW`
-  for the main model. Router-Maestro does not inject synthetic catalog entries
-  or rewrite the selection to a dedicated upstream `-1m` model.
-- **Capability-aware reasoning tiers**: `reasoning_effort` and Anthropic
-  thinking controls stay on the selected base model. The ordered effort ladder
-  is `minimal < low < medium < high < xhigh < max`. An advertised exact tier is
-  passed through; otherwise Router-Maestro may substitute only the highest
-  supported tier no greater than the request, or reject it when no such tier
-  exists. Unknown tiers are rejected. `minimal` has no implicit token-budget
-  equivalent, so a small `thinking.budget_tokens` value is not guessed to mean
-  `minimal`. Copilot's known catalog-only `none` sentinel is preserved as model
-  capability metadata, but it is not a client request tier, budget mapping, or
-  downward-substitution target. Effort does not route through `-high` or
-  `-xhigh` model suffixes.
-- **Anthropic adaptive effort passthrough**: `output_config.effort` is preserved
-  across the stable route and its beta compatibility alias. Explicit effort
-  replaces an adaptive thinking budget, while manual
-  `thinking.type="enabled"` retains its protocol-required `budget_tokens` when
-  `budget_tokens < max_tokens`.
-  Omitting `budget_tokens` uses the configured server default. The Messages
-  runtime rejects present token limits unless they are positive, non-boolean
-  integers. If an exact reasoning tier is unavailable, Router-Maestro may use
-  the highest advertised tier that does not exceed the request. It never
-  silently raises reasoning effort, cost, or latency; a request with no valid
-  lower tier is rejected.
-
-## Table of Contents
-
-- [Quick Start](#quick-start)
-- [Core Concepts](#core-concepts)
-  - [Model Identification](#model-identification)
-  - [Auto-Routing](#auto-routing)
-  - [Priority & Fallback](#priority--fallback)
-  - [Cross-Provider Translation](#cross-provider-translation)
-  - [Contexts](#contexts)
-- [CLI Reference](#cli-reference)
-- [API Reference](#api-reference)
-- [Configuration](#configuration)
-  - [Metrics & Observability](#metrics--observability)
-- [Deployment](#deployment)
-  - [Architecture](#architecture)
-  - [Server and Client API Keys](#server-and-client-api-keys)
-  - [Local with pip install](#local-with-pip-install)
-  - [Option A: Remote Docker (No HTTPS)](#option-a-remote-docker-no-https)
-  - [Option B: Production (Docker Compose + Traefik + HTTPS)](#option-b-production-docker-compose--traefik--https)
-  - [Remote Management](#remote-management)
-  - [Advanced Configuration](#advanced-configuration)
-- [License](#license)
-- [Changelog](#changelog)
-
-## Quick Start
-
-Get a local server running in 3 steps. The server (started locally or via Docker with `~/.config/router-maestro` mounted) auto-creates a `local` context with a generated API key — no manual `context add` is needed when client and server are on the same machine.
-
-**Before you start, make sure you have:**
-
-- Docker running locally (or skip to [Local with pip install](#local-with-pip-install))
-- Python 3 with `pip` available for the `router-maestro` CLI on the host
-- An active GitHub Copilot subscription
-- Port 8080 free, or adjust `-p 8080:8080` in the Docker command below
-
-> **Custom port:** If you use a different host port (e.g. `-p 8123:8080`), update the local context so the CLI connects to the correct port:
-> ```bash
-> router-maestro context update local --endpoint http://localhost:8123
-> ```
-
-> **About the Router-Maestro API key.** Router-Maestro has **one server key** (format `sk-rm-...`) that clients must send on inference, administration, and remote-management requests. Public health/docs and the independently configured metrics endpoint are exceptions. It is **not** an OpenAI / Anthropic / Gemini / GitHub token — it only authenticates clients to *your* Router-Maestro server. The server auto-generates and persists this key on first start (in `~/.config/router-maestro/contexts.json` or its Docker-mounted equivalent), so you usually never type it by hand: the CLI reads it from the active context and the `config claude-code/codex/gemini` wizards write it into each tool's settings for you. The two times you do touch it explicitly are (1) `router-maestro server show-key` to copy it into a raw `curl` or environment variable like `ROUTER_MAESTRO_API_KEY`, and (2) `router-maestro context add ... --api-key sk-rm-...` when pointing a client machine at a **remote** server (see [Deployment](#deployment)). If an authenticated request returns `401`, it almost always means the key it sent doesn't match what the server expects — re-run `server show-key` and compare.
+Router-Maestro is a local or self-hosted model gateway. It separates the client
+protocol from the upstream model transport, so a client is no longer limited to
+models that natively speak its API. Claude Code can use Responses-only GPT
+models; Codex can use Claude, Gemini, Grok, and MAI models; Gemini CLI can use
+the same catalog through its native API surface.
 
 <https://github.com/user-attachments/assets/35f7c0f5-967a-4f93-aec8-c34b460a0032>
 
-### One Copilot Catalog, Every Client
-
-Router-Maestro loads the live GitHub Copilot model catalog instead of limiting
-each client to its native model family. The provider handler selects the
-compatible upstream transport, using an identity fast path for matching
-protocols and lazy semantic translation only when protocols differ.
-
-| Client | Ingress protocol | GitHub Copilot models |
-|--------|------------------|-----------------------|
-| Claude Code | Anthropic Messages | Full live catalog, including Responses-only GPT models |
-| OpenAI Codex | OpenAI Responses | Full live catalog, including Claude, Gemini, Grok, and MAI models |
-| Gemini CLI | Gemini generateContent | Full live catalog across Messages, Chat, and Responses transports |
-
-The CLI wizard and `router-maestro web` both show the selected server's live
-models and advertised context-window choices. Unsupported feature combinations
-fail explicitly before provider I/O rather than silently dropping fields.
-
-### 1. Start the Server (Docker)
-
-```bash
-docker run -d --name router-maestro \
-  -p 8080:8080 \
-  -v ~/.local/share/router-maestro:/home/maestro/.local/share/router-maestro \
-  -v ~/.config/router-maestro:/home/maestro/.config/router-maestro \
-  likanwen/router-maestro:latest
-```
-
-Both volumes are required:
-
-- `.local/share/router-maestro` persists GitHub Copilot OAuth tokens.
-- `.config/router-maestro` persists the auto-generated server API key (in `contexts.json`). Because this directory is shared with the host, the host CLI sees the same `local` context as the container — no extra setup needed.
-
-If you want a fixed key for automation, add `-e ROUTER_MAESTRO_API_KEY="sk-rm-..."`. The API key is the Router-Maestro server key, not an OpenAI, Anthropic, Gemini, or GitHub token. Every client, generated tool config, or raw API call must use the same key.
-
-Confirm the server is up:
-
-```bash
-curl http://localhost:8080/health
-# Expected: {"status":"healthy"}
-```
-
-> Prefer running without Docker? See [Local with pip install](#local-with-pip-install).
-
-### 2. Authenticate with GitHub Copilot
-
-Install the CLI on the host and run `auth login` against the local server. The OAuth device flow is hosted by the server; the CLI just renders the URL/code and polls for completion, so there is no need to `docker exec` into the container.
-
-```bash
-pip install router-maestro
-router-maestro auth login github-copilot
-
-# Follow the prompts in this terminal:
-#   1. Visit https://github.com/login/device
-#   2. Enter the displayed code
-#   3. Authorize "GitHub Copilot Chat"
-```
-
-If you ever need the server API key (for example to paste into a raw `curl`):
-
-```bash
-router-maestro server show-key
-```
-
-### 3. Configure Your CLI Tool
-
-The config commands read the endpoint and API key from the active context (`local` by default) and write them into the target tool's settings.
-
-```bash
-router-maestro config claude-code   # Claude Code (Anthropic-compatible)
-router-maestro config codex         # OpenAI Codex (CLI / extension / app)
-router-maestro config gemini        # Gemini CLI
-```
-
-Or open the local configuration portal:
-
-```bash
-router-maestro web
-```
-
-The portal binds to `127.0.0.1:8765` and opens the system browser. It measures
-each selected context through the public `/health` endpoint, then loads that
-context's authenticated `/api/admin/models` catalog. Context API keys are never
-shown; **Copy Key** retrieves one only for the clipboard action. Project-level
-targets are discovered from Claude Code, Codex, and Gemini trusted-folder
-stores, plus paths explicitly added to Router-Maestro. Explicit additions do
-not modify any client's own trust policy. Codex project files can only set the
-model and model-catalog path, so the portal requires their selected context to
-match the Router-Maestro provider already configured at user level.
-
-Every Codex configuration run asks whether to refresh
-`~/.codex/router-maestro-models.json` from the selected Router-Maestro context;
-the default is **Yes**. This applies to both user- and project-level config. The
-web portal exposes the same option and bypasses its model-list cache on Apply,
-while Preview remains side-effect free. Codex reads `model_catalog_json` at
-startup, so start a new Codex session after refreshing it.
-
-Interactive terminals use a searchable model dropdown whose labels and table
-show the server's `context_window_options` (for example, `272K / 1M`). Claude
-Code then asks for one of the contexts it can encode; older servers without the
-new field retain the legacy context choices. If the live catalog contains no
-Claude-family model, both user- and project-level wizards map Fable, Opus,
-Sonnet, Haiku, and subagent roles to the available models; project mappings
-override the user defaults only inside that project. The legacy
-`ANTHROPIC_SMALL_FAST_MODEL` setting is removed. After all client-specific
-choices, the final prompt asks whether generated model IDs should retain the
-`provider/` prefix.
-
-For Copilot models, Router-Maestro derives these choices from CAPI's default and
-`long_context` billing tiers. Raw usable prompt limits such as `922000` are
-displayed as `1M`, matching VS Code's model picker.
-
-For Codex, also export the same key on the client because the generated config references `ROUTER_MAESTRO_API_KEY`:
-
-```bash
-export ROUTER_MAESTRO_API_KEY="sk-rm-..."   # add to your shell profile
-```
-
-**Done!** Run `claude`, `codex`, or `gemini` and your requests route through Router-Maestro.
-
-To smoke-test the full path without launching a client:
-
-```bash
-curl http://localhost:8080/api/openai/v1/models \
-  -H "Authorization: Bearer $(router-maestro server show-key)"
-# Expected: JSON list of available models
-```
-
-> **Deploying to another machine or a VPS?** See [Deployment](#deployment) for the remote-Docker and Compose + Traefik + HTTPS setups.
-
-## Core Concepts
-
-### Model Identification
-
-Models are identified using the format `{provider}/{model-id}`:
-
-| Example                           | Description                         |
-| --------------------------------- | ----------------------------------- |
-| `github-copilot/gpt-4o` | GPT-4o via GitHub Copilot |
-| `github-copilot/claude-sonnet-4` | Claude Sonnet 4 via GitHub Copilot |
-| `openai/gpt-4-turbo` | GPT-4 Turbo via OpenAI |
-| `anthropic/claude-3-5-sonnet` | Claude 3.5 Sonnet via Anthropic |
-
-Model-list endpoints and successful response `model` fields use this qualified
-form. The response value identifies the candidate that actually executed the
-request, so it can change after a permitted fallback without becoming
-ambiguous. Qualification uses catalog provenance rather than guessing from the
-text of an upstream ID. A raw upstream ID may itself contain `/` and remains the
-complete suffix: provider `openrouter` plus raw ID `openrouter/auto` is exposed
-as `openrouter/openrouter/auto`. Only a catalog value explicitly marked as an
-already-public ID is decoded once.
-
-Bare model IDs and fuzzy aliases remain valid input conveniences, but they do
-not select or lock a provider. This includes an exact raw alias that contains a
-slash. Use the complete public `provider/model-id` returned by a model-list
-endpoint when provider identity matters. Other slash-containing inputs are
-treated as provider-scoped; an unknown provider prefix returns `404` instead of
-falling back to a cross-provider fuzzy match.
-
-**Fuzzy matching**: You don't need to type exact model IDs. Router-Maestro will fuzzy-match common variations:
-
-| You type              | Resolves to                      |
-| --------------------- | -------------------------------- |
-| `Opus 4.6`            | `claude-opus-4-6-20250617`       |
-| `opus-4-6`            | `claude-opus-4-6-20250617`       |
-| `claude-sonnet-4.5`   | `claude-sonnet-4-5-20250929`     |
-| `anthropic/sonnet-4-5`| Sonnet 4.5 via Anthropic only    |
-
-The highest-confidence fuzzy match wins. A date/version suffix is used only to
-break ties within the same normalized model family. Low-confidence or
-effectively tied cross-family matches are rejected as ambiguous instead of
-being resolved by an unrelated model's newer date.
-
-### Auto-Routing
-
-Use the special model name `router-maestro` for automatic provider selection:
-
-```json
-{"model": "router-maestro", "messages": [...]}
-```
-
-`router-maestro` is a virtual model with two selectable profiles. New installs
-default to **Smart Auto**: a configured router model classifies the request as
-`fast`, `general`, `coding`, or `deep_reasoning`, then Router-Maestro runs the
-model assigned to that task. Hard requirements such as tools, vision,
-structured output, reasoning, files, and output size are filtered before
-classification. Input size is estimated from the actual request: models remain
-preferred only below 70% of their advertised prompt window, leaving room for
-tokenizer and provider-accounting differences. If none remains below that
-threshold, Auto keeps every hard-compatible model tied for the largest window
-instead of rejecting the request. A structured upstream context-overflow error
-may switch only to a larger configured task model, or to another model tied at
-the largest window, and only before the first response frame. The router model
-can return only a task type, never an arbitrary provider or model ID.
-
-The alternative **Priority Chain** profile follows an explicit ordered list.
-The list cannot be empty, and Router-Maestro never appends models from provider
-catalog order. It moves to the next model only after a retryable failure before
-the response stream commits.
-
-Configure either profile from the searchable CLI wizard or the local portal:
-
-```bash
-router-maestro model auto configure
-router-maestro model auto show
-router-maestro web
-```
-
-The server exposes `router-maestro` in its model catalog with metadata aggregated
-from the active profile's execution models. Context and token limits use the
-largest configured value; feature support is the union. Runtime filtering still
-checks the requested combination against a concrete model, because a flat
-catalog entry cannot express every combination of capabilities.
-
-### Priority & Fallback
-
-The legacy `priorities` and `fallback` settings continue to govern fallback from
-an explicitly requested model. Existing installations with a non-empty legacy
-priority list migrate to the equivalent Auto Priority Chain profile, preserving
-their routing behavior.
-
-```bash
-# Set priorities
-router-maestro model priority add github-copilot/claude-sonnet-4 --position 1
-router-maestro model priority add github-copilot/gpt-4o --position 2
-
-# View priorities
-router-maestro model priority list
-```
-
-**Fallback** triggers only after a retryable execution failure, such as a
-transport error, rate limit, retryable upstream status, or malformed upstream
-response before a streaming response is committed:
-
-| Strategy     | Behavior                             |
-| ------------ | ------------------------------------ |
-| `priority` | Try next model in priorities list |
-| `same-model` | Try same model on different provider |
-| `none` | Fail immediately |
-
-Configure in `~/.config/router-maestro/priorities.json`:
-
-```json
-{
-  "priorities": ["github-copilot/claude-sonnet-4", "github-copilot/gpt-4o"],
-  "fallback": {"strategy": "priority", "maxRetries": 2}
-}
-```
-
-An explicit `provider/model-id` remains the primary candidate. If it is absent
-from the priority list, the configured priorities are still eligible after a
-retryable execution failure, with the primary removed from duplicates. Static
-capability mismatches and invalid or unsupported request options return the
-entry protocol's native `400` response and do not switch models. Once a stream
-has emitted its first provider chunk, a later failure is surfaced in that same
-stream and Router-Maestro never replays the request on another candidate.
-
-Streaming has a strict terminal contract. A stream succeeds only after an
-explicit successful provider terminal; clean EOF without one is an
-`unexpected_eof`, not success. Failures discovered before an SSE response is
-returned use the entry protocol's non-2xx JSON error. After the HTTP response
-has started, its status is already committed (normally `200`), so an error,
-incomplete result, or unexpected EOF is encoded as exactly one protocol-native
-in-stream terminal instead. The standard Anthropic route may send a `ping`
-before opening a slow upstream stream; a failure after that ping is therefore
-post-commit even though no model content has arrived yet.
-
-OpenAI Responses preserves the upstream response's business status. A native
-Responses result with `status: "incomplete"`, `"failed"`, or `"cancelled"`
-remains an HTTP `200` Responses object/event with that status; it is not
-manufactured into `completed`. Transport failures and malformed provider
-payloads remain errors. When a failed/cancelled Responses result is bridged to
-Chat, Anthropic, or Gemini, whose non-stream response schemas cannot represent
-that native status, Router-Maestro returns that entry protocol's error envelope.
-
-### Cross-Provider Translation
-
-Router-Maestro separates the client protocol from the provider transport. Its
-generation dispatcher accepts Anthropic Messages, OpenAI Chat, OpenAI
-Responses, or Gemini and can select an upstream Messages, Chat, or Responses
-binding. This gives the current implementation a 4×3 transport matrix; it does
-not imply that every provider or model advertises all three transports.
-
-For example:
-
-```bash
-# Use Anthropic API with OpenAI provider
-POST /v1/messages  {"model": "openai/gpt-4o", ...}
-
-# Use OpenAI API with Anthropic provider
-POST /api/openai/v1/chat/completions  {"model": "anthropic/claude-3-5-sonnet", ...}
-```
-
-When ingress and upstream use the same protocol, Router-Maestro preserves the
-wire payload on a copy-on-write identity fast path and does not create semantic
-IR. A cross-protocol attempt decodes semantic IR lazily, at most once per
-request, and reuses the immutable result across eligible transport attempts.
-The model route plan chooses provider/model candidates only. For each model,
-the provider handler exhausts its compatible transports before model fallback
-can move to the next candidate; that transport switch does not consume the
-model fallback limit.
-
-Accepted semantic options are either preserved, translated, or rejected; they
-are not silently dropped. Unsupported options use the client's native error
-shape (OpenAI, Anthropic, or Gemini) with HTTP `400`. Reasoning-tier
-substitution is downward-only across the ordered
-`minimal < low < medium < high < xhigh < max` ladder. Unknown tier names are
-rejected, and `minimal` is never inferred from a token budget because no
-documented budget equivalent exists.
-
-Omitted temperature remains omitted through Chat, Responses, and Gemini
-translation. An explicit value, including `1.0`, remains explicit. Copilot's
-Chat transport accepts the explicit value, while Copilot's Responses transport
-rejects every explicit temperature with an OpenAI-native HTTP `400` before
-provider I/O. OpenAI Responses reasoning currently represents only
-`reasoning.effort`; `reasoning.summary` and other sibling fields are rejected
-with their exact parameter path instead of being ignored.
-
-For Copilot, the dispatcher can try Messages, Chat, or Responses according to
-the ingress protocol and catalog capabilities. Consequently Claude Code can use
-a Copilot GPT model that is available only through Responses while continuing
-to call the stable Anthropic Messages endpoint. The former Router-Maestro beta
-Messages and Responses paths remain aliases of this dispatcher for one
-compatibility cycle; new CLI configuration writes stable URLs.
-
-For standard Anthropic thinking requests, budget and reasoning validation use
-the capability and output-token snapshot of the same frozen route candidate
-that will execute the request. Validation never consults a different provider's
-same-named catalog entry and then silently changes candidates.
-
-OpenAI Chat and Responses preserve refusals as typed `refusal` data, including
-streaming deltas and assistant history. Anthropic has no equivalent content
-block and maps refusal content to text. Gemini has no equivalent refusal part,
-so a cross-protocol conversion to Gemini rejects it before provider I/O rather
-than silently changing it into ordinary model text.
-
-For OpenAI Chat streaming, `stream_options: {"include_usage": true}` emits a
-final usage-only chunk with `choices: []` immediately before `[DONE]`.
-Explicit `false` suppresses downstream usage; omitting `stream_options` keeps
-Router-Maestro's legacy streaming shape. Invalid stream options are rejected
-with an OpenAI-native `400` before the provider call.
-
-### Contexts
-
-A **context** is a named connection profile stored on the client machine. It contains the endpoint URL and Router-Maestro server API key for one deployment, so the same CLI can manage local Docker containers, remote VPS deployments, and other Router-Maestro servers.
-
-| Context  | Use Case                                   |
-| -------- | ------------------------------------------ |
-| `local` | Default context for `router-maestro server start` |
-| `docker` | Connect to a local Docker container |
-| `my-vps` | Connect to a remote VPS deployment |
-
-```bash
-# Add a context with the server API key from `server show-key`
-router-maestro context add my-vps --endpoint https://api.example.com --api-key sk-rm-...
-
-# Switch contexts
-router-maestro context set my-vps
-
-# All CLI commands now target the remote server
-router-maestro model list
-```
-
-## CLI Reference
-
-### Server
-
-| Command                    | Description        |
-| -------------------------- | ------------------ |
-| `server start --port 8080` | Start the server   |
-| `server status` | Show server status |
-| `server show-key` | Show current context API key |
-
-### Authentication
-
-| Command                 | Description                    |
-| ----------------------- | ------------------------------ |
-| `auth login [provider]` | Authenticate with a provider   |
-| `auth logout <provider>` | Remove authentication |
-| `auth list` | List authenticated providers |
-
-### Models
-
-| Command                            | Description            |
-| ---------------------------------- | ---------------------- |
-| `model list`                       | List available models  |
-| `model refresh` | Refresh models cache |
-| `model priority list` | Show priorities |
-| `model priority add <model> --position <n>` | Add or move a priority |
-| `model fallback show` | Show fallback config |
-
-### Contexts (Remote Management)
-
-| Command                                              | Description          |
-| ---------------------------------------------------- | -------------------- |
-| `context current`                                    | Show current context |
-| `context list` | List all contexts |
-| `context set <name>` | Switch context |
-| `context update <name> --endpoint <url> [--api-key <key>]` | Update context endpoint/key |
-| `context add <name> --endpoint <url> --api-key <key>` | Add remote context |
-| `context test` | Test connection |
-
-### Other
-
-| Command              | Description                   |
-| -------------------- | ----------------------------- |
-| `config claude-code` | Generate Claude Code settings |
-| `config codex`       | Generate Codex config (CLI/Extension/App) |
-| `config gemini`      | Generate Gemini CLI .env      |
-| `web` | Open the loopback-only local configuration portal |
-
-## API Reference
-
-### OpenAI-Compatible
-
-```bash
-# Chat completions — full curl example
-curl http://localhost:8080/api/openai/v1/chat/completions \
-  -H "Authorization: Bearer sk-rm-..." \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "github-copilot/gpt-4o",
-    "messages": [{"role": "user", "content": "Hello"}],
-    "stream": false
-  }'
-
-# Responses
-POST /api/openai/v1/responses
-
-# List models
-GET /api/openai/v1/models
-```
-
-`POST /api/openai/beta/v1/responses` remains a temporary compatibility alias
-for the stable Responses path.
-
-The list `id` and every successful Chat/Responses response `model` are
-provider-qualified (`provider/model-id`). A fallback response reports the
-candidate that actually served it.
-
-### Anthropic-Compatible
-
-```bash
-# Messages
-POST /v1/messages
-POST /api/anthropic/v1/messages
-{
-  "model": "github-copilot/claude-sonnet-4",
-  "max_tokens": 1024,
-  "messages": [{"role": "user", "content": "Hello"}]
-}
-
-# Count tokens
-POST /v1/messages/count_tokens
-```
-
-`POST /api/anthropic/beta/v1/messages` remains a temporary compatibility alias
-for the stable dispatcher. Prefer `/v1/messages` or
-`/api/anthropic/v1/messages` in new Claude Code configuration.
-
-### Admin
-
-```bash
-POST /api/admin/models/refresh   # Refresh model cache
-```
-
-### Gemini-Compatible
-
-```bash
-# Generate content (non-streaming)
-POST /api/gemini/v1beta/models/{model}:generateContent
-{
-  "contents": [{"role": "user", "parts": [{"text": "Hello"}]}]
-}
-
-# Stream generate content (SSE)
-POST /api/gemini/v1beta/models/{model}:streamGenerateContent?alt=sse
-{
-  "contents": [{"role": "user", "parts": [{"text": "Hello"}]}]
-}
-
-# Count tokens
-POST /api/gemini/v1beta/models/{model}:countTokens
-{
-  "contents": [{"role": "user", "parts": [{"text": "Hello"}]}]
-}
-```
-
-Gemini's `v1beta` segment is the Gemini wire-protocol version, not a
-Router-Maestro beta endpoint, so it is not deprecated with the RM beta aliases.
-`countTokens` remains a separate operation using the existing native count or
-estimator path; it is not one of the generation transports. Router-Maestro does
-not currently register a Gemini-native provider binding, but the Gemini ingress
-can target Messages, Chat, or Responses providers.
-
-## Configuration
-
-### File Locations
-
-Following XDG Base Directory specification:
-
-| Type       | Path                               | Contents                     |
-| ---------- | ---------------------------------- | ---------------------------- |
-| **Config** | `~/.config/router-maestro/` | |
-| | `providers.json` | Custom provider definitions |
-| | `priorities.json` | Model priorities and fallback |
-| | `contexts.json` | Deployment contexts |
-| | `projects.json` | Projects explicitly added through the local portal |
-| **Data** | `~/.local/share/router-maestro/` | |
-| | `auth.json` | Provider OAuth and API-key credentials |
-| | `server.json` | Legacy server state; current server API keys are stored in `contexts.json` |
-| | `reasoning-capsule-keys.json` | Auto-generated owner-only reasoning replay key ring |
-
-### Reasoning Capsule Keys
-
-Cross-protocol reasoning replay uses authenticated `rmr1` capsules so opaque
-provider state is never exposed as plaintext to another wire protocol. Without
-environment configuration, Router-Maestro atomically creates and reuses
-`~/.local/share/router-maestro/reasoning-capsule-keys.json` with mode `0600`.
-An invalid, unreadable, or corrupt key source fails server startup rather than
-silently replacing the key.
-
-Multi-instance deployments must set the same unpadded base64url-encoded 32-byte
-key in `ROUTER_MAESTRO_REASONING_CAPSULE_KEY` on every instance. During
-rotation, place comma-separated old keys in
-`ROUTER_MAESTRO_REASONING_CAPSULE_PREVIOUS_KEYS`; they decrypt existing
-capsules but never encrypt new ones. See [docs/deployment.md](docs/deployment.md)
-for the rollout order and fail-closed behavior.
-
-### Custom Providers
-
-Add OpenAI-compatible providers in `~/.config/router-maestro/providers.json`:
-
-```json
-{
-  "providers": {
-    "ollama": {
-      "type": "openai-compatible",
-      "baseURL": "http://localhost:11434/v1",
-      "models": {
-        "llama3": {"name": "Llama 3"},
-        "mistral": {"name": "Mistral 7B"}
-      },
-      "options": {
-        "allow_unauthenticated": true
-      }
-    }
-  }
-}
-```
-
-Custom-provider credentials are resolved in this order:
-
-1. A non-empty environment variable. By default its name is the provider ID in
-   uppercase with punctuation replaced by underscores, followed by `_API_KEY`.
-2. An API key saved in Router-Maestro's credential repository with
-   `router-maestro auth login <provider>`.
-3. No credential, only when `options.allow_unauthenticated` is explicitly
-   `true`. Anonymous requests do not include an `Authorization` header.
-
-For example, `ollama` uses `OLLAMA_API_KEY` and `my-provider` uses
-`MY_PROVIDER_API_KEY`:
-
-```bash
-export OLLAMA_API_KEY="sk-..."
-```
-
-Set `options.api_key_env` to a valid environment-variable name when a provider
-needs a different name. Provider definitions and their authentication
-requirements are obtained from the active server, so the same login command
-works for local and remote contexts. Only a local context may fall back to the
-local `providers.json` while its server is unavailable.
-
-The supported runtime options are `api_key_env` and
-`allow_unauthenticated`. Router-Maestro preserves unknown option keys from
-older `providers.json` files when loading and saving, but ignores them at
-runtime. If one provider definition is invalid, it is skipped with a sanitized
-diagnostic while other valid custom providers remain available.
-
-### Hot-Reload
-
-Configuration files are automatically reloaded every 5 minutes:
-
-| File               | Auto-Reload      |
-| ------------------ | ---------------- |
-| `priorities.json` | ✓ (5 min) |
-| `providers.json` | ✓ (5 min) |
-| `auth.json` | Requires restart |
-
-Force immediate reload:
-
-```bash
-router-maestro model refresh
-```
-
-### Metrics & Observability
-
-Router-Maestro exposes a top-level Prometheus endpoint at `/metrics` with
-HTTP request counters, request duration histograms, and request IDs on
-responses via `X-Request-ID`. Streaming request durations are recorded after
-the response body finishes. Generation attempts also expose bounded
-`entry_protocol`, `upstream_transport`, `conversion_mode`, `outcome`, and
-`ir_materialized` labels. Provider, model, and binding identities are kept out
-of Prometheus and are available only in opt-in audit attempt records.
-
-```bash
-curl http://localhost:8080/metrics
-```
-
-By default `/metrics` is public. Set `ROUTER_MAESTRO_METRICS_TOKEN` to require
-an independent metrics token:
-
-```bash
-ROUTER_MAESTRO_METRICS_TOKEN="metrics-secret" router-maestro server start
-curl http://localhost:8080/metrics -H "Authorization: Bearer metrics-secret"
-```
-
-See [docs/observability.md](docs/observability.md) for scrape examples, metric
-labels, and troubleshooting guidance.
-
-## Deployment
-
-### Architecture
+## Why Router-Maestro
+
+- **One Copilot subscription, every compatible client.** Authenticate once with
+  GitHub Copilot and expose its live catalog—including GPT, Claude, Gemini,
+  Grok, and MAI—to Claude Code, Codex, Gemini CLI, and API clients.
+- **Protocol-independent routing.** Anthropic Messages, OpenAI Chat
+  Completions, OpenAI Responses, and Gemini generation enter one dispatcher;
+  providers choose the best Messages, Chat, or Responses upstream transport.
+- **Native fast paths, translation only when needed.** Matching protocols use a
+  copy-on-write identity path. Cross-protocol attempts lazily materialize a
+  typed semantic representation and stream events without buffering the full
+  response.
+- **Tools, streaming, reasoning, and long context.** Router-Maestro preserves
+  tool calls/results, structured output, usage, terminal outcomes, and
+  reasoning continuation across supported protocol boundaries. Live catalog
+  metadata advertises context choices such as `272K / 1M` to clients.
+- **A real Auto model.** The virtual `router-maestro` model can classify work
+  into Fast, General, Coding, or Deep Reasoning tasks, or follow a strict
+  priority chain. Capability and context-window filtering happen before the
+  model is selected.
+- **Configuration for humans and agents.** Use searchable CLI wizards or the
+  loopback-only visual portal to manage contexts, models, context windows,
+  client configuration, trusted projects, and Auto routing.
+- **Self-hosted control.** Run locally, in Docker, or behind HTTPS. Prometheus
+  metrics, request IDs, stream guards, and opt-in audit traces support
+  production diagnosis without sending routing control to a hosted portal.
+
+## Supported Surface
+
+### Clients and ingress protocols
+
+| Client or API consumer | Router-Maestro surface | Full Copilot catalog |
+| --- | --- | --- |
+| Claude Code / Anthropic SDK | Anthropic Messages | Yes, including Responses-only GPT models |
+| OpenAI Codex / OpenAI SDK | OpenAI Responses | Yes, including Claude, Gemini, Grok, and MAI |
+| OpenAI-compatible clients | Chat Completions | Yes, subject to feature representability |
+| Gemini CLI / Gemini SDK | Gemini `generateContent` | Yes, across available upstream transports |
+
+### Providers
+
+| Provider | Authentication | Upstream transports |
+| --- | --- | --- |
+| GitHub Copilot | OAuth device flow | Messages, Chat, Responses as advertised by each model |
+| OpenAI | API key | OpenAI-compatible transport |
+| Anthropic | API key | Anthropic Messages |
+| Custom OpenAI-compatible | API key, environment key, or explicit anonymous mode | Chat Completions |
+
+Unsupported cross-protocol fields fail explicitly before provider I/O rather
+than being silently dropped.
+
+## How It Works
 
 ```mermaid
-graph TD
-    Internet["🌐 Internet (HTTPS)"]
-    subgraph VPS
-        Traefik["Traefik (ports 80/443)\nAutomatic HTTPS · Let's Encrypt\nHTTP → HTTPS redirect"]
-        RM["Router-Maestro (port 8080)\nOpenAI / Anthropic-compatible API\nMulti-provider routing"]
-    end
-    Providers["LLM Providers\nGitHub Copilot · OpenAI · Anthropic"]
-
-    Internet -->|443| Traefik
-    Traefik -->|8080| RM
-    RM --> Providers
+flowchart LR
+    C[Claude Code / Codex / Gemini / SDK] --> P[Protocol runtime]
+    P --> R[Model and Auto routing]
+    R --> H[Provider handler]
+    H --> T{Best upstream transport}
+    T -->|same protocol| I[Identity fast path]
+    T -->|cross protocol| S[Lazy semantic translation]
+    I --> U[Provider model]
+    S --> U
 ```
 
-- **Traefik** — reverse proxy that handles TLS termination and auto-renews HTTPS certificates via Let's Encrypt. Only needed for public-facing deployments.
-- **Router-Maestro** — the API server. Listens on port 8080, requires its API key for inference and administration requests, and routes inference to configured LLM providers. Health/docs are public; metrics has its own optional token.
-
-### Server and Client API Keys
-
-Router-Maestro currently has one server API key. The same
-`ROUTER_MAESTRO_API_KEY` protects inference routes and `/api/admin/*`; every
-inference client and remote CLI management command must send that key. A
-separate administrator key is not currently supported. Public health/docs and
-the independently configured metrics endpoint are the exceptions described in
-their respective sections.
-
-You can provide the key explicitly with `ROUTER_MAESTRO_API_KEY` or `router-maestro server start --api-key ...`. If you do not, the server generates a `sk-rm-...` key on first start and persists it in the `local` context inside `contexts.json` (the Docker image runs the same `server start` command, so the same behavior applies there). To read it later:
-
-```bash
-router-maestro server show-key                                # local install / inside the container
-docker exec router-maestro router-maestro server show-key      # remote Docker host (run over SSH)
-docker compose exec router-maestro router-maestro server show-key   # Docker Compose
-```
-
-Authentication (`router-maestro auth login github-copilot`) and config (`router-maestro config claude-code` / `codex` / `gemini`) always run from the client and use the active context's endpoint + key. They never need `docker exec` because the server hosts the OAuth device flow and exposes it via the admin HTTP API.
-
-### Local with pip install
-
-If you would rather not use Docker, run the server directly on the same machine. The `local` context is auto-created on first start, so the host CLI works against `localhost:8080` with zero context setup.
-
-```bash
-pip install router-maestro
-router-maestro server start --port 8080            # leave running in this terminal
-router-maestro auth login github-copilot           # in a second terminal
-router-maestro config claude-code                  # or: config codex / config gemini
-```
-
-For a fixed key, set `ROUTER_MAESTRO_API_KEY` before `server start` or pass `--api-key`.
-
-### Option A: Remote Docker (No HTTPS)
-
-**Use when:** running on another machine on your LAN/VPN, or behind an existing reverse proxy (Nginx, Caddy, etc.) that handles TLS.
-
-**Prerequisites:** Docker installed on the server host; SSH access to that host; the Router-Maestro CLI installed on your client machine (`pip install router-maestro`).
-
-**Step 1 — Start the container on the server host**
-
-```bash
-docker run -d --name router-maestro \
-  -p 8080:8080 \
-  -v ~/.local/share/router-maestro:/home/maestro/.local/share/router-maestro \
-  -v ~/.config/router-maestro:/home/maestro/.config/router-maestro \
-  likanwen/router-maestro:latest
-```
-
-The server generates and persists an API key automatically. For a fixed key, add `-e ROUTER_MAESTRO_API_KEY="sk-rm-..."`.
-
-**Step 2 — Read the server API key from the server host**
-
-```bash
-ssh user@server-host docker exec router-maestro router-maestro server show-key
-```
-
-Copy the printed key for the next step.
-
-**Step 3 — Add the server as a context on your client machine**
-
-```bash
-router-maestro context add my-server \
-  --endpoint http://server-host:8080 \
-  --api-key "sk-rm-..."
-
-router-maestro context set my-server
-router-maestro context test          # verify endpoint + key
-```
-
-**Step 4 — Authenticate with GitHub Copilot from the client**
-
-The auth command targets the active context, so this runs against the remote server over HTTP — no `docker exec` needed.
-
-```bash
-router-maestro auth login github-copilot
-# 1. Visit the URL shown in this terminal
-# 2. Enter the displayed code
-# 3. Authorize "GitHub Copilot Chat"
-```
-
-**Step 5 — Configure your CLI tool from the client**
-
-```bash
-router-maestro config claude-code   # or: config codex / config gemini
-```
-
-**Step 6 — Verify**
-
-```bash
-curl http://server-host:8080/health
-# Expected: {"status":"healthy"}
-
-curl http://server-host:8080/api/openai/v1/models \
-  -H "Authorization: Bearer sk-rm-..."
-# Expected: JSON list of available models
-```
-
-### Option B: Production (Docker Compose + Traefik + HTTPS)
-
-**Use when:** deploying to a public-facing VPS with a domain name. Provides automatic HTTPS via Let's Encrypt with the Cloudflare DNS challenge.
-
-**Prerequisites:**
-- A VPS with Docker and Docker Compose installed
-- A domain name (e.g., `api.example.com`) with DNS pointing to your VPS
-- A Cloudflare account managing your domain's DNS (for automatic HTTPS)
-- The Router-Maestro CLI installed on your client machine (`pip install router-maestro`)
-
-**Step 1 — Clone the repository on the VPS**
-
-```bash
-git clone https://github.com/MadSkittles/Router-Maestro.git
-cd Router-Maestro
-```
-
-**Step 2 — Configure environment variables**
-
-```bash
-cp .env.example .env
-```
-
-Edit `.env` with your values:
-
-| Variable | Description | Example |
-|----------|-------------|---------|
-| `DOMAIN` | Your domain pointing to this VPS | `api.example.com` |
-| `CF_DNS_API_TOKEN` | Cloudflare API token with `Zone:DNS:Edit` permission. [Generate here](https://dash.cloudflare.com/profile/api-tokens) | `abc123...` |
-| `ACME_EMAIL` | Email for Let's Encrypt certificate expiry notifications | `you@example.com` |
-| `ROUTER_MAESTRO_API_KEY` | Optional fixed server API key. Leave blank, and do not set it in the shell running Docker Compose, to let the server generate and persist one. | `sk-rm-...` |
-| `ROUTER_MAESTRO_LOG_LEVEL` | Log verbosity (`DEBUG`, `INFO`, `WARNING`, `ERROR`) | `INFO` |
-| `TRAEFIK_DASHBOARD_AUTH` | (Optional) Basic auth for Traefik dashboard. Generate with `htpasswd -nB admin`, then escape `$` as `$$` | `admin:$$2y$$05$$...` |
-
-**Step 3 — Start the services**
-
-```bash
-docker compose up -d
-```
-
-This starts both Traefik (reverse proxy) and Router-Maestro. Traefik will automatically obtain an HTTPS certificate for your domain.
-
-**Step 4 — Read the server API key from the VPS**
-
-```bash
-docker compose exec router-maestro router-maestro server show-key
-```
-
-If you set `ROUTER_MAESTRO_API_KEY` in `.env` or in the shell running Docker Compose, this prints that key. Otherwise it prints the generated key stored in the server's mounted config.
-
-**Step 5 — Add the VPS as a context on your client machine**
-
-```bash
-router-maestro context add my-vps \
-  --endpoint https://api.example.com \
-  --api-key "sk-rm-..."
-
-router-maestro context set my-vps
-router-maestro context test
-```
-
-**Step 6 — Authenticate with GitHub Copilot from the client**
-
-```bash
-router-maestro auth login github-copilot
-# Targets the VPS through the active context — no docker compose exec needed.
-# 1. Visit the URL shown
-# 2. Enter the displayed code
-# 3. Authorize "GitHub Copilot Chat"
-```
-
-**Step 7 — Configure your CLI tool from the client**
-
-```bash
-router-maestro model list           # confirm models load from the VPS
-router-maestro config claude-code   # or: config codex / config gemini
-```
-
-For Codex, also export the same key on the client because the generated config references `ROUTER_MAESTRO_API_KEY`:
-
-```bash
-export ROUTER_MAESTRO_API_KEY="sk-rm-..."   # add to your shell profile
-```
-
-**Step 8 — Verify**
-
-```bash
-curl https://api.example.com/health
-# Expected: {"status":"healthy"}
-
-curl https://api.example.com/api/openai/v1/models \
-  -H "Authorization: Bearer sk-rm-..."
-# Expected: JSON list of available models
-```
-
-### Remote Management
-
-Contexts let you manage any Router-Maestro server (local or remote) from your local CLI:
-
-```bash
-# Add a remote server with the server API key from `server show-key`
-router-maestro context add my-vps --endpoint https://api.example.com --api-key sk-rm-...
-
-# Switch between servers
-router-maestro context set my-vps     # target remote VPS
-router-maestro context set local      # target local server
-
-# Test the connection
-router-maestro context test
-
-# All commands now target the active context
-router-maestro model list
-router-maestro auth login github-copilot
-```
-
-### Advanced Configuration
-
-For additional deployment options, see [docs/deployment.md](docs/deployment.md):
-
-- Alternative DNS providers (AWS Route53, DigitalOcean, GoDaddy, Namecheap, etc.)
-- HTTP challenge setup (when DNS challenge is not available)
-- Traefik dashboard configuration and security
-- Complete environment variables reference
-
-### Stream Guards & Audit Tracing
-
-Router-Maestro includes runtime stream protection and optional per-request tracing.
-
-**Stream Guards** (enabled by default in `priorities.json`):
-
-- **Leak Guard** — detects when Copilot-served Claude models emit internal protocol markup (control envelopes, XML tool calls) as plain text. Control envelopes abort the stream (client retries); invoke leaks are recovered into structured tool_use.
-- **Runaway Guard** — aborts streams with degenerate generation patterns (infinite tiny fragments or excessive byte volume).
-
-Configure in `~/.config/router-maestro/priorities.json`:
-```json
-{
-  "guards": {
-    "leak_guard": { "enabled": true },
-    "runaway_guard": { "enabled": true, "max_bytes": 10000000 }
-  },
-  "beta_strip": ["output-128k-*"]
-}
-```
-
-The four protocol streaming encoders (OpenAI Chat, OpenAI Responses,
-Anthropic, and Gemini) attach these guards to their stream processing. The beta
-Anthropic URL reuses the same encoder. `beta_strip` is also live: matching
-tokens are removed from the inbound `anthropic-beta` header before Copilot
-transport, and remaining tokens are forwarded. The broader request context is
-separate from this stream pipeline: it owns one immutable config/router
-generation, request ID, audit, terminal outcome, and cleanup for streaming and
-non-stream inference and token counting routes. Streaming cleanup finishes at
-the final ASGI body frame, not when the endpoint returns a stream object.
-
-**Audit Tracing** (opt-in, for debugging):
-
-```bash
-# Enable via env var
-ROUTER_MAESTRO_TRACE=1 router-maestro server start
-
-# Or in priorities.json
-{ "audit": { "enabled": true } }
-```
-
-Each traced request writes a directory under
-`~/.local/share/router-maestro/traces/{request_id}/`. Artifacts are lifecycle
-records, not a fixed four-file bundle:
-
-- `inbound.json` — the client request
-- `upstream.json`, `upstream_2.json`, ... — upstream request observations in order
-- `upstream_resp.json`, `upstream_resp_2.json`, ... — upstream response
-  observations, numbered independently in response order
-- `outbound.json` — wire status, timing, and semantic terminal outcome
-
-Some early failures have no upstream artifact, while fallback, authentication
-retry, catalog, or token-count traffic may produce multiple attempt records.
-The recognized `Authorization`, `X-API-Key`, and `X-Goog-API-Key` headers and
-common credential-shaped payload keys are redacted before the trace is written
-asynchronously. Treat traces as sensitive because prompts, model output, and
-unrecognized application-specific headers can still contain private data.
-
-For Docker, mount a volume to persist traces:
-```bash
-docker run ... -v ./traces:/home/maestro/.local/share/router-maestro/traces ...
-```
-
-## License
-
-MIT License - see [LICENSE](LICENSE) file.
-
-## Changelog
-
-See [CHANGELOG.md](CHANGELOG.md) for release history.
-
-## Contributing
-
-Contributions are welcome! Please feel free to submit a Pull Request.
-
-### Local Integration Tests
-
-The live-backend integration tests are local-only and are not part of GitHub
-Actions. They start a local Router-Maestro server, reuse your existing
-Router-Maestro config/auth files, and send requests to the real GitHub Copilot
-backend. The suite covers model invocation paths only: OpenAI Chat, OpenAI
-Responses, Anthropic Messages/count_tokens, Gemini generateContent/stream/countTokens,
-tool calls, streaming, usage accounting, Anthropic thinking budgets and
-`output_config.effort`, OpenAI reasoning_effort, Gemini-family API calls, and the
-full Copilot model matrix by default. Admin endpoints are intentionally not
-covered by these tests.
+Provider handlers own their catalog, authentication, endpoint bindings,
+transport preference, and provider-specific contracts. Routing selects a model;
+the handler selects how to call it. Model fallback begins only after the
+selected model's viable transports are exhausted.
+
+## Five-Minute Local Start
 
 Prerequisites:
 
-```bash
-uv run router-maestro auth login github-copilot
-```
+- [uv](https://docs.astral.sh/uv/) or another Python 3.14 package installer
+- an active GitHub Copilot subscription for Copilot-backed models
 
-Run them explicitly:
-
-```bash
-make integration-test
-```
-
-Optional overrides:
+Install the CLI and server:
 
 ```bash
-RM_INTEGRATION_MODEL=github-copilot/gpt-4o make integration-test
-RM_INTEGRATION_TOOL_MODEL=github-copilot/gpt-4o make integration-test
-RM_INTEGRATION_RESPONSES_MODEL=github-copilot/gpt-5.4-mini make integration-test
-RM_INTEGRATION_MODELS=github-copilot/gpt-4o,github-copilot/claude-sonnet-4.5 make integration-test
-RM_INTEGRATION_MAX_MODELS=8 make integration-test
-RM_INTEGRATION_MAX_REASONING_MODELS=3 make integration-test
-RM_INTEGRATION_MAX_REASONING_MODELS=0 make integration-test  # full reasoning sweep
+uv tool install --python 3.14 router-maestro
 ```
 
-### Deployed Claude/Codex Validation
-
-The repository also includes a repeatable live-client runner for an already deployed test
-context. It fetches the context's current model list, runs Claude Code and Codex one-shot smoke
-cases, then verifies a fresh two-request recall session for every selected model. Codex receives a
-temporary version-matched model catalog; persistent client configuration is not changed.
+Start Router-Maestro in one terminal:
 
 ```bash
-make live-validation RM_LIVE_ARGS='--context remote-vm-hk --client all --phase all'
+router-maestro server start
 ```
 
-Use `--provider`, repeatable `--model`, `--model-pattern`, or `--max-models` to bound a canary.
-Sanitized JSON/TSV and per-attempt logs are temporary unless `--keep-logs` or `--output-dir` is
-specified. The automated recall check complements rather than replaces the interactive file/MCP
-rounds in `skills/router-maestro-live-validation/`.
-
-### Request Preparation Benchmark
+The first start creates a local context and a `sk-rm-...` server API key. In a
+second terminal, authenticate and open the visual configurator:
 
 ```bash
-uv run python scripts/benchmark_request_preparation.py --iterations 1000
+router-maestro auth login github-copilot
+router-maestro web
 ```
+
+Or configure a client from the terminal:
+
+```bash
+router-maestro config claude-code
+router-maestro config codex
+router-maestro config gemini
+```
+
+The wizard reads the active server's live model catalog, lets you choose the
+model and context window, and previews or backs up the target configuration.
+For Codex it can also refresh `router-maestro-models.json`, so custom model
+metadata is available when the next Codex session starts.
+
+Verify the server and catalog:
+
+```bash
+curl http://localhost:8080/health
+router-maestro model list
+```
+
+For Docker, a VPS, HTTPS, upgrades, and rollback, follow the
+[Deployment Guide](docs/deployment.md). For all client and provider choices,
+follow the [Configuration Guide](docs/configuration.md). Both guides include
+prompts that can be pasted directly into an AI coding agent.
+
+To delegate the work, start at
+[AI-assisted deployment](docs/deployment.md#ai-assisted-deployment) or
+[AI-assisted client configuration](docs/configuration.md#ai-assisted-client-configuration).
+
+## Router-Maestro Auto
+
+Select the virtual model ID `router-maestro` to enable server-side automatic
+routing. New configurations default to **Smart Auto**:
+
+1. A configured router model classifies the request as `fast`, `general`,
+   `coding`, or `deep_reasoning`.
+2. The corresponding configured task model becomes the first candidate.
+3. Capability requirements and the estimated input size filter unsafe models.
+   Router-Maestro normally keeps candidates below 70% of their advertised
+   prompt capacity to leave room for tokenizer and protocol differences.
+4. If no model satisfies that safety margin, all configured models tied for the
+   largest hard-compatible context window remain eligible.
+5. A precise upstream context-overflow response may retry a larger configured
+   model before the first response frame; committed streams are never replayed.
+
+**Priority Chain** mode is available when deterministic ordering is preferred.
+Its configured fallback chain must not be empty.
+
+Configure either mode with:
+
+```bash
+router-maestro model auto configure
+# or
+router-maestro web
+```
+
+See [Auto routing and client configuration](docs/configuration.md#router-maestro-auto)
+for policy details.
+
+## Stable API Endpoints
+
+New integrations should use the stable paths:
+
+| API | Endpoint |
+| --- | --- |
+| OpenAI Chat Completions | `/api/openai/v1/chat/completions` |
+| OpenAI Responses | `/api/openai/v1/responses` |
+| OpenAI model list | `/api/openai/v1/models` |
+| Anthropic Messages | `/api/anthropic/v1/messages` |
+| Anthropic token count | `/api/anthropic/v1/messages/count_tokens` |
+| Gemini generation | `/api/gemini/v1beta/models/{model}:generateContent` |
+| Gemini streaming | `/api/gemini/v1beta/models/{model}:streamGenerateContent` |
+
+`/api/gemini/v1beta` is the Gemini protocol version, not a Router-Maestro beta
+route. Older Router-Maestro beta aliases remain compatibility paths only and
+should not be used for new configuration.
+
+Authenticated inference and administration use the same Router-Maestro server
+API key. `/health` is public. `/metrics` is public unless a separate metrics
+token is configured. Treat the server key as both inference and configuration
+authority.
+
+## Documentation
+
+### Use and operations
+
+- [Configuration Guide](docs/configuration.md) — contexts, providers, CLI and
+  Web configuration, Claude Code, Codex, Gemini CLI, Auto, and AI-agent prompts
+- [Deployment Guide](docs/deployment.md) — native, Docker, VPS, Traefik/HTTPS,
+  upgrades, rollback, multi-instance keys, and AI-agent prompts
+- [Metrics and Observability](docs/observability.md) — Prometheus metrics,
+  request IDs, terminal outcomes, audit artifacts, and troubleshooting
+- [Copilot Context Limits](docs/copilot-context-limits.md) — catalog context
+  metadata and prompt/output budgeting
+- [Tool Choice Behavior](docs/tool-choice-behavior.md) — tool-choice and finish
+  semantics across providers
+
+### Protocol and engineering reference
+
+- [API Translation and Protocol Contracts](docs/api-translation.md) — ingress,
+  transport bindings, semantic conversion, streaming, and error policy
+- [Token Calculation](docs/token-calculation.md) — context budgeting, token
+  counting, and thinking-budget normalization
+- [Python 3.14 and Slim Image Design](docs/python-314-and-slim-image-design.md)
+- [Python 3.14 and Slim Image Implementation Plan](docs/python-314-and-slim-image-plan.md)
+
+Historical design records:
+
+- [Provider-bound option policy](docs/superpowers/specs/2026-07-15-provider-bound-option-policy-design.md)
+  and its [round-two design](docs/superpowers/specs/2026-07-15-provider-bound-option-policy-round2-design.md)
+- [Option guard audit](docs/superpowers/specs/2026-07-15-option-guard-audit.md)
+- [Streaming keepalive gap design](docs/superpowers/specs/2026-07-21-beta-stream-keepalive-gap-design.md)
+- [Copilot reasoning sanitization](docs/superpowers/specs/2026-07-22-copilot-reasoning-sanitize-design.md)
+- [Copilot token-refresh resilience](docs/superpowers/specs/2026-07-22-copilot-token-refresh-resilience-design.md)
+- [Reasoning path consistency](docs/superpowers/specs/2026-07-23-reasoning-path-consistency-design.md)
+- Implementation plans: [option policy round one](docs/superpowers/plans/2026-07-15-provider-bound-option-policy-round1.md),
+  [option policy round two](docs/superpowers/plans/2026-07-15-provider-bound-option-policy-round2.md),
+  [reasoning sanitization](docs/superpowers/plans/2026-07-22-copilot-reasoning-sanitize.md),
+  [token refresh](docs/superpowers/plans/2026-07-22-copilot-token-refresh-resilience.md),
+  and [reasoning consistency](docs/superpowers/plans/2026-07-23-reasoning-path-consistency.md)
+
+### Project
+
+- [Contributing Guide](CONTRIBUTING.md) — development setup, architecture
+  boundaries, tests, audit tracing, live validation, and pull requests
+- [Changelog](CHANGELOG.md)
+- [License](LICENSE)
+
+## Contributing
+
+Contributions are welcome. Start with [CONTRIBUTING.md](CONTRIBUTING.md), which
+includes the required offline gates, live-provider test boundaries, and a safe
+audit workflow for protocol investigations.
+
+## License
+
+Router-Maestro is available under the [MIT License](LICENSE).

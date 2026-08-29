@@ -404,10 +404,32 @@
     }
 
     .rm-model-name {
+      min-width: 0;
       overflow: hidden;
       max-width: 100%;
       color: var(--rm-cyan);
       text-overflow: ellipsis;
+    }
+
+    .rm-model-title {
+      display: flex;
+      align-items: center;
+      gap: 5px;
+      min-width: 0;
+      max-width: 100%;
+    }
+
+    .rm-model-badge--internal {
+      flex: 0 0 auto;
+      padding: 1px 4px;
+      color: #020408;
+      border-radius: 3px;
+      background: var(--rm-cyan);
+      box-shadow: 0 0 7px rgba(37, 217, 255, 0.35);
+      font-size: 7px;
+      font-weight: 800;
+      letter-spacing: 0.3px;
+      line-height: 1.35;
     }
 
     .rm-model-name--auto {
@@ -635,15 +657,126 @@
     }
 
     .rm-auto-editor {
+      position: relative;
       display: grid;
+      grid-template-rows: 0fr;
       grid-column: 1 / -1;
-      gap: 10px;
-      padding: 10px;
-      border: 1px solid var(--rm-cyan);
+      gap: 0;
+      min-height: 0;
+      padding: 0 10px;
+      overflow: hidden;
+      opacity: 0;
+      border: 1px solid rgba(37, 217, 255, 0.1);
       background: rgba(37, 217, 255, 0.04);
+      box-shadow: 0 0 0 rgba(37, 217, 255, 0);
+      pointer-events: none;
+      transform: translateY(-8px);
+      transform-origin: top center;
+      transition:
+        grid-template-rows 760ms cubic-bezier(0.16, 1, 0.3, 1),
+        padding-block 760ms cubic-bezier(0.16, 1, 0.3, 1),
+        opacity 420ms ease-out,
+        transform 760ms cubic-bezier(0.16, 1, 0.3, 1),
+        border-color 420ms ease-out,
+        box-shadow 420ms ease-out;
+      isolation: isolate;
     }
 
     .rm-auto-editor[hidden] { display: none; }
+
+    .rm-auto-editor-content {
+      display: grid;
+      gap: 10px;
+      min-height: 0;
+      overflow: hidden;
+    }
+
+    .rm-auto-editor::after {
+      content: "";
+      position: absolute;
+      z-index: 3;
+      top: -18%;
+      bottom: -18%;
+      left: -48%;
+      width: 34%;
+      pointer-events: none;
+      opacity: 0;
+      background: linear-gradient(
+        90deg,
+        transparent,
+        rgba(37, 217, 255, 0.12),
+        rgba(202, 249, 255, 0.82),
+        rgba(255, 255, 255, 0.96),
+        rgba(37, 217, 255, 0.18),
+        transparent
+      );
+      filter: blur(1.5px);
+      mix-blend-mode: screen;
+      transform: skewX(-18deg);
+    }
+
+    .rm-auto-editor.is-open {
+      grid-template-rows: 1fr;
+      padding-block: 10px;
+      opacity: 1;
+      border-color: var(--rm-cyan);
+      box-shadow: inset 0 0 18px rgba(37, 217, 255, 0.04);
+      pointer-events: auto;
+      transform: translateY(0);
+    }
+
+    .rm-auto-editor.is-revealing {
+      animation: rm-auto-editor-pulse 920ms cubic-bezier(0.16, 1, 0.3, 1);
+    }
+
+    .rm-auto-editor.is-revealing::after {
+      animation: rm-auto-editor-flare 920ms cubic-bezier(0.16, 1, 0.3, 1);
+    }
+
+    .rm-auto-editor.is-collapsing {
+      pointer-events: none;
+      transition-duration: 520ms, 520ms, 360ms, 520ms, 360ms, 360ms;
+      transition-timing-function: cubic-bezier(0.4, 0, 0.6, 1);
+    }
+
+    @keyframes rm-auto-editor-pulse {
+      0%, 100% {
+        border-color: var(--rm-cyan);
+        box-shadow: inset 0 0 18px rgba(37, 217, 255, 0.04);
+      }
+      40% {
+        border-color: #ffffff;
+        box-shadow:
+          0 0 10px rgba(230, 253, 255, 0.98),
+          0 0 42px rgba(37, 217, 255, 0.82),
+          inset 0 0 32px rgba(37, 217, 255, 0.24);
+      }
+      68% {
+        border-color: #8deeff;
+        box-shadow:
+          0 0 6px rgba(230, 253, 255, 0.58),
+          0 0 26px rgba(37, 217, 255, 0.5),
+          inset 0 0 24px rgba(37, 217, 255, 0.14);
+      }
+    }
+
+    @keyframes rm-auto-editor-flare {
+      0%, 12% {
+        left: -48%;
+        opacity: 0;
+      }
+      24% {
+        opacity: 1;
+      }
+      67% {
+        left: 116%;
+        opacity: 0.94;
+      }
+      86%, 100% {
+        left: 116%;
+        opacity: 0;
+      }
+    }
 
     .rm-auto-head,
     .rm-auto-actions {
@@ -834,8 +967,13 @@
 
     @media (prefers-reduced-motion: reduce) {
       .rm-model-row--auto::before,
-      .rm-model-name--auto {
+      .rm-model-name--auto,
+      .rm-auto-editor,
+      .rm-auto-editor.is-revealing,
+      .rm-auto-editor.is-revealing::after,
+      .rm-auto-editor.is-collapsing {
         animation: none;
+        transition: none;
       }
     }
   </style>
@@ -976,6 +1114,7 @@
               </div>
 
               <div class="rm-auto-editor" id="rm-auto-routing" hidden>
+                <div class="rm-auto-editor-content">
                 <div class="rm-auto-head">
                   <div>
                     <span class="rm-label">Auto Routing Profile</span>
@@ -1015,6 +1154,7 @@
                 <div class="rm-auto-actions">
                   <span class="rm-choice-meta" id="rm-auto-status">SELECT AUTO TO LOAD PROFILE</span>
                   <button id="rm-auto-save" type="button">SAVE AUTO PROFILE</button>
+                </div>
                 </div>
               </div>
             </div>
@@ -1264,6 +1404,49 @@
           : "PRIORITY CHAIN // " + priorityChainValues().length + " MODELS";
       }
 
+      function clearAutoRoutingAnimation() {
+        autoRouting.classList.remove("is-revealing", "is-collapsing");
+      }
+
+      function setAutoRoutingVisible(visible) {
+        var reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+        if (!visible) {
+          if (autoRouting.hidden || autoRouting.classList.contains("is-collapsing")) {
+            return;
+          }
+          if (reduceMotion) {
+            clearAutoRoutingAnimation();
+            autoRouting.classList.remove("is-open");
+            autoRouting.hidden = true;
+            return;
+          }
+          autoRouting.classList.remove("is-revealing", "is-open");
+          autoRouting.classList.add("is-collapsing");
+          return;
+        }
+        if (
+          !autoRouting.hidden &&
+          autoRouting.classList.contains("is-open") &&
+          !autoRouting.classList.contains("is-collapsing")
+        ) {
+          return;
+        }
+        autoRouting.hidden = false;
+        clearAutoRoutingAnimation();
+        if (reduceMotion) {
+          autoRouting.classList.add("is-open");
+          return;
+        }
+        void autoRouting.offsetHeight;
+        autoRouting.classList.add("is-open", "is-revealing");
+      }
+
+      function syncAutoRouting() {
+        var visible = Boolean(state.selectedModel && state.selectedModel.virtual);
+        setAutoRoutingVisible(visible);
+        if (visible) { loadAutoConfig(); }
+      }
+
       function renderAutoConfig(current) {
         state.autoConfig = current;
         var auto = current.auto || {};
@@ -1402,7 +1585,7 @@
             option.value = windowOption.tier;
             option.dataset.tokens = String(windowOption.max_prompt_tokens);
             option.textContent = windowOption.label +
-              (windowOption.max_prompt_tokens > 900000 ? " [1m]" : " standard");
+              (windowOption.max_prompt_tokens > 900000 ? " extended" : " standard");
             option.selected = Boolean(windowOption.is_default);
             windowSelect.appendChild(option);
           });
@@ -1441,13 +1624,22 @@
 
           var identity = document.createElement("span");
           identity.className = "rm-model-cell rm-model-identity";
+          var title = document.createElement("span");
+          title.className = "rm-model-title";
           var name = document.createElement("span");
           name.className = "rm-model-name" + (model.virtual ? " rm-model-name--auto" : "");
           name.textContent = model.name;
+          title.appendChild(name);
+          if (model.internal) {
+            var internalBadge = document.createElement("span");
+            internalBadge.className = "rm-model-badge--internal";
+            internalBadge.textContent = "INTERNAL";
+            title.appendChild(internalBadge);
+          }
           var compactProvider = document.createElement("span");
           compactProvider.className = "rm-model-provider-compact";
           compactProvider.textContent = model.provider_name;
-          identity.appendChild(name);
+          identity.appendChild(title);
           identity.appendChild(compactProvider);
 
           var provider = document.createElement("span");
@@ -1477,8 +1669,7 @@
             setChoiceMeta(mainModel, mainModelMeta);
             renderContextWindows();
             renderModels();
-            autoRouting.hidden = !model.virtual;
-            if (model.virtual) { loadAutoConfig(); }
+            syncAutoRouting();
             schedulePreview();
           });
           cell.appendChild(button);
@@ -1531,8 +1722,7 @@
         renderContextWindows();
         updateClientFields();
         renderModels();
-        autoRouting.hidden = !(state.selectedModel && state.selectedModel.virtual);
-        if (state.selectedModel && state.selectedModel.virtual) { loadAutoConfig(); }
+        syncAutoRouting();
         setCatalogControlsDisabled(false);
         schedulePreview();
       }
@@ -1751,7 +1941,7 @@
           if (version !== state.previewVersion) {
             return;
           }
-          targetPath.textContent = result.target_path;
+          updateTargetPlaceholder();
           preview.textContent = result.content;
           applyButton.disabled = false;
           setStatus("READY // NO FILES MODIFIED", false);
@@ -1857,7 +2047,7 @@
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify(buildConfigRequest())
           });
-          targetPath.textContent = result.target_path;
+          updateTargetPlaceholder();
           preview.textContent = result.content;
           setStatus(
             result.model_catalog_error
@@ -1885,8 +2075,7 @@
         setChoiceMeta(mainModel, mainModelMeta);
         renderContextWindows();
         renderModels();
-        autoRouting.hidden = !(state.selectedModel && state.selectedModel.virtual);
-        if (state.selectedModel && state.selectedModel.virtual) { loadAutoConfig(); }
+        syncAutoRouting();
         schedulePreview();
       });
 
@@ -1911,6 +2100,25 @@
       });
       autoChainAdd.addEventListener("click", function () { addPriorityChainRow(); });
       autoSaveButton.addEventListener("click", saveAutoConfig);
+      autoRouting.addEventListener("animationend", function (event) {
+        if (
+          event.animationName === "rm-auto-editor-pulse" &&
+          autoRouting.classList.contains("is-revealing")
+        ) {
+          autoRouting.classList.remove("is-revealing");
+        }
+      });
+      autoRouting.addEventListener("transitionend", function (event) {
+        if (
+          event.propertyName !== "grid-template-rows" ||
+          !autoRouting.classList.contains("is-collapsing") ||
+          autoRouting.classList.contains("is-open")
+        ) {
+          return;
+        }
+        clearAutoRoutingAnimation();
+        autoRouting.hidden = true;
+      });
 
       document.querySelectorAll("[data-auto-task]").forEach(function (select) {
         select.addEventListener("change", function () {
