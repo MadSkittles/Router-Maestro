@@ -634,6 +634,9 @@ def test_portal_app_serves_ui_and_sensitive_key_only_on_explicit_route(tmp_path:
     assert "@keyframes rm-auto-row-flow" in page.text
     assert "grid-template-rows 760ms" in page.text
     assert "transition-duration: 520ms" in page.text
+    assert ".rm-auto-editor.is-open:not(.is-revealing)" in page.text
+    assert "> .rm-auto-editor-content" in page.text
+    assert "overflow: visible" in page.text
     assert "@keyframes rm-auto-editor-pulse" in page.text
     assert "@keyframes rm-auto-editor-flare" in page.text
     assert 'autoRouting.classList.add("is-open", "is-revealing")' in page.text

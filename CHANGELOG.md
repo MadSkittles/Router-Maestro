@@ -4,6 +4,15 @@ All notable changes to Router-Maestro are documented here.
 
 ---
 
+## v0.9.1 (2026-08-29)
+
+### Fixed
+
+- **Auto Routing Profile focus rings are no longer clipped.** Once the reveal animation settles,
+  the Portal restores visible overflow around the Auto panel and its grid content so the yellow
+  focus outline renders completely for Mode, Router Model, and task-model selectors. Reveal and
+  collapse transitions still clip their animated content.
+
 ## v0.9.0 (2026-08-29)
 
 ### Added
