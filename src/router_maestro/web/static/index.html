@@ -725,6 +725,11 @@
       transform: translateY(0);
     }
 
+    .rm-auto-editor.is-open:not(.is-revealing),
+    .rm-auto-editor.is-open:not(.is-revealing) > .rm-auto-editor-content {
+      overflow: visible;
+    }
+
     .rm-auto-editor.is-revealing {
       animation: rm-auto-editor-pulse 920ms cubic-bezier(0.16, 1, 0.3, 1);
     }
