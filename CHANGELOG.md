@@ -4,7 +4,7 @@ All notable changes to Router-Maestro are documented here.
 
 ---
 
-## Unreleased
+## v0.9.0 (2026-08-29)
 
 ### Added
 
@@ -21,6 +21,11 @@ All notable changes to Router-Maestro are documented here.
 
 ### Changed
 
+- **0.9 is the final minor line before 1.0.** The Router-Maestro beta route aliases remain
+  available for this release as a last migration window. They are deprecated and will be removed
+  in 1.0.0: use `/api/openai/v1/responses`, `/api/anthropic/v1/messages`, and
+  `/api/anthropic/v1/messages/count_tokens` now. Gemini's `/api/gemini/v1beta` path names the
+  Gemini protocol version and is not part of this removal.
 - **Documentation is organized around product value and task-oriented guides.** The README now
   leads with cross-client Copilot catalog access, protocol-independent routing, Auto, and the
   shortest local setup. Detailed client/provider configuration and deployment/upgrade/rollback

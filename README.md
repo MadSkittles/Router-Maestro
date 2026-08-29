@@ -184,9 +184,21 @@ New integrations should use the stable paths:
 | Gemini generation | `/api/gemini/v1beta/models/{model}:generateContent` |
 | Gemini streaming | `/api/gemini/v1beta/models/{model}:streamGenerateContent` |
 
+### 0.9 to 1.0 endpoint migration
+
+0.9 is the final minor release before 1.0. The following Router-Maestro beta
+aliases remain available only for the 0.9 migration window and will be removed
+in 1.0.0:
+
+| Deprecated 0.9 compatibility alias | Stable replacement |
+| --- | --- |
+| `/api/openai/beta/v1/responses` | `/api/openai/v1/responses` |
+| `/api/anthropic/beta/v1/messages` | `/api/anthropic/v1/messages` |
+| `/api/anthropic/beta/v1/messages/count_tokens` | `/api/anthropic/v1/messages/count_tokens` |
+
+Move client configuration to the stable paths before upgrading to 1.0.0.
 `/api/gemini/v1beta` is the Gemini protocol version, not a Router-Maestro beta
-route. Older Router-Maestro beta aliases remain compatibility paths only and
-should not be used for new configuration.
+route, and is not part of this removal.
 
 Authenticated inference and administration use the same Router-Maestro server
 API key. `/health` is public. `/metrics` is public unless a separate metrics

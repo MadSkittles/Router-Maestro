@@ -371,6 +371,18 @@ Before upgrading:
 4. retain the existing server and reasoning keys; and
 5. validate the target image in a test context when protocol behavior changed.
 
+Before upgrading from 0.9 to 1.0.0, scan client and reverse-proxy
+configuration for the three deprecated Router-Maestro aliases and replace them:
+
+| Removed in 1.0.0 | Stable replacement |
+| --- | --- |
+| `/api/openai/beta/v1/responses` | `/api/openai/v1/responses` |
+| `/api/anthropic/beta/v1/messages` | `/api/anthropic/v1/messages` |
+| `/api/anthropic/beta/v1/messages/count_tokens` | `/api/anthropic/v1/messages/count_tokens` |
+
+Gemini's `/api/gemini/v1beta` path is unaffected because `v1beta` identifies
+the Gemini API version.
+
 For a pinned Compose deployment, update only the image tag, then:
 
 ```bash

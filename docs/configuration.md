@@ -226,6 +226,20 @@ GEMINI_MODEL=<selected model>
 The API path still contains `v1beta` when Gemini CLI calls generation methods;
 that is the Gemini protocol version, not a Router-Maestro beta endpoint.
 
+### 0.9 endpoint migration
+
+0.9 is the last minor release that retains Router-Maestro's old beta aliases.
+Before 1.0.0, migrate any manually maintained client configuration as follows:
+
+| Deprecated alias | Stable replacement |
+| --- | --- |
+| `/api/openai/beta/v1/responses` | `/api/openai/v1/responses` |
+| `/api/anthropic/beta/v1/messages` | `/api/anthropic/v1/messages` |
+| `/api/anthropic/beta/v1/messages/count_tokens` | `/api/anthropic/v1/messages/count_tokens` |
+
+Current CLI and Web configuration already generate stable paths. Gemini's
+`/api/gemini/v1beta` remains because `v1beta` is the Gemini API version.
+
 ## Configure with the Local Web Portal
 
 Start the portal on the client machine:

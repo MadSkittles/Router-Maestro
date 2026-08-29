@@ -397,9 +397,11 @@ Keep the layers distinct:
 - `CONTRIBUTING.md` owns developer workflow and validation.
 
 Use stable endpoint paths in new documentation. `/api/gemini/v1beta` is the
-Gemini protocol version; Router-Maestro's old `/beta/v1` aliases are not the
-recommended paths. Verify all relative links and commands from the repository
-root.
+Gemini protocol version; Router-Maestro's old `/beta/v1` aliases are deprecated
+in 0.9 and removed in 1.0.0. Do not add new call sites, tests, generated client
+configuration, or documentation that depends on those aliases except explicit
+0.9 compatibility coverage. Verify all relative links and commands from the
+repository root.
 
 ## Pull Requests
 
