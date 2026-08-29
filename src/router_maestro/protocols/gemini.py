@@ -176,6 +176,8 @@ class GeminiRuntime:
             model = self.default_model
         contents = payload.get("contents")
         opaque_carriers = _thought_signatures(contents)
+        generation = payload.get("generationConfig")
+        generation = generation if isinstance(generation, Mapping) else {}
         return RequestManifest(
             protocol=self.protocol,
             model=model,
@@ -189,6 +191,15 @@ class GeminiRuntime:
                 carrier for carrier in opaque_carriers if is_reasoning_capsule_carrier(carrier)
             ),
             opaque_continuation=bool(opaque_carriers),
+            structured_output=(
+                generation.get("responseSchema") is not None
+                or generation.get("responseJsonSchema") is not None
+            ),
+            max_output_tokens=(
+                generation.get("maxOutputTokens")
+                if isinstance(generation.get("maxOutputTokens"), int)
+                else None
+            ),
         )
 
     async def decode_request(self, payload: Mapping[str, Any]) -> SemanticRequest:

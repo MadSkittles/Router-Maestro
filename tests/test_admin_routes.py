@@ -630,7 +630,9 @@ async def test_admin_models_exposes_operation_capabilities(monkeypatch):
         "responses": True,
         "native_anthropic": False,
     }
-    assert "transport_capabilities" not in response.models[0].model_dump()
+    assert response.models[0].transport_capabilities == {"openai_responses": True}
+    assert response.models[0].feature_capabilities == {}
+    assert response.models[0].virtual is False
 
 
 @pytest.mark.asyncio

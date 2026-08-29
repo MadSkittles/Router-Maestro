@@ -714,6 +714,31 @@ class TestContextWindowPrompt:
             is ContextWindowChoice.CONTEXT_1M
         )
 
+    def test_server_auto_model_uses_advertised_context_options(self, monkeypatch):
+        monkeypatch.setattr(cc_claude, "supports_dropdowns", lambda: False)
+        monkeypatch.setattr(cc_claude.Prompt, "ask", lambda *args, **kwargs: "1m")
+        model = {
+            "provider": "router-maestro",
+            "id": "router-maestro",
+            "name": "Router-Maestro Auto",
+            "virtual": True,
+            "context_window_options": [
+                {"tier": "default", "max_prompt_tokens": 272_000, "is_default": True},
+                {"tier": "long_context", "max_prompt_tokens": 922_000, "is_default": False},
+            ],
+        }
+
+        choice = cc_claude._select_context_window(
+            model,
+            label="main",
+            main=True,
+            default=ContextWindowChoice.DEFAULT,
+        )
+
+        assert choice is ContextWindowChoice.CONTEXT_1M
+        assert cc_base._model_key(model) == "router-maestro"
+        assert cc_claude._with_context_suffix("router-maestro", choice) == "router-maestro[1m]"
+
 
 class _StubAdminClient:
     endpoint = "http://localhost:8080"
@@ -733,6 +758,13 @@ def _stub_bundled_codex_catalog() -> dict:
                 "shell_type": "shell_command",
                 "tool_mode": "code_mode_only",
                 "multi_agent_version": "v2",
+                "default_reasoning_level": "medium",
+                "supported_reasoning_levels": [
+                    {"effort": "low", "description": "baseline low"},
+                    {"effort": "medium", "description": "baseline medium"},
+                    {"effort": "ultra", "description": "baseline ultra"},
+                ],
+                "input_modalities": ["text", "image"],
             }
         ]
     }
@@ -832,7 +864,6 @@ class TestCodexConfig:
             "gpt-5.6-terra",
             "github-copilot/gpt-5.5",
             "github-copilot/claude-opus-4.6",
-            "router-maestro",
         }
         provider = data["model_providers"]["router-maestro"]
         assert provider == {
@@ -862,6 +893,8 @@ class TestCodexConfig:
                     "is_default": False,
                 },
             ],
+            "feature_capabilities": {"parallel_tools": True, "vision": False},
+            "reasoning_effort_values": ["none", "minimal", "low", "high", "xhigh"],
         }
 
         catalog = cc_codex._build_codex_model_catalog([model])
@@ -875,6 +908,15 @@ class TestCodexConfig:
         assert entry["shell_type"] == "default"
         assert "tool_mode" not in entry
         assert "multi_agent_version" not in entry
+        assert entry["supports_parallel_tool_calls"] is True
+        assert entry["input_modalities"] == ["text"]
+        assert entry["default_reasoning_level"] == "minimal"
+        assert [item["effort"] for item in entry["supported_reasoning_levels"]] == [
+            "minimal",
+            "low",
+            "high",
+            "xhigh",
+        ]
 
     def test_user_level_can_skip_model_catalog_update(self, tmp_path, monkeypatch):
         home, _ = _setup_codex_env(

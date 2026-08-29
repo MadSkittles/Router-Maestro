@@ -11,6 +11,7 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from router_maestro import __version__
 from router_maestro.web.service import (
+    PortalAutoConfigRequest,
     PortalConfigRequest,
     PortalConfigResult,
     PortalContext,
@@ -125,6 +126,17 @@ def create_portal_app(service: PortalService | None = None) -> FastAPI:
             force_refresh=refresh,
         )
 
+    @app.get("/api/contexts/{context_name}/auto")
+    async def auto_config(context_name: str) -> dict:
+        return await app.state.portal_service.get_auto_config(context_name)
+
+    @app.put("/api/contexts/{context_name}/auto")
+    async def update_auto_config(
+        context_name: str,
+        request: PortalAutoConfigRequest,
+    ) -> dict:
+        return await app.state.portal_service.update_auto_config(context_name, request)
+
     @app.get("/api/contexts/{context_name}/key", response_model=ApiKeyResponse)
     async def api_key(context_name: str) -> ApiKeyResponse:
         return ApiKeyResponse(api_key=app.state.portal_service.get_api_key(context_name))
@@ -154,6 +166,7 @@ __all__ = [
     "PortalMeta",
     "PortalConfigRequest",
     "PortalConfigResult",
+    "PortalAutoConfigRequest",
     "PortalContext",
     "PortalHealth",
     "PortalModel",

@@ -315,6 +315,10 @@ async def test_public_model_lists_expose_supported_context_windows():
                         ContextWindowOption("default", 272_000, True),
                         ContextWindowOption("long_context", 922_000, False),
                     ),
+                    operation_capabilities={"responses": True},
+                    feature_capabilities={"parallel_tools": True, "vision": True},
+                    transport_capabilities={"openai_responses": True},
+                    reasoning_effort_values=["low", "medium", "high"],
                 )
             ]
 
@@ -330,6 +334,14 @@ async def test_public_model_lists_expose_supported_context_windows():
     assert [option.model_dump() for option in openai_response.data[0].context_window_options] == (
         expected
     )
+    assert openai_response.data[0].operation_capabilities == {"responses": True}
+    assert openai_response.data[0].feature_capabilities == {
+        "parallel_tools": True,
+        "vision": True,
+    }
+    assert openai_response.data[0].transport_capabilities == {"openai_responses": True}
+    assert openai_response.data[0].reasoning_effort_values == ["low", "medium", "high"]
+    assert openai_response.data[0].virtual is False
     anthropic_options = anthropic_response.data[0].context_window_options
     assert [option.model_dump() for option in anthropic_options] == expected
     assert [option.model_dump() for option in admin_response.models[0].context_window_options] == (
@@ -390,10 +402,20 @@ async def test_public_model_lists_round_trip_to_same_provider_with_bare_upstream
         [model.id for model in anthropic_response.data],
         [model.id for model in admin_response.models],
     ):
-        assert set(public_ids) == {"first/shared-model", "second/shared-model"}
+        assert set(public_ids) == {
+            "router-maestro",
+            "first/shared-model",
+            "second/shared-model",
+        }
         for public_id in public_ids:
             plan = await model_router.plan_route(public_id, Operation.CHAT)
-            assert plan.primary.model.qualified_id == public_id
+            if public_id == "router-maestro":
+                assert plan.primary.model.qualified_id in {
+                    "first/shared-model",
+                    "second/shared-model",
+                }
+            else:
+                assert plan.primary.model.qualified_id == public_id
 
             response, provider_name = await model_router.chat_completion(
                 ChatRequest(
@@ -402,15 +424,14 @@ async def test_public_model_lists_round_trip_to_same_provider_with_bare_upstream
                 ),
                 fallback=False,
             )
-            assert provider_name == public_id.split("/", 1)[0]
+            if public_id == "router-maestro":
+                assert provider_name in {"first", "second"}
+            else:
+                assert provider_name == public_id.split("/", 1)[0]
             assert response.model == "shared-model"
 
     for provider in model_router.providers.values():
-        assert cast(_RoundTripProvider, provider).requested_models == [
-            "shared-model",
-            "shared-model",
-            "shared-model",
-        ]
+        assert set(cast(_RoundTripProvider, provider).requested_models) == {"shared-model"}
 
 
 def test_cli_model_list_does_not_double_qualify_public_id(monkeypatch):
@@ -441,3 +462,31 @@ def test_cli_model_list_does_not_double_qualify_public_id(monkeypatch):
     assert "openai/gpt-4o" in rendered
     assert "openai/openai/gpt-4o" not in rendered
     assert "272K / 1M" in rendered
+
+
+def test_cli_model_list_renders_virtual_auto_with_truecolor_shimmer(monkeypatch):
+    class _Client:
+        async def list_models(self):
+            return [
+                {
+                    "provider": "router-maestro",
+                    "id": "router-maestro",
+                    "name": "Router-Maestro Auto",
+                    "virtual": True,
+                    "max_context_window_tokens": 1_000_000,
+                }
+            ]
+
+        async def get_priorities(self):
+            return {"priorities": []}
+
+    output = Console(record=True, force_terminal=True, color_system="truecolor", width=120)
+    monkeypatch.setattr(model_cli, "get_admin_client", _Client)
+    monkeypatch.setattr(model_cli, "console", output)
+
+    model_cli.list_models()
+
+    assert "Router-Maestro Auto" in output.export_text(clear=False)
+    rendered = output.export_text(styles=True)
+    assert "\x1b[1;3;38;2;27;151;255m" in rendered
+    assert "\x1b[1;3;38;2;74;132;255m" in rendered

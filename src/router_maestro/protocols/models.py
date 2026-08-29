@@ -100,9 +100,21 @@ class RequestManifest:
     opaque_continuation: bool = False
     # Appended to preserve compatibility for callers using positional fields.
     parallel_tools: bool = False
+    # Additional cheap requirements used by Auto routing. These flags remain
+    # shallow so identity dispatch never has to materialize SemanticRequest.
+    structured_output: bool = False
+    max_output_tokens: int | None = None
+    requested_context_tokens: int | None = None
+    estimated_input_tokens: int | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "reasoning_capsules", tuple(self.reasoning_capsules))
+        for name in ("max_output_tokens", "requested_context_tokens", "estimated_input_tokens"):
+            value = getattr(self, name)
+            if value is not None and (
+                not isinstance(value, int) or isinstance(value, bool) or value < 0
+            ):
+                raise ValueError(f"{name} must be a non-negative integer")
 
 
 @dataclass(frozen=True, slots=True)

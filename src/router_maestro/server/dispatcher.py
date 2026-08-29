@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Mapping, Sequence
 from dataclasses import dataclass, replace
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any, Protocol
@@ -25,13 +25,26 @@ from router_maestro.providers.base import (
     ChatRequest,
     ProviderError,
     ProviderFailureKind,
+    ProviderFailureSignal,
     RequestOptionError,
     ResponsesRequest,
 )
 from router_maestro.providers.bindings import AttemptRequestContext
 from router_maestro.providers.handler import ProviderHandler
+from router_maestro.routing.auto_router import (
+    AutoTaskCandidate,
+    build_classifier_payload,
+    eligible_auto_tasks,
+    parse_classifier_result,
+)
 from router_maestro.routing.capabilities import Operation
-from router_maestro.routing.generation_plan import GenerationRoutePlan, plan_generation_route
+from router_maestro.routing.generation_plan import (
+    GenerationCandidate,
+    GenerationRoutePlan,
+    auto_candidate_for_id,
+    model_prompt_capacity,
+    plan_generation_route,
+)
 from router_maestro.routing.model_ref import ModelRef
 from router_maestro.routing.transport_plan import TransportPlan
 from router_maestro.runtime.reasoning_capsule import (
@@ -48,6 +61,8 @@ if TYPE_CHECKING:
     from router_maestro.routing.router import Router
 
 logger = get_logger("server.dispatcher")
+
+_AUTO_CONTEXT_1M_SUFFIX = "[1m]"
 
 _SOURCE_PARAMETER_ALIASES = {
     WireProtocol.ANTHROPIC_MESSAGES: {
@@ -220,6 +235,7 @@ class DispatchAttemptOutcome(StrEnum):
     """Closed attempt outcomes suitable for low-cardinality metrics labels."""
 
     SELECTED = "selected"
+    CONTEXT_OVERFLOW = "context_overflow"
     RETRYABLE_FAILURE = "retryable_failure"
     UNSUPPORTED = "unsupported"
     UNREPRESENTABLE = "unrepresentable"
@@ -400,6 +416,7 @@ class _CapsuleAffinity:
 
 @dataclass(slots=True)
 class _FailureState:
+    first_context_overflow: ProviderError | None = None
     first_retryable: ProviderError | None = None
     first_provider_rejection: ProviderError | None = None
     first_representability: ProtocolRepresentabilityError | None = None
@@ -422,6 +439,10 @@ class _FailureState:
             return True
         return False
 
+    def record_context_overflow(self, error: ProviderError) -> None:
+        if self.first_context_overflow is None:
+            self.first_context_overflow = error
+
     def record_representability(self, error: ProtocolRepresentabilityError) -> None:
         if self.first_representability is None:
             self.first_representability = error
@@ -430,9 +451,18 @@ class _FailureState:
         if self.first_static_unsupported is None:
             self.first_static_unsupported = error
 
-    def final_error(self, envelope: RequestEnvelope) -> BaseException:
+    def final_error(
+        self,
+        envelope: RequestEnvelope,
+        *,
+        prefer_context_overflow: bool = False,
+    ) -> BaseException:
+        if prefer_context_overflow and self.first_context_overflow is not None:
+            return self.first_context_overflow
         if self.first_retryable is not None:
             return self.first_retryable
+        if self.first_context_overflow is not None:
+            return self.first_context_overflow
         if self.first_provider_rejection is not None:
             return _source_provider_rejection(self.first_provider_rejection, envelope)
         if self.first_representability is not None:
@@ -517,6 +547,19 @@ class GenerationDispatcher:
     async def dispatch(self, router: Router, envelope: RequestEnvelope) -> DispatchResult:
         capsule_affinity = self._capsule_affinity(envelope)
         route = await self._plan_generation_route(router, envelope, capsule_affinity)
+        return await self._dispatch_route(
+            router, envelope, route, capsule_affinity=capsule_affinity
+        )
+
+    async def _dispatch_route(
+        self,
+        router: Router,
+        envelope: RequestEnvelope,
+        route: GenerationRoutePlan,
+        *,
+        capsule_affinity: _CapsuleAffinity | None = None,
+    ) -> DispatchResult:
+        """Execute an already planned non-streaming route."""
         previous_response_affinity = self._previous_response_affinity(envelope, route)
         if (
             capsule_affinity is not None
@@ -527,6 +570,7 @@ class GenerationDispatcher:
         continuation_affinity = capsule_affinity or previous_response_affinity
         failures = _FailureState()
         eligible_transport_seen = False
+        context_fallback_started = False
 
         for candidate_index, candidate in enumerate(route.candidates):
             transports = ProviderHandler(candidate.provider).bindings_for(
@@ -575,6 +619,8 @@ class GenerationDispatcher:
                         DispatchAttemptOutcome.UNREPRESENTABLE,
                         materialization_count_before=materialization_count_before,
                     )
+                    if route.fallback_on_context_overflow_only and context_fallback_started:
+                        break
                     continue
                 except ProtocolDecodeError as error:
                     raise self._invalid_ingress(error) from error
@@ -586,6 +632,8 @@ class GenerationDispatcher:
                         DispatchAttemptOutcome.UNSUPPORTED,
                         materialization_count_before=materialization_count_before,
                     )
+                    if route.fallback_on_context_overflow_only and context_fallback_started:
+                        break
                     continue
                 except ProviderError as error:
                     self._record_attempt(
@@ -594,6 +642,16 @@ class GenerationDispatcher:
                         self._provider_failure_outcome(error),
                         materialization_count_before=materialization_count_before,
                     )
+                    if (
+                        route.fallback_on_context_overflow_only
+                        and error.signal is ProviderFailureSignal.CONTEXT_WINDOW_EXCEEDED
+                    ):
+                        failures.record_context_overflow(error)
+                        context_fallback_started = True
+                        break
+                    if route.fallback_on_context_overflow_only and context_fallback_started:
+                        failures.record_provider(error)
+                        break
                     if failures.record_provider(error):
                         continue
                     raise
@@ -613,11 +671,15 @@ class GenerationDispatcher:
                 )
                 return DispatchResult(value, DispatchSelection(transport))
 
-            if (
-                candidate_index + 1 < len(route.candidates)
-                and failures.first_retryable is None
-                and (continuation_affinity is None or eligible_transport_seen)
+            if candidate_index + 1 < len(route.candidates) and (
+                continuation_affinity is None or eligible_transport_seen
             ):
+                if route.fallback_on_context_overflow_only:
+                    if context_fallback_started:
+                        continue
+                    raise failures.final_error(envelope, prefer_context_overflow=True)
+                if failures.first_retryable is not None:
+                    continue
                 # RoutePlan model switches are recovery from an upstream failure.
                 # A request rejected during static transport preparation must stay
                 # a client/implementation error instead of silently changing model.
@@ -628,7 +690,10 @@ class GenerationDispatcher:
 
         if continuation_affinity is not None and not eligible_transport_seen:
             raise self._invalid_reasoning_capsule()
-        raise failures.final_error(envelope)
+        raise failures.final_error(
+            envelope,
+            prefer_context_overflow=route.fallback_on_context_overflow_only,
+        )
 
     async def dispatch_stream(
         self,
@@ -647,6 +712,7 @@ class GenerationDispatcher:
         continuation_affinity = capsule_affinity or previous_response_affinity
         failures = _FailureState()
         eligible_transport_seen = False
+        context_fallback_started = False
 
         for candidate_index, candidate in enumerate(route.candidates):
             transports = ProviderHandler(candidate.provider).bindings_for(
@@ -720,6 +786,8 @@ class GenerationDispatcher:
                         DispatchAttemptOutcome.UNREPRESENTABLE,
                         materialization_count_before=materialization_count_before,
                     )
+                    if route.fallback_on_context_overflow_only and context_fallback_started:
+                        break
                     continue
                 except ProtocolDecodeError as error:
                     await close_async_iterator(iterator)
@@ -733,6 +801,8 @@ class GenerationDispatcher:
                         DispatchAttemptOutcome.UNSUPPORTED,
                         materialization_count_before=materialization_count_before,
                     )
+                    if route.fallback_on_context_overflow_only and context_fallback_started:
+                        break
                     continue
                 except ProviderError as error:
                     await close_async_iterator(iterator)
@@ -742,6 +812,16 @@ class GenerationDispatcher:
                         self._provider_failure_outcome(error),
                         materialization_count_before=materialization_count_before,
                     )
+                    if (
+                        route.fallback_on_context_overflow_only
+                        and error.signal is ProviderFailureSignal.CONTEXT_WINDOW_EXCEEDED
+                    ):
+                        failures.record_context_overflow(error)
+                        context_fallback_started = True
+                        break
+                    if route.fallback_on_context_overflow_only and context_fallback_started:
+                        failures.record_provider(error)
+                        break
                     if failures.record_provider(error):
                         continue
                     raise
@@ -768,11 +848,15 @@ class GenerationDispatcher:
                     first_events=first_events,
                 )
 
-            if (
-                candidate_index + 1 < len(route.candidates)
-                and failures.first_retryable is None
-                and (continuation_affinity is None or eligible_transport_seen)
+            if candidate_index + 1 < len(route.candidates) and (
+                continuation_affinity is None or eligible_transport_seen
             ):
+                if route.fallback_on_context_overflow_only:
+                    if context_fallback_started:
+                        continue
+                    raise failures.final_error(envelope, prefer_context_overflow=True)
+                if failures.first_retryable is not None:
+                    continue
                 # Keep the streaming and non-streaming model-switch rules exact:
                 # only a pre-commit retryable upstream failure authorizes RoutePlan
                 # to select another model.
@@ -780,7 +864,10 @@ class GenerationDispatcher:
 
         if continuation_affinity is not None and not eligible_transport_seen:
             raise self._invalid_reasoning_capsule()
-        raise failures.final_error(envelope)
+        raise failures.final_error(
+            envelope,
+            prefer_context_overflow=route.fallback_on_context_overflow_only,
+        )
 
     def _record_attempt(
         self,
@@ -824,6 +911,8 @@ class GenerationDispatcher:
 
     @staticmethod
     def _provider_failure_outcome(error: ProviderError) -> DispatchAttemptOutcome:
+        if error.signal is ProviderFailureSignal.CONTEXT_WINDOW_EXCEEDED:
+            return DispatchAttemptOutcome.CONTEXT_OVERFLOW
         if error.retryable:
             return DispatchAttemptOutcome.RETRYABLE_FAILURE
         if isinstance(error, RequestOptionError):
@@ -863,6 +952,9 @@ class GenerationDispatcher:
         requested_model = self._request_model(envelope)
         from router_maestro.routing.router import AUTO_ROUTE_MODEL
 
+        if requested_model == f"{AUTO_ROUTE_MODEL}{_AUTO_CONTEXT_1M_SUFFIX}":
+            requested_model = AUTO_ROUTE_MODEL
+
         pinned_auto_route = False
         if capsule_affinity is not None and requested_model == AUTO_ROUTE_MODEL:
             pinned_auto_route = True
@@ -871,11 +963,148 @@ class GenerationDispatcher:
                 capsule_affinity.model,
             ).qualified_id
         try:
+            if requested_model == AUTO_ROUTE_MODEL:
+                return await self._plan_auto_route(router, envelope)
             return await plan_generation_route(router, requested_model, envelope.manifest)
         except ProviderError:
             if pinned_auto_route:
                 raise self._invalid_reasoning_capsule() from None
             raise
+
+    async def _plan_auto_route(
+        self,
+        router: Router,
+        envelope: RequestEnvelope,
+    ) -> GenerationRoutePlan:
+        """Resolve either a strict configured chain or one bounded task classifier result."""
+        from router_maestro.config import AutoMode
+
+        config = router._get_priorities_config()
+        if config.auto.mode is AutoMode.PRIORITY_CHAIN:
+            envelope.estimate_input_tokens()
+            return await plan_generation_route(router, "router-maestro", envelope.manifest)
+
+        await router._ensure_models_cache()
+        envelope.estimate_input_tokens()
+        tasks = eligible_auto_tasks(router, envelope)
+        if not tasks:
+            raise ProviderError(
+                "No configured Auto task model supports the requested capabilities",
+                status_code=400,
+                retryable=False,
+                kind=ProviderFailureKind.CLIENT_REQUEST,
+                parameter="model",
+            )
+
+        distinct_models = tuple(dict.fromkeys(task.candidate.model for task in tasks))
+        if len(distinct_models) == 1:
+            selected = tasks[0].candidate
+        else:
+            selected_task = await self._classify_auto_task(router, envelope, tasks)
+            selected = next(task.candidate for task in tasks if task.task is selected_task)
+        fallbacks = self._auto_overflow_fallbacks(tasks, selected)
+        return GenerationRoutePlan(
+            primary=selected,
+            fallbacks=fallbacks,
+            explicit=False,
+            max_model_switches=len(fallbacks),
+            fallback_on_context_overflow_only=bool(fallbacks),
+        )
+
+    @staticmethod
+    def _auto_overflow_fallbacks(
+        tasks: Sequence[AutoTaskCandidate],
+        selected: GenerationCandidate,
+    ) -> tuple[GenerationCandidate, ...]:
+        """Return configured models that may recover a context overflow.
+
+        Prefer strictly larger advertised windows. Once the selected model is
+        already at the largest known window, retain every peer tied at that
+        maximum. Unknown capacities remain retryable because RM cannot prove
+        that they are smaller than the rejected model.
+        """
+        selected_capacity = model_prompt_capacity(selected.info)
+        task_capacities = [(task, model_prompt_capacity(task.candidate.info)) for task in tasks]
+        known_capacities = [capacity for _task, capacity in task_capacities if capacity is not None]
+        largest_capacity = max(known_capacities, default=None)
+        seen = {selected.model}
+        fallbacks = []
+        for task, capacity in task_capacities:
+            candidate = task.candidate
+            if candidate.model in seen:
+                continue
+            if selected_capacity is None:
+                eligible = capacity is None
+            elif capacity is None:
+                eligible = True
+            else:
+                eligible = capacity > selected_capacity or (
+                    capacity == selected_capacity == largest_capacity
+                )
+            if eligible:
+                seen.add(candidate.model)
+                fallbacks.append(candidate)
+        fallbacks.sort(
+            key=lambda candidate: (
+                model_prompt_capacity(candidate.info) is None,
+                model_prompt_capacity(candidate.info) or 0,
+            )
+        )
+        return tuple(fallbacks)
+
+    async def _classify_auto_task(
+        self, router: Router, envelope: RequestEnvelope, tasks: Any
+    ) -> Any:
+        """Invoke the configured router model once without recursively selecting Auto."""
+        config = router._get_priorities_config().auto.task_router
+        router_candidate = auto_candidate_for_id(
+            router,
+            config.router_model,
+            manifest=None,
+            strict_unknown=False,
+        )
+        if router_candidate is None:
+            raise ProviderError(
+                f"Configured Auto router model '{config.router_model}' is unavailable",
+                status_code=503,
+                retryable=False,
+                kind=ProviderFailureKind.CLIENT_REQUEST,
+                parameter="auto.task_router.router_model",
+            )
+        payload = build_classifier_payload(
+            envelope,
+            router_model=router_candidate.model.qualified_id,
+            tasks=tasks,
+            disable_reasoning="none" in (router_candidate.info.reasoning_effort_values or ()),
+        )
+        from router_maestro.protocols import OpenAIChatRuntime
+
+        try:
+            classifier_runtime = self._runtime(WireProtocol.OPENAI_CHAT)
+        except ProtocolRuntimeNotFoundError:
+            # Production uses ProtocolRuntimeFactory, but direct dispatcher
+            # callers may supply only target runtimes. The classifier ingress
+            # codec itself is provider-neutral and needs no binding context.
+            classifier_runtime = OpenAIChatRuntime()
+        classifier_envelope = RequestEnvelope(classifier_runtime, payload, take_ownership=True)
+        classifier_route = GenerationRoutePlan(
+            primary=router_candidate,
+            explicit=True,
+            max_model_switches=0,
+        )
+        result = await self._dispatch_route(router, classifier_envelope, classifier_route)
+        try:
+            return parse_classifier_result(result.value, [task.task for task in tasks])
+        except ValueError as error:
+            raise ProviderError(
+                "Auto router model returned an invalid task classification",
+                status_code=502,
+                retryable=False,
+                kind=ProviderFailureKind.UPSTREAM_PROTOCOL,
+                provider=router_candidate.model.provider,
+                model=router_candidate.model.upstream_id,
+                cause=error,
+            ) from error
 
     def _previous_response_affinity(
         self,

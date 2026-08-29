@@ -17,6 +17,20 @@ def _runtime_config() -> dict:
         "revision": "a" * 64,
         "priorities": ["first/model", "second/model"],
         "fallback": {"strategy": "priority", "maxRetries": 2},
+        "auto": {
+            "mode": "task-router",
+            "capability_policy": "strict",
+            "priority_chain": [],
+            "task_router": {
+                "router_model": "first/model",
+                "task_models": {
+                    "fast": "first/model",
+                    "general": "first/model",
+                    "coding": "second/model",
+                    "deep_reasoning": "second/model",
+                },
+            },
+        },
         "model_overrides": {"sentinel/model": {"max_output_tokens": 1234}},
         "thinking": {
             "default_budget": 4321,
@@ -66,7 +80,7 @@ def _assert_single_snapshot_patch(client: _RuntimeConfigClient) -> dict:
     patched, revision = client.patch_calls[0]
     assert revision == "a" * 64
     assert "revision" not in patched
-    for field in ("model_overrides", "thinking", "guards", "beta_strip", "audit"):
+    for field in ("auto", "model_overrides", "thinking", "guards", "beta_strip", "audit"):
         assert patched[field] == client.source[field]
     return patched
 
@@ -128,3 +142,73 @@ def test_config_conflict_never_prints_mutation_success(monkeypatch) -> None:
     assert "Runtime configuration changed; refresh and retry" in rendered
     assert "Added 'new/model'" not in rendered
     _assert_single_snapshot_patch(client)
+
+
+def test_auto_configure_smart_mode_patches_same_snapshot(monkeypatch) -> None:
+    client = _RuntimeConfigClient()
+    models = [
+        {"provider": "first", "id": "first/model", "name": "First"},
+        {"provider": "second", "id": "second/model", "name": "Second"},
+    ]
+
+    async def list_models():
+        return models
+
+    client.list_models = list_models  # type: ignore[attr-defined]
+    answers = iter(
+        [
+            "task-router",
+            "strict",
+            "first/model",
+            "first/model",
+            "first/model",
+            "second/model",
+            "second/model",
+        ]
+    )
+    monkeypatch.setattr(model_cli, "get_admin_client", lambda: client)
+    monkeypatch.setattr(model_cli, "supports_dropdowns", lambda: True)
+    monkeypatch.setattr(model_cli, "select_dropdown", lambda *args, **kwargs: next(answers))
+
+    model_cli.auto_configure()
+
+    patched = _assert_single_snapshot_patch(client)
+    assert patched["auto"]["mode"] == "task-router"
+    assert patched["auto"]["capability_policy"] == "strict"
+    assert patched["auto"]["task_router"]["router_model"] == "first/model"
+    assert patched["auto"]["task_router"]["task_models"]["coding"] == "second/model"
+
+
+def test_auto_configure_priority_chain_uses_ordered_dropdowns(monkeypatch) -> None:
+    client = _RuntimeConfigClient()
+    models = [
+        {"provider": "first", "id": "first/model", "name": "First"},
+        {"provider": "second", "id": "second/model", "name": "Second"},
+    ]
+
+    async def list_models():
+        return models
+
+    client.list_models = list_models  # type: ignore[attr-defined]
+    answers = iter(["priority-chain", "second/model", "first/model"])
+    confirmations = iter([True, False])
+    monkeypatch.setattr(model_cli, "get_admin_client", lambda: client)
+    monkeypatch.setattr(model_cli, "supports_dropdowns", lambda: True)
+    monkeypatch.setattr(model_cli, "select_dropdown", lambda *args, **kwargs: next(answers))
+    monkeypatch.setattr(
+        model_cli.Confirm,
+        "ask",
+        lambda *args, **kwargs: next(confirmations),
+    )
+
+    model_cli.auto_configure()
+
+    assert client.get_calls == 1
+    assert len(client.patch_calls) == 1
+    patched, revision = client.patch_calls[0]
+    assert revision == "a" * 64
+    assert patched["auto"]["mode"] == "priority-chain"
+    assert patched["auto"]["capability_policy"] == "strict"
+    assert patched["auto"]["priority_chain"] == ["second/model", "first/model"]
+    for field in ("model_overrides", "thinking", "guards", "beta_strip", "audit"):
+        assert patched[field] == client.source[field]

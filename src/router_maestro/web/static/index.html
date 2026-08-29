@@ -344,6 +344,48 @@
       box-shadow: inset 3px 0 0 var(--rm-cyan);
     }
 
+    .rm-model-row--auto {
+      position: relative;
+      overflow: hidden;
+      background:
+        linear-gradient(90deg, rgba(37, 217, 255, 0.13), rgba(37, 217, 255, 0.025) 64%),
+        #030811;
+      isolation: isolate;
+    }
+
+    .rm-model-row--auto::before {
+      content: "";
+      position: absolute;
+      z-index: 0;
+      top: -35%;
+      bottom: -35%;
+      left: -42%;
+      width: 25%;
+      pointer-events: none;
+      background: linear-gradient(
+        90deg,
+        transparent,
+        rgba(133, 236, 255, 0.08),
+        rgba(225, 252, 255, 0.34),
+        rgba(37, 217, 255, 0.08),
+        transparent
+      );
+      filter: blur(1px);
+      transform: skewX(-17deg);
+      animation: rm-auto-row-flow 4.8s ease-in-out infinite;
+    }
+
+    .rm-model-row--auto:hover {
+      background:
+        linear-gradient(90deg, rgba(37, 217, 255, 0.21), rgba(37, 217, 255, 0.045) 70%),
+        #030811;
+    }
+
+    .rm-model-row--auto > .rm-model-cell {
+      position: relative;
+      z-index: 1;
+    }
+
     .rm-model-cell {
       display: flex;
       align-items: center;
@@ -362,10 +404,78 @@
     }
 
     .rm-model-name {
+      min-width: 0;
       overflow: hidden;
       max-width: 100%;
       color: var(--rm-cyan);
       text-overflow: ellipsis;
+    }
+
+    .rm-model-title {
+      display: flex;
+      align-items: center;
+      gap: 5px;
+      min-width: 0;
+      max-width: 100%;
+    }
+
+    .rm-model-badge--internal {
+      flex: 0 0 auto;
+      padding: 1px 4px;
+      color: #020408;
+      border-radius: 3px;
+      background: var(--rm-cyan);
+      box-shadow: 0 0 7px rgba(37, 217, 255, 0.35);
+      font-size: 7px;
+      font-weight: 800;
+      letter-spacing: 0.3px;
+      line-height: 1.35;
+    }
+
+    .rm-model-name--auto {
+      display: inline-block;
+      padding-right: 5px;
+      color: #bdf6ff;
+      background: linear-gradient(
+        105deg,
+        #1b97ff 0%,
+        #25d9ff 22%,
+        #c6f8ff 42%,
+        #ffffff 50%,
+        #7ee8ff 59%,
+        #4a84ff 78%,
+        #25d9ff 100%
+      );
+      background-size: 240% 100%;
+      font-family: Impact, Haettenschweiler, "Arial Black", sans-serif;
+      font-size: 16px;
+      font-style: italic;
+      font-weight: 900;
+      letter-spacing: 1.25px;
+      line-height: 1.05;
+      text-transform: uppercase;
+      transform: skewX(-7deg) scaleX(1.035);
+      transform-origin: left center;
+      -webkit-background-clip: text;
+      background-clip: text;
+      -webkit-text-fill-color: transparent;
+      -webkit-text-stroke: 0.35px rgba(216, 248, 255, 0.82);
+      filter:
+        drop-shadow(1px 0 0 rgba(17, 101, 122, 0.9))
+        drop-shadow(0 0 5px rgba(37, 217, 255, 0.75));
+      animation: rm-auto-name-flow 3.2s linear infinite;
+    }
+
+    @keyframes rm-auto-name-flow {
+      from { background-position: 170% 50%; }
+      to { background-position: -70% 50%; }
+    }
+
+    @keyframes rm-auto-row-flow {
+      0%, 48% { left: -42%; opacity: 0; }
+      54% { opacity: 1; }
+      82% { left: 118%; opacity: 1; }
+      88%, 100% { left: 118%; opacity: 0; }
     }
 
     .rm-model-provider-compact {
@@ -546,6 +656,179 @@
       cursor: pointer;
     }
 
+    .rm-auto-editor {
+      position: relative;
+      display: grid;
+      grid-template-rows: 0fr;
+      grid-column: 1 / -1;
+      gap: 0;
+      min-height: 0;
+      padding: 0 10px;
+      overflow: hidden;
+      opacity: 0;
+      border: 1px solid rgba(37, 217, 255, 0.1);
+      background: rgba(37, 217, 255, 0.04);
+      box-shadow: 0 0 0 rgba(37, 217, 255, 0);
+      pointer-events: none;
+      transform: translateY(-8px);
+      transform-origin: top center;
+      transition:
+        grid-template-rows 760ms cubic-bezier(0.16, 1, 0.3, 1),
+        padding-block 760ms cubic-bezier(0.16, 1, 0.3, 1),
+        opacity 420ms ease-out,
+        transform 760ms cubic-bezier(0.16, 1, 0.3, 1),
+        border-color 420ms ease-out,
+        box-shadow 420ms ease-out;
+      isolation: isolate;
+    }
+
+    .rm-auto-editor[hidden] { display: none; }
+
+    .rm-auto-editor-content {
+      display: grid;
+      gap: 10px;
+      min-height: 0;
+      overflow: hidden;
+    }
+
+    .rm-auto-editor::after {
+      content: "";
+      position: absolute;
+      z-index: 3;
+      top: -18%;
+      bottom: -18%;
+      left: -48%;
+      width: 34%;
+      pointer-events: none;
+      opacity: 0;
+      background: linear-gradient(
+        90deg,
+        transparent,
+        rgba(37, 217, 255, 0.12),
+        rgba(202, 249, 255, 0.82),
+        rgba(255, 255, 255, 0.96),
+        rgba(37, 217, 255, 0.18),
+        transparent
+      );
+      filter: blur(1.5px);
+      mix-blend-mode: screen;
+      transform: skewX(-18deg);
+    }
+
+    .rm-auto-editor.is-open {
+      grid-template-rows: 1fr;
+      padding-block: 10px;
+      opacity: 1;
+      border-color: var(--rm-cyan);
+      box-shadow: inset 0 0 18px rgba(37, 217, 255, 0.04);
+      pointer-events: auto;
+      transform: translateY(0);
+    }
+
+    .rm-auto-editor.is-revealing {
+      animation: rm-auto-editor-pulse 920ms cubic-bezier(0.16, 1, 0.3, 1);
+    }
+
+    .rm-auto-editor.is-revealing::after {
+      animation: rm-auto-editor-flare 920ms cubic-bezier(0.16, 1, 0.3, 1);
+    }
+
+    .rm-auto-editor.is-collapsing {
+      pointer-events: none;
+      transition-duration: 520ms, 520ms, 360ms, 520ms, 360ms, 360ms;
+      transition-timing-function: cubic-bezier(0.4, 0, 0.6, 1);
+    }
+
+    @keyframes rm-auto-editor-pulse {
+      0%, 100% {
+        border-color: var(--rm-cyan);
+        box-shadow: inset 0 0 18px rgba(37, 217, 255, 0.04);
+      }
+      40% {
+        border-color: #ffffff;
+        box-shadow:
+          0 0 10px rgba(230, 253, 255, 0.98),
+          0 0 42px rgba(37, 217, 255, 0.82),
+          inset 0 0 32px rgba(37, 217, 255, 0.24);
+      }
+      68% {
+        border-color: #8deeff;
+        box-shadow:
+          0 0 6px rgba(230, 253, 255, 0.58),
+          0 0 26px rgba(37, 217, 255, 0.5),
+          inset 0 0 24px rgba(37, 217, 255, 0.14);
+      }
+    }
+
+    @keyframes rm-auto-editor-flare {
+      0%, 12% {
+        left: -48%;
+        opacity: 0;
+      }
+      24% {
+        opacity: 1;
+      }
+      67% {
+        left: 116%;
+        opacity: 0.94;
+      }
+      86%, 100% {
+        left: 116%;
+        opacity: 0;
+      }
+    }
+
+    .rm-auto-head,
+    .rm-auto-actions {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+    }
+
+    .rm-auto-fields,
+    .rm-auto-task-fields {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 9px;
+    }
+
+    .rm-auto-chain { display: grid; gap: 8px; }
+
+    .rm-auto-chain-list { display: grid; gap: 7px; }
+
+    .rm-auto-chain-row {
+      display: grid;
+      grid-template-columns: auto minmax(0, 1fr) auto;
+      align-items: start;
+      gap: 8px;
+    }
+
+    .rm-auto-chain-choice {
+      display: grid;
+      min-width: 0;
+    }
+
+    .rm-auto-chain-index {
+      min-width: 68px;
+      color: var(--rm-dim);
+      font-size: 10px;
+      letter-spacing: 0.7px;
+      text-transform: uppercase;
+    }
+
+    .rm-auto-chain-remove,
+    .rm-auto-add {
+      min-height: 34px;
+      padding: 6px 10px;
+      color: var(--rm-cyan);
+      border-color: var(--rm-cyan-soft);
+    }
+
+    .rm-auto-chain-remove:disabled { visibility: hidden; }
+
+    .rm-auto-add { justify-self: start; }
+
     .rm-preview pre {
       min-height: 168px;
       max-height: 390px;
@@ -674,6 +957,23 @@
         font-size: 28px;
         letter-spacing: 2.5px;
         transform: skewX(-6deg) scaleX(1.02);
+      }
+
+      .rm-model-name--auto {
+        font-size: 15px;
+        letter-spacing: 0.85px;
+      }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      .rm-model-row--auto::before,
+      .rm-model-name--auto,
+      .rm-auto-editor,
+      .rm-auto-editor.is-revealing,
+      .rm-auto-editor.is-revealing::after,
+      .rm-auto-editor.is-collapsing {
+        animation: none;
+        transition: none;
       }
     }
   </style>
@@ -812,6 +1112,51 @@
                   <span id="rm-catalog-state">YES</span>
                 </label>
               </div>
+
+              <div class="rm-auto-editor" id="rm-auto-routing" hidden>
+                <div class="rm-auto-editor-content">
+                <div class="rm-auto-head">
+                  <div>
+                    <span class="rm-label">Auto Routing Profile</span>
+                    Task routing and fallback settings
+                  </div>
+                  <span class="rm-choice-meta" id="rm-auto-revision">NOT LOADED</span>
+                </div>
+                <div class="rm-auto-fields">
+                  <label>
+                    <span class="rm-label">Mode</span>
+                    <select id="rm-auto-mode">
+                      <option value="task-router">Smart Auto</option>
+                      <option value="priority-chain">Priority Chain</option>
+                    </select>
+                  </label>
+                  <label id="rm-auto-policy-field">
+                    <span class="rm-label">Unknown Capability Support</span>
+                    <select id="rm-auto-policy">
+                      <option value="strict">Exclude unknown models</option>
+                      <option value="optimistic">Allow unknown models</option>
+                    </select>
+                    <span class="rm-choice-meta">Smart Auto only</span>
+                  </label>
+                </div>
+                <div class="rm-auto-task-fields" id="rm-auto-task-fields">
+                  <label class="rm-field-wide"><span class="rm-label">Router Model</span><select id="rm-auto-router-model"></select><span class="rm-choice-meta" id="rm-auto-router-model-meta"></span></label>
+                  <label><span class="rm-label">Fast</span><select data-auto-task="fast"></select><span class="rm-choice-meta" data-auto-task-meta="fast"></span></label>
+                  <label><span class="rm-label">General</span><select data-auto-task="general"></select><span class="rm-choice-meta" data-auto-task-meta="general"></span></label>
+                  <label><span class="rm-label">Coding</span><select data-auto-task="coding"></select><span class="rm-choice-meta" data-auto-task-meta="coding"></span></label>
+                  <label><span class="rm-label">Deep Reasoning</span><select data-auto-task="deep_reasoning"></select><span class="rm-choice-meta" data-auto-task-meta="deep_reasoning"></span></label>
+                </div>
+                <div class="rm-auto-chain" id="rm-auto-chain-field" hidden>
+                  <span class="rm-label">Priority Chain</span>
+                  <div class="rm-auto-chain-list" id="rm-auto-chain-list"></div>
+                  <button class="rm-auto-add" id="rm-auto-chain-add" type="button">+ ADD FALLBACK</button>
+                </div>
+                <div class="rm-auto-actions">
+                  <span class="rm-choice-meta" id="rm-auto-status">SELECT AUTO TO LOAD PROFILE</span>
+                  <button id="rm-auto-save" type="button">SAVE AUTO PROFILE</button>
+                </div>
+                </div>
+              </div>
             </div>
           </section>
 
@@ -847,7 +1192,8 @@
         requestVersion: 0,
         previewVersion: 0,
         previewTimer: null,
-        contextController: null
+        contextController: null,
+        autoConfig: null
       };
 
       var contextSelect = document.getElementById("rm-context-select");
@@ -867,6 +1213,19 @@
       var catalogUpdate = document.getElementById("rm-catalog-update");
       var catalogToggle = document.getElementById("rm-catalog-toggle");
       var catalogState = document.getElementById("rm-catalog-state");
+      var autoRouting = document.getElementById("rm-auto-routing");
+      var autoMode = document.getElementById("rm-auto-mode");
+      var autoPolicyField = document.getElementById("rm-auto-policy-field");
+      var autoPolicy = document.getElementById("rm-auto-policy");
+      var autoRouterModel = document.getElementById("rm-auto-router-model");
+      var autoRouterModelMeta = document.getElementById("rm-auto-router-model-meta");
+      var autoTaskFields = document.getElementById("rm-auto-task-fields");
+      var autoChainField = document.getElementById("rm-auto-chain-field");
+      var autoChainList = document.getElementById("rm-auto-chain-list");
+      var autoChainAdd = document.getElementById("rm-auto-chain-add");
+      var autoRevision = document.getElementById("rm-auto-revision");
+      var autoStatus = document.getElementById("rm-auto-status");
+      var autoSaveButton = document.getElementById("rm-auto-save");
       var projectField = document.getElementById("rm-project-field");
       var projectSelect = document.getElementById("rm-project-select");
       var projectMeta = document.getElementById("rm-project-meta");
@@ -940,8 +1299,235 @@
       function setChoiceMeta(select, target) {
         var model = modelByKey(select.value);
         target.textContent = model
-          ? model.provider_name + " // " + model.upstream_id
+          ? (model.virtual ? "DYNAMIC TASK ROUTING" : model.provider_name + " // " + model.upstream_id)
           : "--";
+      }
+
+      function concreteModels() {
+        return state.models.filter(function (model) { return !model.virtual; });
+      }
+
+      function fillConcreteModelSelect(select, selectedKey) {
+        clearElement(select);
+        concreteModels().forEach(function (model) {
+          var option = document.createElement("option");
+          option.value = model.key;
+          option.textContent = model.name;
+          option.selected = model.key === selectedKey;
+          select.appendChild(option);
+        });
+      }
+
+      function priorityChainValues() {
+        return Array.from(autoChainList.querySelectorAll("select")).map(function (select) {
+          return select.value;
+        }).filter(Boolean);
+      }
+
+      function addPriorityChainRow(selectedKey) {
+        if (!selectedKey) {
+          var selected = new Set(priorityChainValues());
+          var available = concreteModels().find(function (model) {
+            return !selected.has(model.key);
+          });
+          if (!available) { return; }
+          selectedKey = available.key;
+        }
+        var row = document.createElement("div");
+        row.className = "rm-auto-chain-row";
+        var index = document.createElement("span");
+        index.className = "rm-auto-chain-index";
+        var choice = document.createElement("div");
+        choice.className = "rm-auto-chain-choice";
+        var select = document.createElement("select");
+        fillConcreteModelSelect(select, selectedKey);
+        var meta = document.createElement("span");
+        meta.className = "rm-choice-meta";
+        setChoiceMeta(select, meta);
+        var remove = document.createElement("button");
+        remove.type = "button";
+        remove.className = "rm-auto-chain-remove";
+        remove.textContent = "REMOVE";
+        remove.addEventListener("click", function () {
+          row.remove();
+          refreshPriorityChainRows();
+        });
+        select.addEventListener("change", function () {
+          setChoiceMeta(select, meta);
+          refreshPriorityChainRows();
+        });
+        choice.appendChild(select);
+        choice.appendChild(meta);
+        row.appendChild(index);
+        row.appendChild(choice);
+        row.appendChild(remove);
+        autoChainList.appendChild(row);
+        refreshPriorityChainRows();
+      }
+
+      function refreshPriorityChainRows() {
+        var rows = Array.from(autoChainList.querySelectorAll(".rm-auto-chain-row"));
+        var selected = rows.map(function (row) { return row.querySelector("select").value; });
+        rows.forEach(function (row, position) {
+          row.querySelector(".rm-auto-chain-index").textContent = "Priority " + (position + 1);
+          row.querySelector("select").setAttribute(
+            "aria-label",
+            "Priority " + (position + 1) + " model"
+          );
+          row.querySelector(".rm-auto-chain-remove").disabled = rows.length === 1;
+          var own = row.querySelector("select").value;
+          Array.from(row.querySelector("select").options).forEach(function (option) {
+            option.disabled = option.value !== own && selected.includes(option.value);
+          });
+        });
+        autoChainAdd.disabled = rows.length >= concreteModels().length;
+        if (autoMode.value === "priority-chain") {
+          autoStatus.textContent = "PRIORITY CHAIN // " + rows.length + " MODELS";
+        }
+      }
+
+      function renderPriorityChain(values) {
+        clearElement(autoChainList);
+        var chain = values && values.length ? values : [concreteModels()[0]?.key];
+        chain.filter(Boolean).forEach(function (modelKey) {
+          addPriorityChainRow(modelKey);
+        });
+      }
+
+      function updateAutoModeFields() {
+        var smart = autoMode.value === "task-router";
+        autoTaskFields.hidden = !smart;
+        autoPolicyField.hidden = !smart;
+        autoChainField.hidden = smart;
+        autoStatus.textContent = smart
+          ? "SMART AUTO // 4 TASK TYPES"
+          : "PRIORITY CHAIN // " + priorityChainValues().length + " MODELS";
+      }
+
+      function clearAutoRoutingAnimation() {
+        autoRouting.classList.remove("is-revealing", "is-collapsing");
+      }
+
+      function setAutoRoutingVisible(visible) {
+        var reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+        if (!visible) {
+          if (autoRouting.hidden || autoRouting.classList.contains("is-collapsing")) {
+            return;
+          }
+          if (reduceMotion) {
+            clearAutoRoutingAnimation();
+            autoRouting.classList.remove("is-open");
+            autoRouting.hidden = true;
+            return;
+          }
+          autoRouting.classList.remove("is-revealing", "is-open");
+          autoRouting.classList.add("is-collapsing");
+          return;
+        }
+        if (
+          !autoRouting.hidden &&
+          autoRouting.classList.contains("is-open") &&
+          !autoRouting.classList.contains("is-collapsing")
+        ) {
+          return;
+        }
+        autoRouting.hidden = false;
+        clearAutoRoutingAnimation();
+        if (reduceMotion) {
+          autoRouting.classList.add("is-open");
+          return;
+        }
+        void autoRouting.offsetHeight;
+        autoRouting.classList.add("is-open", "is-revealing");
+      }
+
+      function syncAutoRouting() {
+        var visible = Boolean(state.selectedModel && state.selectedModel.virtual);
+        setAutoRoutingVisible(visible);
+        if (visible) { loadAutoConfig(); }
+      }
+
+      function renderAutoConfig(current) {
+        state.autoConfig = current;
+        var auto = current.auto || {};
+        var taskRouter = auto.task_router || {};
+        var taskModels = taskRouter.task_models || {};
+        autoMode.value = auto.mode || "task-router";
+        autoPolicy.value = auto.capability_policy || "strict";
+        fillConcreteModelSelect(autoRouterModel, taskRouter.router_model);
+        setChoiceMeta(autoRouterModel, autoRouterModelMeta);
+        document.querySelectorAll("[data-auto-task]").forEach(function (select) {
+          fillConcreteModelSelect(select, taskModels[select.dataset.autoTask]);
+          var meta = document.querySelector(
+            '[data-auto-task-meta="' + select.dataset.autoTask + '"]'
+          );
+          setChoiceMeta(select, meta);
+        });
+        renderPriorityChain(auto.priority_chain || []);
+        autoRevision.textContent = "SYNCED";
+        autoRevision.title = current.revision
+          ? "Config revision " + current.revision
+          : "Config revision unavailable";
+        updateAutoModeFields();
+      }
+
+      async function loadAutoConfig() {
+        if (!state.context || !state.selectedModel || !state.selectedModel.virtual) { return; }
+        try {
+          var current = await api(
+            "/api/contexts/" + encodeURIComponent(state.context.name) + "/auto"
+          );
+          renderAutoConfig(current);
+        } catch (error) {
+          autoStatus.textContent = "LOAD ERROR // " + error.message;
+          setStatus("AUTO CONFIG ERROR // " + error.message, true);
+        }
+      }
+
+      async function saveAutoConfig() {
+        if (!state.context || !state.autoConfig) { return; }
+        autoSaveButton.disabled = true;
+        try {
+          var chain = priorityChainValues();
+          if (autoMode.value === "priority-chain" && !chain.length) {
+            throw new Error("Priority chain cannot be empty");
+          }
+          if (new Set(chain).size !== chain.length) {
+            throw new Error("Priority chain cannot contain duplicate models");
+          }
+          if (chain.some(function (value) {
+            return !modelByKey(value) || modelByKey(value).virtual;
+          })) {
+            throw new Error("Every chain entry must be an available concrete model");
+          }
+          var taskModels = {};
+          document.querySelectorAll("[data-auto-task]").forEach(function (select) {
+            taskModels[select.dataset.autoTask] = select.value;
+          });
+          var updated = await api(
+            "/api/contexts/" + encodeURIComponent(state.context.name) + "/auto",
+            {
+              method: "PUT",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                revision: state.autoConfig.revision,
+                mode: autoMode.value,
+                capability_policy: autoPolicy.value,
+                priority_chain: chain,
+                router_model: autoRouterModel.value,
+                task_models: taskModels
+              })
+            }
+          );
+          renderAutoConfig(updated);
+          await loadContext(state.context.name);
+          setStatus("AUTO ROUTING UPDATED // " + autoMode.value.toUpperCase(), false);
+        } catch (error) {
+          autoStatus.textContent = "SAVE ERROR // " + error.message;
+          setStatus("AUTO CONFIG ERROR // " + error.message, true);
+        } finally {
+          autoSaveButton.disabled = false;
+        }
       }
 
       function roleDefault(role) {
@@ -999,7 +1585,7 @@
             option.value = windowOption.tier;
             option.dataset.tokens = String(windowOption.max_prompt_tokens);
             option.textContent = windowOption.label +
-              (windowOption.max_prompt_tokens > 900000 ? " [1m]" : " standard");
+              (windowOption.max_prompt_tokens > 900000 ? " extended" : " standard");
             option.selected = Boolean(windowOption.is_default);
             windowSelect.appendChild(option);
           });
@@ -1026,7 +1612,7 @@
           cell.colSpan = 4;
           var button = document.createElement("button");
           button.type = "button";
-          button.className = "rm-model-row";
+          button.className = "rm-model-row" + (model.virtual ? " rm-model-row--auto" : "");
           button.setAttribute(
             "aria-label",
             "Select " + model.name + " from " + model.provider_name
@@ -1038,13 +1624,22 @@
 
           var identity = document.createElement("span");
           identity.className = "rm-model-cell rm-model-identity";
+          var title = document.createElement("span");
+          title.className = "rm-model-title";
           var name = document.createElement("span");
-          name.className = "rm-model-name";
+          name.className = "rm-model-name" + (model.virtual ? " rm-model-name--auto" : "");
           name.textContent = model.name;
+          title.appendChild(name);
+          if (model.internal) {
+            var internalBadge = document.createElement("span");
+            internalBadge.className = "rm-model-badge--internal";
+            internalBadge.textContent = "INTERNAL";
+            title.appendChild(internalBadge);
+          }
           var compactProvider = document.createElement("span");
           compactProvider.className = "rm-model-provider-compact";
           compactProvider.textContent = model.provider_name;
-          identity.appendChild(name);
+          identity.appendChild(title);
           identity.appendChild(compactProvider);
 
           var provider = document.createElement("span");
@@ -1074,6 +1669,7 @@
             setChoiceMeta(mainModel, mainModelMeta);
             renderContextWindows();
             renderModels();
+            syncAutoRouting();
             schedulePreview();
           });
           cell.appendChild(button);
@@ -1126,6 +1722,7 @@
         renderContextWindows();
         updateClientFields();
         renderModels();
+        syncAutoRouting();
         setCatalogControlsDisabled(false);
         schedulePreview();
       }
@@ -1344,7 +1941,7 @@
           if (version !== state.previewVersion) {
             return;
           }
-          targetPath.textContent = result.target_path;
+          updateTargetPlaceholder();
           preview.textContent = result.content;
           applyButton.disabled = false;
           setStatus("READY // NO FILES MODIFIED", false);
@@ -1450,7 +2047,7 @@
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify(buildConfigRequest())
           });
-          targetPath.textContent = result.target_path;
+          updateTargetPlaceholder();
           preview.textContent = result.content;
           setStatus(
             result.model_catalog_error
@@ -1478,6 +2075,7 @@
         setChoiceMeta(mainModel, mainModelMeta);
         renderContextWindows();
         renderModels();
+        syncAutoRouting();
         schedulePreview();
       });
 
@@ -1496,6 +2094,40 @@
       keyButton.addEventListener("click", copyKey);
       addProjectButton.addEventListener("click", addProject);
       applyButton.addEventListener("click", applyConfig);
+      autoMode.addEventListener("change", updateAutoModeFields);
+      autoRouterModel.addEventListener("change", function () {
+        setChoiceMeta(autoRouterModel, autoRouterModelMeta);
+      });
+      autoChainAdd.addEventListener("click", function () { addPriorityChainRow(); });
+      autoSaveButton.addEventListener("click", saveAutoConfig);
+      autoRouting.addEventListener("animationend", function (event) {
+        if (
+          event.animationName === "rm-auto-editor-pulse" &&
+          autoRouting.classList.contains("is-revealing")
+        ) {
+          autoRouting.classList.remove("is-revealing");
+        }
+      });
+      autoRouting.addEventListener("transitionend", function (event) {
+        if (
+          event.propertyName !== "grid-template-rows" ||
+          !autoRouting.classList.contains("is-collapsing") ||
+          autoRouting.classList.contains("is-open")
+        ) {
+          return;
+        }
+        clearAutoRoutingAnimation();
+        autoRouting.hidden = true;
+      });
+
+      document.querySelectorAll("[data-auto-task]").forEach(function (select) {
+        select.addEventListener("change", function () {
+          var meta = document.querySelector(
+            '[data-auto-task-meta="' + select.dataset.autoTask + '"]'
+          );
+          setChoiceMeta(select, meta);
+        });
+      });
 
       document.querySelectorAll("[data-role]").forEach(function (select) {
         select.addEventListener("change", function () {

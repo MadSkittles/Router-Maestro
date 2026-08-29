@@ -177,6 +177,11 @@ class ModelObject(BaseModel):
     context_window_options: list[ContextWindowOption] = Field(default_factory=list)
     supports_thinking: bool | None = None
     supports_vision: bool | None = None
+    operation_capabilities: dict[str, bool] = Field(default_factory=dict)
+    feature_capabilities: dict[str, bool] = Field(default_factory=dict)
+    transport_capabilities: dict[str, bool] = Field(default_factory=dict)
+    reasoning_effort_values: list[str] | None = None
+    virtual: bool = False
 
 
 class ModelList(BaseModel):

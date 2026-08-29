@@ -4,6 +4,55 @@ All notable changes to Router-Maestro are documented here.
 
 ---
 
+## v0.9.0 (2026-08-29)
+
+### Added
+
+- **Smart Auto routing and strict priority profiles.** The virtual `router-maestro` model now
+  supports a default task-router profile with a bounded router-model classifier and explicit
+  `fast`, `general`, `coding`, and `deep_reasoning` mappings, plus a strict priority-chain mode
+  that can never fall back to provider catalog order. CLI and the local Web Portal can configure
+  both profiles, while existing non-empty priority configurations migrate without changing their
+  effective order.
+- **Server-owned Auto model metadata.** OpenAI, Anthropic, and admin model catalogs now expose one
+  virtual Auto entry whose context limits and capabilities are aggregated from the configured
+  execution models. Codex catalog generation consumes that entry instead of synthesizing metadata
+  from an unrelated baseline model.
+
+### Changed
+
+- **0.9 is the final minor line before 1.0.** The Router-Maestro beta route aliases remain
+  available for this release as a last migration window. They are deprecated and will be removed
+  in 1.0.0: use `/api/openai/v1/responses`, `/api/anthropic/v1/messages`, and
+  `/api/anthropic/v1/messages/count_tokens` now. Gemini's `/api/gemini/v1beta` path names the
+  Gemini protocol version and is not part of this removal.
+- **Documentation is organized around product value and task-oriented guides.** The README now
+  leads with cross-client Copilot catalog access, protocol-independent routing, Auto, and the
+  shortest local setup. Detailed client/provider configuration and deployment/upgrade/rollback
+  procedures live in dedicated guides with copy-ready AI-agent prompts, while the new contributor
+  guide documents architecture boundaries, offline/live validation, and safe revision-aware audit
+  tracing.
+- **Auto capability filtering is request-aware.** Smart Auto filters explicit tool, vision,
+  reasoning, parallel-tool, file, structured-output, and output-limit requirements before asking
+  the router model. It uses the actual request's estimated input size and a 70% prompt-window
+  safety threshold; if no model is below the threshold, all hard-compatible models tied for the
+  largest window remain eligible. Claude Code's `[1m]` suffix remains a client-side auto-compact
+  hint and does not force server routing. If only one execution model remains, classification is
+  skipped and the original request retains its identity fast path.
+- **Auto context-overflow recovery is bounded.** Copilot's exact
+  `model_max_prompt_tokens_exceeded` response can move a Smart Auto request to a larger configured
+  task model, or another model tied for the largest context, before the first response frame.
+  Ordinary 400, 429, and 5xx failures do not trigger this context-only fallback.
+
+### Fixed
+
+- **The Web Portal keeps user target paths stable and reveals Auto configuration smoothly.**
+  Preview and Apply no longer replace friendly paths such as `~/.claude/settings.json` with a
+  momentary absolute home path, and selecting Router-Maestro Auto now expands its routing profile
+  with a slower reduced-motion-aware transition, brighter border/scan flare, and a matching
+  collapse animation when leaving Auto. Claude Code's long-context choice is labeled `1M
+  extended` while retaining the same underlying `[1m]` client hint.
+
 ## v0.8.2 (2026-08-28)
 
 ### Added

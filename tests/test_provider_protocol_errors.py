@@ -3432,6 +3432,41 @@ async def test_copilot_bare_400_signal_requires_exact_status_and_body(
     assert exc_info.value.signal is None
 
 
+@pytest.mark.parametrize(
+    ("status", "body", "expected"),
+    [
+        (
+            400,
+            b'{"error":{"message":"any safe text","code":"model_max_prompt_tokens_exceeded"}}',
+            ProviderFailureSignal.CONTEXT_WINDOW_EXCEEDED,
+        ),
+        (
+            400,
+            b'{"error":{"message":"model_max_prompt_tokens_exceeded"}}',
+            None,
+        ),
+        (
+            400,
+            b'{"code":"model_max_prompt_tokens_exceeded"}',
+            None,
+        ),
+        (
+            500,
+            b'{"error":{"code":"model_max_prompt_tokens_exceeded"}}',
+            None,
+        ),
+        (400, b"not-json", None),
+        (400, b"x" * (64 * 1024 + 1), None),
+    ],
+)
+def test_copilot_context_overflow_signal_requires_exact_bounded_json_code(
+    status: int,
+    body: bytes,
+    expected: ProviderFailureSignal | None,
+) -> None:
+    assert CopilotProvider._failure_signal(status, body) is expected
+
+
 @pytest.mark.asyncio
 async def test_copilot_stream_exact_bare_400_sets_signal_and_closes_once() -> None:
     response = httpx.Response(400, stream=httpx.ByteStream(b"Bad Request\n"))

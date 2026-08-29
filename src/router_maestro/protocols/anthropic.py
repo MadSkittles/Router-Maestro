@@ -174,6 +174,10 @@ class AnthropicMessagesRuntime:
                 carrier for carrier in opaque_carriers if is_reasoning_capsule_carrier(carrier)
             ),
             opaque_continuation=bool(opaque_carriers),
+            structured_output=payload.get("output_config") is not None,
+            max_output_tokens=(
+                payload.get("max_tokens") if isinstance(payload.get("max_tokens"), int) else None
+            ),
         )
 
     async def decode_request(self, payload: Mapping[str, Any]) -> SemanticRequest:

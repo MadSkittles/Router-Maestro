@@ -14,10 +14,17 @@ from router_maestro.config.paths import (
     get_data_dir,
 )
 from router_maestro.config.priorities import (
+    DEFAULT_AUTO_ROUTER_MODEL,
+    DEFAULT_AUTO_TASK_MODELS,
+    AutoCapabilityPolicy,
+    AutoConfig,
+    AutoMode,
+    AutoTaskType,
     FallbackConfig,
     FallbackStrategy,
     ModelOverride,
     PrioritiesConfig,
+    TaskRouterConfig,
     ThinkingBudgetConfig,
 )
 from router_maestro.config.providers import (
@@ -62,6 +69,13 @@ __all__ = [
     "ProvidersConfig",
     # Priority models
     "PrioritiesConfig",
+    "AutoCapabilityPolicy",
+    "AutoConfig",
+    "AutoMode",
+    "AutoTaskType",
+    "TaskRouterConfig",
+    "DEFAULT_AUTO_ROUTER_MODEL",
+    "DEFAULT_AUTO_TASK_MODELS",
     "FallbackConfig",
     "FallbackStrategy",
     "ModelOverride",

@@ -387,7 +387,9 @@ async def logout(
 async def list_models(model_router: Router = Depends(get_app_router)) -> ModelsResponse:
     """List all available models from authenticated providers."""
     try:
-        models = await model_router.list_models()
+        from router_maestro.routing.generation_plan import list_models_with_auto
+
+        models = await list_models_with_auto(model_router)
         model_list = [
             ModelInfo(
                 provider=model.provider,
@@ -395,6 +397,7 @@ async def list_models(model_router: Router = Depends(get_app_router)) -> ModelsR
                     model.provider,
                     model.id,
                     id_is_qualified=model.id_is_qualified,
+                    is_virtual=model.virtual,
                 ),
                 name=model.name,
                 max_prompt_tokens=model.max_prompt_tokens,
@@ -409,6 +412,10 @@ async def list_models(model_router: Router = Depends(get_app_router)) -> ModelsR
                     for option in model.effective_context_window_options()
                 ],
                 operation_capabilities=dict(model.operation_capabilities),
+                feature_capabilities=dict(model.feature_capabilities),
+                transport_capabilities=dict(model.transport_capabilities),
+                reasoning_effort_values=model.reasoning_effort_values,
+                virtual=model.virtual,
             )
             for model in models
         ]

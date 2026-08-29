@@ -64,6 +64,7 @@ def test_admin_get_returns_complete_config_revision_and_etag(tmp_path):
     body = response.json()
     assert set(body) == {
         "priorities",
+        "auto",
         "fallback",
         "model_overrides",
         "thinking",

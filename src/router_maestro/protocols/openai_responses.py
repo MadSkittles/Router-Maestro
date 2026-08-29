@@ -187,6 +187,12 @@ class OpenAIResponsesRuntime:
                 else None
             ),
             opaque_continuation=opaque_continuation,
+            structured_output=payload.get("text") is not None,
+            max_output_tokens=(
+                payload.get("max_output_tokens")
+                if isinstance(payload.get("max_output_tokens"), int)
+                else None
+            ),
         )
 
     async def decode_request(self, payload: Mapping[str, Any]) -> SemanticRequest:
@@ -2735,8 +2741,29 @@ def _encode_request(
             reasoning["effort"] = effort
         payload["reasoning"] = reasoning
     if request.structured_output is not None:
-        payload["text"] = thaw_json(request.structured_output)
+        payload["text"] = _encode_structured_output(request.structured_output)
     return payload
+
+
+def _encode_structured_output(value: Mapping[str, Any]) -> dict[str, Any]:
+    """Project a normalized or Chat-shaped output format onto Responses ``text``."""
+    raw = thaw_json(value)
+    if "format" in raw:
+        return raw
+    if isinstance(raw.get("type"), str):
+        if raw["type"] == "json_schema" and isinstance(raw.get("json_schema"), Mapping):
+            return {"format": {"type": "json_schema", **dict(raw["json_schema"])}}
+        if raw["type"] == "json_schema" and isinstance(raw.get("schema"), Mapping):
+            return {
+                "format": {
+                    "type": "json_schema",
+                    "name": raw.get("name") or "response",
+                    **({"strict": raw["strict"]} if "strict" in raw else {}),
+                    "schema": raw["schema"],
+                }
+            }
+        return {"format": raw}
+    return raw
 
 
 def _reject_request_fields(request: SemanticRequest) -> None:

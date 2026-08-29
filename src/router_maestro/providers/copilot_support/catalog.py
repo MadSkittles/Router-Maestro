@@ -424,6 +424,8 @@ class CopilotCatalog:
             vision_support = normalize_catalog_boolean(supports, "vision")
             thinking_support = normalize_catalog_boolean(supports, "thinking")
             parallel_tools_support = normalize_catalog_boolean(supports, "parallel_tool_calls")
+            structured_output_support = normalize_catalog_boolean(supports, "structured_output")
+            files_support = normalize_catalog_boolean(supports, "files")
             models.append(
                 ModelInfo(
                     id=model_id,
@@ -457,6 +459,12 @@ class CopilotCatalog:
                             if parallel_tools_support is not None
                             else {}
                         ),
+                        **(
+                            {Feature.STRUCTURED_OUTPUT: structured_output_support}
+                            if structured_output_support is not None
+                            else {}
+                        ),
+                        **({Feature.FILES: files_support} if files_support is not None else {}),
                     },
                     transport_capabilities=transport_capabilities(supported_endpoints),
                 )

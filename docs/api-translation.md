@@ -532,7 +532,7 @@ match across providers.
 
 | Endpoint | Format | Key Fields |
 |---|---|---|
-| `GET /api/openai/v1/models` | OpenAI `ModelList` | `id`, `owned_by`, `max_prompt_tokens`, `supports_thinking` |
+| `GET /api/openai/v1/models` | OpenAI `ModelList` | `id`, `owned_by`, token/context limits, transport and feature capabilities, reasoning efforts, `virtual` |
 | `GET /api/anthropic/v1/models` | Anthropic `ModelList` | `id`, `display_name`, `supports_thinking`, `supports_vision` |
 
 Both call `router.list_models()`, which aggregates and de-duplicates `ModelInfo`
@@ -545,5 +545,8 @@ Stable generation paths are `/v1/messages` (also
 `/api/anthropic/v1/messages`), `/api/openai/v1/chat/completions`, and
 `/api/openai/v1/responses`. The former Router-Maestro beta Messages and
 Responses URLs are temporary aliases to the same dispatcher, not separate
-transport implementations. Gemini keeps `/api/gemini/v1beta/...`: `v1beta` is
-the Gemini protocol version and is unrelated to the RM beta aliases.
+transport implementations. Version 0.9 is their final compatibility window;
+`/api/openai/beta/v1/responses`, `/api/anthropic/beta/v1/messages`, and
+`/api/anthropic/beta/v1/messages/count_tokens` are removed in 1.0.0. Gemini
+keeps `/api/gemini/v1beta/...`: `v1beta` is the Gemini protocol version and is
+unrelated to the RM beta aliases.

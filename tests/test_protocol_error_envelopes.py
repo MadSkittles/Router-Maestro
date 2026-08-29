@@ -232,6 +232,32 @@ def test_provider_signal_maps_to_one_allowlisted_header(surface: ProtocolSurface
 
 
 @pytest.mark.parametrize("surface", _PROTOCOL_SURFACES)
+def test_context_overflow_uses_safe_native_error_and_allowlisted_signal(
+    surface: ProtocolSurface,
+) -> None:
+    from router_maestro.providers import ProviderFailureSignal
+
+    error = ProviderError(
+        "Request exceeds the selected model's context window",
+        status_code=400,
+        retryable=False,
+        kind=ProviderFailureKind.CLIENT_REQUEST,
+        signal=ProviderFailureSignal.CONTEXT_WINDOW_EXCEEDED,
+        cause=RuntimeError("private prompt token count"),
+    )
+
+    response = protocol_errors.protocol_error_response(error, surface)
+    native_error = _native_error(response, surface)
+
+    assert response.status_code == 400
+    assert native_error["message"] == "Request exceeds the selected model's context window"
+    assert response.headers["X-Router-Maestro-Error-Signal"] == "context_window_exceeded"
+    assert "private prompt token count" not in bytes(response.body).decode()
+    if surface.startswith("openai"):
+        assert native_error["code"] == "context_length_exceeded"
+
+
+@pytest.mark.parametrize("surface", _PROTOCOL_SURFACES)
 def test_provider_error_without_signal_emits_no_signal_header(surface: ProtocolSurface) -> None:
     error = ProviderError(
         "Ordinary provider failure",

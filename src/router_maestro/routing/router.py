@@ -1650,33 +1650,24 @@ class Router:
         )
 
     async def _get_auto_route_model(self) -> tuple[str, str, BaseProvider] | None:
-        """Get the highest priority available model for auto-routing.
+        """Resolve one configured Auto target for legacy pre-dispatch call sites.
 
-        Returns:
-            Tuple of (provider_name, model_id, provider) or None if no model available
+        The stable generation endpoints use ``GenerationDispatcher`` and can run
+        the task classifier. Legacy DTO helpers cannot safely classify without a
+        raw protocol envelope, so they use the first configured execution target
+        and never fall back to provider catalog order.
         """
         await self._ensure_models_cache()
-        priorities_config = self._get_priorities_config()
+        from router_maestro.routing.generation_plan import configured_auto_model_ids
 
-        # Try each priority in order
-        for priority_key in priorities_config.priorities:
-            provider_name, model_id = self._parse_model_key(priority_key)
-            if provider_name in self.providers:
-                provider = self.providers[provider_name]
-                if provider.is_authenticated():
-                    # Verify model exists in cache
-                    if priority_key in self._models_cache:
-                        logger.debug("Auto-route selected: %s", priority_key)
-                        return provider_name, model_id, provider
-
-        # Fallback: return first available model from any provider
-        for key, entry in self._models_cache.items():
-            provider_name, model = entry
-            if not self._is_qualified_cache_entry(key, entry):
+        for model_id in configured_auto_model_ids(self._get_priorities_config()):
+            entry = self._models_cache.get(model_id)
+            if entry is None or not self._is_qualified_cache_entry(model_id, entry):
                 continue
+            provider_name, model = entry
             provider = self.providers.get(provider_name)
-            if provider and provider.is_authenticated():
-                logger.debug("Auto-route fallback: %s", key)
+            if provider is not None and provider.is_authenticated():
+                logger.debug("Legacy Auto-route selected: %s", model_id)
                 return provider_name, model.id, provider
 
         return None

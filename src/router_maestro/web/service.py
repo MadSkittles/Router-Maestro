@@ -50,6 +50,7 @@ _PROJECT_MARKERS = (
     "Cargo.toml",
     "go.mod",
 )
+_INTERNAL_MODEL_SUFFIX = re.compile(r"\s*\(\s*internal[\s_-]+only\s*\)\s*$", re.IGNORECASE)
 
 
 class PortalServiceError(RuntimeError):
@@ -99,6 +100,8 @@ class PortalModel(BaseModel):
     context_label: str
     context_windows: list[PortalContextWindow] = Field(default_factory=list)
     transports: list[str] = Field(default_factory=list)
+    virtual: bool = False
+    internal: bool = False
 
 
 class PortalModels(BaseModel):
@@ -139,6 +142,17 @@ class PortalConfigResult(BaseModel):
     model_catalog_path: str | None = None
     model_catalog_updated: bool = False
     model_catalog_error: str | None = None
+
+
+class PortalAutoConfigRequest(BaseModel):
+    """Versioned Auto-profile replacement sent through the local portal."""
+
+    revision: str
+    mode: Literal["task-router", "priority-chain"]
+    capability_policy: Literal["strict", "optimistic"] = "strict"
+    priority_chain: list[str] = Field(default_factory=list)
+    router_model: str
+    task_models: dict[str, str]
 
 
 class PortalService:
@@ -273,6 +287,62 @@ class PortalService:
             self._model_cache[name] = (self._clock(), models)
             return models
 
+    async def get_auto_config(self, name: str) -> dict[str, Any]:
+        """Return the selected server's revisioned Auto configuration."""
+        context = self.get_context(name)
+        try:
+            async with self._http_client(10.0) as client:
+                response = await client.get(
+                    f"{context.endpoint.rstrip('/')}/api/admin/priorities",
+                    headers=self._headers(context),
+                )
+            response.raise_for_status()
+            payload = response.json()
+        except (httpx.HTTPError, ValueError) as error:
+            raise PortalServiceError(502, f"Context '{name}' Auto config is unavailable") from error
+        if not isinstance(payload, dict) or not isinstance(payload.get("revision"), str):
+            raise PortalServiceError(502, f"Context '{name}' returned an invalid Auto config")
+        return payload
+
+    async def update_auto_config(
+        self, name: str, request: PortalAutoConfigRequest
+    ) -> dict[str, Any]:
+        """CAS-update only the Auto profile while preserving all other runtime settings."""
+        context = self.get_context(name)
+        current = await self.get_auto_config(name)
+        if current["revision"] != request.revision:
+            raise PortalServiceError(409, "Runtime configuration changed; reload Auto settings")
+        task_router = current.get("auto", {}).get("task_router", {})
+        replacement = {key: value for key, value in current.items() if key != "revision"}
+        replacement["auto"] = {
+            "mode": request.mode,
+            "capability_policy": request.capability_policy,
+            "priority_chain": request.priority_chain,
+            "task_router": {
+                "router_model": request.router_model or task_router.get("router_model"),
+                "task_models": request.task_models or task_router.get("task_models", {}),
+            },
+        }
+        try:
+            async with self._http_client(20.0) as client:
+                response = await client.patch(
+                    f"{context.endpoint.rstrip('/')}/api/admin/priorities",
+                    headers=self._headers(context),
+                    json={**replacement, "revision": request.revision},
+                )
+            if response.status_code == 409:
+                raise PortalServiceError(409, "Runtime configuration changed; reload Auto settings")
+            response.raise_for_status()
+            payload = response.json()
+        except PortalServiceError:
+            raise
+        except (httpx.HTTPError, ValueError) as error:
+            raise PortalServiceError(502, f"Context '{name}' Auto config update failed") from error
+        if not isinstance(payload, dict):
+            raise PortalServiceError(502, f"Context '{name}' returned an invalid Auto config")
+        self._model_cache.pop(name, None)
+        return payload
+
     @staticmethod
     def _provider_name(provider: str) -> str:
         special = {
@@ -286,6 +356,7 @@ class PortalService:
     @staticmethod
     def _model_name(model: dict) -> str:
         raw_name = str(model.get("name") or _bare_upstream_model_id(model))
+        raw_name = _INTERNAL_MODEL_SUFFIX.sub("", raw_name)
         words = [word for word in re.split(r"[-_\s]+", raw_name) if word]
         acronyms = {"ai": "AI", "gpt": "GPT", "mai": "MAI"}
         rendered: list[str] = []
@@ -306,7 +377,18 @@ class PortalService:
         return " ".join(rendered)
 
     @staticmethod
+    def _is_internal_model(model: dict) -> bool:
+        raw_name = str(model.get("name") or "")
+        return _INTERNAL_MODEL_SUFFIX.search(raw_name) is not None
+
+    @staticmethod
     def _transport_names(model: dict) -> list[str]:
+        if model.get("virtual") is True:
+            # Auto aggregates execution-model capabilities. Keep this summary
+            # stable even when the current profile happens to contain only one
+            # native transport; the concrete request still selects its actual
+            # binding at dispatch time.
+            return ["Responses", "Chat", "Messages"]
         capabilities = model.get("operation_capabilities")
         if not isinstance(capabilities, dict):
             return []
@@ -357,6 +439,8 @@ class PortalService:
                 context_label=_context_windows_label(model),
                 context_windows=self._context_windows(model),
                 transports=self._transport_names(model),
+                virtual=model.get("virtual") is True,
+                internal=self._is_internal_model(model),
             )
             for model in raw_models
             if isinstance(model.get("id"), str) and isinstance(model.get("provider"), str)

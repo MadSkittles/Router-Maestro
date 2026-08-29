@@ -550,10 +550,22 @@ async def test_gemini_structured_output_reaches_target_wire_field(
     ).dispatch(router, envelope)
 
     assert result.value == "ok"
-    assert execution.calls[0][2][wire_field] == {
+    expected = {
         "type": "json_schema",
-        "schema": schema,
+        "json_schema": {
+            "name": "response",
+            "schema": schema,
+        },
     }
+    if target_protocol is WireProtocol.OPENAI_RESPONSES:
+        expected = {
+            "format": {
+                "type": "json_schema",
+                "name": "response",
+                "schema": schema,
+            }
+        }
+    assert execution.calls[0][2][wire_field] == expected
 
 
 @pytest.mark.parametrize(

@@ -84,6 +84,96 @@ def _responses_message(text: str = "hello") -> dict:
     }
 
 
+@pytest.mark.asyncio
+async def test_chat_json_schema_projects_to_responses_text_format() -> None:
+    chat = OpenAIChatRuntime()
+    responses = OpenAIResponsesRuntime()
+    payload = {
+        "model": "gpt-example",
+        "messages": [{"role": "user", "content": "classify"}],
+        "response_format": {
+            "type": "json_schema",
+            "json_schema": {
+                "name": "classification",
+                "strict": True,
+                "schema": {
+                    "type": "object",
+                    "properties": {"task_type": {"type": "string"}},
+                    "required": ["task_type"],
+                    "additionalProperties": False,
+                },
+            },
+        },
+    }
+
+    encoded = await responses.encode_request(await chat.decode_request(payload))
+
+    assert encoded["text"] == {
+        "format": {
+            "type": "json_schema",
+            "name": "classification",
+            "strict": True,
+            "schema": payload["response_format"]["json_schema"]["schema"],
+        }
+    }
+
+
+@pytest.mark.asyncio
+async def test_normalized_json_schema_gets_stable_responses_name() -> None:
+    semantic = SemanticRequest(
+        model="gpt-example",
+        input=(SemanticMessage(role=MessageRole.USER, content=(TextContent("classify"),)),),
+        structured_output={
+            "type": "json_schema",
+            "schema": {"type": "object", "additionalProperties": False},
+        },
+    )
+
+    encoded = await OpenAIResponsesRuntime().encode_request(semantic)
+
+    assert encoded["text"] == {
+        "format": {
+            "type": "json_schema",
+            "name": "response",
+            "schema": {"type": "object", "additionalProperties": False},
+        }
+    }
+
+
+@pytest.mark.asyncio
+async def test_responses_json_schema_projects_to_chat_response_format() -> None:
+    responses = OpenAIResponsesRuntime()
+    chat = OpenAIChatRuntime()
+    payload = {
+        "model": "gpt-example",
+        "input": "classify",
+        "text": {
+            "format": {
+                "type": "json_schema",
+                "name": "classification",
+                "strict": True,
+                "schema": {
+                    "type": "object",
+                    "properties": {"task_type": {"type": "string"}},
+                    "required": ["task_type"],
+                    "additionalProperties": False,
+                },
+            }
+        },
+    }
+
+    encoded = await chat.encode_request(await responses.decode_request(payload))
+
+    assert encoded["response_format"] == {
+        "type": "json_schema",
+        "json_schema": {
+            "name": "classification",
+            "strict": True,
+            "schema": payload["text"]["format"]["schema"],
+        },
+    }
+
+
 _RESPONSES_TOOL_CALLS = (
     {
         "type": "function_call",
@@ -713,7 +803,7 @@ async def test_real_openai_envelope_metadata_projects_across_response_protocols(
 
 
 @pytest.mark.asyncio
-async def test_chat_response_message_projection_still_rejects_opaque_reasoning() -> None:
+async def test_chat_response_projects_visible_reasoning_without_foreign_opaque_state() -> None:
     state = OpaqueState(
         origin_protocol=WireProtocol.OPENAI_RESPONSES,
         origin_provider="github-copilot",
@@ -735,8 +825,41 @@ async def test_chat_response_message_projection_still_rejects_opaque_reasoning()
         ),
     )
 
-    with pytest.raises(ProtocolRepresentabilityError, match="opaque reasoning state"):
-        await OpenAIChatRuntime().encode_response(response)
+    encoded = await OpenAIChatRuntime().encode_response(response)
+
+    message = encoded["choices"][0]["message"]
+    assert message["reasoning_content"] == "plan"
+    assert "reasoning_opaque" not in message
+    assert "thinking_signature" not in message
+
+
+def test_chat_stream_projects_visible_reasoning_without_foreign_opaque_state() -> None:
+    state = OpaqueState(
+        origin_protocol=WireProtocol.OPENAI_RESPONSES,
+        origin_provider="github-copilot",
+        origin_model="gpt-example",
+        origin_binding="copilot-responses",
+        item_id="rs_1",
+        blob={"type": "reasoning", "id": "rs_1", "encrypted_content": "opaque"},
+    )
+    encoder = OpenAIChatRuntime().new_stream_encoder(
+        model="gpt-example",
+        response_id="chat_1",
+    )
+
+    frames = encoder.encode(
+        SemanticEvent(
+            type=SemanticEventType.OUTPUT_ITEM,
+            item=ReasoningSummary("plan", opaque_state=state),
+        )
+    )
+
+    reasoning_deltas = [
+        frame["choices"][0]["delta"]
+        for frame in frames
+        if frame["choices"][0]["delta"].get("reasoning_content") is not None
+    ]
+    assert reasoning_deltas == [{"reasoning_content": "plan"}]
 
 
 @pytest.mark.asyncio

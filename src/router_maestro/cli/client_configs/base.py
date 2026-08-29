@@ -164,12 +164,14 @@ def _select_model_dict(
     Interactive terminals receive a searchable dropdown. The numeric prompt is
     retained for non-interactive/test environments.
     """
+    auto_model = next((model for model in models if model.get("virtual") is True), None)
     if supports_dropdowns():
         choices: list[tuple[str, dict | None]] = []
         if allow_auto:
-            choices.append(("router-maestro — Auto routing", None))
+            if auto_model is None:
+                choices.append(("router-maestro — Auto routing", None))
         choices.extend((_model_choice_label(model), model) for model in models)
-        selected_default = default_model
+        selected_default = default_model or (auto_model if allow_auto else None)
         if selected_default is None and not allow_auto and models:
             selected_default = models[0]
         return select_dropdown(
@@ -186,7 +188,7 @@ def _select_model_dict(
                 break
     choice = Prompt.ask(prompt, default=default)
     if choice == "0" and allow_auto:
-        return None
+        return auto_model
     if choice.isdigit():
         idx = int(choice) - 1
         if 0 <= idx < len(models):
@@ -205,11 +207,15 @@ def _model_key(model: dict) -> str:
         return model["wire_key"]
     if "custom_key" in model:
         return model["custom_key"]
+    if model.get("virtual") is True:
+        return model["id"]
     return qualify_model_id(model["provider"], model["id"])
 
 
 def _bare_upstream_model_id(model: dict) -> str:
     """Return the upstream ID from qualified server or legacy bare model entries."""
+    if model.get("virtual") is True:
+        return model.get("id", "")
     provider = model.get("provider", "")
     model_id = model.get("id", "")
     prefix = f"{provider}/"
@@ -379,7 +385,12 @@ class ClientConfig(ABC):
         ``wire_key``/``custom_key`` are never rewritten, so they never gate the
         prompt on.
         """
-        if model is None or "wire_key" in model or "custom_key" in model:
+        if (
+            model is None
+            or model.get("virtual") is True
+            or "wire_key" in model
+            or "custom_key" in model
+        ):
             return False
         return _model_key(model) != _bare_upstream_model_id(model)
 
@@ -413,6 +424,8 @@ class ClientConfig(ABC):
         """
         if model is None:
             return "router-maestro"
+        if model.get("virtual") is True:
+            return _model_key(model)
         if "wire_key" in model or "custom_key" in model:
             return _model_key(model)
         qualified = _model_key(model)
