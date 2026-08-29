@@ -1326,6 +1326,31 @@ def test_copilot_responses_warm_catalog_none_only_strips_public_effort(requested
     assert "reasoning" not in payload
 
 
+@pytest.mark.parametrize("operation", [Operation.CHAT, Operation.RESPONSES])
+def test_copilot_internal_none_effort_is_forwarded_only_when_catalog_advertises_it(
+    operation,
+) -> None:
+    provider = CopilotProvider()
+
+    supported = provider.outbound_contract.resolve_reasoning(
+        model="gpt-5.6-luna",
+        reasoning_effort="none",
+        thinking_budget=None,
+        catalog_effort_values=["none", "low", "medium"],
+        operation=operation,
+    )
+    unsupported = provider.outbound_contract.resolve_reasoning(
+        model="gpt-5.6-luna",
+        reasoning_effort="none",
+        thinking_budget=None,
+        catalog_effort_values=["low", "medium"],
+        operation=operation,
+    )
+
+    assert supported.effort == "none"
+    assert unsupported.effort is None
+
+
 def test_copilot_responses_warm_catalog_does_not_raise_minimal_to_low() -> None:
     provider = CopilotProvider()
     provider._models_ttl_cache.set(

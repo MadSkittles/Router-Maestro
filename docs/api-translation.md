@@ -532,7 +532,7 @@ match across providers.
 
 | Endpoint | Format | Key Fields |
 |---|---|---|
-| `GET /api/openai/v1/models` | OpenAI `ModelList` | `id`, `owned_by`, `max_prompt_tokens`, `supports_thinking` |
+| `GET /api/openai/v1/models` | OpenAI `ModelList` | `id`, `owned_by`, token/context limits, transport and feature capabilities, reasoning efforts, `virtual` |
 | `GET /api/anthropic/v1/models` | Anthropic `ModelList` | `id`, `display_name`, `supports_thinking`, `supports_vision` |
 
 Both call `router.list_models()`, which aggregates and de-duplicates `ModelInfo`

@@ -290,11 +290,45 @@ Use the special model name `router-maestro` for automatic provider selection:
 {"model": "router-maestro", "messages": [...]}
 ```
 
-The router will try models in priority order and fall back to the next on failure.
+`router-maestro` is a virtual model with two selectable profiles. New installs
+default to **Smart Auto**: a configured router model classifies the request as
+`fast`, `general`, `coding`, or `deep_reasoning`, then Router-Maestro runs the
+model assigned to that task. Hard requirements such as tools, vision,
+structured output, reasoning, files, and output size are filtered before
+classification. Input size is estimated from the actual request: models remain
+preferred only below 70% of their advertised prompt window, leaving room for
+tokenizer and provider-accounting differences. If none remains below that
+threshold, Auto keeps every hard-compatible model tied for the largest window
+instead of rejecting the request. A structured upstream context-overflow error
+may switch only to a larger configured task model, or to another model tied at
+the largest window, and only before the first response frame. The router model
+can return only a task type, never an arbitrary provider or model ID.
+
+The alternative **Priority Chain** profile follows an explicit ordered list.
+The list cannot be empty, and Router-Maestro never appends models from provider
+catalog order. It moves to the next model only after a retryable failure before
+the response stream commits.
+
+Configure either profile from the searchable CLI wizard or the local portal:
+
+```bash
+router-maestro model auto configure
+router-maestro model auto show
+router-maestro web
+```
+
+The server exposes `router-maestro` in its model catalog with metadata aggregated
+from the active profile's execution models. Context and token limits use the
+largest configured value; feature support is the union. Runtime filtering still
+checks the requested combination against a concrete model, because a flat
+catalog entry cannot express every combination of capabilities.
 
 ### Priority & Fallback
 
-**Priority** determines which model is tried first when using auto-routing.
+The legacy `priorities` and `fallback` settings continue to govern fallback from
+an explicitly requested model. Existing installations with a non-empty legacy
+priority list migrate to the equivalent Auto Priority Chain profile, preserving
+their routing behavior.
 
 ```bash
 # Set priorities

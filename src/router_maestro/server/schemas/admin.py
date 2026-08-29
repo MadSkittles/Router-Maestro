@@ -85,6 +85,10 @@ class ModelInfo(BaseModel):
             "provider catalog; lets clients gate native-passthrough options."
         ),
     )
+    feature_capabilities: dict[str, bool] = Field(default_factory=dict)
+    transport_capabilities: dict[str, bool] = Field(default_factory=dict)
+    reasoning_effort_values: list[str] | None = None
+    virtual: bool = False
 
 
 class ModelsResponse(BaseModel):

@@ -28,6 +28,7 @@ from router_maestro.protocols._tool_namespace import decode_namespaced_tool_name
 from router_maestro.providers.base import (
     ProviderError,
     ProviderFailureKind,
+    ProviderFailureSignal,
     RequestOptionError,
 )
 from router_maestro.providers.bindings import (
@@ -1360,14 +1361,33 @@ async def test_copilot_messages_stream_strips_private_fields_and_preserves_exten
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("status", "body", "kind", "retryable"),
+    ("status", "body", "kind", "retryable", "signal"),
     [
-        (429, {"error": {"message": "slow down"}}, ProviderFailureKind.RATE_LIMIT, True),
+        (
+            429,
+            {"error": {"message": "slow down"}},
+            ProviderFailureKind.RATE_LIMIT,
+            True,
+            None,
+        ),
         (
             400,
             {"error": {"code": "unsupported_api_for_model"}},
             ProviderFailureKind.UNSUPPORTED_OPERATION,
             False,
+            None,
+        ),
+        (
+            400,
+            {
+                "error": {
+                    "message": "prompt token count of 1001 exceeds the limit of 1000",
+                    "code": "model_max_prompt_tokens_exceeded",
+                }
+            },
+            ProviderFailureKind.CLIENT_REQUEST,
+            False,
+            ProviderFailureSignal.CONTEXT_WINDOW_EXCEEDED,
         ),
     ],
 )
@@ -1376,6 +1396,7 @@ async def test_copilot_executor_classifies_nonstream_statuses(
     body: dict,
     kind: ProviderFailureKind,
     retryable: bool,
+    signal: ProviderFailureSignal | None,
 ) -> None:
     provider = CopilotProvider()
     provider.ensure_token = AsyncMock()  # type: ignore[method-assign]
@@ -1401,6 +1422,44 @@ async def test_copilot_executor_classifies_nonstream_statuses(
     assert raised.value.kind is kind
     assert raised.value.retryable is retryable
     assert raised.value.upstream_status_code == status
+    assert raised.value.signal is signal
+
+
+@pytest.mark.asyncio
+async def test_copilot_executor_classifies_stream_context_overflow_before_first_frame() -> None:
+    body = (
+        b'{"error":{"message":"prompt token count exceeds the limit",'
+        b'"code":"model_max_prompt_tokens_exceeded"}}'
+    )
+    response = httpx.Response(400, stream=httpx.ByteStream(body))
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return response
+
+    provider = CopilotProvider()
+    provider._cached_token = "token"
+    provider.ensure_token = AsyncMock()  # type: ignore[method-assign]
+    provider._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    binding = _binding(provider, WireProtocol.OPENAI_RESPONSES)
+    attempt = await binding.prepare_attempt(
+        model=ModelRef(provider=provider.name, upstream_id="gpt-4o"),
+        payload={"input": "hello"},
+        stream=True,
+    )
+
+    try:
+        assert binding.executor is not None
+        with pytest.raises(ProviderError) as raised:
+            async for _frame in binding.executor.execute_stream(attempt):
+                pass
+    finally:
+        await provider.close()
+
+    assert raised.value.kind is ProviderFailureKind.CLIENT_REQUEST
+    assert raised.value.retryable is False
+    assert raised.value.signal is ProviderFailureSignal.CONTEXT_WINDOW_EXCEEDED
+    assert response.is_stream_consumed
+    assert response.is_closed
 
 
 @pytest.mark.asyncio

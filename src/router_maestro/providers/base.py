@@ -429,6 +429,9 @@ class ModelInfo:
     # only scalar limits; model-list routes synthesize one default option from
     # those limits when possible.
     context_window_options: tuple[ContextWindowOption, ...] = ()
+    # Virtual server-owned models (currently Router-Maestro Auto) already carry
+    # their complete public ID and must not be provider-qualified again.
+    virtual: bool = False
 
     def effective_context_window_options(self) -> tuple[ContextWindowOption, ...]:
         """Return explicit choices or one default choice derived from scalar limits."""
@@ -491,6 +494,7 @@ class ModelInfo:
             id_is_qualified=self.id_is_qualified,
             transport_capabilities=self.transport_capabilities,
             context_window_options=(() if token_limits_changed else self.context_window_options),
+            virtual=self.virtual,
         )
 
 
@@ -632,6 +636,7 @@ class ProviderFailureSignal(StrEnum):
     """Closed, non-sensitive classifications for narrowly handled failures."""
 
     COPILOT_BARE_BAD_REQUEST = "copilot_bare_bad_request"
+    CONTEXT_WINDOW_EXCEEDED = "context_window_exceeded"
 
 
 _RETRYABLE_UPSTREAM_STATUSES = frozenset({429, 500, 502, 503, 504, 529})
@@ -975,6 +980,11 @@ class BaseProvider(ABC):
         """
         status_code = error.response.status_code
         kind, retryable = classify_upstream_status(status_code)
+        message = f"{label} API error: {status_code}"
+        if signal is ProviderFailureSignal.CONTEXT_WINDOW_EXCEEDED:
+            message = "Request exceeds the selected model's context window"
+            kind = ProviderFailureKind.CLIENT_REQUEST
+            retryable = False
         suffix = " stream" if stream else ""
         if include_body:
             try:
@@ -991,7 +1001,7 @@ class BaseProvider(ABC):
                 len(error_body.encode("utf-8", errors="replace")),
             )
             raise ProviderError(
-                f"{label} API error: {status_code}",
+                message,
                 status_code=status_code,
                 retryable=retryable,
                 kind=kind,
@@ -1003,7 +1013,7 @@ class BaseProvider(ABC):
             ) from error
         logger.error("%s%s API error: %d", label, suffix, error.response.status_code)
         raise ProviderError(
-            f"{label} API error: {status_code}",
+            message,
             status_code=status_code,
             retryable=retryable,
             kind=kind,

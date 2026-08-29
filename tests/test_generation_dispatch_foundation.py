@@ -242,7 +242,7 @@ async def test_auto_route_filters_every_fallback_before_applying_switch_limit() 
         ModelRef("alpha", "one"),
         ModelRef("gamma", "three"),
     ]
-    assert plan.max_model_switches == 2
+    assert plan.max_model_switches == 1
 
 
 @pytest.mark.asyncio
@@ -431,8 +431,13 @@ async def test_generation_route_none_disables_model_fallback() -> None:
 
     plan = await plan_generation_route(router, "router-maestro")
 
-    assert plan.candidates == (plan.primary,)
-    assert plan.max_model_switches == 0
+    # Auto priority-chain owns its complete explicit fallback chain; the
+    # legacy global fallback strategy only governs direct-model requests.
+    assert [candidate.model for candidate in plan.candidates] == [
+        ModelRef("alpha", "one"),
+        ModelRef("beta", "two"),
+    ]
+    assert plan.max_model_switches == 1
 
 
 @pytest.mark.asyncio
@@ -458,9 +463,10 @@ async def test_max_retries_limits_model_switches_not_provider_transports() -> No
     assert [candidate.model for candidate in plan.candidates] == [
         ModelRef("alpha", "one"),
         ModelRef("beta", "two"),
+        ModelRef("gamma", "three"),
     ]
-    assert [len(options) for options in transports] == [3, 3]
-    assert plan.max_model_switches == 1
+    assert [len(options) for options in transports] == [3, 3, 3]
+    assert plan.max_model_switches == 2
 
 
 @pytest.mark.parametrize(

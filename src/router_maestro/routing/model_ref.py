@@ -45,8 +45,11 @@ def catalog_model_public_id(
     catalog_id: str,
     *,
     id_is_qualified: bool = False,
+    is_virtual: bool = False,
 ) -> str:
     """Encode a catalog model using its explicit raw/public provenance."""
+    if is_virtual:
+        return validate_upstream_model_id(catalog_id)
     ref = (
         ModelRef.from_qualified_catalog_id(provider, catalog_id)
         if id_is_qualified

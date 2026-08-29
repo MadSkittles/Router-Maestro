@@ -897,7 +897,9 @@ async def list_models(
         after_id: Return models after this ID (for forward pagination)
         before_id: Return models before this ID (for backward pagination)
     """
-    models = await model_router.list_models()
+    from router_maestro.routing.generation_plan import list_models_with_auto
+
+    models = await list_models_with_auto(model_router)
 
     # Generate ISO 8601 timestamp for created_at
     # Using current time since actual creation dates aren't tracked
@@ -910,6 +912,7 @@ async def list_models(
                 model.provider,
                 model.id,
                 id_is_qualified=model.id_is_qualified,
+                is_virtual=model.virtual,
             ),
             created_at=created_at,
             display_name=_generate_display_name(
@@ -917,6 +920,7 @@ async def list_models(
                     model.provider,
                     model.id,
                     id_is_qualified=model.id_is_qualified,
+                    is_virtual=model.virtual,
                 )
             ),
             type="model",

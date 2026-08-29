@@ -14,7 +14,12 @@ from fastapi.testclient import TestClient
 from router_maestro.cli.client_configs.base import ContextWindowChoice
 from router_maestro.config.contexts import ContextConfig, ContextsConfig
 from router_maestro.web.app import create_portal_app
-from router_maestro.web.service import PortalConfigRequest, PortalService, PortalServiceError
+from router_maestro.web.service import (
+    PortalAutoConfigRequest,
+    PortalConfigRequest,
+    PortalService,
+    PortalServiceError,
+)
 
 
 def _contexts() -> ContextsConfig:
@@ -90,6 +95,37 @@ def _transport(request: httpx.Request) -> httpx.Response:
     if request.url.path == "/api/admin/models":
         assert request.headers["Authorization"] == "Bearer sk-rm-secret"
         return httpx.Response(200, json=_catalog())
+    if request.url.path == "/api/admin/priorities":
+        config = {
+            "revision": "a" * 64,
+            "priorities": [],
+            "fallback": {"strategy": "priority", "maxRetries": 2},
+            "model_overrides": {},
+            "thinking": {"default_budget": 16000, "auto_enable": False, "model_budgets": {}},
+            "guards": {
+                "leak_guard": {"enabled": True},
+                "runaway_guard": {"enabled": True, "max_bytes": 10000000, "max_deltas": 50000},
+            },
+            "beta_strip": [],
+            "audit": {"enabled": False, "trace_dir": None},
+            "auto": {
+                "mode": "task-router",
+                "capability_policy": "strict",
+                "priority_chain": [],
+                "task_router": {
+                    "router_model": "github-copilot/gpt-5.6-sol",
+                    "task_models": {
+                        task: "github-copilot/gpt-5.6-sol"
+                        for task in ("fast", "general", "coding", "deep_reasoning")
+                    },
+                },
+            },
+        }
+        if request.method == "PATCH":
+            body = json.loads(request.content)
+            config.update(body)
+            config["revision"] = "b" * 64
+        return httpx.Response(200, json=config)
     return httpx.Response(404)
 
 
@@ -121,6 +157,21 @@ def test_model_display_names_use_consistent_product_casing() -> None:
     assert PortalService._model_name({"name": "gpt-5.6-sol", "id": "gpt-5.6-sol"}) == (
         "GPT-5.6 Sol"
     )
+
+
+def test_virtual_auto_model_uses_aggregate_transport_capability_summary() -> None:
+    assert PortalService._transport_names(
+        {
+            "virtual": True,
+            "operation_capabilities": {"responses": True},
+        }
+    ) == ["Responses", "Chat", "Messages"]
+    assert PortalService._transport_names(
+        {
+            "virtual": False,
+            "operation_capabilities": {"responses": True},
+        }
+    ) == ["Responses"]
     assert (
         PortalService._model_name({"name": "MAI-Code-1.1-Flash", "id": "mai-code-1.1-flash"})
         == "MAI Code 1.1 Flash"
@@ -149,6 +200,28 @@ async def test_health_and_models_are_context_scoped(tmp_path: Path) -> None:
     assert catalog.models[0].provider_name == "GitHub Copilot"
     assert catalog.models[0].context_label == "272K / 1M"
     assert catalog.models[0].transports == ["Responses", "Chat"]
+
+
+@pytest.mark.asyncio
+async def test_auto_config_round_trips_through_selected_context(tmp_path: Path) -> None:
+    service = _service(tmp_path)
+    current = await service.get_auto_config("hk")
+
+    updated = await service.update_auto_config(
+        "hk",
+        PortalAutoConfigRequest(
+            revision=current["revision"],
+            mode="priority-chain",
+            capability_policy="strict",
+            priority_chain=["github-copilot/gpt-5.6-sol"],
+            router_model="github-copilot/gpt-5.6-sol",
+            task_models=current["auto"]["task_router"]["task_models"],
+        ),
+    )
+
+    assert updated["revision"] == "b" * 64
+    assert updated["auto"]["mode"] == "priority-chain"
+    assert updated["auto"]["priority_chain"] == ["github-copilot/gpt-5.6-sol"]
 
 
 def test_project_registry_merges_client_trust_and_explicit_paths(tmp_path: Path) -> None:
@@ -516,6 +589,25 @@ def test_portal_app_serves_ui_and_sensitive_key_only_on_explicit_route(tmp_path:
     assert page.status_code == 200
     assert "ROUTER-MAESTRO" in page.text
     assert "Codex Catalog" in page.text
+    assert "SAVE AUTO PROFILE" in page.text
+    assert "Task routing and fallback settings" in page.text
+    assert "Exclude unknown models" in page.text
+    assert "Smart Auto only" in page.text
+    assert 'id="rm-auto-chain-list"' in page.text
+    assert 'id="rm-auto-chain-add"' in page.text
+    assert 'id="rm-auto-router-model-meta"' in page.text
+    assert 'data-auto-task-meta="fast"' in page.text
+    assert 'data-auto-task-meta="deep_reasoning"' in page.text
+    assert 'className = "rm-auto-chain-choice"' in page.text
+    assert "+ ADD FALLBACK" in page.text
+    assert 'id="rm-auto-chain"' not in page.text
+    assert 'option.textContent = model.name + " // " + model.provider_name' not in page.text
+    assert "option.textContent = model.name;" in page.text
+    assert 'model.virtual ? " rm-model-row--auto" : ""' in page.text
+    assert 'model.virtual ? " rm-model-name--auto" : ""' in page.text
+    assert "@keyframes rm-auto-name-flow" in page.text
+    assert "@keyframes rm-auto-row-flow" in page.text
+    assert "@media (prefers-reduced-motion: reduce)" in page.text
     assert "rm-catalog-toggle" in page.text
     assert '<link rel="icon" href="/favicon.svg" type="image/svg+xml">' in page.text
     assert favicon.status_code == 200

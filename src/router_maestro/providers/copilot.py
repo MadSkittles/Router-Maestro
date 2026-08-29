@@ -88,6 +88,7 @@ COPILOT_COUNT_TOKENS_PATH = "/v1/messages/count_tokens"
 COPILOT_MODEL_ALIASES: dict[str, str] = {"codex-auto-review": "gpt-5.4-mini"}
 
 _COPILOT_UNSUPPORTED_OPERATION_CODE = "unsupported_api_for_model"
+_COPILOT_CONTEXT_WINDOW_EXCEEDED_CODE = "model_max_prompt_tokens_exceeded"
 _MAX_COPILOT_ERROR_BODY_BYTES = 64 * 1024
 _EXACT_COPILOT_BARE_BAD_REQUEST = b"Bad Request\n"
 
@@ -542,6 +543,11 @@ class CopilotOutboundContract(OutboundContract):
 
         # Catalog-driven path: trust whatever Copilot advertises.
         if catalog_effort_values is not None:
+            if reasoning_effort == "none":
+                return ReasoningResolution(
+                    effort="none" if "none" in catalog_effort_values else None,
+                    rewrite_max_tokens_to_completion=rewrite,
+                )
             if not catalog_effort_values:
                 # Category A: model advertises no reasoning surface -> strip.
                 if reasoning_effort is not None or thinking_budget is not None:
@@ -598,6 +604,10 @@ class CopilotOutboundContract(OutboundContract):
     ) -> ReasoningResolution:
         known_reasoning_support = _known_reasoning_support(model)
         if catalog_effort_values is not None:
+            if reasoning_effort == "none":
+                return ReasoningResolution(
+                    effort="none" if "none" in catalog_effort_values else None
+                )
             if not catalog_effort_values:
                 # Category A: no reasoning surface -> strip.
                 if reasoning_effort is not None:
@@ -1255,9 +1265,20 @@ class CopilotProvider(BaseProvider):
 
     @staticmethod
     def _failure_signal(status_code: int, body: bytes) -> ProviderFailureSignal | None:
-        """Classify one exact Copilot failure without retaining its body."""
+        """Classify exact, bounded Copilot failures without retaining the body."""
         if status_code == 400 and body == _EXACT_COPILOT_BARE_BAD_REQUEST:
             return ProviderFailureSignal.COPILOT_BARE_BAD_REQUEST
+        if status_code != 400 or len(body) > _MAX_COPILOT_ERROR_BODY_BYTES:
+            return None
+        try:
+            payload = json.loads(body)
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            return None
+        if not isinstance(payload, dict):
+            return None
+        error = payload.get("error")
+        if isinstance(error, dict) and error.get("code") == _COPILOT_CONTEXT_WINDOW_EXCEEDED_CODE:
+            return ProviderFailureSignal.CONTEXT_WINDOW_EXCEEDED
         return None
 
     async def _send_with_auth_retry(

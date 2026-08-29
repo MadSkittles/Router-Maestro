@@ -48,6 +48,14 @@ _CODEX_MODEL_SPECIFIC_EXTENSION_FIELDS = frozenset(
         "use_responses_lite",
     }
 )
+_CODEX_REASONING_LEVEL_DESCRIPTIONS = {
+    "minimal": "Fastest responses with minimal reasoning",
+    "low": "Fast responses with lighter reasoning",
+    "medium": "Balances speed and reasoning depth for everyday tasks",
+    "high": "Greater reasoning depth for complex problems",
+    "xhigh": "Extra high reasoning depth for complex problems",
+    "max": "Maximum reasoning depth for the hardest problems",
+}
 
 
 def get_codex_paths() -> dict[str, Path]:
@@ -183,6 +191,38 @@ def _catalog_context_windows(model: dict[str, Any]) -> tuple[int | None, int | N
     return default_window, max_window
 
 
+def _apply_server_model_capabilities(
+    entry: dict[str, Any],
+    model: dict[str, Any],
+) -> None:
+    """Project explicit RM catalog capabilities into Codex model metadata."""
+    feature_capabilities = model.get("feature_capabilities")
+    if isinstance(feature_capabilities, dict):
+        parallel_tools = feature_capabilities.get("parallel_tools")
+        if isinstance(parallel_tools, bool):
+            entry["supports_parallel_tool_calls"] = parallel_tools
+        vision = feature_capabilities.get("vision")
+        if isinstance(vision, bool):
+            entry["input_modalities"] = ["text", "image"] if vision else ["text"]
+
+    raw_efforts = model.get("reasoning_effort_values")
+    if not isinstance(raw_efforts, list):
+        return
+    efforts = [effort for effort in _CODEX_REASONING_LEVEL_DESCRIPTIONS if effort in raw_efforts]
+    if not efforts:
+        return
+    entry["supported_reasoning_levels"] = [
+        {
+            "effort": effort,
+            "description": _CODEX_REASONING_LEVEL_DESCRIPTIONS[effort],
+        }
+        for effort in efforts
+    ]
+    default_effort = entry.get("default_reasoning_level")
+    if default_effort not in efforts:
+        entry["default_reasoning_level"] = "medium" if "medium" in efforts else efforts[0]
+
+
 def _build_codex_model_catalog(models: list[dict[str, Any]]) -> dict[str, Any] | None:
     """Extend Codex's bundled catalog with exact Router-Maestro model slugs."""
     catalog = _load_bundled_codex_catalog()
@@ -236,6 +276,7 @@ def _build_codex_model_catalog(models: list[dict[str, Any]]) -> dict[str, Any] |
         entry["supports_parallel_tool_calls"] = False
         entry["supports_image_detail_original"] = False
         entry["experimental_supported_tools"] = []
+        _apply_server_model_capabilities(entry, model)
         default_window, max_window = _catalog_context_windows(model)
         if default_window is not None:
             entry["context_window"] = default_window
@@ -245,33 +286,6 @@ def _build_codex_model_catalog(models: list[dict[str, Any]]) -> dict[str, Any] |
         extended_models.append(entry)
         known_slugs.add(slug)
 
-    if "router-maestro" not in known_slugs:
-        auto_entry = copy.deepcopy(baseline)
-        for field in _CODEX_MODEL_SPECIFIC_EXTENSION_FIELDS:
-            auto_entry.pop(field, None)
-        auto_entry["slug"] = "router-maestro"
-        auto_entry["display_name"] = "Router-Maestro Auto"
-        auto_entry["description"] = "Router-Maestro automatic model routing"
-        auto_entry["priority"] = 999
-        auto_entry["visibility"] = "list"
-        auto_entry["supported_in_api"] = True
-        auto_entry["additional_speed_tiers"] = []
-        auto_entry["service_tiers"] = []
-        auto_entry["availability_nux"] = None
-        auto_entry["upgrade"] = None
-        auto_entry["supports_search_tool"] = False
-        auto_entry["shell_type"] = "default"
-        auto_entry["model_messages"] = None
-        auto_entry["supports_reasoning_summaries"] = False
-        auto_entry["support_verbosity"] = False
-        auto_entry["default_verbosity"] = None
-        auto_entry["apply_patch_tool_type"] = None
-        auto_entry["web_search_tool_type"] = "text"
-        auto_entry["truncation_policy"] = {"mode": "bytes", "limit": 10_000}
-        auto_entry["supports_parallel_tool_calls"] = False
-        auto_entry["supports_image_detail_original"] = False
-        auto_entry["experimental_supported_tools"] = []
-        extended_models.append(auto_entry)
     return extended
 
 

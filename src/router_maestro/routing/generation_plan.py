@@ -13,7 +13,7 @@ from copy import deepcopy
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from router_maestro.config import FallbackStrategy
+from router_maestro.config import AutoCapabilityPolicy, AutoMode, FallbackStrategy
 from router_maestro.protocols.models import RequestManifest
 from router_maestro.providers.base import (
     BaseProvider,
@@ -27,6 +27,10 @@ from router_maestro.utils.model_match import AmbiguousModelMatchError, fuzzy_mat
 
 if TYPE_CHECKING:
     from router_maestro.routing.router import Router
+
+
+AUTO_CONTEXT_SAFETY_NUMERATOR = 7
+AUTO_CONTEXT_SAFETY_DENOMINATOR = 10
 
 
 @dataclass(frozen=True, slots=True)
@@ -52,6 +56,7 @@ class GenerationRoutePlan:
     fallbacks: tuple[GenerationCandidate, ...] = ()
     explicit: bool = False
     max_model_switches: int = 0
+    fallback_on_context_overflow_only: bool = False
 
     def __post_init__(self) -> None:
         fallbacks = tuple(self.fallbacks)
@@ -67,6 +72,32 @@ class GenerationRoutePlan:
     @property
     def candidates(self) -> tuple[GenerationCandidate, ...]:
         return (self.primary, *self.fallbacks)
+
+
+def model_prompt_capacity(info: ModelInfo) -> int | None:
+    """Return the largest prompt budget this concrete model advertises."""
+    options = info.effective_context_window_options()
+    if options:
+        return max(option.max_prompt_tokens for option in options)
+    return info.max_prompt_tokens
+
+
+def auto_context_is_safe(info: ModelInfo, estimated_input_tokens: int | None) -> bool:
+    """Keep Auto below 70% of the advertised prompt budget.
+
+    Tokenizers and protocol overhead differ between Router-Maestro's estimate
+    and the provider's final accounting. Reaching the threshold is therefore a
+    signal to choose a larger configured task model before provider I/O.
+    """
+    if estimated_input_tokens is None:
+        return True
+    capacity = model_prompt_capacity(info)
+    if capacity is None:
+        return True
+    return (
+        estimated_input_tokens * AUTO_CONTEXT_SAFETY_DENOMINATOR
+        < capacity * AUTO_CONTEXT_SAFETY_NUMERATOR
+    )
 
 
 def _catalog_candidate(
@@ -106,6 +137,230 @@ def _ordered_catalog_candidates(router: Any) -> list[GenerationCandidate]:
     return ordered
 
 
+def auto_candidate_for_id(
+    router: Any,
+    model_id: str,
+    *,
+    manifest: RequestManifest | None,
+    strict_unknown: bool,
+) -> GenerationCandidate | None:
+    """Resolve one configured Auto model against hard request requirements."""
+    entry = router._models_cache.get(model_id)
+    if entry is None or not router._is_qualified_cache_entry(model_id, entry):
+        return None
+    candidate = _catalog_candidate(router, entry[0], entry[1])
+    if candidate is None:
+        return None
+    if manifest is not None and not model_supports_manifest(
+        candidate.info.feature_capabilities,
+        manifest,
+        strict_unknown=strict_unknown,
+    ):
+        return None
+    if manifest is not None:
+        requested_output = manifest.max_output_tokens
+        if (
+            requested_output is not None
+            and candidate.info.max_output_tokens is not None
+            and candidate.info.max_output_tokens < requested_output
+        ):
+            return None
+    return candidate
+
+
+def select_auto_context_candidates(
+    candidates: tuple[GenerationCandidate, ...],
+    estimated_input_tokens: int | None,
+) -> tuple[GenerationCandidate, ...]:
+    """Apply Auto's 70% context preference without turning it into rejection.
+
+    Models below the safety threshold are omitted while at least one safer
+    configured model exists. If every hard-compatible candidate is at or over
+    its threshold, retain every model tied for the largest advertised prompt
+    window so Auto can still attempt the request.
+    """
+    safe = tuple(
+        candidate
+        for candidate in candidates
+        if auto_context_is_safe(candidate.info, estimated_input_tokens)
+    )
+    if safe or not candidates:
+        return safe
+
+    capacities = tuple(model_prompt_capacity(candidate.info) for candidate in candidates)
+    if any(capacity is None for capacity in capacities):
+        # Unknown is not safely smaller than any advertised limit. Keep every
+        # unknown-capacity model rather than inventing a hard ceiling for it.
+        return tuple(
+            candidate
+            for candidate, capacity in zip(candidates, capacities, strict=True)
+            if capacity is None
+        )
+    known_capacities = tuple(capacity for capacity in capacities if capacity is not None)
+    largest = max(known_capacities)
+    return tuple(
+        candidate
+        for candidate, capacity in zip(candidates, capacities, strict=True)
+        if capacity == largest
+    )
+
+
+def configured_auto_model_ids(config: Any) -> tuple[str, ...]:
+    """Return the stable execution-model set represented by the Auto profile."""
+    auto = config.auto
+    if auto.mode is AutoMode.PRIORITY_CHAIN:
+        return tuple(auto.priority_chain)
+    return tuple(dict.fromkeys(auto.task_router.task_models.values()))
+
+
+def eligible_auto_candidates(
+    router: Any,
+    manifest: RequestManifest | None,
+) -> tuple[GenerationCandidate, ...]:
+    """Resolve configured Auto targets without consulting provider catalog order."""
+    config = router._get_priorities_config()
+    strict_unknown = (
+        config.auto.mode is AutoMode.TASK_ROUTER
+        and config.auto.capability_policy is AutoCapabilityPolicy.STRICT
+    )
+    hard_candidates = tuple(
+        candidate
+        for model_id in configured_auto_model_ids(config)
+        if (
+            candidate := auto_candidate_for_id(
+                router,
+                model_id,
+                manifest=manifest,
+                strict_unknown=strict_unknown,
+            )
+        )
+        is not None
+    )
+    return select_auto_context_candidates(
+        hard_candidates,
+        manifest.estimated_input_tokens if manifest is not None else None,
+    )
+
+
+async def auto_model_info(router: Any) -> ModelInfo:
+    """Aggregate the configured Auto execution set into one virtual catalog model."""
+    await router._ensure_models_cache()
+    config = router._get_priorities_config()
+    candidates: list[GenerationCandidate] = []
+    seen_ids: set[str] = set()
+    for model_id in configured_auto_model_ids(config):
+        if model_id in seen_ids:
+            continue
+        seen_ids.add(model_id)
+        candidate = auto_candidate_for_id(
+            router,
+            model_id,
+            manifest=None,
+            strict_unknown=False,
+        )
+        if candidate is None:
+            entry = router._models_cache.get(model_id)
+            if entry is not None and router._is_qualified_cache_entry(model_id, entry):
+                provider = router.providers.get(entry[0])
+                if provider is not None:
+                    candidate = GenerationCandidate(
+                        model=ModelRef(entry[0], entry[1].id),
+                        provider=provider,
+                        info=deepcopy(entry[1]),
+                    )
+        if candidate is not None:
+            candidates.append(candidate)
+    context_by_tier: dict[str, Any] = {}
+    default_tiers: set[str] = set()
+    for candidate in candidates:
+        for option in candidate.info.effective_context_window_options():
+            existing = context_by_tier.get(option.tier)
+            if existing is None or option.max_prompt_tokens > existing.max_prompt_tokens:
+                context_by_tier[option.tier] = option
+            if option.is_default:
+                default_tiers.add(option.tier)
+    selected_default_tier = (
+        max(
+            default_tiers,
+            key=lambda tier: context_by_tier[tier].max_prompt_tokens,
+        )
+        if default_tiers
+        else None
+    )
+    from router_maestro.providers.base import ContextWindowOption
+
+    context_options = tuple(
+        ContextWindowOption(
+            tier=option.tier,
+            max_prompt_tokens=option.max_prompt_tokens,
+            is_default=tier == selected_default_tier,
+        )
+        for tier, option in sorted(
+            context_by_tier.items(),
+            key=lambda item: item[1].max_prompt_tokens,
+        )
+    )
+
+    def union_capabilities(attribute: str) -> dict[str, bool]:
+        mappings = [getattr(candidate.info, attribute) for candidate in candidates]
+        keys = set().union(*mappings)
+        result: dict[str, bool] = {}
+        for key in keys:
+            values = [mapping.get(key) for mapping in mappings]
+            if True in values:
+                result[key] = True
+            elif values and all(value is False for value in values):
+                result[key] = False
+        return result
+
+    def maximum(attribute: str) -> int | None:
+        values = [getattr(candidate.info, attribute) for candidate in candidates]
+        known = [value for value in values if value is not None]
+        return max(known) if known else None
+
+    return ModelInfo(
+        id="router-maestro",
+        name="Router-Maestro Auto",
+        provider="router-maestro",
+        max_prompt_tokens=maximum("max_prompt_tokens"),
+        max_output_tokens=maximum("max_output_tokens"),
+        max_context_window_tokens=maximum("max_context_window_tokens"),
+        context_window_options=context_options,
+        supports_thinking=any(candidate.info.supports_thinking for candidate in candidates),
+        supports_vision=any(candidate.info.supports_vision for candidate in candidates),
+        reasoning_effort_values=_ordered_reasoning_efforts(candidates),
+        operation_capabilities=union_capabilities("operation_capabilities"),
+        feature_capabilities=union_capabilities("feature_capabilities"),
+        transport_capabilities=union_capabilities("transport_capabilities"),
+        virtual=True,
+    )
+
+
+def _ordered_reasoning_efforts(
+    candidates: list[GenerationCandidate],
+) -> list[str] | None:
+    """Return the configured models' effort union in semantic strength order."""
+    values = {
+        effort
+        for candidate in candidates
+        for effort in candidate.info.reasoning_effort_values or ()
+    }
+    if not values:
+        return None
+    order = ("none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra")
+    rank = {effort: index for index, effort in enumerate(order)}
+    return sorted(values, key=lambda effort: (rank.get(effort, len(rank)), effort))
+
+
+async def list_models_with_auto(router: Any) -> list[ModelInfo]:
+    """Return the virtual Auto model followed by the real provider catalog."""
+    from router_maestro.routing.router import Router
+
+    if not isinstance(router, Router):
+        return await router.list_models()
+    return [await auto_model_info(router), *(await router.list_models())]
+
+
 def _invalid_model(message: str, *, cause: BaseException | None = None) -> ProviderError:
     return ProviderError(
         message,
@@ -141,7 +396,8 @@ async def plan_generation_route(
             kind=ProviderFailureKind.UPSTREAM_STATUS,
         )
 
-    configured_ids = set(router._get_priorities_config().priorities)
+    config = router._get_priorities_config()
+    configured_ids = set(config.priorities)
     eligible_ordered = [
         candidate
         for candidate in ordered
@@ -161,9 +417,18 @@ async def plan_generation_route(
     remaining: list[GenerationCandidate] = []
 
     if model_id == AUTO_ROUTE_MODEL:
-        candidates = eligible_configured or eligible_ordered
+        auto = config.auto
+        if auto.mode is AutoMode.PRIORITY_CHAIN and not auto.priority_chain:
+            raise ProviderError(
+                "Auto priority chain is empty; configure at least one model",
+                status_code=503,
+                retryable=False,
+                kind=ProviderFailureKind.CLIENT_REQUEST,
+                parameter="auto.priority_chain",
+            )
+        candidates = list(eligible_auto_candidates(router, manifest))
         if not candidates:
-            raise _invalid_model("No models support the requested features")
+            raise _invalid_model("No configured Auto model supports the requested capabilities")
         primary, *remaining = candidates
     elif explicit:
         try:
@@ -221,7 +486,16 @@ async def plan_generation_route(
         primary, *remaining = aliases
 
     assert primary is not None
-    fallback = router._get_priorities_config().fallback
+    fallback = config.fallback
+    if model_id == AUTO_ROUTE_MODEL and config.auto.mode is AutoMode.PRIORITY_CHAIN:
+        selected_fallbacks = tuple(remaining)
+        limit = len(selected_fallbacks)
+        return GenerationRoutePlan(
+            primary=primary,
+            fallbacks=selected_fallbacks,
+            explicit=False,
+            max_model_switches=limit,
+        )
     if fallback.strategy is FallbackStrategy.NONE or fallback.maxRetries == 0:
         selected_fallbacks: tuple[GenerationCandidate, ...] = ()
         limit = 0
@@ -250,4 +524,18 @@ async def plan_generation_route(
     )
 
 
-__all__ = ["GenerationCandidate", "GenerationRoutePlan", "plan_generation_route"]
+__all__ = [
+    "AUTO_CONTEXT_SAFETY_DENOMINATOR",
+    "AUTO_CONTEXT_SAFETY_NUMERATOR",
+    "GenerationCandidate",
+    "GenerationRoutePlan",
+    "auto_context_is_safe",
+    "auto_candidate_for_id",
+    "auto_model_info",
+    "configured_auto_model_ids",
+    "eligible_auto_candidates",
+    "list_models_with_auto",
+    "model_prompt_capacity",
+    "plan_generation_route",
+    "select_auto_context_candidates",
+]

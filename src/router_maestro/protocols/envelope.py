@@ -50,6 +50,42 @@ class RequestEnvelope:
         self._materialization_count = 0
         self._flight: concurrent.futures.Future[SemanticRequest] | None = None
 
+    def replace_manifest(self, manifest: RequestManifest) -> None:
+        """Replace only shallow routing facts before dispatch begins."""
+        if manifest.protocol is not self._runtime.protocol:
+            raise ValueError("replacement manifest protocol must match its runtime")
+        with self._state_lock:
+            if self._semantic_request is not None or self._flight is not None:
+                raise RuntimeError("request manifest cannot change after IR materialization begins")
+            self._manifest = manifest
+
+    def require_context_tokens(self, tokens: int) -> None:
+        """Attach a client-side context hint to this request's shallow manifest."""
+        if not isinstance(tokens, int) or isinstance(tokens, bool) or tokens <= 0:
+            raise ValueError("context token requirement must be a positive integer")
+        from dataclasses import replace
+
+        self.replace_manifest(replace(self._manifest, requested_context_tokens=tokens))
+
+    def estimate_input_tokens(self) -> int:
+        """Memoize a shallow wire estimate for Auto context filtering only."""
+        if self._manifest.estimated_input_tokens is not None:
+            return self._manifest.estimated_input_tokens
+        import json
+        from dataclasses import replace
+
+        from router_maestro.utils.tokens import estimate_tokens
+
+        serialized = json.dumps(
+            self._raw_payload,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            default=str,
+        )
+        estimated = estimate_tokens(serialized)
+        self.replace_manifest(replace(self._manifest, estimated_input_tokens=estimated))
+        return estimated
+
     @property
     def protocol(self) -> WireProtocol:
         return self._runtime.protocol

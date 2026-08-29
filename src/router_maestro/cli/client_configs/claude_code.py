@@ -139,7 +139,7 @@ def _find_existing_model(
         return fallback
     configured = _strip_context_suffix(value).casefold()
     if configured == "router-maestro":
-        return None
+        return next((model for model in models if model.get("virtual") is True), fallback)
 
     for model in models:
         bare_id = _bare_upstream_model_id(model)
@@ -158,7 +158,9 @@ def _find_existing_model(
 
 def _catalog_has_claude_model(models: list[dict]) -> bool:
     return any(
-        detect_family(_bare_upstream_model_id(model)) is ModelFamily.ANTHROPIC for model in models
+        model.get("virtual") is not True
+        and detect_family(_bare_upstream_model_id(model)) is ModelFamily.ANTHROPIC
+        for model in models
     )
 
 

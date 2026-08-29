@@ -5,17 +5,32 @@ from typing import Annotated
 
 import typer
 from rich.console import Console
+from rich.prompt import Confirm
 from rich.table import Table
+from rich.text import Text
 
 from router_maestro.cli.client import ServerNotRunningError, get_admin_client
+from router_maestro.cli.client_configs.prompts import select_dropdown, supports_dropdowns
+from router_maestro.config import AutoCapabilityPolicy, AutoMode, AutoTaskType
 from router_maestro.routing.model_ref import qualify_model_id
 
 app = typer.Typer(no_args_is_help=True)
 console = Console()
 
+_AUTO_SHIMMER_STOPS = (
+    (27, 151, 255),
+    (37, 217, 255),
+    (160, 241, 255),
+    (255, 255, 255),
+    (119, 228, 255),
+    (74, 132, 255),
+)
+
 
 def _model_key(model: dict) -> str:
     """Return one provider-qualified model key without duplicating its prefix."""
+    if model.get("virtual") is True:
+        return model["id"]
     return qualify_model_id(model["provider"], model["id"])
 
 
@@ -52,6 +67,24 @@ def _context_windows_label(model: dict) -> str:
     return " / ".join(_format_token_count(limit) for limit in limits) if limits else "unknown"
 
 
+def _auto_shimmer_text(value: str) -> Text:
+    """Render Auto branding as a terminal-safe cyan-to-blue light sweep."""
+    result = Text()
+    last_index = max(len(value) - 1, 1)
+    last_stop = len(_AUTO_SHIMMER_STOPS) - 1
+    for index, character in enumerate(value):
+        position = (index / last_index) * last_stop
+        stop_index = min(int(position), last_stop - 1)
+        blend = position - stop_index
+        start = _AUTO_SHIMMER_STOPS[stop_index]
+        end = _AUTO_SHIMMER_STOPS[stop_index + 1]
+        red, green, blue = (
+            round(start[channel] + (end[channel] - start[channel]) * blend) for channel in range(3)
+        )
+        result.append(character, style=f"bold italic rgb({red},{green},{blue})")
+    return result
+
+
 def _handle_server_error(e: Exception) -> None:
     """Handle server connection errors."""
     if isinstance(e, ServerNotRunningError):
@@ -59,6 +92,154 @@ def _handle_server_error(e: Exception) -> None:
     else:
         console.print(f"[red]Error: {e}[/red]")
     raise typer.Exit(1)
+
+
+def _select_catalog_model(models: list[dict], prompt: str, *, default: str | None = None) -> str:
+    concrete = [model for model in models if model.get("virtual") is not True]
+    if not concrete:
+        raise ValueError("No concrete models are available")
+    choices = [
+        (
+            f"{_model_key(model)} — {model['name']} — {_context_windows_label(model)}",
+            _model_key(model),
+        )
+        for model in concrete
+    ]
+    if supports_dropdowns():
+        return select_dropdown(prompt, choices, default=default, searchable=True)
+    from rich.prompt import Prompt
+
+    for index, (label, _value) in enumerate(choices, 1):
+        console.print(f"  {index}. {label}")
+    default_index = next(
+        (str(index) for index, (_label, value) in enumerate(choices, 1) if value == default),
+        "1",
+    )
+    answer = Prompt.ask(
+        prompt, choices=[str(i) for i in range(1, len(choices) + 1)], default=default_index
+    )
+    return choices[int(answer) - 1][1]
+
+
+auto_app = typer.Typer(no_args_is_help=True, help="Configure the virtual Auto model")
+app.add_typer(auto_app, name="auto")
+
+
+@auto_app.command(name="show")
+def auto_show() -> None:
+    """Show the active Auto mode and both retained profiles."""
+    client = get_admin_client()
+    try:
+        auto = asyncio.run(client.get_runtime_config()).get("auto", {})
+    except Exception as error:
+        _handle_server_error(error)
+        return
+    console.print("\n[bold]Auto Model Configuration[/bold]")
+    console.print(f"  Mode: [cyan]{auto.get('mode', AutoMode.TASK_ROUTER.value)}[/cyan]")
+    console.print(f"  Capability policy: [cyan]{auto.get('capability_policy', 'strict')}[/cyan]")
+    task_router = auto.get("task_router", {})
+    console.print(
+        f"  Router model: [cyan]{task_router.get('router_model', 'not configured')}[/cyan]"
+    )
+    for task in AutoTaskType:
+        model = task_router.get("task_models", {}).get(task.value, "not configured")
+        console.print(f"  {task.value}: [cyan]{model}[/cyan]")
+    chain = auto.get("priority_chain", [])
+    console.print(f"  Priority chain: [cyan]{' → '.join(chain) if chain else 'empty'}[/cyan]\n")
+
+
+@auto_app.command(name="configure")
+def auto_configure() -> None:
+    """Interactively configure Smart Auto or a strict priority fallback chain."""
+    client = get_admin_client()
+    try:
+        data = asyncio.run(client.get_runtime_config())
+        models = asyncio.run(client.list_models())
+        revision = data.pop("revision")
+        auto = dict(data.get("auto", {}))
+        current_mode = auto.get("mode", AutoMode.TASK_ROUTER.value)
+        mode_choices = [
+            ("Smart Auto — classify each request by task", AutoMode.TASK_ROUTER.value),
+            ("Priority Chain — use a strict ordered fallback chain", AutoMode.PRIORITY_CHAIN.value),
+        ]
+        mode = (
+            select_dropdown("Auto mode", mode_choices, default=current_mode)
+            if supports_dropdowns()
+            else typer.prompt(
+                "Auto mode (task-router/priority-chain)",
+                default=current_mode,
+            )
+        )
+        if mode not in {item.value for item in AutoMode}:
+            raise ValueError("Auto mode must be task-router or priority-chain")
+        auto["mode"] = mode
+
+        if mode == AutoMode.TASK_ROUTER.value:
+            policy_choices = [
+                (
+                    "Require confirmed support — exclude unknown capabilities",
+                    AutoCapabilityPolicy.STRICT.value,
+                ),
+                (
+                    "Allow unknown support — exclude only confirmed incompatibility",
+                    AutoCapabilityPolicy.OPTIMISTIC.value,
+                ),
+            ]
+            current_policy = auto.get("capability_policy", AutoCapabilityPolicy.STRICT.value)
+            policy = (
+                select_dropdown(
+                    "Unknown capability handling",
+                    policy_choices,
+                    default=current_policy,
+                )
+                if supports_dropdowns()
+                else typer.prompt(
+                    "Unknown capability handling (strict/optimistic)",
+                    default=current_policy,
+                )
+            )
+            if policy not in {item.value for item in AutoCapabilityPolicy}:
+                raise ValueError("Capability policy must be strict or optimistic")
+            auto["capability_policy"] = policy
+            task_router = dict(auto.get("task_router", {}))
+            task_router["router_model"] = _select_catalog_model(
+                models,
+                "Router model",
+                default=task_router.get("router_model"),
+            )
+            current_tasks = dict(task_router.get("task_models", {}))
+            task_router["task_models"] = {
+                task.value: _select_catalog_model(
+                    models,
+                    f"{task.value.replace('_', ' ').title()} model",
+                    default=current_tasks.get(task.value),
+                )
+                for task in AutoTaskType
+            }
+            auto["task_router"] = task_router
+        else:
+            chain: list[str] = []
+            current = list(auto.get("priority_chain", []))
+            while True:
+                default = current[len(chain)] if len(chain) < len(current) else None
+                selected = _select_catalog_model(
+                    models,
+                    f"Priority {len(chain) + 1}",
+                    default=default,
+                )
+                if selected in chain:
+                    console.print("[yellow]That model is already in the chain.[/yellow]")
+                    continue
+                chain.append(selected)
+                if not Confirm.ask("Add another fallback model?", default=len(chain) == 1):
+                    break
+            auto["priority_chain"] = chain
+
+        data["auto"] = auto
+        asyncio.run(client.patch_runtime_config(config=data, revision=revision))
+        console.print("[green]Auto model configuration updated[/green]")
+    except Exception as error:
+        _handle_server_error(error)
 
 
 @app.command(name="list")
@@ -89,6 +270,7 @@ def list_models() -> None:
 
     for model in models:
         model_key = _model_key(model)
+        is_auto = model.get("virtual") is True
         # Check if this model is in the priority list
         try:
             priority_idx = priorities_list.index(model_key)
@@ -98,8 +280,8 @@ def list_models() -> None:
 
         table.add_row(
             priority_str,
-            model_key,
-            model["name"],
+            _auto_shimmer_text(model_key) if is_auto else model_key,
+            _auto_shimmer_text(model["name"]) if is_auto else model["name"],
             model["provider"],
             _context_windows_label(model),
         )

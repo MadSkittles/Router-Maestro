@@ -28,6 +28,8 @@ class Feature(StrEnum):
     VISION = "vision"
     REASONING = "reasoning"
     PARALLEL_TOOLS = "parallel_tools"
+    FILES = "files"
+    STRUCTURED_OUTPUT = "structured_output"
 
 
 class CapabilitySupport(StrEnum):
@@ -146,23 +148,38 @@ class RequestFeatures:
 def model_supports_manifest(
     feature_capabilities: Mapping[str, bool],
     manifest: RequestManifest,
+    *,
+    strict_unknown: bool = False,
 ) -> bool:
     """Return false only when catalog metadata denies a required request feature.
 
-    File inputs intentionally have no mapping here because ``Feature`` does not
-    currently define a portable file capability. Missing catalog entries remain
-    probeable.
+    Missing catalog entries remain probeable for direct model selection and
+    legacy routing. Smart Auto can opt into ``strict_unknown`` so an explicitly
+    requested capability is never assigned to a model whose support is unknown.
     """
-    required = (
+    required = [
         (Feature.TOOLS, manifest.tools),
         (Feature.VISION, manifest.images),
         (Feature.REASONING, manifest.reasoning),
         (Feature.PARALLEL_TOOLS, manifest.parallel_tools),
-    )
-    return all(
-        not enabled or feature_capabilities.get(feature.value) is not False
-        for feature, enabled in required
-    )
+    ]
+    # File and structured-output metadata is still sparse across providers.
+    # Smart Auto evaluates those two only under its strict policy; direct model
+    # selection retains the existing adapter-probe behavior.
+    if strict_unknown:
+        required.extend(
+            (
+                (Feature.FILES, manifest.files),
+                (Feature.STRUCTURED_OUTPUT, manifest.structured_output),
+            )
+        )
+    for feature, enabled in required:
+        if not enabled:
+            continue
+        declared = feature_capabilities.get(feature.value)
+        if declared is False or (strict_unknown and declared is not True):
+            return False
+    return True
 
 
 @dataclass(frozen=True, slots=True)

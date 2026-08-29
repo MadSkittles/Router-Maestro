@@ -159,6 +159,10 @@ class OpenAIChatRuntime:
             files=has_typed_block(messages, {"file", "input_file"}),
             reasoning=bool(payload.get("reasoning_effort") or payload.get("thinking")),
             parallel_tools=payload.get("parallel_tool_calls") is True,
+            structured_output=payload.get("response_format") is not None,
+            max_output_tokens=(
+                payload.get("max_tokens") if isinstance(payload.get("max_tokens"), int) else None
+            ),
         )
 
     async def decode_request(self, payload: Mapping[str, Any]) -> SemanticRequest:
@@ -841,14 +845,9 @@ class OpenAIChatStreamEncoder:
             delta: dict[str, Any] = {"reasoning_content": item.text}
             state = item.opaque_state
             if state is not None:
-                if state.origin_protocol is not _PROTOCOL or not isinstance(state.blob, str):
-                    reject(
-                        _PROTOCOL,
-                        "event.item.opaque_state",
-                        "Chat stream requires Chat-origin text opaque state",
-                    )
-                delta["thinking_id"] = state.item_id
-                delta["thinking_signature"] = state.blob
+                if state.origin_protocol is _PROTOCOL and isinstance(state.blob, str):
+                    delta["thinking_id"] = state.item_id
+                    delta["thinking_signature"] = state.blob
             return [delta]
         if isinstance(item, ToolCall):
             call = _encode_tool_call(item, parameter="event.item")
@@ -1455,8 +1454,28 @@ def _encode_request(
                 thinking["budget_tokens"] = request.reasoning.budget_tokens
             payload["thinking"] = thinking
     if request.structured_output is not None:
-        payload["response_format"] = thaw_json(request.structured_output)
+        payload["response_format"] = _encode_structured_output(request.structured_output)
     return payload
+
+
+def _encode_structured_output(value: Mapping[str, Any]) -> dict[str, Any]:
+    """Project normalized or Responses-shaped output controls onto Chat wire."""
+    raw = thaw_json(value)
+    if isinstance(raw.get("format"), Mapping):
+        raw = dict(raw["format"])
+    if raw.get("type") == "json_schema" and isinstance(raw.get("json_schema"), Mapping):
+        return raw
+    if raw.get("type") == "json_schema" and isinstance(raw.get("schema"), Mapping):
+        json_schema = {
+            "name": raw.get("name") or "response",
+            "schema": raw["schema"],
+        }
+        if "strict" in raw:
+            json_schema["strict"] = raw["strict"]
+        return {"type": "json_schema", "json_schema": json_schema}
+    if raw.get("type") == "json_object":
+        return {"type": "json_object"}
+    reject(_PROTOCOL, "structured_output", "unsupported Chat structured output shape")
 
 
 def _put(
@@ -1849,14 +1868,14 @@ def _response_message(response: SemanticResponse) -> dict[str, Any]:
                     f"response.output[{index}].name",
                     "Chat response messages cannot carry a semantic name",
                 )
-            # Responses assigns an ID and lifecycle status to its output-message
-            # container. Chat carries the same assistant content directly inside
-            # a choice, so those two transport-only fields have no wire slots and
-            # are intentionally projected away. Semantic content remains guarded
-            # by _encode_message (for example opaque reasoning and tool namespace).
-            parts.extend(item.content)
+            # Responses assigns IDs, lifecycle state, and opaque continuation
+            # blobs to its output. Chat can expose the visible reasoning summary,
+            # but cannot round-trip a foreign provider blob. Project that private
+            # response-only state away; request encoding remains fail-closed so a
+            # client can never replay an incomplete continuation through Chat.
+            parts.extend(_chat_response_part(part) for part in item.content)
         elif isinstance(item, TextContent | RefusalContent | ReasoningSummary | ToolCall):
-            parts.append(item)
+            parts.append(_chat_response_part(item))
         else:
             reject(
                 _PROTOCOL,
@@ -1866,6 +1885,12 @@ def _response_message(response: SemanticResponse) -> dict[str, Any]:
     return _encode_message(
         SemanticMessage(role=MessageRole.ASSISTANT, content=tuple(parts)), index=0
     )
+
+
+def _chat_response_part(part: object) -> object:
+    if isinstance(part, ReasoningSummary) and part.opaque_state is not None:
+        return replace(part, opaque_state=None)
+    return part
 
 
 def chat_request_to_semantic(request: ChatRequest) -> SemanticRequest:

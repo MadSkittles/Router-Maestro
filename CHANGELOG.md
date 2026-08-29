@@ -4,6 +4,35 @@ All notable changes to Router-Maestro are documented here.
 
 ---
 
+## Unreleased
+
+### Added
+
+- **Smart Auto routing and strict priority profiles.** The virtual `router-maestro` model now
+  supports a default task-router profile with a bounded router-model classifier and explicit
+  `fast`, `general`, `coding`, and `deep_reasoning` mappings, plus a strict priority-chain mode
+  that can never fall back to provider catalog order. CLI and the local Web Portal can configure
+  both profiles, while existing non-empty priority configurations migrate without changing their
+  effective order.
+- **Server-owned Auto model metadata.** OpenAI, Anthropic, and admin model catalogs now expose one
+  virtual Auto entry whose context limits and capabilities are aggregated from the configured
+  execution models. Codex catalog generation consumes that entry instead of synthesizing metadata
+  from an unrelated baseline model.
+
+### Changed
+
+- **Auto capability filtering is request-aware.** Smart Auto filters explicit tool, vision,
+  reasoning, parallel-tool, file, structured-output, and output-limit requirements before asking
+  the router model. It uses the actual request's estimated input size and a 70% prompt-window
+  safety threshold; if no model is below the threshold, all hard-compatible models tied for the
+  largest window remain eligible. Claude Code's `[1m]` suffix remains a client-side auto-compact
+  hint and does not force server routing. If only one execution model remains, classification is
+  skipped and the original request retains its identity fast path.
+- **Auto context-overflow recovery is bounded.** Copilot's exact
+  `model_max_prompt_tokens_exceeded` response can move a Smart Auto request to a larger configured
+  task model, or another model tied for the largest context, before the first response frame.
+  Ordinary 400, 429, and 5xx failures do not trigger this context-only fallback.
+
 ## v0.8.2 (2026-08-28)
 
 ### Added

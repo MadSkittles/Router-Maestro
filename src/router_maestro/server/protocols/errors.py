@@ -20,6 +20,7 @@ ProtocolSelector = ProtocolName | ProtocolSurface
 PROVIDER_FAILURE_SIGNAL_HEADER = "X-Router-Maestro-Error-Signal"
 _PROVIDER_SIGNAL_HEADERS = {
     ProviderFailureSignal.COPILOT_BARE_BAD_REQUEST: "copilot_bare_bad_request",
+    ProviderFailureSignal.CONTEXT_WINDOW_EXCEEDED: "context_window_exceeded",
 }
 
 
@@ -66,16 +67,21 @@ def normalize_protocol_error(error: Exception) -> NormalizedProtocolError:
         signal_value = (
             _PROVIDER_SIGNAL_HEADERS.get(error.signal) if error.signal is not None else None
         )
+        code = (
+            "context_length_exceeded"
+            if error.signal is ProviderFailureSignal.CONTEXT_WINDOW_EXCEEDED
+            else (
+                "unsupported_parameter"
+                if isinstance(error, RequestOptionError) and error.parameter
+                else _error_code(error.downstream_status_code, error.kind)
+            )
+        )
         return NormalizedProtocolError(
             status_code=error.downstream_status_code,
             message=error.safe_message,
             kind=error.kind,
             parameter=error.parameter,
-            code=(
-                "unsupported_parameter"
-                if isinstance(error, RequestOptionError) and error.parameter
-                else _error_code(error.downstream_status_code, error.kind)
-            ),
+            code=code,
             headers=(
                 {PROVIDER_FAILURE_SIGNAL_HEADER: signal_value} if signal_value is not None else None
             ),
