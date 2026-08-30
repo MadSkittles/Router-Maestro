@@ -1919,18 +1919,119 @@ async def test_copilot_chat_empty_nonthinking_reasoning_response_at_output_cap_i
 
 
 @pytest.mark.asyncio
+async def test_copilot_chat_empty_at_cap_with_thinking_disabled_is_length() -> None:
+    """Claude Code's Bash prefix probe sends thinking=disabled with a tiny cap.
+
+    Copilot answers a pure truncation with empty choices instead of a
+    ``finish_reason: length`` choice, so an explicit ``disabled`` must reach the
+    same graceful degradation as an absent ``thinking``.
+    """
+    provider = CopilotProvider()
+    provider.ensure_token = AsyncMock()  # type: ignore[method-assign]
+    provider._models_ttl_cache.set(
+        [
+            ModelInfo(
+                id="claude-sonnet-5",
+                name="claude-sonnet-5",
+                provider="github-copilot",
+                reasoning_effort_values=["low", "medium", "high"],
+            )
+        ]
+    )
+    provider._send_with_auth_retry = AsyncMock(  # type: ignore[method-assign]
+        return_value=_response_for_payload(
+            {
+                "choices": [],
+                "usage": {"prompt_tokens": 493, "completion_tokens": 64},
+                "model": "claude-sonnet-5",
+            }
+        )
+    )
+
+    response = await provider.chat_completion(
+        _chat_request(model="claude-sonnet-5", max_tokens=64, thinking_type="disabled")
+    )
+
+    assert response.content == ""
+    assert response.finish_reason == "length"
+
+
+@pytest.mark.asyncio
+async def test_copilot_chat_empty_at_cap_uses_catalog_for_unknown_claude_generation() -> None:
+    """A warm catalog outranks the static table, which stops at the 4.x line."""
+    provider = CopilotProvider()
+    provider.ensure_token = AsyncMock()  # type: ignore[method-assign]
+    provider._models_ttl_cache.set(
+        [
+            ModelInfo(
+                id="claude-sonnet-5",
+                name="claude-sonnet-5",
+                provider="github-copilot",
+                reasoning_effort_values=["low", "medium", "high", "xhigh", "max"],
+            )
+        ]
+    )
+    provider._send_with_auth_retry = AsyncMock(  # type: ignore[method-assign]
+        return_value=_response_for_payload(
+            {
+                "choices": [],
+                "usage": {"completion_tokens": 4096},
+                "model": "claude-sonnet-5",
+            }
+        )
+    )
+
+    response = await provider.chat_completion(
+        _chat_request(model="claude-sonnet-5", max_tokens=4096)
+    )
+
+    assert response.finish_reason == "length"
+
+
+@pytest.mark.asyncio
+async def test_copilot_chat_empty_at_cap_stays_protocol_error_when_catalog_denies_reasoning() -> (
+    None
+):
+    """A catalog that advertises no reasoning tiers keeps the failure typed."""
+    provider = CopilotProvider()
+    provider.ensure_token = AsyncMock()  # type: ignore[method-assign]
+    provider._models_ttl_cache.set(
+        [
+            ModelInfo(
+                id="claude-sonnet-5",
+                name="claude-sonnet-5",
+                provider="github-copilot",
+                reasoning_effort_values=[],
+            )
+        ]
+    )
+    provider._send_with_auth_retry = AsyncMock(  # type: ignore[method-assign]
+        return_value=_response_for_payload(
+            {
+                "choices": [],
+                "usage": {"completion_tokens": 64},
+                "model": "claude-sonnet-5",
+            }
+        )
+    )
+
+    with pytest.raises(ProviderError) as exc_info:
+        await provider.chat_completion(
+            _chat_request(model="claude-sonnet-5", max_tokens=64, thinking_type="disabled")
+        )
+
+    _assert_protocol_failure(
+        exc_info.value,
+        provider="github-copilot",
+        model="claude-sonnet-5",
+    )
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("model", "max_tokens", "thinking_type", "thinking_budget", "completion_tokens"),
     [
         pytest.param("claude-opus-4.8", 4096, None, None, 4097, id="implicit-above-cap"),
-        pytest.param(
-            "claude-opus-4.8",
-            4096,
-            "disabled",
-            None,
-            4096,
-            id="explicitly-disabled-at-cap",
-        ),
         pytest.param("gpt-4o", 4096, None, None, 4096, id="non-reasoning-at-cap"),
         pytest.param(
             "claude-opus-4.8",
