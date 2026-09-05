@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import json
+import re
 import subprocess
 import tomllib
 from pathlib import Path
@@ -35,12 +36,17 @@ from router_maestro.routing.capabilities import Operation
 
 _CODEX_MODEL_CATALOG_FILENAME = "router-maestro-models.json"
 _CODEX_CATALOG_BASELINE_SLUG = "gpt-5.6-terra"
+_INTERNAL_ONLY_DISPLAY_SUFFIX = re.compile(
+    r"\s*\(\s*internal[\s_-]+only\s*\)\s*$",
+    re.IGNORECASE,
+)
 _CODEX_MODEL_SPECIFIC_EXTENSION_FIELDS = frozenset(
     {
         "comp_hash",
         "include_apps_usage_instructions",
         "include_plugin_usage_instructions",
         "include_skills_usage_instructions",
+        "multi_agent_reasoning_effort",
         "multi_agent_version",
         "node_repl_auto_review_required",
         "node_repl_disabled",
@@ -55,6 +61,14 @@ _CODEX_REASONING_LEVEL_DESCRIPTIONS = {
     "high": "Greater reasoning depth for complex problems",
     "xhigh": "Extra high reasoning depth for complex problems",
     "max": "Maximum reasoning depth for the hardest problems",
+    "ultra": "Maximum reasoning with automatic task delegation",
+}
+_CODEX_ULTRA_MODEL_EFFORTS = {
+    "gpt-6-astra": "xhigh",
+    "gpt-5.6-sol": "max",
+    "gpt-5.6-sol-fast": "max",
+    "gpt-5.6-terra": "max",
+    "router-maestro": "max",
 }
 
 
@@ -223,6 +237,41 @@ def _apply_server_model_capabilities(
         entry["default_reasoning_level"] = "medium" if "medium" in efforts else efforts[0]
 
 
+def _apply_codex_model_capabilities(
+    entry: dict[str, Any],
+    model: dict[str, Any],
+) -> None:
+    """Add Codex-only modes that map onto provider-advertised wire capabilities."""
+    model_id = _bare_upstream_model_id(model).casefold()
+    ultra_effort = _CODEX_ULTRA_MODEL_EFFORTS.get(model_id)
+    if ultra_effort is None:
+        return
+    supported = entry.get("supported_reasoning_levels")
+    if not isinstance(supported, list) or not any(
+        isinstance(item, dict) and item.get("effort") == ultra_effort for item in supported
+    ):
+        return
+    if not any(isinstance(item, dict) and item.get("effort") == "ultra" for item in supported):
+        supported.append(
+            {
+                "effort": "ultra",
+                "description": _CODEX_REASONING_LEVEL_DESCRIPTIONS["ultra"],
+            }
+        )
+    entry["multi_agent_version"] = "v2"
+    if model_id == "gpt-6-astra":
+        entry["multi_agent_reasoning_effort"] = ultra_effort
+
+
+def _catalog_display_name(model: dict[str, Any], slug: str) -> str:
+    """Return a clean Codex label while preserving the provider's source metadata."""
+    raw_name = model.get("name")
+    if not isinstance(raw_name, str) or not raw_name.strip():
+        return slug
+    display_name = _INTERNAL_ONLY_DISPLAY_SUFFIX.sub("", raw_name).strip()
+    return display_name or slug
+
+
 def _build_codex_model_catalog(models: list[dict[str, Any]]) -> dict[str, Any] | None:
     """Extend Codex's bundled catalog with exact Router-Maestro model slugs."""
     catalog = _load_bundled_codex_catalog()
@@ -255,7 +304,7 @@ def _build_codex_model_catalog(models: list[dict[str, Any]]) -> dict[str, Any] |
         for field in _CODEX_MODEL_SPECIFIC_EXTENSION_FIELDS:
             entry.pop(field, None)
         entry["slug"] = slug
-        entry["display_name"] = model.get("name") or slug
+        entry["display_name"] = _catalog_display_name(model, slug)
         entry["description"] = f"{entry['display_name']} via Router-Maestro"
         entry["priority"] = priority
         entry["visibility"] = "list"
@@ -277,6 +326,7 @@ def _build_codex_model_catalog(models: list[dict[str, Any]]) -> dict[str, Any] |
         entry["supports_image_detail_original"] = False
         entry["experimental_supported_tools"] = []
         _apply_server_model_capabilities(entry, model)
+        _apply_codex_model_capabilities(entry, model)
         default_window, max_window = _catalog_context_windows(model)
         if default_window is not None:
             entry["context_window"] = default_window

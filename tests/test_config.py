@@ -918,6 +918,125 @@ class TestCodexConfig:
             "xhigh",
         ]
 
+    def test_generated_catalog_strips_internal_only_display_suffix(self, monkeypatch):
+        monkeypatch.setattr(
+            cc_codex,
+            "_load_bundled_codex_catalog",
+            lambda: _stub_bundled_codex_catalog(),
+        )
+        model = {
+            "provider": "github-copilot",
+            "id": "github-copilot/gpt-5.6-sol-fast",
+            "name": "GPT-5.6 Sol Fast (Internal only)",
+        }
+
+        catalog = cc_codex._build_codex_model_catalog([model])
+
+        assert catalog is not None
+        entry = next(
+            item for item in catalog["models"] if item["slug"] == "github-copilot/gpt-5.6-sol-fast"
+        )
+        assert entry["display_name"] == "GPT-5.6 Sol Fast"
+        assert entry["description"] == "GPT-5.6 Sol Fast via Router-Maestro"
+        assert model["name"] == "GPT-5.6 Sol Fast (Internal only)"
+
+    def test_generated_astra_catalog_exposes_codex_ultra_as_xhigh_multi_agent(self, monkeypatch):
+        monkeypatch.setattr(
+            cc_codex,
+            "_load_bundled_codex_catalog",
+            lambda: _stub_bundled_codex_catalog(),
+        )
+        upstream_efforts = ["low", "medium", "high", "xhigh", "max"]
+        model = {
+            "provider": "github-copilot",
+            "id": "github-copilot/gpt-6-astra",
+            "name": "GPT-6 Astra",
+            "reasoning_effort_values": upstream_efforts,
+        }
+
+        catalog = cc_codex._build_codex_model_catalog([model])
+
+        assert catalog is not None
+        entry = next(
+            item for item in catalog["models"] if item["slug"] == "github-copilot/gpt-6-astra"
+        )
+        assert [item["effort"] for item in entry["supported_reasoning_levels"]] == [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max",
+            "ultra",
+        ]
+        assert entry["multi_agent_version"] == "v2"
+        assert entry["multi_agent_reasoning_effort"] == "xhigh"
+        assert model["reasoning_effort_values"] == upstream_efforts
+
+    @pytest.mark.parametrize(
+        ("model_id", "virtual"),
+        [
+            ("github-copilot/gpt-5.6-sol", False),
+            ("github-copilot/gpt-5.6-sol-fast", False),
+            ("github-copilot/gpt-5.6-terra", False),
+            ("router-maestro", True),
+        ],
+    )
+    def test_generated_sol_family_and_auto_catalogs_expose_codex_ultra(
+        self, monkeypatch, model_id, virtual
+    ):
+        monkeypatch.setattr(
+            cc_codex,
+            "_load_bundled_codex_catalog",
+            lambda: _stub_bundled_codex_catalog(),
+        )
+        model = {
+            "provider": "router-maestro" if virtual else "github-copilot",
+            "id": model_id,
+            "name": "Router-Maestro Auto" if virtual else model_id.rsplit("/", 1)[-1],
+            "reasoning_effort_values": ["none", "low", "medium", "high", "xhigh", "max"],
+            "virtual": virtual,
+        }
+
+        catalog = cc_codex._build_codex_model_catalog([model])
+
+        assert catalog is not None
+        entry = next(item for item in catalog["models"] if item["slug"] == model_id)
+        assert [item["effort"] for item in entry["supported_reasoning_levels"]][-2:] == [
+            "max",
+            "ultra",
+        ]
+        assert entry["multi_agent_version"] == "v2"
+        assert "multi_agent_reasoning_effort" not in entry
+
+    @pytest.mark.parametrize(
+        "model_id",
+        [
+            "github-copilot/gpt-5.6-luna",
+            "github-copilot/gpt-5.5",
+            "github-copilot/grok-4.6",
+        ],
+    )
+    def test_generated_other_catalogs_do_not_gain_codex_ultra(self, monkeypatch, model_id):
+        monkeypatch.setattr(
+            cc_codex,
+            "_load_bundled_codex_catalog",
+            lambda: _stub_bundled_codex_catalog(),
+        )
+        model = {
+            "provider": "github-copilot",
+            "id": model_id,
+            "name": model_id.rsplit("/", 1)[-1],
+            "reasoning_effort_values": ["none", "low", "medium", "high", "xhigh", "max"],
+        }
+
+        catalog = cc_codex._build_codex_model_catalog([model])
+
+        assert catalog is not None
+        entry = next(item for item in catalog["models"] if item["slug"] == model_id)
+        assert "ultra" not in [item["effort"] for item in entry["supported_reasoning_levels"]]
+        assert "multi_agent_version" not in entry
+        assert "multi_agent_reasoning_effort" not in entry
+
     def test_user_level_can_skip_model_catalog_update(self, tmp_path, monkeypatch):
         home, _ = _setup_codex_env(
             monkeypatch,
