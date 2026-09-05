@@ -4,6 +4,19 @@ All notable changes to Router-Maestro are documented here.
 
 ---
 
+## v0.9.2 (2026-09-05)
+
+### Fixed
+
+- **Generated Codex model catalogs preserve client-only Ultra modes.** GPT-6 Astra, GPT-5.6
+  Sol, GPT-5.6 Sol Fast, GPT-5.6 Terra, and Router-Maestro Auto now advertise Codex Ultra
+  with Multi-Agent V2 metadata while mapping the actual upstream reasoning request to each
+  model's supported `xhigh` or `max` effort. Other models remain limited to their provider
+  catalog capabilities.
+- **Internal model labels stay out of Codex display names.** The generated
+  `router-maestro-models.json` removes a trailing `(Internal only)` marker from display names
+  and descriptions without changing model IDs or the provider's source metadata.
+
 ## v0.9.1 (2026-08-29)
 
 ### Fixed
