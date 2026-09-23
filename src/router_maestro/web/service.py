@@ -31,7 +31,10 @@ from router_maestro.cli.client_configs.base import (
     _format_token_count,
     _model_key,
 )
-from router_maestro.cli.client_configs.claude_code import _catalog_has_claude_model
+from router_maestro.cli.client_configs.claude_code import (
+    _catalog_has_claude_model,
+    _context_option_uses_one_million_hint,
+)
 from router_maestro.cli.client_configs.dsh import redact_dsh_settings
 from router_maestro.config import PROJECTS_FILE, ContextConfig, ContextsConfig, load_contexts_config
 from router_maestro.config.settings import write_json_owner_only
@@ -88,6 +91,7 @@ class PortalContextWindow(BaseModel):
     max_prompt_tokens: int
     label: str
     is_default: bool = False
+    claude_code_1m: bool = False
 
 
 class PortalModel(BaseModel):
@@ -423,6 +427,7 @@ class PortalService:
                     max_prompt_tokens=tokens,
                     label=_format_token_count(tokens),
                     is_default=option.get("is_default") is True,
+                    claude_code_1m=_context_option_uses_one_million_hint(model, option),
                 )
             )
         return result
@@ -726,9 +731,7 @@ class PortalService:
         if not isinstance(options, list) or not options:
             return True
         return any(
-            isinstance(option, dict)
-            and isinstance(option.get("max_prompt_tokens"), int)
-            and option["max_prompt_tokens"] > 900_000
+            isinstance(option, dict) and _context_option_uses_one_million_hint(model, option)
             for option in options
         )
 

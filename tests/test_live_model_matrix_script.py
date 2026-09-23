@@ -219,6 +219,26 @@ def test_claude_model_argument_applies_server_default_1m_context() -> None:
     assert runner.claude_model_argument(model) == "github-copilot/gemini-3.6-flash[1m]"
 
 
+def test_claude_model_argument_applies_default_872k_prompt_as_1m_context() -> None:
+    model = _model("github-copilot/claude-opus-5.5")
+    model.raw.update(
+        {
+            "max_output_tokens": 128_000,
+            "max_context_window_tokens": 1_000_000,
+            "context_window_options": [
+                {"tier": "default", "max_prompt_tokens": 200_000, "is_default": False},
+                {
+                    "tier": "long_context",
+                    "max_prompt_tokens": 872_000,
+                    "is_default": True,
+                },
+            ],
+        }
+    )
+
+    assert runner.claude_model_argument(model) == "github-copilot/claude-opus-5.5[1m]"
+
+
 def test_claude_model_argument_keeps_nondefault_1m_tier_unsuffixed() -> None:
     model = _model("github-copilot/gpt-5.6-terra")
     model.raw["context_window_options"] = [

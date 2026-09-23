@@ -31,6 +31,9 @@ from typing import Any
 
 import httpx
 
+from router_maestro.cli.client_configs.claude_code import (
+    _context_option_uses_one_million_hint,
+)
 from router_maestro.cli.client_configs.codex import _build_codex_model_catalog
 from router_maestro.config import load_contexts_config
 from router_maestro.config.settings import write_json_owner_only
@@ -453,12 +456,7 @@ def claude_model_argument(model: CatalogModel) -> str:
     for option in options:
         if not isinstance(option, dict) or option.get("is_default") is not True:
             continue
-        prompt_tokens = option.get("max_prompt_tokens")
-        if (
-            isinstance(prompt_tokens, int)
-            and not isinstance(prompt_tokens, bool)
-            and prompt_tokens > 900_000
-        ):
+        if _context_option_uses_one_million_hint(model.raw, option):
             return f"{model.wire_id}[1m]"
     return model.wire_id
 

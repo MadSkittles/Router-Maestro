@@ -1598,9 +1598,9 @@
           windows.forEach(function (windowOption) {
             var option = document.createElement("option");
             option.value = windowOption.tier;
-            option.dataset.tokens = String(windowOption.max_prompt_tokens);
+            option.dataset.context = windowOption.claude_code_1m ? "1m" : "default";
             option.textContent = windowOption.label +
-              (windowOption.max_prompt_tokens > 900000 ? " extended" : " standard");
+              (windowOption.claude_code_1m ? " extended" : " standard");
             option.selected = Boolean(windowOption.is_default);
             windowSelect.appendChild(option);
           });
@@ -1613,8 +1613,7 @@
         if (!option || clientSelect.value !== "claude-code") {
           return "default";
         }
-        var tokens = Number(option.dataset.tokens || 0);
-        return tokens > 900000 ? "1m" : "default";
+        return option.dataset.context || "default";
       }
 
       function renderModels() {
