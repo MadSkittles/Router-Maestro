@@ -73,6 +73,54 @@ def test_context_prompt_uses_server_advertised_contexts(monkeypatch):
     ]
 
 
+def test_context_prompt_maps_872k_prompt_budget_to_one_million_hint(monkeypatch):
+    captured = {}
+    model = {
+        "provider": "github-copilot",
+        "id": "github-copilot/claude-opus-5.5",
+        "name": "Claude Opus 5.5",
+        "max_output_tokens": 128_000,
+        "max_context_window_tokens": 1_000_000,
+        "context_window_options": [
+            {
+                "tier": "default",
+                "max_prompt_tokens": 200_000,
+                "is_default": False,
+            },
+            {
+                "tier": "long_context",
+                "max_prompt_tokens": 872_000,
+                "is_default": True,
+            },
+        ],
+    }
+
+    def fake_select(message, choices, **kwargs):
+        captured.update(message=message, choices=choices, kwargs=kwargs)
+        return ContextWindowChoice.CONTEXT_1M
+
+    monkeypatch.setattr(cc_claude, "supports_dropdowns", lambda: True)
+    monkeypatch.setattr(cc_claude, "select_dropdown", fake_select)
+
+    selected = cc_claude._select_context_window(
+        model,
+        label="main",
+        main=True,
+        default=ContextWindowChoice.DEFAULT,
+    )
+    resolved = ClaudeCodeConfig().resolve_model_selection(
+        ModelSelection("main", model, selected),
+        IdStyle.QUALIFIED,
+    )
+
+    assert selected is ContextWindowChoice.CONTEXT_1M
+    assert [label for label, _ in captured["choices"]] == [
+        "200K (standard; no [1m])",
+        "872K ([1m])",
+    ]
+    assert resolved == "github-copilot/claude-opus-5.5[1m]"
+
+
 def test_single_server_context_skips_context_prompt(monkeypatch):
     monkeypatch.setattr(
         cc_claude,

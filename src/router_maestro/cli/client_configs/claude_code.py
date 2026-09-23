@@ -171,6 +171,39 @@ def _one_million_label(model: dict) -> str:
     return "1M ([1m])"
 
 
+def _context_option_uses_one_million_hint(model: dict, option: dict) -> bool:
+    """Return whether Claude Code should encode this context option as ``[1m]``.
+
+    Catalog options advertise usable prompt tokens, while Claude Code's hint
+    describes the combined prompt and output window. For example, a 1M model
+    with 128K reserved for output advertises an 872K prompt budget.
+    """
+    prompt_tokens = option.get("max_prompt_tokens")
+    if not isinstance(prompt_tokens, int) or isinstance(prompt_tokens, bool) or prompt_tokens <= 0:
+        return False
+
+    max_output_tokens = model.get("max_output_tokens")
+    combined_tokens = prompt_tokens
+    if (
+        isinstance(max_output_tokens, int)
+        and not isinstance(max_output_tokens, bool)
+        and max_output_tokens > 0
+    ):
+        combined_tokens += max_output_tokens
+
+    max_context_tokens = model.get("max_context_window_tokens")
+    if (
+        isinstance(max_context_tokens, int)
+        and not isinstance(max_context_tokens, bool)
+        and max_context_tokens > 0
+    ):
+        combined_tokens = min(combined_tokens, max_context_tokens)
+
+    if combined_tokens >= 1_000_000:
+        return True
+    return _format_token_count(prompt_tokens) == "1M"
+
+
 def _catalog_context_choices(
     model: dict,
 ) -> list[tuple[str, ContextWindowChoice]] | None:
@@ -179,23 +212,29 @@ def _catalog_context_choices(
     if not isinstance(raw_options, list):
         return None
 
-    options: list[tuple[int, bool]] = []
+    options: list[tuple[int, bool, bool]] = []
     for option in raw_options:
         if not isinstance(option, dict):
             continue
         limit = option.get("max_prompt_tokens")
         if not isinstance(limit, int) or isinstance(limit, bool) or limit <= 0:
             continue
-        options.append((limit, option.get("is_default") is True))
+        options.append(
+            (
+                limit,
+                option.get("is_default") is True,
+                _context_option_uses_one_million_hint(model, option),
+            )
+        )
     if not options:
         return None
 
-    one_million_options = [option for option in options if _format_token_count(option[0]) == "1M"]
-    standard_options = [option for option in options if option not in one_million_options]
+    one_million_options = [option for option in options if option[2]]
+    standard_options = [option for option in options if not option[2]]
     choices: list[tuple[str, ContextWindowChoice]] = []
 
     if standard_options:
-        standard_limit, _ = next(
+        standard_limit, _, _ = next(
             (option for option in standard_options if option[1]),
             standard_options[0],
         )
@@ -206,7 +245,7 @@ def _catalog_context_choices(
             )
         )
     if one_million_options:
-        long_limit = max(limit for limit, _ in one_million_options)
+        long_limit = max(limit for limit, _, _ in one_million_options)
         choices.append(
             (
                 f"{_format_token_count(long_limit)} ([1m])",

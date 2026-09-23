@@ -4,6 +4,15 @@ All notable changes to Router-Maestro are documented here.
 
 ---
 
+## v0.9.9 (2026-09-23)
+
+### Fixed
+
+- **Claude Code recognizes 1M total windows with reserved output capacity.** CLI, Web Portal,
+  and live-client validation now append the `[1m]` hint when a catalog tier exposes a 1M
+  combined context as separate prompt and output budgets, including Claude Opus 5.5's
+  872K prompt plus 128K output window.
+
 ## v0.9.8 (2026-09-10)
 
 ### Changed

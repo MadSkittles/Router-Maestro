@@ -226,6 +226,56 @@ async def test_health_and_models_are_context_scoped(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_claude_opus_55_872k_context_is_projected_and_written_as_one_million(
+    tmp_path: Path,
+) -> None:
+    model = {
+        "provider": "github-copilot",
+        "id": "github-copilot/claude-opus-5.5",
+        "name": "Claude Opus 5.5",
+        "max_output_tokens": 128_000,
+        "max_context_window_tokens": 1_000_000,
+        "context_window_options": [
+            {
+                "tier": "default",
+                "max_prompt_tokens": 200_000,
+                "is_default": False,
+            },
+            {
+                "tier": "long_context",
+                "max_prompt_tokens": 872_000,
+                "is_default": True,
+            },
+        ],
+        "operation_capabilities": {"native_anthropic": True},
+    }
+
+    def transport(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/admin/models":
+            return httpx.Response(200, json={"models": [model]})
+        return httpx.Response(404)
+
+    service = _service(tmp_path, transport=httpx.MockTransport(transport))
+    catalog = await service.list_models("hk")
+    result = await service.preview_config(
+        PortalConfigRequest(
+            context="hk",
+            client="claude-code",
+            main_model="github-copilot/claude-opus-5.5",
+            context_window=ContextWindowChoice.CONTEXT_1M,
+        )
+    )
+
+    assert [window.claude_code_1m for window in catalog.models[0].context_windows] == [
+        False,
+        True,
+    ]
+    assert catalog.models[0].context_windows[1].label == "872K"
+    assert '"ANTHROPIC_MODEL": "github-copilot/claude-opus-5.5[1m]"' in result.content
+    assert '"CLAUDE_CODE_AUTO_COMPACT_WINDOW": "1000000"' in result.content
+
+
+@pytest.mark.asyncio
 async def test_auto_config_round_trips_through_selected_context(tmp_path: Path) -> None:
     service = _service(tmp_path)
     current = await service.get_auto_config("hk")
@@ -747,8 +797,10 @@ def test_portal_app_serves_ui_and_sensitive_key_only_on_explicit_route(tmp_path:
     assert 'autoRouting.addEventListener("animationend"' in page.text
     assert 'window.matchMedia("(prefers-reduced-motion: reduce)")' in page.text
     assert "targetPath.textContent = result.target_path" not in page.text
-    assert 'windowOption.max_prompt_tokens > 900000 ? " extended" : " standard"' in page.text
-    assert 'windowOption.max_prompt_tokens > 900000 ? " [1m]" : " standard"' not in page.text
+    assert 'windowOption.claude_code_1m ? " extended" : " standard"' in page.text
+    assert 'option.dataset.context = windowOption.claude_code_1m ? "1m" : "default"' in page.text
+    assert 'return option.dataset.context || "default"' in page.text
+    assert "windowOption.max_prompt_tokens > 900000" not in page.text
     assert "@media (prefers-reduced-motion: reduce)" in page.text
     assert "rm-catalog-toggle" in page.text
     assert '<link rel="icon" href="/favicon.svg" type="image/svg+xml">' in page.text
