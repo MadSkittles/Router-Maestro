@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import asyncio
-import time
 
 import httpx
 import pytest
 
 from router_maestro.providers.copilot_support.auth_session import CopilotAuthSession
 from router_maestro.providers.copilot_support.transport import CopilotTransport
+
+_NOW = 1_000.0
 
 
 class _BlockingLineStream(httpx.AsyncByteStream):
@@ -43,10 +44,14 @@ async def test_aged_client_rotation_waits_for_active_stream(
     auth = CopilotAuthSession()
     transport = CopilotTransport(auth)
     transport.client = old_client
-    transport.client_created_at = time.monotonic()
+    transport.client_created_at = _NOW
     monkeypatch.setattr(
         "router_maestro.providers.copilot_support.transport.httpx.AsyncClient",
         lambda **_kwargs: new_client,
+    )
+    monkeypatch.setattr(
+        "router_maestro.providers.copilot_support.transport.time.monotonic",
+        lambda: _NOW,
     )
 
     async def keep_token(_path: str, _status: int) -> bool:
@@ -62,7 +67,7 @@ async def test_aged_client_rotation_waits_for_active_stream(
         lines = response.aiter_lines()
         assert await anext(lines) == "first"
 
-        transport.client_created_at = time.monotonic() - transport.client_max_age - 1
+        transport.client_created_at = _NOW - transport.client_max_age - 1
         assert transport.get_client() is new_client
         await asyncio.sleep(0)
         assert old_client.is_closed is False
@@ -89,10 +94,14 @@ async def test_aged_idle_client_closes_after_rotation(
     new_client = httpx.AsyncClient(transport=httpx.MockTransport(ok))
     transport = CopilotTransport(CopilotAuthSession())
     transport.client = old_client
-    transport.client_created_at = time.monotonic() - transport.client_max_age - 1
+    transport.client_created_at = _NOW - transport.client_max_age - 1
     monkeypatch.setattr(
         "router_maestro.providers.copilot_support.transport.httpx.AsyncClient",
         lambda **_kwargs: new_client,
+    )
+    monkeypatch.setattr(
+        "router_maestro.providers.copilot_support.transport.time.monotonic",
+        lambda: _NOW,
     )
 
     assert transport.get_client() is new_client
@@ -123,10 +132,14 @@ async def test_aged_client_rotation_waits_for_active_non_stream_request(
     )
     transport = CopilotTransport(CopilotAuthSession())
     transport.client = old_client
-    transport.client_created_at = time.monotonic()
+    transport.client_created_at = _NOW
     monkeypatch.setattr(
         "router_maestro.providers.copilot_support.transport.httpx.AsyncClient",
         lambda **_kwargs: new_client,
+    )
+    monkeypatch.setattr(
+        "router_maestro.providers.copilot_support.transport.time.monotonic",
+        lambda: _NOW,
     )
 
     async def keep_token(_path: str, _status: int) -> bool:
@@ -144,7 +157,7 @@ async def test_aged_client_rotation_waits_for_active_non_stream_request(
     )
     await request_started.wait()
 
-    transport.client_created_at = time.monotonic() - transport.client_max_age - 1
+    transport.client_created_at = _NOW - transport.client_max_age - 1
     assert transport.get_client() is new_client
     await asyncio.sleep(0)
     assert old_client.is_closed is False
@@ -161,13 +174,19 @@ async def test_aged_client_rotation_waits_for_active_non_stream_request(
 
 
 @pytest.mark.asyncio
-async def test_retired_client_closes_after_last_concurrent_lease() -> None:
+async def test_retired_client_closes_after_last_concurrent_lease(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     client = httpx.AsyncClient(
         transport=httpx.MockTransport(lambda request: httpx.Response(200, request=request))
     )
     transport = CopilotTransport(CopilotAuthSession())
     transport.client = client
-    transport.client_created_at = time.monotonic()
+    transport.client_created_at = _NOW
+    monkeypatch.setattr(
+        "router_maestro.providers.copilot_support.transport.time.monotonic",
+        lambda: _NOW,
+    )
 
     first_lease = transport.lease_client()
     second_lease = transport.lease_client()
