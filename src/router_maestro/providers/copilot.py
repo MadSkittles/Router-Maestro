@@ -1319,9 +1319,9 @@ class CopilotProvider(BaseProvider):
             raise_auth_failure=self._raise_auth_failure,
         )
 
-    async def _recycle_client(self) -> None:
+    async def _recycle_client(self, client: httpx.AsyncClient | None = None) -> None:
         """Close and discard the current HTTP client so the next call creates a fresh one."""
-        await self._transport.recycle_client()
+        await self._transport.recycle_client(client)
 
     @contextlib.asynccontextmanager
     async def _stream_with_auth_retry(

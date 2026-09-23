@@ -4,6 +4,14 @@ All notable changes to Router-Maestro are documented here.
 
 ---
 
+## v0.9.10 (2026-09-23)
+
+### Fixed
+
+- **Copilot HTTP client rotation no longer interrupts active streams.** The five-minute
+  HTTP/2 client rollover now retires an aged client, sends new requests through a fresh
+  client, and waits for requests already using the old client to finish before closing it.
+
 ## v0.9.9 (2026-09-23)
 
 ### Fixed
