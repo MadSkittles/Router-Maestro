@@ -162,7 +162,8 @@ def test_internal_alias_to_required_model_uses_target_compatibility_policy(monke
     assert payload["reasoning"]["effort"] == "low"
 
 
-def test_expired_catalog_uses_known_floor_without_fetching():
+def test_expired_catalog_uses_known_floor_without_fetching(monkeypatch):
+    monkeypatch.setattr("router_maestro.utils.cache.time.monotonic", lambda: 1000.0)
     provider = _provider("gpt-6.1-sol", _RAW_EFFORTS)
     provider._models_ttl_cache._timestamp = 0.0
     assert not provider._models_ttl_cache.is_valid
