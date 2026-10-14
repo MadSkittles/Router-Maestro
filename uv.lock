@@ -574,7 +574,7 @@ wheels = [
 
 [[package]]
 name = "router-maestro"
-version = "0.9.10"
+version = "0.9.11"
 source = { editable = "." }
 dependencies = [
     { name = "cryptography" },

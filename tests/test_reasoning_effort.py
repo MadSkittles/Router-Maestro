@@ -115,6 +115,16 @@ class TestEffortMapping:
         assert resolve_effort_within_catalog("low", []) is None
         assert resolve_effort_within_catalog("low", ["bogus"]) is None
 
+    @pytest.mark.parametrize("disabled", ["off", "none"])
+    def test_disabled_effort_resolves_to_supported_none_or_lowest_tier(self, disabled):
+        from router_maestro.utils.reasoning import resolve_effort_within_catalog
+
+        assert resolve_effort_within_catalog(disabled, ["high", "none", "low"]) == "none"
+        assert resolve_effort_within_catalog(disabled, ["high", "low", "minimal"]) == "minimal"
+        assert resolve_effort_within_catalog(disabled, ["high", "medium"]) == "medium"
+        assert resolve_effort_within_catalog(disabled, ["none"]) == "none"
+        assert resolve_effort_within_catalog(disabled, []) is None
+
     def test_downgrade_for_upstream(self):
         assert downgrade_for_upstream(None) is None
         assert downgrade_for_upstream("low") == "low"
@@ -276,9 +286,9 @@ class TestChatRouteSchemaPassthrough:
 
         assert request.reasoning_effort == "minimal"
 
-    def test_internal_request_rejects_provider_catalog_none_sentinel(self):
-        with pytest.raises(ValueError, match="reasoning_effort"):
-            _stub_request(reasoning_effort="none")
+    @pytest.mark.parametrize("effort", ["off", "none"])
+    def test_internal_request_accepts_disabled_effort(self, effort):
+        assert _stub_request(reasoning_effort=effort).reasoning_effort == effort
 
     def test_omitted_chat_reasoning_effort_remains_unset(self):
         from router_maestro.server.schemas.openai import ChatCompletionRequest
@@ -327,6 +337,11 @@ class TestResponsesSchemaPassthrough:
         reasoning = ResponsesReasoningConfig.model_validate({"effort": "none"})
 
         assert reasoning.effort == "none"
+
+    def test_schema_accepts_responses_off_alias(self):
+        from router_maestro.server.schemas.responses import ResponsesReasoningConfig
+
+        assert ResponsesReasoningConfig.model_validate({"effort": "off"}).effort == "off"
 
     def test_omitted_responses_reasoning_remains_unset(self):
         from router_maestro.server.schemas.responses import (

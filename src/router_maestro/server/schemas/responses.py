@@ -114,7 +114,7 @@ class ResponsesReasoningConfig(BaseModel):
 
     model_config = ConfigDict(extra="ignore")
 
-    effort: Literal["none", "minimal", "low", "medium", "high", "xhigh", "max"] | None = None
+    effort: Literal["off", "none", "minimal", "low", "medium", "high", "xhigh", "max"] | None = None
 
 
 # ============================================================================

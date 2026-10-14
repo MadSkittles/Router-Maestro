@@ -156,16 +156,19 @@ def _dsh_reasoning_efforts(model: dict[str, Any]) -> CommentedMap | bool | None:
         return None
 
     available = {value for value in raw if isinstance(value, str)}
+    supported = [effort for effort in _DSH_REASONING_EFFORTS if effort in available]
+    # DSH requires a non-off entry; an explicit no-reasoning catalog uses
+    # its boolean form instead of an effort map with only an off selector.
+    if not supported:
+        return False
+
     efforts = CommentedMap()
+    # The selector describes actual support; provider-side compatibility
+    # clamping does not make disabled reasoning available to this model.
     if "none" in available:
         efforts["off"] = "none"
-    for effort in _DSH_REASONING_EFFORTS:
-        if effort in available:
-            efforts[effort] = effort
-    # DSH requires at least one non-off entry in an effort map. An explicit
-    # empty/no-reasoning catalog therefore uses its boolean form instead.
-    if not any(effort in efforts for effort in _DSH_REASONING_EFFORTS):
-        return False
+    for effort in supported:
+        efforts[effort] = effort
     return efforts
 
 

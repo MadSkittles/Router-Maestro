@@ -1814,7 +1814,7 @@ def test_explicit_unsupported_vision_uses_native_400_without_model_switch(
     _assert_no_provider_work(primary, fallback)
 
 
-@pytest.mark.parametrize("effort", ["ultra", "none"])
+@pytest.mark.parametrize("effort", ["ultra", "disabled"])
 def test_openai_invalid_reasoning_effort_is_native_400(
     client: TestClient,
     effort: str,

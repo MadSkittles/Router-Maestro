@@ -422,9 +422,10 @@ equivalent: budget conversion still begins at `low=1024`, and smaller positive
 budgets are rejected instead of being guessed as `minimal`. Unknown tier names
 remain invalid rather than being treated as a request for the largest catalog
 tier. Copilot catalogs may additionally advertise the provider-owned sentinel
-`none`; Router-Maestro preserves it in model capability metadata so the catalog
-remains usable, but `none` is not a public request tier, has no budget mapping,
-and is ignored by exact/downward tier selection. An allowlist containing only
+`none`; Router-Maestro preserves verified support in model capability metadata.
+`off` and `none` are disabled-reasoning request aliases on the OpenAI routes,
+not positive thinking-budget tiers, and are ignored by exact/downward tier
+selection for native Messages. An allowlist containing only
 `none` therefore cannot satisfy a positive reasoning-effort request. Other
 unknown catalog strings remain strict upstream-protocol errors.
 
@@ -451,14 +452,25 @@ is *not* sufficient to guarantee the catalog path; the model must also advertise
 the field.
 
 **Path A — catalog advertises tiers (`effort_values` returns a list):**
-`pick_closest_effort(desired, tiers)` selects the highest advertised tier not
-exceeding the request. An exact match is preserved; an above-catalog request
-(e.g. `max` when the catalog tops out at `high`) is downgraded to the highest
-tier at or below it; if no tier is at or below the request, it is rejected with
-HTTP 400 (never substituted upward). An empty advertised list means the model
-declares no reasoning support, so any explicit effort/budget is rejected. This
-path uses **no** family heuristic — Copilot's advertisement is authoritative, so
-newly opened tiers are adopted without a code change.
+An exact match is preserved; an above-catalog request (e.g. `max` when the
+catalog tops out at `high`) uses the highest supported tier at or below it.
+Chat and Responses requests below the model's reasoning floor use the lowest
+supported tier. `off` and `none` are disabled-reasoning aliases: they send
+`none` when it is supported, otherwise use the lowest supported reasoning tier,
+or omit reasoning for a model with an explicitly empty effort list. Omitted
+effort remains omitted; it is not an implicit request for the floor.
+
+Copilot's `gpt-6.1-sol` catalog has advertised `none` even though its Responses
+endpoint rejects it. Router-Maestro corrects this verified model-specific
+discrepancy before selecting a tier or publishing model capability metadata;
+its cold-cache floor is `low`. Other models retain their own declared tiers.
+The native Responses path and translated Chat/Responses payloads use the same
+resolution, including `off` or `none` from clients such as DSH.
+
+The generated DSH effort map offers `off: none` only when disabled reasoning
+is supported. Mandatory-reasoning models expose only their actual tiers; they
+do not label their minimum as `off`. Router-Maestro still accepts disabled
+aliases from legacy clients and clamps them independently of the UI catalog.
 
 **Path B — no catalog reasoning info (`effort_values` returns `None`):** the
 static family heuristic `_known_reasoning_support(model)` decides support

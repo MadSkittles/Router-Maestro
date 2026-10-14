@@ -26,6 +26,8 @@ EFFORT_TO_BUDGET: dict[str, int] = {
 
 EFFORT_ORDER: tuple[str, ...] = ("minimal", "low", "medium", "high", "xhigh", "max")
 VALID_EFFORTS: tuple[str, ...] = EFFORT_ORDER
+DISABLED_EFFORTS: tuple[str, ...] = ("off", "none")
+REQUEST_EFFORTS: tuple[str, ...] = (*DISABLED_EFFORTS, *VALID_EFFORTS)
 
 # Effort levels that vanilla OpenAI / Copilot upstreams accept directly.
 UPSTREAM_NATIVE_EFFORTS: tuple[str, ...] = ("minimal", "low", "medium", "high")
@@ -51,8 +53,11 @@ def resolve_effort_within_catalog(desired: str, allowed: list[str]) -> str | Non
     Returns the highest tier at or below ``desired``; when none is at or below,
     clamps UP to the lowest available tier so a request never 400s over a tier
     below the model's floor. Returns ``None`` only when ``allowed`` holds no
-    valid tier (the caller treats that as "no reasoning support").
+    valid tier (the caller treats that as "no reasoning support"). ``off`` and
+    ``none`` preserve a supported ``none`` sentinel, otherwise use that floor.
     """
+    if desired in DISABLED_EFFORTS and "none" in allowed:
+        return "none"
     valid_allowed = [value for value in allowed if value in EFFORT_ORDER]
     if not valid_allowed:
         return None

@@ -56,21 +56,26 @@ class RequestFeatures:
 
     @classmethod
     def for_chat(cls, request: ChatRequest) -> RequestFeatures:
+        from router_maestro.utils.reasoning import DISABLED_EFFORTS
+
+        effort = request.reasoning_effort.lower() if request.reasoning_effort is not None else None
+        reasoning = effort not in DISABLED_EFFORTS and bool(
+            effort or request.thinking_budget or request.thinking_type in {"enabled", "adaptive"}
+        )
         return cls(
             tools=bool(request.tools),
             vision=_contains_image(request.messages),
-            reasoning=bool(
-                request.reasoning_effort
-                or request.thinking_budget
-                or request.thinking_type in {"enabled", "adaptive"}
-            ),
+            reasoning=reasoning,
             reasoning_parameter=(
                 "reasoning_effort"
-                if request.reasoning_effort is not None
+                if effort is not None and reasoning
                 else (
                     "thinking_budget"
-                    if request.thinking_budget is not None
-                    or request.thinking_type in {"enabled", "adaptive"}
+                    if reasoning
+                    and (
+                        request.thinking_budget is not None
+                        or request.thinking_type in {"enabled", "adaptive"}
+                    )
                     else None
                 )
             ),
@@ -78,7 +83,10 @@ class RequestFeatures:
 
     @classmethod
     def for_responses(cls, request: ResponsesRequest) -> RequestFeatures:
-        reasoning = request.reasoning_effort not in {None, "none"}
+        from router_maestro.utils.reasoning import DISABLED_EFFORTS
+
+        effort = request.reasoning_effort.lower() if request.reasoning_effort is not None else None
+        reasoning = effort is not None and effort not in DISABLED_EFFORTS
         return cls(
             tools=bool(request.tools),
             vision=_contains_image(request.input),
