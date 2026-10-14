@@ -70,7 +70,7 @@ from router_maestro.providers.base import (
     ResponsesToolCall,
     resolve_terminal_outcome,
 )
-from router_maestro.utils.reasoning import budget_to_effort
+from router_maestro.utils.reasoning import DISABLED_EFFORTS, budget_to_effort
 
 _PROTOCOL = WireProtocol.OPENAI_RESPONSES
 _REQUEST_FIELDS = frozenset(
@@ -171,7 +171,8 @@ class OpenAIResponsesRuntime:
         reasoning_carriers, opaque_continuation = _inspect_reasoning_continuation(input_value)
         reasoning = payload.get("reasoning")
         reasoning_requested = bool(reasoning)
-        if isinstance(reasoning, Mapping) and reasoning.get("effort") == "none":
+        effort = reasoning.get("effort") if isinstance(reasoning, Mapping) else None
+        if isinstance(effort, str) and effort.lower() in DISABLED_EFFORTS:
             reasoning_requested = False
         return RequestManifest(
             protocol=self.protocol,
@@ -2074,7 +2075,9 @@ def _decode_reasoning(value: object) -> ReasoningConfig | None:
     effort = optional_string(
         reasoning.get("effort"), protocol=_PROTOCOL, parameter="reasoning.effort"
     )
-    if effort == "none":
+    if effort is not None:
+        effort = effort.lower()
+    if effort in DISABLED_EFFORTS:
         return ReasoningConfig(enabled=False)
     return ReasoningConfig(enabled=True, effort=effort)
 

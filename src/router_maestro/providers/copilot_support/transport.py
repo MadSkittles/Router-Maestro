@@ -360,25 +360,49 @@ class CopilotTransport:
                         model=model,
                         cause=error,
                     ) from error
-                if audit is not None:
-                    audit.record_upstream_response(
-                        response.status_code,
-                        dict(response.headers),
-                        stream_summary="stream opened",
-                    )
-                if attempt == 0 and response.status_code in AUTH_RETRY_STATUSES:
-                    with contextlib.suppress(Exception):
-                        await response.aread()
-                    await cm.__aexit__(None, None, None)
-                    if await refresh_for_auth_status(path, response.status_code):
-                        continue
-                if response.status_code in AUTH_RETRY_STATUSES:
-                    with contextlib.suppress(Exception):
-                        await response.aread()
-                    await cm.__aexit__(None, None, None)
-                    raise_auth_failure(path, response.status_code, model=model)
                 try:
-                    yield response
+                    if audit is not None:
+                        if response.is_success:
+                            audit.record_upstream_response(
+                                response.status_code,
+                                dict(response.headers),
+                                stream_summary="stream opened",
+                            )
+                        else:
+                            try:
+                                # Cache HTTP error bodies for the caller; never pre-read SSE.
+                                error_body = await response.aread()
+                            except httpx.HTTPError as error:
+                                audit.record_upstream_response(
+                                    response.status_code,
+                                    dict(response.headers),
+                                    stream_summary=(
+                                        f"error body unavailable ({type(error).__name__})"
+                                    ),
+                                )
+                                if response.status_code not in AUTH_RETRY_STATUSES:
+                                    # Keep the HTTP status when a failed read spent the stream.
+                                    # The original response is still closed by its context.
+                                    response = httpx.Response(
+                                        response.status_code,
+                                        headers=response.headers,
+                                        content=b"",
+                                        request=response.request,
+                                        extensions=response.extensions,
+                                    )
+                            else:
+                                audit.record_upstream_response(
+                                    response.status_code,
+                                    dict(response.headers),
+                                    error_body,
+                                )
+                    if response.status_code not in AUTH_RETRY_STATUSES:
+                        yield response
+                        return
+                    with contextlib.suppress(Exception):
+                        await response.aread()
                 finally:
                     await cm.__aexit__(None, None, None)
-                return
+                if attempt == 0 and await refresh_for_auth_status(path, response.status_code):
+                    continue
+                raise_auth_failure(path, response.status_code, model=model)

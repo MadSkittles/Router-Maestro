@@ -320,10 +320,10 @@ class ChatRequest:
     def _validate_options(self) -> None:
         """Apply the same invariants to direct and legacy construction."""
         if self.reasoning_effort is not None:
-            from router_maestro.utils.reasoning import VALID_EFFORTS
+            from router_maestro.utils.reasoning import REQUEST_EFFORTS
 
             effort = self.reasoning_effort.lower()
-            if effort not in VALID_EFFORTS:
+            if effort not in REQUEST_EFFORTS:
                 raise ValueError(f"Unsupported reasoning_effort '{self.reasoning_effort}'")
             self.reasoning_effort = effort
 

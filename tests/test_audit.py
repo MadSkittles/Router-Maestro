@@ -3,6 +3,8 @@
 import asyncio
 import json
 
+import pytest
+
 from router_maestro.providers.base import unexpected_eof_outcome
 from router_maestro.utils.audit import AuditTrace, is_tracing_enabled
 
@@ -147,6 +149,29 @@ class TestAuditTrace:
         resp = json.loads((tmp_path / "req-stream" / "upstream_resp.json").read_text())
         assert resp["stream_summary"] == "42 chunks, 5000 bytes"
         assert "body" not in resp
+
+    @pytest.mark.parametrize(
+        ("body", "expected"),
+        [
+            (
+                b'{"error":{"message":"unsupported effort","access_token":"secret"}}',
+                {"error": {"message": "unsupported effort", "access_token": "***"}},
+            ),
+            (b'{"token":"incomplete-secret"', "<28 bytes>"),
+            (b"\xff\x00secret", "<8 bytes>"),
+            (b"", "<0 bytes>"),
+        ],
+    )
+    def test_upstream_error_bytes_are_redacted_or_omitted(self, tmp_path, body, expected):
+        trace = AuditTrace("req-error-bytes", tmp_path)
+        trace.record_upstream_response(400, {"Authorization": "Bearer secret"}, body)
+        trace.flush()
+
+        record = json.loads((tmp_path / "req-error-bytes" / "upstream_resp.json").read_text())
+        assert record["body"] == expected
+        assert record["headers"]["Authorization"] == "***"
+        assert "stream_summary" not in record
+        assert "secret" not in json.dumps(record)
 
     def test_upstream_attempts_are_append_only(self, tmp_path):
         trace = AuditTrace("req-retry", tmp_path)

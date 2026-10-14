@@ -194,6 +194,19 @@ before asynchronous disk writes. Treat traces as sensitive debugging data
 anyway because prompts, model output, and unrecognized application-specific
 headers can contain private data.
 
+Copilot streaming requests record successful upstream responses with a
+`stream_summary` without consuming SSE data. Non-2xx responses instead retain
+the HTTP error body in `upstream_resp*.json`, including each authentication
+retry. JSON bodies use the same recursive credential redaction as requests;
+unparseable or binary bodies retain only their byte count. A failed body read
+records only the exception class and preserves the upstream status. Ordinary
+server logs and public error responses do not expose these raw bodies.
+
+For a pre-stream HTTP 400, correlate `X-Request-ID`, inspect the matching
+`upstream_resp*.json` error code/message/parameter, then compare `inbound.json`
+and `upstream*.json`. Do not infer the cause from the public generic
+`Copilot API error: 400` message or from the most recently modified trace.
+
 ## Troubleshooting
 
 ### `/metrics` returns 401

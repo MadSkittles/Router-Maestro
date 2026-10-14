@@ -11,7 +11,11 @@ from router_maestro.cli import config as cli_config
 from router_maestro.cli.client_configs import base as cc_base
 from router_maestro.cli.client_configs import get_client, list_clients
 from router_maestro.cli.client_configs.base import GenerateContext, IdStyle, ModelSelection
-from router_maestro.cli.client_configs.dsh import DshConfig, _dsh_context_window
+from router_maestro.cli.client_configs.dsh import (
+    DshConfig,
+    _dsh_context_window,
+    _dsh_reasoning_efforts,
+)
 
 
 def _astra() -> dict:
@@ -108,6 +112,61 @@ def test_dsh_context_window_uses_combined_upstream_capacity(model: dict, expecte
     assert _dsh_context_window(model) == expected
 
 
+@pytest.mark.parametrize(
+    ("allowed", "expected"),
+    [
+        (["low", "high"], {"low": "low", "high": "high"}),
+        (
+            ["high", "minimal", "low"],
+            {"minimal": "minimal", "low": "low", "high": "high"},
+        ),
+        (["max", "high"], {"high": "high", "max": "max"}),
+        (["max"], {"max": "max"}),
+        (["none", "low", "high"], {"off": "none", "low": "low", "high": "high"}),
+        (["none", "high"], {"off": "none", "high": "high"}),
+        (["off", "low", "low", 42], {"low": "low"}),
+        (["none"], False),
+        ([], False),
+        (["unsupported"], False),
+        (None, None),
+        ("low", None),
+    ],
+)
+def test_dsh_reasoning_off_requires_catalog_support(allowed: object, expected: object) -> None:
+    assert _dsh_reasoning_efforts({"reasoning_effort_values": allowed}) == expected
+
+
+@pytest.mark.parametrize("model_id", ["gpt-6.1-sol", "gpt-6-astra"])
+def test_dsh_omits_off_for_mandatory_reasoning_models(tmp_path: Path, model_id: str) -> None:
+    path = tmp_path / "settings.yaml"
+    model = {**_astra(), "id": f"github-copilot/{model_id}"}
+
+    _write(path, selected=model, catalog=[model])
+
+    generated = _load(path)["llm-pi-ai"]["providers"]["router-maestro"]["models"][0]
+    assert generated["reasoningEfforts"] == {
+        "low": "low",
+        "medium": "medium",
+        "high": "high",
+        "xhigh": "xhigh",
+        "max": "max",
+    }
+
+
+def test_dsh_preserves_auto_off_none_mapping(tmp_path: Path) -> None:
+    path = tmp_path / "settings.yaml"
+    model = {
+        **_astra(),
+        "id": "router-maestro",
+        "reasoning_effort_values": ["none", "low", "medium", "high", "xhigh", "max"],
+    }
+
+    _write(path, selected=model, catalog=[model])
+
+    generated = _load(path)["llm-pi-ai"]["providers"]["router-maestro"]["models"][0]
+    assert generated["reasoningEfforts"]["off"] == "none"
+
+
 def test_dsh_write_preserves_unrelated_settings_and_generates_catalog(tmp_path: Path) -> None:
     path = tmp_path / "settings.yaml"
     path.write_text(
@@ -146,6 +205,7 @@ def test_dsh_write_preserves_unrelated_settings_and_generates_catalog(tmp_path: 
     by_id = {model["id"]: model for model in rm["models"]}
     assert by_id["github-copilot/gpt-6-astra"]["contextWindow"] == 1_000_000
     assert by_id["github-copilot/gpt-6-astra"]["input"] == ["text", "image"]
+    assert "off" not in by_id["github-copilot/gpt-6-astra"]["reasoningEfforts"]
     assert by_id["github-copilot/gpt-5.6-sol-fast"]["contextWindow"] == 1_050_000
     assert by_id["github-copilot/gpt-5.6-sol-fast"]["name"] == "GPT-5.6 Sol Fast"
     assert by_id["github-copilot/gpt-5.6-sol-fast"]["input"] == ["text"]

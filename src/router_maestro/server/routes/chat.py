@@ -59,7 +59,7 @@ from router_maestro.server.schemas.openai import (
 from router_maestro.server.streaming import sse_streaming_response
 from router_maestro.utils import get_logger
 from router_maestro.utils.async_iterators import close_async_iterator
-from router_maestro.utils.reasoning import VALID_EFFORTS, effort_to_budget
+from router_maestro.utils.reasoning import DISABLED_EFFORTS, REQUEST_EFFORTS, effort_to_budget
 
 logger = get_logger("server.routes.chat")
 
@@ -165,7 +165,7 @@ async def chat_completions(
             return client_error_response(_thinking_validation_error(error), "openai")
 
     effort = (request.reasoning_effort or "").lower() or None
-    if effort and effort not in VALID_EFFORTS:
+    if effort and effort not in REQUEST_EFFORTS:
         return client_error_response(
             RequestOptionError(
                 f"Unsupported reasoning_effort '{request.reasoning_effort}'",
@@ -182,6 +182,8 @@ async def chat_completions(
             payload = await raw_request.json()
             if isinstance(payload, Mapping):
                 payload = dict(payload)
+                if effort is not None:
+                    payload["reasoning_effort"] = effort
                 if thinking is not None:
                     payload["thinking"] = thinking.model_dump(exclude_none=True)
             return await _dispatch_chat_generation(
@@ -232,7 +234,7 @@ async def chat_completions(
     if effort:
         chat_request.reasoning_effort = effort
         chat_request.thinking_budget = effort_to_budget(effort)
-        chat_request.thinking_type = "enabled"
+        chat_request.thinking_type = "disabled" if effort in DISABLED_EFFORTS else "enabled"
     elif thinking is not None:
         chat_request.thinking_type = thinking.type
         chat_request.thinking_budget = (

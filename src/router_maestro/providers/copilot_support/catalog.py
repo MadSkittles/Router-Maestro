@@ -29,6 +29,11 @@ logger = get_logger("providers.copilot.catalog")
 
 COPILOT_MODELS_PATH = "/models"
 MODELS_CACHE_TTL = 300
+# Copilot advertises ``none`` here, but /responses rejects it. Keep this
+# correction model-specific: other models genuinely accept disabled reasoning.
+_COPILOT_REQUIRED_REASONING_EFFORTS: dict[str, tuple[str, ...]] = {
+    "gpt-6.1-sol": ("low", "medium", "high", "xhigh", "max"),
+}
 _COPILOT_REASONING_EFFORT_SENTINELS = frozenset({"none"})
 _COPILOT_CATALOG_REASONING_EFFORT_VALUES = frozenset(VALID_EFFORTS).union(
     _COPILOT_REASONING_EFFORT_SENTINELS
@@ -61,6 +66,16 @@ RESPONSES_ELIGIBLE_MODELS: frozenset[str] = frozenset(
 
 def _bare_model(model: str) -> str:
     return model.split("/", 1)[1] if "/" in model else model
+
+
+def effective_reasoning_effort_values(model: str, values: list[str] | None) -> list[str] | None:
+    """Correct a verified catalog discrepancy, including the cold-start floor."""
+    required = _COPILOT_REQUIRED_REASONING_EFFORTS.get(_bare_model(model).lower())
+    if required is None:
+        return deepcopy(values)
+    if values is None:
+        return list(required)
+    return [value for value in values if value not in {"off", "none"}]
 
 
 def is_model_responses_eligible(model: str) -> bool:
@@ -419,7 +434,9 @@ class CopilotCatalog:
                 )
                 continue
             supported_endpoints = normalize_endpoints(model)
-            reasoning_values = normalize_reasoning_effort_values(supports)
+            reasoning_values = effective_reasoning_effort_values(
+                model_id, normalize_reasoning_effort_values(supports)
+            )
             tools_support = normalize_catalog_boolean(supports, "tool_calls")
             vision_support = normalize_catalog_boolean(supports, "vision")
             thinking_support = normalize_catalog_boolean(supports, "thinking")

@@ -1327,28 +1327,30 @@ def test_copilot_responses_warm_catalog_none_only_strips_public_effort(requested
 
 
 @pytest.mark.parametrize("operation", [Operation.CHAT, Operation.RESPONSES])
-def test_copilot_internal_none_effort_is_forwarded_only_when_catalog_advertises_it(
+@pytest.mark.parametrize("effort", ["off", "none"])
+def test_copilot_disabled_effort_preserves_none_or_clamps_to_catalog_floor(
     operation,
+    effort,
 ) -> None:
     provider = CopilotProvider()
 
     supported = provider.outbound_contract.resolve_reasoning(
         model="gpt-5.6-luna",
-        reasoning_effort="none",
+        reasoning_effort=effort,
         thinking_budget=None,
         catalog_effort_values=["none", "low", "medium"],
         operation=operation,
     )
     unsupported = provider.outbound_contract.resolve_reasoning(
         model="gpt-5.6-luna",
-        reasoning_effort="none",
+        reasoning_effort=effort,
         thinking_budget=None,
         catalog_effort_values=["low", "medium"],
         operation=operation,
     )
 
     assert supported.effort == "none"
-    assert unsupported.effort is None
+    assert unsupported.effort == "low"
 
 
 def test_copilot_responses_warm_catalog_does_not_raise_minimal_to_low() -> None:

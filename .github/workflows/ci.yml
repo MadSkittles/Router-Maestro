@@ -59,4 +59,6 @@ jobs:
         run: uv run pytest tests/ -v
 
       - name: Run deterministic controlled-boundary tests
-        run: uv run pytest integration_tests/test_controlled_boundaries.py -v
+        run: |
+          uv run pytest integration_tests/test_controlled_boundaries.py \
+            integration_tests/test_copilot_effort_audit.py -v

@@ -70,6 +70,7 @@ from router_maestro.providers.base import (
     Message,
     resolve_terminal_outcome,
 )
+from router_maestro.utils.reasoning import DISABLED_EFFORTS
 
 _PROTOCOL = WireProtocol.OPENAI_CHAT
 _NON_SUCCESS_TERMINAL_ERRORS = {
@@ -150,6 +151,8 @@ class OpenAIChatRuntime:
 
     def inspect_request(self, payload: Mapping[str, Any]) -> RequestManifest:
         messages = payload.get("messages")
+        effort = payload.get("reasoning_effort")
+        disabled = isinstance(effort, str) and effort.lower() in DISABLED_EFFORTS
         return RequestManifest(
             protocol=self.protocol,
             model=payload.get("model") if isinstance(payload.get("model"), str) else None,
@@ -157,7 +160,7 @@ class OpenAIChatRuntime:
             tools=bool(payload.get("tools")),
             images=has_typed_block(messages, {"image_url", "input_image"}),
             files=has_typed_block(messages, {"file", "input_file"}),
-            reasoning=bool(payload.get("reasoning_effort") or payload.get("thinking")),
+            reasoning=not disabled and bool(effort or payload.get("thinking")),
             parallel_tools=payload.get("parallel_tool_calls") is True,
             structured_output=payload.get("response_format") is not None,
             max_output_tokens=(
@@ -1030,6 +1033,10 @@ def _decode_reasoning(body: Mapping[str, Any]) -> ReasoningConfig | None:
         protocol=_PROTOCOL,
         parameter="reasoning_effort",
     )
+    if effort is not None:
+        effort = effort.lower()
+    if effort in DISABLED_EFFORTS:
+        return ReasoningConfig(enabled=False)
     thinking = body.get("thinking")
     if thinking is None:
         return ReasoningConfig(effort=effort) if effort is not None else None
@@ -1449,7 +1456,9 @@ def _encode_request(
     if request.parallel_tool_calls is not None:
         payload["parallel_tool_calls"] = request.parallel_tool_calls
     if request.reasoning is not None:
-        if request.reasoning.effort is not None:
+        if request.reasoning.enabled is False:
+            payload["reasoning_effort"] = "none"
+        elif request.reasoning.effort is not None:
             payload["reasoning_effort"] = request.reasoning.effort
         if request.reasoning.enabled is not None or request.reasoning.budget_tokens is not None:
             thinking_type = "enabled" if request.reasoning.enabled is not False else "disabled"

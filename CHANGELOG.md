@@ -4,6 +4,24 @@ All notable changes to Router-Maestro are documented here.
 
 ---
 
+## v0.9.11 (2026-10-15)
+
+### Fixed
+
+- **Copilot disabled reasoning respects the model's supported floor.** OpenAI
+  Chat and Responses accept `off` and `none`, preserve genuinely supported
+  disabled reasoning, and otherwise select the lowest supported effort. The
+  verified GPT-6.1 Sol catalog discrepancy no longer sends unsupported `none`.
+- **Copilot streaming HTTP errors retain diagnostic audit bodies.** Opt-in
+  audit captures redacted error JSON, including authentication retries, without
+  pre-reading successful SSE or exposing raw errors in normal logs.
+- **DSH catalogs do not offer misleading Off choices.** Generated effort maps
+  offer Off only when the model supports disabled reasoning; legacy requests
+  remain compatible through Router-Maestro's provider-side normalization.
+- **HTTPS uploads have a five-minute read allowance.** The production Traefik
+  Compose template uses a `300s` request-body read timeout instead of the
+  default `60s`, with container-recreation instructions in the deployment guide.
+
 ## v0.9.10 (2026-09-23)
 
 ### Fixed

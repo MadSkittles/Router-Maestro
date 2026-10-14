@@ -51,7 +51,10 @@ from router_maestro.providers.bindings import (
     ProtocolRuntimeOptions,
 )
 from router_maestro.providers.copilot_support.auth_session import CopilotAuthSession
-from router_maestro.providers.copilot_support.catalog import CopilotCatalog
+from router_maestro.providers.copilot_support.catalog import (
+    CopilotCatalog,
+    effective_reasoning_effort_values,
+)
 from router_maestro.providers.copilot_support.catalog import (
     normalize_supported_endpoints as _catalog_normalize_supported_endpoints,
 )
@@ -69,6 +72,7 @@ from router_maestro.routing.transport_policy import TransportPolicy
 from router_maestro.utils import get_logger
 from router_maestro.utils.context_window import resolve_thinking_budget
 from router_maestro.utils.reasoning import (
+    DISABLED_EFFORTS,
     VALID_EFFORTS,
     budget_to_effort,
     downgrade_for_upstream,
@@ -518,6 +522,11 @@ class CopilotOutboundContract(OutboundContract):
         differ only in the cold-catalog path and the gpt-5.4 max_tokens rewrite, both
         preserved here.
         """
+        bare = model.split("/", 1)[1] if "/" in model else model
+        model = COPILOT_MODEL_ALIASES.get(bare, bare)
+        catalog_effort_values = effective_reasoning_effort_values(model, catalog_effort_values)
+        if reasoning_effort is not None:
+            reasoning_effort = reasoning_effort.lower()
         if operation in (Operation.RESPONSES, Operation.RESPONSES_STREAM):
             return self._resolve_reasoning_responses(
                 model=model,
@@ -543,11 +552,11 @@ class CopilotOutboundContract(OutboundContract):
         rewrite = bare_lower.startswith("gpt-5.4")
         known_reasoning_support = _known_reasoning_support(model)
 
-        # Catalog-driven path: trust whatever Copilot advertises.
+        # Catalog-driven path after verified provider compatibility corrections.
         if catalog_effort_values is not None:
-            if reasoning_effort == "none":
+            if reasoning_effort in DISABLED_EFFORTS:
                 return ReasoningResolution(
-                    effort="none" if "none" in catalog_effort_values else None,
+                    effort=resolve_effort_within_catalog(reasoning_effort, catalog_effort_values),
                     rewrite_max_tokens_to_completion=rewrite,
                 )
             if not catalog_effort_values:
@@ -583,6 +592,10 @@ class CopilotOutboundContract(OutboundContract):
             return ReasoningResolution(effort=None, rewrite_max_tokens_to_completion=rewrite)
 
         effort = reasoning_effort or budget_to_effort(thinking_budget)
+        if effort in DISABLED_EFFORTS:
+            # A family heuristic cannot tell whether the floor is none,
+            # minimal, or low. Omit unless the effective catalog supplies it.
+            return ReasoningResolution(effort=None, rewrite_max_tokens_to_completion=rewrite)
         if bare_lower.startswith("claude-") and effort in ("xhigh", "max"):
             effort = "high"
         elif effort == "max":
@@ -606,9 +619,9 @@ class CopilotOutboundContract(OutboundContract):
     ) -> ReasoningResolution:
         known_reasoning_support = _known_reasoning_support(model)
         if catalog_effort_values is not None:
-            if reasoning_effort == "none":
+            if reasoning_effort in DISABLED_EFFORTS:
                 return ReasoningResolution(
-                    effort="none" if "none" in catalog_effort_values else None
+                    effort=resolve_effort_within_catalog(reasoning_effort, catalog_effort_values)
                 )
             if not catalog_effort_values:
                 # Category A: no reasoning surface -> strip.
@@ -631,6 +644,8 @@ class CopilotOutboundContract(OutboundContract):
                 "Copilot Responses model %s has no known reasoning support; stripping reasoning",
                 model,
             )
+            return ReasoningResolution(effort=None)
+        if reasoning_effort in DISABLED_EFFORTS:
             return ReasoningResolution(effort=None)
         upstream_effort = (
             reasoning_effort
@@ -1408,14 +1423,16 @@ class CopilotProvider(BaseProvider):
         )
 
     def _catalog_effort_values(self, model: str) -> list[str] | None:
-        """Look up the catalog-advertised reasoning_effort allowlist for ``model``.
+        """Look up effective Copilot reasoning tiers for ``model``.
 
         Pulls from the in-memory model cache only — never blocks the request
         on a network fetch. Returns ``None`` if the cache is cold or the model
-        isn't in it, in which case ``apply_copilot_chat_reasoning`` falls back
-        to the hardcoded heuristic.
+        isn't in it, except for verified compatibility entries with known cold
+        tiers. Other missing entries fall back to the family heuristic.
         """
-        return self._catalog.effort_values(model)
+        bare = model.split("/", 1)[1] if "/" in model else model
+        model = COPILOT_MODEL_ALIASES.get(bare, bare)
+        return effective_reasoning_effort_values(model, self._catalog.effort_values(model))
 
     def _get_client(self) -> httpx.AsyncClient:
         """Get or create a reusable HTTP client.
