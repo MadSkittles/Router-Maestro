@@ -197,6 +197,26 @@ docker compose config
 Do not paste the rendered output into an issue: depending on the Compose
 version and configuration, it can include environment values.
 
+The production Compose file sets the HTTPS entrypoint's
+`transport.respondingTimeouts.readTimeout` to `300s`, rather than Traefik's
+`60s` default, to allow large conversation request bodies to upload over slower
+connections. This limits reading the incoming request, including its body; it
+is not a model generation or SSE response timeout.
+
+This is a Traefik startup argument, not hot-reloaded routing configuration.
+Saving the Compose file does not apply it, and `docker compose restart traefik`
+reuses the old container arguments. To apply a changed value to an existing
+deployment, wait for a quiet window and recreate only the Traefik container:
+
+```bash
+docker compose up -d --no-deps --pull never traefik
+```
+
+Compose recreates the container when its configured command changes. No image
+build or Router-Maestro restart is needed, but active proxy connections may be
+interrupted. If only preparing configuration, defer this command until ready
+to apply the change.
+
 ### 4. Start and verify
 
 ```bash
