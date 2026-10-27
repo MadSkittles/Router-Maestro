@@ -4,6 +4,15 @@ All notable changes to Router-Maestro are documented here.
 
 ---
 
+## v0.9.12 (2026-10-27)
+
+### Fixed
+
+- **Codex Auto-review uses GPT-6 Luna through Copilot.** The internal
+  `codex-auto-review` alias now maps to the bare upstream model ID `gpt-6-luna`
+  instead of the retired `gpt-5.4-mini`. The mapping remains independent of the
+  client's selected conversation model and hidden from the public model catalog.
+
 ## v0.9.11 (2026-10-15)
 
 ### Fixed

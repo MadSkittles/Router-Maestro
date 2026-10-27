@@ -90,8 +90,8 @@ COPILOT_COUNT_TOKENS_PATH = "/v1/messages/count_tokens"
 # model id (with no GHC catalog entry) to a real upstream Copilot model. Codex's
 # Auto-review (guardian) mode issues Responses requests with model
 # ``codex-auto-review``, which only exists on the ChatGPT/Codex subscription
-# backend; route it to GHC's low-latency ``gpt-5.4-mini`` subagent model.
-COPILOT_MODEL_ALIASES: dict[str, str] = {"codex-auto-review": "gpt-5.4-mini"}
+# backend; route it to GHC's low-latency ``gpt-6-luna`` model.
+COPILOT_MODEL_ALIASES: dict[str, str] = {"codex-auto-review": "gpt-6-luna"}
 
 _COPILOT_UNSUPPORTED_OPERATION_CODE = "unsupported_api_for_model"
 _COPILOT_CONTEXT_WINDOW_EXCEEDED_CODE = "model_max_prompt_tokens_exceeded"
