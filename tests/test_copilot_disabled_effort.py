@@ -142,14 +142,18 @@ def test_chat_and_responses_disabled_semantics_match(disabled, model, allowed, e
 
 @pytest.mark.parametrize("disabled", ["off", "none"])
 @pytest.mark.parametrize("qualified", [False, True])
-def test_model_alias_uses_target_effort_catalog(disabled, qualified):
-    provider = _provider("gpt-5.4-mini", ["medium", "high"])
+@pytest.mark.parametrize(
+    "allowed,expected",
+    [(["medium", "high"], "medium"), (["none", "low", "medium"], "none")],
+)
+def test_model_alias_uses_target_effort_catalog(disabled, qualified, allowed, expected):
+    provider = _provider("gpt-6-luna", allowed)
     alias = "github-copilot/codex-auto-review" if qualified else "codex-auto-review"
     payload = provider._build_responses_payload(
         ResponsesRequest(model=alias, input="hi", reasoning_effort=disabled)
     )
 
-    assert payload["reasoning"]["effort"] == "medium"
+    assert payload["reasoning"]["effort"] == expected
 
 
 @pytest.mark.parametrize("allowed", [None, _RAW_EFFORTS])

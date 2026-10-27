@@ -28,14 +28,14 @@ from router_maestro.routing.router import CACHE_TTL_SECONDS, Router
 from router_maestro.utils.cache import TTLCache
 
 ALIAS = "codex-auto-review"
-TARGET = "gpt-5.4-mini"
+TARGET = "gpt-6-luna"
 
 
 class AliasCopilotMock(BaseProvider):
     """Stand-in for the Copilot provider that declares the guardian alias.
 
     Mirrors the real ``CopilotProvider.model_aliases()`` contract without any
-    network/auth dependency, and exposes ``gpt-5.4-mini`` with ``/responses``
+    network/auth dependency, and exposes ``gpt-6-luna`` with ``/responses``
     support so a normalized alias has a real catalog target to resolve against.
     """
 
@@ -64,7 +64,7 @@ class AliasCopilotMock(BaseProvider):
         return [
             ModelInfo(
                 id=TARGET,
-                name="GPT-5.4 mini",
+                name="GPT-6 Luna",
                 provider="github-copilot",
                 operation_capabilities={"responses": True, "chat": True},
             )
@@ -112,9 +112,10 @@ async def test_resolve_provider_alias_is_case_insensitive() -> None:
 
 
 @pytest.mark.asyncio
-async def test_plan_route_resolves_alias_for_responses() -> None:
+@pytest.mark.parametrize("operation", [Operation.RESPONSES, Operation.RESPONSES_STREAM])
+async def test_plan_route_resolves_alias_for_responses(operation: Operation) -> None:
     router = _make_router(AliasCopilotMock())
-    plan = await router.plan_route(ALIAS, Operation.RESPONSES)
+    plan = await router.plan_route(ALIAS, operation)
     # Normalization flows the request through the explicit qualified-id path.
     assert plan.explicit is True
     assert plan.primary.model == ModelRef("github-copilot", TARGET)

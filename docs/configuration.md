@@ -218,6 +218,13 @@ distinguishes them from Codex's bundled GPT labels. Model IDs and bundled model
 entries remain unchanged. Generated display names and descriptions also omit a
 trailing `(Internal only)` marker.
 
+Codex Auto-review (guardian) requests use the internal model ID
+`codex-auto-review`. The Copilot provider maps that ID to the bare upstream
+model ID `gpt-6-luna` (without a provider prefix). This provider-owned mapping is
+defined in `COPILOT_MODEL_ALIASES`, not a runtime configuration option; it
+does not follow the client's selected conversation model. The alias is not
+advertised in Router-Maestro's public model catalog.
+
 Current Codex versions accept the provider definition only at user scope.
 Project configuration can override `model` and the model-catalog path, but it
 inherits the user-level provider. Therefore:
