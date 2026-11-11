@@ -457,6 +457,7 @@ async def test_gemini_chat_binding_normalizes_schema_maps_with_keyword_named_ent
         "dependentSchemas": {"example": {"properties": {"y": True}}},
         "additionalProperties": {"type": ["string", "null"]},
         "not": {"anyOf": [True]},
+        "contentSchema": {"type": ["string", "null"]},
     }
 
     attempt = await binding.prepare_attempt(
@@ -489,7 +490,51 @@ async def test_gemini_chat_binding_normalizes_schema_maps_with_keyword_named_ent
     assert normalized["dependentSchemas"] == {"example": {"properties": {"y": {}}}}
     assert normalized["additionalProperties"] == {"type": "string", "nullable": True}
     assert normalized["not"] == {"anyOf": [{}]}
+    assert normalized["contentSchema"] == {"type": "string", "nullable": True}
     assert definition["properties"]["x"] is True
+
+
+@pytest.mark.asyncio
+async def test_gemini_chat_binding_normalizes_draft7_dependencies() -> None:
+    provider = CopilotProvider()
+    binding = _binding(provider, WireProtocol.OPENAI_CHAT)
+    parameters = {
+        "type": "object",
+        "properties": {
+            "trigger": {"type": "boolean"},
+            "name": {"type": "string"},
+            "any": {"type": "string"},
+        },
+        "dependencies": {
+            "trigger": {
+                "type": "object",
+                "properties": {"x": {"type": ["string", "null"]}, "y": True},
+            },
+            "name": ["trigger", "any"],
+            "any": True,
+        },
+    }
+
+    attempt = await binding.prepare_attempt(
+        model=ModelRef(provider=provider.name, upstream_id="gemini-4-carbon"),
+        payload={
+            "model": "github-copilot/gemini-4-carbon",
+            "messages": [{"role": "user", "content": "hello"}],
+            "tools": [{"type": "function", "function": {"name": "set", "parameters": parameters}}],
+        },
+        stream=False,
+    )
+
+    dependencies = attempt.payload["tools"][0]["function"]["parameters"]["dependencies"]
+    assert dependencies == {
+        "trigger": {
+            "type": "object",
+            "properties": {"x": {"type": "string", "nullable": True}, "y": {}},
+        },
+        "name": ["trigger", "any"],
+        "any": {},
+    }
+    assert parameters["dependencies"]["trigger"]["properties"]["x"]["type"] == ["string", "null"]
 
 
 @pytest.mark.asyncio

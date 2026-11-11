@@ -321,7 +321,8 @@ def _normalize_copilot_tool(tool: Any) -> Any:
     return normalized
 
 
-# Only these JSON Schema positions hold subschemas. Every other keyword value (enum, const,
+# Only these JSON Schema positions (plus schema-valued draft-07 `dependencies`) hold subschemas.
+# Every other keyword value (enum, const,
 # default, example(s), vendor extensions, ...) is instance data or annotation and stays verbatim.
 _GEMINI_SUBSCHEMA_MAP_KEYS = frozenset(
     {"properties", "patternProperties", "dependentSchemas", "$defs", "definitions"}
@@ -333,6 +334,7 @@ _GEMINI_SUBSCHEMA_KEYS = frozenset(
         "additionalItems",
         "unevaluatedItems",
         "contains",
+        "contentSchema",
         "propertyNames",
         "not",
         "if",
@@ -370,6 +372,14 @@ def _normalize_gemini_schema_types(value: Any) -> Any:
             normalized[key] = _normalize_gemini_subschema(item)
         elif key in _GEMINI_BOOLEAN_SUBSCHEMA_KEYS:
             normalized[key] = _normalize_gemini_schema_types(item)
+        elif key == "dependencies" and isinstance(item, Mapping):
+            # Draft-07 mixes schema dependencies with property-name arrays; keep the arrays.
+            normalized[key] = {
+                name: dependency
+                if isinstance(dependency, list)
+                else _normalize_gemini_subschema(dependency)
+                for name, dependency in item.items()
+            }
         else:
             normalized[key] = item
     schema_type = normalized.get("type")
