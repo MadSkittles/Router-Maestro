@@ -4,7 +4,7 @@ All notable changes to Router-Maestro are documented here.
 
 ---
 
-## Unreleased
+## v0.9.13 (2026-11-11)
 
 ### Fixed
 
