@@ -381,6 +381,58 @@ async def test_gemini_chat_binding_projects_schemas_rejected_by_copilot_gemini()
 
 
 @pytest.mark.asyncio
+async def test_gemini_chat_binding_preserves_schema_instance_data() -> None:
+    provider = CopilotProvider()
+    binding = _binding(provider, WireProtocol.OPENAI_CHAT)
+    instance = {
+        "items": True,
+        "properties": {"flag": True},
+        "type": ["string", "null"],
+        "anyOf": [True],
+    }
+    parameters = {
+        "type": "object",
+        "properties": {
+            "config": {
+                "type": "object",
+                "properties": {"items": {"type": "boolean"}},
+                "enum": [instance],
+                "const": instance,
+                "default": instance,
+                "examples": [instance],
+            },
+            "modes": {"type": "array", "items": True, "enum": [[instance]]},
+        },
+    }
+
+    attempt = await binding.prepare_attempt(
+        model=ModelRef(provider=provider.name, upstream_id="gemini-4-carbon"),
+        payload={
+            "model": "github-copilot/gemini-4-carbon",
+            "messages": [{"role": "user", "content": "hello"}],
+            "tools": [{"type": "function", "function": {"name": "set", "parameters": parameters}}],
+        },
+        stream=False,
+    )
+
+    expected = {
+        "items": True,
+        "properties": {"flag": True},
+        "type": ["string", "null"],
+        "anyOf": [True],
+    }
+    normalized = attempt.payload["tools"][0]["function"]["parameters"]["properties"]
+    config = normalized["config"]
+    assert config["properties"] == {"items": {"type": "boolean"}}
+    assert config["enum"] == [expected]
+    assert config["const"] == expected
+    assert config["default"] == expected
+    assert config["examples"] == [expected]
+    assert normalized["modes"] == {"type": "array", "items": {}, "enum": [[expected]]}
+    assert instance == expected
+
+
+@pytest.mark.asyncio
 async def test_non_gemini_chat_binding_keeps_boolean_and_empty_object_schemas() -> None:
     provider = CopilotProvider()
     binding = _binding(provider, WireProtocol.OPENAI_CHAT)

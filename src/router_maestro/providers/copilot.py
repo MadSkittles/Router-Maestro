@@ -322,6 +322,8 @@ def _normalize_copilot_tool(tool: Any) -> Any:
 
 
 _GEMINI_SUBSCHEMA_LIST_KEYS = frozenset({"anyOf", "oneOf", "allOf", "prefixItems", "items"})
+# Values under these keywords are JSON instances, not schemas, and must reach upstream verbatim.
+_GEMINI_INSTANCE_DATA_KEYS = frozenset({"enum", "const", "default", "examples"})
 
 
 def _normalize_gemini_subschema(value: Any) -> Any:
@@ -340,7 +342,9 @@ def _normalize_gemini_schema_types(value: Any) -> Any:
 
     normalized: dict[str, Any] = {}
     for key, item in value.items():
-        if key == "properties" and isinstance(item, Mapping):
+        if key in _GEMINI_INSTANCE_DATA_KEYS:
+            normalized[key] = item
+        elif key == "properties" and isinstance(item, Mapping):
             normalized[key] = {
                 name: _normalize_gemini_subschema(schema) for name, schema in item.items()
             }
