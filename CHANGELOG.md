@@ -4,6 +4,18 @@ All notable changes to Router-Maestro are documented here.
 
 ---
 
+## Unreleased
+
+### Fixed
+
+- **Copilot Gemini accepts boolean subschemas and parameterless object tools.**
+  GitHub Copilot Gemini rejects a whole request with a bare `400 Bad Request`
+  when any tool uses a `true` subschema under `properties`, `items`,
+  `prefixItems`, `anyOf`, `oneOf`, or `allOf`, or declares top-level
+  `parameters` as an object without `properties` (common for MCP tools that take
+  no arguments). The Copilot Chat binding now sends the equivalent `{}` and
+  `properties: {}` for `gemini-*` models; other models keep the original schema.
+
 ## v0.9.12 (2026-10-27)
 
 ### Fixed
