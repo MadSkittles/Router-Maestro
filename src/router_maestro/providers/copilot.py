@@ -321,9 +321,27 @@ def _normalize_copilot_tool(tool: Any) -> Any:
     return normalized
 
 
+# Only these JSON Schema positions hold subschemas. Every other keyword value (enum, const,
+# default, example(s), vendor extensions, ...) is instance data or annotation and stays verbatim.
+_GEMINI_SUBSCHEMA_MAP_KEYS = frozenset(
+    {"properties", "patternProperties", "dependentSchemas", "$defs", "definitions"}
+)
 _GEMINI_SUBSCHEMA_LIST_KEYS = frozenset({"anyOf", "oneOf", "allOf", "prefixItems", "items"})
-# Values under these keywords are JSON instances, not schemas, and must reach upstream verbatim.
-_GEMINI_INSTANCE_DATA_KEYS = frozenset({"enum", "const", "default", "examples"})
+_GEMINI_SUBSCHEMA_KEYS = frozenset(
+    {
+        "items",
+        "additionalItems",
+        "unevaluatedItems",
+        "contains",
+        "propertyNames",
+        "not",
+        "if",
+        "then",
+        "else",
+    }
+)
+# Copilot Gemini accepts booleans here, so only object subschemas are normalized.
+_GEMINI_BOOLEAN_SUBSCHEMA_KEYS = frozenset({"additionalProperties", "unevaluatedProperties"})
 
 
 def _normalize_gemini_subschema(value: Any) -> Any:
@@ -342,18 +360,18 @@ def _normalize_gemini_schema_types(value: Any) -> Any:
 
     normalized: dict[str, Any] = {}
     for key, item in value.items():
-        if key in _GEMINI_INSTANCE_DATA_KEYS:
-            normalized[key] = item
-        elif key == "properties" and isinstance(item, Mapping):
+        if key in _GEMINI_SUBSCHEMA_MAP_KEYS and isinstance(item, Mapping):
             normalized[key] = {
                 name: _normalize_gemini_subschema(schema) for name, schema in item.items()
             }
         elif key in _GEMINI_SUBSCHEMA_LIST_KEYS and isinstance(item, list):
             normalized[key] = [_normalize_gemini_subschema(schema) for schema in item]
-        elif key == "items":
+        elif key in _GEMINI_SUBSCHEMA_KEYS:
             normalized[key] = _normalize_gemini_subschema(item)
-        else:
+        elif key in _GEMINI_BOOLEAN_SUBSCHEMA_KEYS:
             normalized[key] = _normalize_gemini_schema_types(item)
+        else:
+            normalized[key] = item
     schema_type = normalized.get("type")
     if isinstance(schema_type, list) and all(isinstance(item, str) for item in schema_type):
         non_null_types = [item for item in schema_type if item != "null"]

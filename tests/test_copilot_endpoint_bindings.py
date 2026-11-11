@@ -399,7 +399,9 @@ async def test_gemini_chat_binding_preserves_schema_instance_data() -> None:
                 "enum": [instance],
                 "const": instance,
                 "default": instance,
+                "example": instance,
                 "examples": [instance],
+                "x-meta": instance,
             },
             "modes": {"type": "array", "items": True, "enum": [[instance]]},
         },
@@ -427,9 +429,67 @@ async def test_gemini_chat_binding_preserves_schema_instance_data() -> None:
     assert config["enum"] == [expected]
     assert config["const"] == expected
     assert config["default"] == expected
+    assert config["example"] == expected
     assert config["examples"] == [expected]
+    assert config["x-meta"] == expected
     assert normalized["modes"] == {"type": "array", "items": {}, "enum": [[expected]]}
     assert instance == expected
+
+
+@pytest.mark.asyncio
+async def test_gemini_chat_binding_normalizes_schema_maps_with_keyword_named_entries() -> None:
+    provider = CopilotProvider()
+    binding = _binding(provider, WireProtocol.OPENAI_CHAT)
+    definition = {
+        "type": "object",
+        "properties": {"x": True, "q": {"type": ["string", "null"]}},
+    }
+    parameters = {
+        "type": "object",
+        "properties": {
+            "a": {"$ref": "#/$defs/default"},
+            "default": {"type": ["integer", "null"]},
+            "enum": {"type": "array", "items": True},
+        },
+        "$defs": {"default": definition, "properties": definition, "enum": definition},
+        "definitions": {"examples": definition},
+        "patternProperties": {"^const$": {"type": ["boolean", "null"]}},
+        "dependentSchemas": {"example": {"properties": {"y": True}}},
+        "additionalProperties": {"type": ["string", "null"]},
+        "not": {"anyOf": [True]},
+    }
+
+    attempt = await binding.prepare_attempt(
+        model=ModelRef(provider=provider.name, upstream_id="gemini-4-carbon"),
+        payload={
+            "model": "github-copilot/gemini-4-carbon",
+            "messages": [{"role": "user", "content": "hello"}],
+            "tools": [{"type": "function", "function": {"name": "set", "parameters": parameters}}],
+        },
+        stream=False,
+    )
+
+    normalized = attempt.payload["tools"][0]["function"]["parameters"]
+    normalized_definition = {
+        "type": "object",
+        "properties": {"x": {}, "q": {"type": "string", "nullable": True}},
+    }
+    assert normalized["properties"] == {
+        "a": {"$ref": "#/$defs/default"},
+        "default": {"type": "integer", "nullable": True},
+        "enum": {"type": "array", "items": {}},
+    }
+    assert normalized["$defs"] == {
+        "default": normalized_definition,
+        "properties": normalized_definition,
+        "enum": normalized_definition,
+    }
+    assert normalized["definitions"] == {"examples": normalized_definition}
+    assert normalized["patternProperties"] == {"^const$": {"type": "boolean", "nullable": True}}
+    assert normalized["dependentSchemas"] == {"example": {"properties": {"y": {}}}}
+    assert normalized["additionalProperties"] == {"type": "string", "nullable": True}
+    assert normalized["not"] == {"anyOf": [{}]}
+    assert definition["properties"]["x"] is True
 
 
 @pytest.mark.asyncio
