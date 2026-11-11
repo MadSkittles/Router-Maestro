@@ -321,14 +321,67 @@ def _normalize_copilot_tool(tool: Any) -> Any:
     return normalized
 
 
+# Only these JSON Schema positions (plus schema-valued draft-07 `dependencies`) hold subschemas.
+# Every other keyword value (enum, const,
+# default, example(s), vendor extensions, ...) is instance data or annotation and stays verbatim.
+_GEMINI_SUBSCHEMA_MAP_KEYS = frozenset(
+    {"properties", "patternProperties", "dependentSchemas", "$defs", "definitions"}
+)
+_GEMINI_SUBSCHEMA_LIST_KEYS = frozenset({"anyOf", "oneOf", "allOf", "prefixItems", "items"})
+_GEMINI_SUBSCHEMA_KEYS = frozenset(
+    {
+        "items",
+        "additionalItems",
+        "unevaluatedItems",
+        "contains",
+        "contentSchema",
+        "propertyNames",
+        "not",
+        "if",
+        "then",
+        "else",
+    }
+)
+# Copilot Gemini accepts booleans here, so only object subschemas are normalized.
+_GEMINI_BOOLEAN_SUBSCHEMA_KEYS = frozenset({"additionalProperties", "unevaluatedProperties"})
+
+
+def _normalize_gemini_subschema(value: Any) -> Any:
+    # Copilot Gemini rejects boolean subschemas; `true` accepts any value, exactly like `{}`.
+    if value is True:
+        return {}
+    return _normalize_gemini_schema_types(value)
+
+
 def _normalize_gemini_schema_types(value: Any) -> Any:
-    """Project nullable JSON Schema unions to Gemini's OpenAPI-style shape."""
+    """Project JSON Schema to the OpenAPI-style subset accepted by Copilot Gemini."""
     if isinstance(value, list):
         return [_normalize_gemini_schema_types(item) for item in value]
     if not isinstance(value, Mapping):
         return value
 
-    normalized = {key: _normalize_gemini_schema_types(item) for key, item in value.items()}
+    normalized: dict[str, Any] = {}
+    for key, item in value.items():
+        if key in _GEMINI_SUBSCHEMA_MAP_KEYS and isinstance(item, Mapping):
+            normalized[key] = {
+                name: _normalize_gemini_subschema(schema) for name, schema in item.items()
+            }
+        elif key in _GEMINI_SUBSCHEMA_LIST_KEYS and isinstance(item, list):
+            normalized[key] = [_normalize_gemini_subschema(schema) for schema in item]
+        elif key in _GEMINI_SUBSCHEMA_KEYS:
+            normalized[key] = _normalize_gemini_subschema(item)
+        elif key in _GEMINI_BOOLEAN_SUBSCHEMA_KEYS:
+            normalized[key] = _normalize_gemini_schema_types(item)
+        elif key == "dependencies" and isinstance(item, Mapping):
+            # Draft-07 mixes schema dependencies with property-name arrays; keep the arrays.
+            normalized[key] = {
+                name: dependency
+                if isinstance(dependency, list)
+                else _normalize_gemini_subschema(dependency)
+                for name, dependency in item.items()
+            }
+        else:
+            normalized[key] = item
     schema_type = normalized.get("type")
     if isinstance(schema_type, list) and all(isinstance(item, str) for item in schema_type):
         non_null_types = [item for item in schema_type if item != "null"]
@@ -366,9 +419,15 @@ def _normalize_gemini_chat_tools(tools: Any, *, model: str) -> Any:
         if isinstance(function, Mapping):
             normalized_function = dict(function)
             if "parameters" in normalized_function:
-                normalized_function["parameters"] = _normalize_gemini_schema_types(
-                    normalized_function["parameters"]
-                )
+                parameters = _normalize_gemini_schema_types(normalized_function["parameters"])
+                # Copilot Gemini rejects a top-level object schema without `properties`.
+                if (
+                    isinstance(parameters, dict)
+                    and parameters.get("type") == "object"
+                    and "properties" not in parameters
+                ):
+                    parameters["properties"] = {}
+                normalized_function["parameters"] = parameters
             tool["function"] = normalized_function
         normalized_tools.append(tool)
     return normalized_tools

@@ -317,6 +317,253 @@ async def test_gemini_chat_binding_normalizes_nullable_tool_schema() -> None:
     assert parameters["properties"]["query"]["type"] == ["string", "null"]
 
 
+@pytest.mark.asyncio
+async def test_gemini_chat_binding_projects_schemas_rejected_by_copilot_gemini() -> None:
+    provider = CopilotProvider()
+    binding = _binding(provider, WireProtocol.OPENAI_CHAT)
+    status_parameters = {"type": "object"}
+    recipe_parameters = {
+        "type": "object",
+        "properties": {
+            "any": True,
+            "steps": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {"params": True, "args": {"type": "string"}},
+                    "additionalProperties": True,
+                },
+            },
+            "tuple": {"type": "array", "items": [True, {"type": "string"}]},
+            "list": {"type": "array", "items": True},
+            "union": {"anyOf": [True, {"type": "string"}]},
+            "options": {"type": "object", "additionalProperties": True},
+        },
+        "required": ["steps"],
+    }
+
+    attempt = await binding.prepare_attempt(
+        model=ModelRef(provider=provider.name, upstream_id="gemini-4-carbon"),
+        payload={
+            "model": "github-copilot/gemini-4-carbon",
+            "messages": [{"role": "user", "content": "hello"}],
+            "tools": [
+                {
+                    "type": "function",
+                    "function": {"name": "status", "parameters": status_parameters},
+                },
+                {
+                    "type": "function",
+                    "function": {"name": "recipe", "parameters": recipe_parameters},
+                },
+                {"type": "function", "function": {"name": "ping"}},
+            ],
+        },
+        stream=False,
+    )
+
+    tools = attempt.payload["tools"]
+    assert tools[0]["function"]["parameters"] == {"type": "object", "properties": {}}
+    recipe = tools[1]["function"]["parameters"]["properties"]
+    assert recipe["any"] == {}
+    assert recipe["steps"]["items"] == {
+        "type": "object",
+        "properties": {"params": {}, "args": {"type": "string"}},
+        "additionalProperties": True,
+    }
+    assert recipe["tuple"]["items"] == [{}, {"type": "string"}]
+    assert recipe["list"]["items"] == {}
+    assert recipe["union"]["anyOf"] == [{}, {"type": "string"}]
+    assert recipe["options"] == {"type": "object", "additionalProperties": True}
+    assert "parameters" not in tools[2]["function"]
+    assert status_parameters == {"type": "object"}
+    assert recipe_parameters["properties"]["any"] is True
+
+
+@pytest.mark.asyncio
+async def test_gemini_chat_binding_preserves_schema_instance_data() -> None:
+    provider = CopilotProvider()
+    binding = _binding(provider, WireProtocol.OPENAI_CHAT)
+    instance = {
+        "items": True,
+        "properties": {"flag": True},
+        "type": ["string", "null"],
+        "anyOf": [True],
+    }
+    parameters = {
+        "type": "object",
+        "properties": {
+            "config": {
+                "type": "object",
+                "properties": {"items": {"type": "boolean"}},
+                "enum": [instance],
+                "const": instance,
+                "default": instance,
+                "example": instance,
+                "examples": [instance],
+                "x-meta": instance,
+            },
+            "modes": {"type": "array", "items": True, "enum": [[instance]]},
+        },
+    }
+
+    attempt = await binding.prepare_attempt(
+        model=ModelRef(provider=provider.name, upstream_id="gemini-4-carbon"),
+        payload={
+            "model": "github-copilot/gemini-4-carbon",
+            "messages": [{"role": "user", "content": "hello"}],
+            "tools": [{"type": "function", "function": {"name": "set", "parameters": parameters}}],
+        },
+        stream=False,
+    )
+
+    expected = {
+        "items": True,
+        "properties": {"flag": True},
+        "type": ["string", "null"],
+        "anyOf": [True],
+    }
+    normalized = attempt.payload["tools"][0]["function"]["parameters"]["properties"]
+    config = normalized["config"]
+    assert config["properties"] == {"items": {"type": "boolean"}}
+    assert config["enum"] == [expected]
+    assert config["const"] == expected
+    assert config["default"] == expected
+    assert config["example"] == expected
+    assert config["examples"] == [expected]
+    assert config["x-meta"] == expected
+    assert normalized["modes"] == {"type": "array", "items": {}, "enum": [[expected]]}
+    assert instance == expected
+
+
+@pytest.mark.asyncio
+async def test_gemini_chat_binding_normalizes_schema_maps_with_keyword_named_entries() -> None:
+    provider = CopilotProvider()
+    binding = _binding(provider, WireProtocol.OPENAI_CHAT)
+    definition = {
+        "type": "object",
+        "properties": {"x": True, "q": {"type": ["string", "null"]}},
+    }
+    parameters = {
+        "type": "object",
+        "properties": {
+            "a": {"$ref": "#/$defs/default"},
+            "default": {"type": ["integer", "null"]},
+            "enum": {"type": "array", "items": True},
+        },
+        "$defs": {"default": definition, "properties": definition, "enum": definition},
+        "definitions": {"examples": definition},
+        "patternProperties": {"^const$": {"type": ["boolean", "null"]}},
+        "dependentSchemas": {"example": {"properties": {"y": True}}},
+        "additionalProperties": {"type": ["string", "null"]},
+        "not": {"anyOf": [True]},
+        "contentSchema": {"type": ["string", "null"]},
+    }
+
+    attempt = await binding.prepare_attempt(
+        model=ModelRef(provider=provider.name, upstream_id="gemini-4-carbon"),
+        payload={
+            "model": "github-copilot/gemini-4-carbon",
+            "messages": [{"role": "user", "content": "hello"}],
+            "tools": [{"type": "function", "function": {"name": "set", "parameters": parameters}}],
+        },
+        stream=False,
+    )
+
+    normalized = attempt.payload["tools"][0]["function"]["parameters"]
+    normalized_definition = {
+        "type": "object",
+        "properties": {"x": {}, "q": {"type": "string", "nullable": True}},
+    }
+    assert normalized["properties"] == {
+        "a": {"$ref": "#/$defs/default"},
+        "default": {"type": "integer", "nullable": True},
+        "enum": {"type": "array", "items": {}},
+    }
+    assert normalized["$defs"] == {
+        "default": normalized_definition,
+        "properties": normalized_definition,
+        "enum": normalized_definition,
+    }
+    assert normalized["definitions"] == {"examples": normalized_definition}
+    assert normalized["patternProperties"] == {"^const$": {"type": "boolean", "nullable": True}}
+    assert normalized["dependentSchemas"] == {"example": {"properties": {"y": {}}}}
+    assert normalized["additionalProperties"] == {"type": "string", "nullable": True}
+    assert normalized["not"] == {"anyOf": [{}]}
+    assert normalized["contentSchema"] == {"type": "string", "nullable": True}
+    assert definition["properties"]["x"] is True
+
+
+@pytest.mark.asyncio
+async def test_gemini_chat_binding_normalizes_draft7_dependencies() -> None:
+    provider = CopilotProvider()
+    binding = _binding(provider, WireProtocol.OPENAI_CHAT)
+    parameters = {
+        "type": "object",
+        "properties": {
+            "trigger": {"type": "boolean"},
+            "name": {"type": "string"},
+            "any": {"type": "string"},
+        },
+        "dependencies": {
+            "trigger": {
+                "type": "object",
+                "properties": {"x": {"type": ["string", "null"]}, "y": True},
+            },
+            "name": ["trigger", "any"],
+            "any": True,
+        },
+    }
+
+    attempt = await binding.prepare_attempt(
+        model=ModelRef(provider=provider.name, upstream_id="gemini-4-carbon"),
+        payload={
+            "model": "github-copilot/gemini-4-carbon",
+            "messages": [{"role": "user", "content": "hello"}],
+            "tools": [{"type": "function", "function": {"name": "set", "parameters": parameters}}],
+        },
+        stream=False,
+    )
+
+    dependencies = attempt.payload["tools"][0]["function"]["parameters"]["dependencies"]
+    assert dependencies == {
+        "trigger": {
+            "type": "object",
+            "properties": {"x": {"type": "string", "nullable": True}, "y": {}},
+        },
+        "name": ["trigger", "any"],
+        "any": {},
+    }
+    assert parameters["dependencies"]["trigger"]["properties"]["x"]["type"] == ["string", "null"]
+
+
+@pytest.mark.asyncio
+async def test_non_gemini_chat_binding_keeps_boolean_and_empty_object_schemas() -> None:
+    provider = CopilotProvider()
+    binding = _binding(provider, WireProtocol.OPENAI_CHAT)
+    parameters = {"type": "object", "properties": {"any": True}}
+
+    attempt = await binding.prepare_attempt(
+        model=ModelRef(provider=provider.name, upstream_id="gpt-5.6-terra"),
+        payload={
+            "model": "github-copilot/gpt-5.6-terra",
+            "messages": [{"role": "user", "content": "hello"}],
+            "tools": [
+                {
+                    "type": "function",
+                    "function": {"name": "status", "parameters": {"type": "object"}},
+                },
+                {"type": "function", "function": {"name": "recipe", "parameters": parameters}},
+            ],
+        },
+        stream=False,
+    )
+
+    tools = attempt.payload["tools"]
+    assert tools[0]["function"]["parameters"] == {"type": "object"}
+    assert tools[1]["function"]["parameters"] == parameters
+
+
 class _IdentityRuntime:
     def __init__(self, protocol: WireProtocol) -> None:
         self.protocol = protocol
